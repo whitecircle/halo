@@ -54,6 +54,8 @@ OPTIMIZER_META_FILE = "optimizer_meta.pt"
 # The warm-restart remedies name the shards by this glob, so every filename derives from it.
 OPTIMIZER_SHARD_GLOB = "optimizer_shard_*.pt"
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
+# Per-layer, per-expert routed token slots over the run, beside each checkpoint (MoELoadMetricsBase).
+MOE_EXPERT_TOKEN_COUNTS_FILE = "moe_expert_token_counts.json"
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
 # An output_dir entry the run keeps beside its checkpoints and never exports, like the Trainer's Hub push.
 RUN_INTERNAL_PREFIX = "_"

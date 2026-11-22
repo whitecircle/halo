@@ -170,6 +170,7 @@ def _host(model) -> EmbeddingTrainer:
     host = object.__new__(EmbeddingTrainer)
     host.model = model
     host.parallelism_config = ParallelismConfig()
+    host.callback_handler = SimpleNamespace(callbacks=())
     return host
 
 

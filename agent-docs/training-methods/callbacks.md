@@ -66,7 +66,7 @@ Tracks per-expert load for any MoE model with a declared router. A forward hook 
 | `dead_frac` | Fraction of experts that got zero tokens this step |
 | `load_max_first` / `load_max_last` | Max-load ratio for the first / last MoE layer |
 
-Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek-style router selects over biased scores inside an `n_group` mask while publishing raw logits. Routers come from transformers' `_can_record_outputs["router_logits"]` declaration; one returning logits alone re-ranks them and warns once. Counters zero every step, and `log_every_n_steps` follows `logging_steps`.
+Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek-style router selects over biased scores inside an `n_group` mask while publishing raw logits. Routers come from transformers' `_can_record_outputs["router_logits"]` declaration; one returning logits alone re-ranks them and warns once. Counters zero every step, after adding into the run's totals ([below](#expert-token-counts-over-the-run)), and `log_every_n_steps` follows `logging_steps`.
 
 It emits nothing in three cases:
 
@@ -75,6 +75,19 @@ It emits nothing in three cases:
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
 Two live paths bypass the hooks even when wired: an EP layer routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4, Nemotron-H), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
+
+### Expert token counts over the run
+
+Both load callbacks also add each step's counts into a running per-layer, per-expert total, logged step or not, on each rank and with no collective. At every checkpoint the trainer reduces the totals and writes `moe_expert_token_counts.json` into the checkpoint before `trainer_state.json` is published, so a complete checkpoint carries it. A resume reads it back and continues the count. A checkpoint without the file starts the count at the resume.
+
+| Field | Meaning |
+|---|---|
+| `counts` | `[num_layers][num_experts]` routed token slots, layers in model order across every pipeline stage. Each layer sums to tokens × `top_k` |
+| `first_step`, `last_step` | The optimizer steps counted, both included |
+| `top_k` | Experts per token |
+| `discard_slot_last` | The last column is a discard slot (Zaya), not an expert |
+
+Unlike the `moe/*` shares, raw counts show every duplicate. TP and expert-TP partners route the same tokens, so their sum is divided by `ParallelismConfig.router_token_replicas`, while CP partners route different chunks and add. A checkpoint recompute and a no-grad forward add nothing (`counts_toward_expert_load`). A tree-packed SFT row counts a shared token once per example holding it, as the bias update does. A run where neither callback counts writes no file.
 
 ### BalancingBiasCallback
 

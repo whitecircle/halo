@@ -364,6 +364,12 @@ class ParallelismConfig:
         return self.world_size // self.data_parallel_size
 
     @property
+    def router_token_replicas(self) -> int:
+        """How many ranks of a stage route each token: TP and expert-TP partners share a batch, while CP partners route
+        different chunks of theirs."""
+        return self.stage_world_size // (self.data_parallel_size * self.cp_size)
+
+    @property
     def requires_rdma(self) -> bool:
         """The EP group spans NVLink domains (not OS nodes: an NVL72 rack-wide group stays on MNNVL)."""
         return self.has_ep_group and self.ep_scope == "global" and self.num_nvlink_domains > 1
