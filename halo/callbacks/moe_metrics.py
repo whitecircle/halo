@@ -108,7 +108,7 @@ def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
     return None
 
 
-def combine_stage_counts(
+def merge_stage_counts(
     stages: list[list[list[int]] | None], *, token_replicas: int, resumed: list[list[int]] | None
 ) -> list[list[int]]:
     """Every PP stage's reduced ``[num_layers, num_experts]`` totals, gathered in rank order and so in stage order, as
@@ -224,7 +224,7 @@ class MoELoadMetricsBase(TrainerCallback):
         resumed = None if self._resumed is None else self._resumed["counts"]
         layers = combine_across_ranks(
             payload,
-            partial(combine_stage_counts, token_replicas=token_replicas, resumed=resumed),
+            partial(merge_stage_counts, token_replicas=token_replicas, resumed=resumed),
             what=MOE_EXPERT_TOKEN_COUNTS_FILE,
         )
         if not layers:

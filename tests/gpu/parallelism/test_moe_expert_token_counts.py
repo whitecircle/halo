@@ -7,8 +7,9 @@ file must hold, per layer, the tokens the run trained on times ``top_k``. Under 
 tokens dispatch delivered to it, counted at the expert compute, and a resume must continue the count from the
 checkpoint's file. Gradient checkpointing is on, and steps 1, 2 and 4 are not logged.
 
-The fsdp, tp2 and cp2 rows have no EP layers, so ``MoEMetricsCallback`` counts at the routers' own hooks (aux loss on).
-The others count in the EP layers' load recorder under a bias update (``BalancingBiasCallback``).
+The fsdp, tp2, cp2 and ep2aux rows balance with the aux loss, so ``MoEMetricsCallback`` counts at the routers' own
+hooks, ep2aux's inside the EP layers. The others count in the EP layers' load recorder under a bias update
+(``BalancingBiasCallback``).
 """
 
 import argparse
@@ -24,7 +25,7 @@ from trl import SFTConfig
 
 from halo.callbacks.balancing import configure_moe_balancing
 from halo.callbacks.factory import build_run_callbacks
-from halo.callbacks.moe_metrics import MoELoadMetricsBase
+from halo.callbacks.moe_metrics import MoELoadMetricsBase, MoEMetricsCallback
 from halo.checkpoint.format import MOE_EXPERT_TOKEN_COUNTS_FILE
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
@@ -51,6 +52,7 @@ MODES = {
     "cp2": (2, {"cp_size": 2, "use_grouped_gemm": False}, "aux_loss"),
     "ep1": (2, {"ep_size": 1}, "bias_update_transient"),
     "ep2": (2, {"ep_size": 2}, "bias_update_transient"),
+    "ep2aux": (2, {"ep_size": 2}, "aux_loss"),
     "ep2tp2": (2, {"ep_size": 2, "tp_size": 2}, "bias_update_transient"),
     "ep2cp2": (2, {"ep_size": 2, "cp_size": 2}, "bias_update_transient"),
     "ep2etp2": (4, {"ep_size": 2, "expert_tp_size": 2}, "bias_update_transient"),
@@ -231,12 +233,15 @@ def run(ctx):
     rows = build_sft_rows(family["vocab_size"], n_rows=64, seq_len=SEQ_LEN)
     root = shared_output_dir(ctx)
     base = None if config.is_pp_mode else save_base_checkpoint(ctx, _qwen3_moe_model(), tokenizer, f"{root}/base")
-    ep_mode = BALANCING != "aux_loss"
+    ep_mode = "ep_size" in LAYOUT
 
     # The unbroken run, saving at steps 2 and 4.
     trainer = _build_trainer(ctx, config, base, f"{root}/unbroken", tokenizer, rows, resume=False)
     callbacks = [cb for cb in trainer.callback_handler.callbacks if isinstance(cb, MoELoadMetricsBase)]
     checks["one_expert_load_callback"] = len(callbacks) == 1
+    checks["aux_loss_counts_at_the_routers"] = all(
+        isinstance(cb, MoEMetricsCallback) == (BALANCING == "aux_loss") for cb in callbacks
+    )
     tally = _Tally(trainer, num_layers, num_experts)
     # PP turns accumulation into the schedule's microbatches, leaving one batch per step.
     accumulation = trainer.args.gradient_accumulation_steps

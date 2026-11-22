@@ -15,8 +15,9 @@ import torch
 from transformers import GptOssConfig, GptOssForCausalLM
 
 import halo.callbacks.balancing as balancing
+import halo.callbacks.moe_metrics as moe_metrics
 from halo.callbacks.balancing import BalancingBiasCallback
-from halo.callbacks.moe_metrics import MoEMetricsCallback, combine_stage_counts, read_run_counts
+from halo.callbacks.moe_metrics import MoEMetricsCallback, merge_stage_counts, read_run_counts
 from halo.checkpoint.format import MOE_EXPERT_TOKEN_COUNTS_FILE
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.loop.checkpointing import CheckpointingMixin
@@ -111,6 +112,43 @@ def test_a_frozen_forward_adds_nothing():
     assert _layer_totals(callback, 1) == [BATCH * SEQ * TOP_K] * NUM_LAYERS
 
 
+def test_padding_positions_count():
+    """The router sees every position and the experts compute every one, so a padded batch counts its padding."""
+    model = _tiny_gptoss()
+    callback = _wired(model)
+    mask = torch.ones(BATCH, SEQ, dtype=torch.long)
+    mask[0, SEQ // 2 :] = 0
+    model(input_ids=_input_ids(), attention_mask=mask).logits.sum().backward()
+    assert _layer_totals(callback, 1) == [BATCH * SEQ * TOP_K] * NUM_LAYERS
+
+
+def test_a_model_declaring_no_router_counts_off_its_output_once(monkeypatch):
+    """The fallback hook on the model output: a no-grad forward through the training model, as a reference scorer
+    runs, adds nothing."""
+    monkeypatch.setattr(moe_metrics, "declared_routers", lambda model: [])
+    model = _tiny_gptoss()
+    callback = MoEMetricsCallback(topk=TOP_K, enable_router_logits=True)
+    callback.on_train_begin(args=None, state=None, control=None, model=model)
+    assert len(callback._hook_handles) == 1, "the callback did not fall back to the model-output hook"
+    with torch.no_grad():
+        model(input_ids=_input_ids())
+    model(input_ids=_input_ids()).logits.sum().backward()
+    assert _layer_totals(callback, 1) == [BATCH * SEQ * TOP_K] * NUM_LAYERS
+
+
+def _reduce_two_ranks_counts(rank: int) -> None:
+    """Each rank counts its own routing; the record holds both ranks' on every rank."""
+    callback = MoEMetricsCallback(topk=1, log_every_n_steps=2)
+    callback._counters = [torch.tensor([1.0 + rank, 0.0, 2.0, 0.0]), torch.tensor([0.0, rank, 0.0, 1.0])]
+    callback.on_step_end(args=None, state=_state(1), control=None)
+    record = callback.run_counts_record(1, token_replicas=1)
+    assert record["counts"] == [[3, 0, 4, 0], [0, 1, 0, 2]], f"rank {rank}: {record['counts']}"
+
+
+def test_the_record_sums_every_ranks_counts():
+    run_gloo_ranks(_reduce_two_ranks_counts, 2)
+
+
 class _Router(torch.nn.Module):
     def __init__(self, counts):
         super().__init__()
@@ -140,22 +178,22 @@ def test_the_bias_callback_counts_its_own_slots_before_the_reduce(monkeypatch):
 
 def test_stage_totals_join_in_stage_order_divide_out_partners_and_add_the_resume():
     stages = [[[2, 4]], None, [[6, 8], [2, 2]]]
-    assert combine_stage_counts(stages, token_replicas=1, resumed=None) == [[2, 4], [6, 8], [2, 2]]
-    assert combine_stage_counts(stages, token_replicas=2, resumed=None) == [[1, 2], [3, 4], [1, 1]]
+    assert merge_stage_counts(stages, token_replicas=1, resumed=None) == [[2, 4], [6, 8], [2, 2]]
+    assert merge_stage_counts(stages, token_replicas=2, resumed=None) == [[1, 2], [3, 4], [1, 1]]
     resumed = [[10, 10], [10, 10], [10, 10]]
-    assert combine_stage_counts(stages, token_replicas=2, resumed=resumed) == [[11, 12], [13, 14], [11, 11]]
-    assert combine_stage_counts([None, None], token_replicas=2, resumed=resumed) == resumed
+    assert merge_stage_counts(stages, token_replicas=2, resumed=resumed) == [[11, 12], [13, 14], [11, 11]]
+    assert merge_stage_counts([None, None], token_replicas=2, resumed=resumed) == resumed
 
 
 def test_partners_that_disagree_are_named(caplog):
     with caplog.at_level(logging.WARNING):
-        assert combine_stage_counts([[[3, 5]]], token_replicas=2, resumed=None) == [[2, 3]]
+        assert merge_stage_counts([[[3, 5]]], token_replicas=2, resumed=None) == [[2, 3]]
     assert "not a multiple of the 2 ranks" in caplog.text
 
 
 def test_a_resume_from_another_model_is_refused():
     with pytest.raises(RuntimeError, match="came from another model"):
-        combine_stage_counts([[[1, 2, 3]]], token_replicas=1, resumed=[[1, 2]])
+        merge_stage_counts([[[1, 2, 3]]], token_replicas=1, resumed=[[1, 2]])
 
 
 @pytest.mark.parametrize(

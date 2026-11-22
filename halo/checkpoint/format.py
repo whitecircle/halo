@@ -90,7 +90,12 @@ CHECKPOINT_COMPLETION_MARKERS = (
     RESUME_ADAPTER_MARKER_FILE,
 )
 # Resume state the aux copy drops by name when it drops the resume sidecars.
-UNSUFFIXED_RESUME_ENTRIES = (TRAINER_STATE_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
+UNSUFFIXED_RESUME_ENTRIES = (
+    TRAINER_STATE_FILE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    MOE_EXPERT_TOKEN_COUNTS_FILE,
+)
 
 # Never carried over by the aux copy: a stray weight file would shadow the fresh safetensors.
 WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")

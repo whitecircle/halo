@@ -82,12 +82,13 @@ Both load callbacks also add each step's counts into a running per-layer, per-ex
 
 | Field | Meaning |
 |---|---|
-| `counts` | `[num_layers][num_experts]` routed token slots, layers in model order across every pipeline stage. Each layer sums to tokens × `top_k` |
+| `format_version` | The record's schema, now 1. A resume refuses any other on every rank |
+| `counts` | `[num_layers][num_experts]` routed token slots, layers in model order across every pipeline stage. Each layer sums to tokens × `top_k`, padding positions included |
 | `first_step`, `last_step` | The optimizer steps counted, both included |
 | `top_k` | Experts per token |
 | `discard_slot_last` | The last column is a discard slot (Zaya), not an expert |
 
-Unlike the `moe/*` shares, raw counts show every duplicate. TP and expert-TP partners route the same tokens, so their sum is divided by `ParallelismConfig.router_token_replicas`, while CP partners route different chunks and add. A checkpoint recompute and a no-grad forward add nothing (`counts_toward_expert_load`). A tree-packed SFT row counts a shared token once per example holding it, as the bias update does. A run where neither callback counts writes no file.
+Unlike the `moe/*` shares, raw counts show every duplicate. TP and expert-TP partners route the same tokens, so their sum is divided by `ParallelismConfig.router_token_replicas`, while CP partners route different chunks and add. A checkpoint recompute and a no-grad forward add nothing (`counts_toward_expert_load`). Every position the router sees counts, padding included, since the experts compute it too: on a padded batch a layer sums to (tokens + padding positions) × `top_k`. A tree-packed SFT row counts a shared token once per example holding it, as the bias update does. A run where neither callback counts writes no file. The file is run state, like `trainer_state.json`: an export that drops the resume state drops it too.
 
 ### BalancingBiasCallback
 
