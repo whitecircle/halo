@@ -34,7 +34,9 @@ from halo.model_loading.parallel.frozen_models import (
     ReferenceAlternatives,
     warn_unparallelized_reference,
 )
+from halo.model_loading.parallel.peft_setup import verify_adapters_trainable
 from halo.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
+from halo.models.families.qwen4_exp.forwards import verify_qwen4_exp_patched
 from halo.models.introspection.config_access import (
     ROUTER_AUX_FIELDS,
     SPECIAL_TOKEN_ID_FIELDS,
@@ -70,6 +72,7 @@ from halo.trainers.construction.trainer_rules import (
     reject_unreachable_mtp_term,
     reject_unreloadable_best_model,
     reject_unsaveable_external_tables,
+    verify_lowp_conversion,
 )
 from halo.trainers.construction.training_args_overrides import (
     align_save_on_each_node,
@@ -380,6 +383,8 @@ class DistributedTrainerMixin(
         # Before any wrapping: adapters sit outside the TP graph and would train rank-inconsistently.
         if config.is_tp_mode:
             reject_lora_under_tp(self._top_level_model())
+        if (peft_model := find_peft_model(self.model)) is not None:
+            verify_adapters_trainable(peft_model)
         self._disable_inert_router_logits()
         reject_unreachable_mtp_term(
             self._top_level_model(),
@@ -390,6 +395,9 @@ class DistributedTrainerMixin(
             rows_per_forward=self.args.per_device_train_batch_size,
             eval_rows_per_forward=self.args.per_device_eval_batch_size if uses_evaluation(self.args) else 1,
         )
+        verify_qwen4_exp_patched(self._top_level_model())
+        # A model handed in, or built from an id, never passed the loader's lowp step.
+        verify_lowp_conversion(self._top_level_model(), config.lowp)
         reject_unreloadable_best_model(self.args, config, self.model)
         reject_unsaveable_external_tables(
             self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp

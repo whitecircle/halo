@@ -4,18 +4,38 @@ in fp32: bf16 cancellation in ``log p - log q`` can flip its sign."""
 import functools
 import inspect
 import math
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 from torch.nn.functional import cosine_similarity, cross_entropy, log_softmax, mse_loss
 
-from halo.kernels.logprobs import LABEL_IGNORE_INDEX, at_least_fp32, map_token_chunks
+from halo.kernels.logprobs import (
+    LABEL_IGNORE_INDEX,
+    at_least_fp32,
+    checkpointed_chunks,
+    logit_chunk_rows,
+    map_token_chunks,
+)
 from halo.model_loading.parallel.frozen_models import place_and_freeze
 
 # Floor for a -inf logit (vocab padding, a top-k-truncated teacher). Its probability stays an exact 0
 # while its log-prob turns finite, so a term that probability weights is 0 instead of 0 * -inf = NaN.
 _MASKED_LOGIT_FLOOR = torch.finfo(torch.float32).min
+
+
+@dataclass(frozen=True)
+class ProjectedTarget:
+    """A no-grad target of :func:`projected_distillation_terms`: ``project`` maps its ``rows``, aligned with the
+    student's, to ``[rows, vocab]`` logits, compared by ``loss_fn``. ``width`` cuts the student's logits to the compared
+    vocabulary, ``None`` keeps them whole; ``gates`` adds the detached gold-token gate against this target."""
+
+    loss_fn: Callable[..., torch.Tensor]
+    project: Callable[..., torch.Tensor]
+    rows: Sequence[torch.Tensor]
+    width: int | None = None
+    gates: bool = False
 
 
 def logits_forward_inputs(inputs: Mapping[str, Any]) -> dict[str, Any]:
@@ -302,6 +322,42 @@ def hard_labels_coefficient(
 ) -> torch.Tensor:
     """Detached gold-token gate ``(1 - p[y]) * q[y]`` at ``T = 1``, one token chunk at a time."""
     return map_token_chunks(_hard_labels_gate, student_logits, teacher_logits, hard_labels)
+
+
+def projected_distillation_terms(
+    student_logits: Callable[..., torch.Tensor],
+    student_rows: Sequence[torch.Tensor],
+    targets: Sequence[ProjectedTarget],
+    hard_labels: torch.Tensor,
+    temperature: float,
+    *,
+    vocab: int,
+    trains_cross_entropy: bool,
+) -> torch.Tensor:
+    """``[N, C]``: per row the hard-label cross-entropy (with a gradient only when ``trains_cross_entropy``), then for
+    each target its vocab-summed divergence and, when it ``gates``, the gate. ``student_logits`` and each target's
+    ``project`` take aligned ``[N, ...]`` rows to logits one chunk at a time under a non-reentrant checkpoint, so no
+    ``[N, vocab]`` plane outlives its chunk; all of them run again in the backward's recompute."""
+    student_inputs = len(student_rows)
+
+    def per_row(labels: torch.Tensor, *rows: torch.Tensor) -> torch.Tensor:
+        student = student_logits(*rows[:student_inputs])
+        terms = [_token_cross_entropy(student if trains_cross_entropy else student.detach(), labels)]
+        start = student_inputs
+        for target in targets:
+            with torch.no_grad():
+                target_logits = target.project(*rows[start : start + len(target.rows)])
+            start += len(target.rows)
+            compared = student if target.width is None else student[..., : target.width]
+            terms.append(_vocab_summed_divergence(target.loss_fn, compared, target_logits, temperature, labels))
+            if target.gates:
+                terms.append(_hard_labels_gate(compared, target_logits, labels))
+        dtype = functools.reduce(torch.promote_types, (term.dtype for term in terms))
+        return torch.stack([term.to(dtype) for term in terms], dim=-1)
+
+    target_rows = [rows for target in targets for rows in target.rows]
+    chunks = checkpointed_chunks(per_row, hard_labels, *student_rows, *target_rows, chunk_rows=logit_chunk_rows(vocab))
+    return torch.cat(list(chunks))
 
 
 def masked_token_mean(

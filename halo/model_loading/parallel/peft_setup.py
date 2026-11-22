@@ -320,6 +320,48 @@ def configure_adapter_training(
     return build_peft_config(model, model_config)
 
 
+def _active_adapter_params(layer: BaseTunerLayer, adapter: str) -> list[torch.nn.Parameter]:
+    """Every parameter ``adapter`` holds in ``layer`` (``lora_A``/``lora_B``/``lora_embedding_*``/
+    ``lora_magnitude_vector`` and the other tuners' ``adapter_layer_names``)."""
+    params: list[torch.nn.Parameter] = []
+    for container_name in layer.adapter_layer_names:
+        container = getattr(layer, container_name)
+        if adapter not in container:
+            continue
+        held = container[adapter]
+        params.extend([held] if isinstance(held, torch.nn.Parameter) else held.parameters())
+    return params
+
+
+def verify_adapters_trainable(peft_model: PeftModel) -> None:
+    """Raise when a tuner layer holds no trainable parameter for an adapter meant to train (an active adapter whose
+    config is not ``inference_mode``). Rank-local, not a collective: every rank builds the same wrap.
+
+    PEFT >= 0.21 re-enables adapters by matching ``named_parameters()`` names against ``named_modules()`` prefixes, so
+    a wrapper that yields other names than its modules leaves every adapter frozen."""
+    trains = {name for name, config in peft_model.peft_config.items() if not config.inference_mode}
+    frozen = []
+    for name, module in peft_model.named_modules():
+        if not isinstance(module, BaseTunerLayer):
+            continue
+        params = [
+            p
+            for adapter in module.active_adapters
+            if adapter in trains
+            for p in _active_adapter_params(module, adapter)
+        ]
+        if params and not any(p.requires_grad for p in params):
+            frozen.append(name)
+    if frozen:
+        raise RuntimeError(
+            f"{len(frozen)} adapter layers hold no trainable parameter after the PEFT wrap (e.g. {frozen[0]}): the run "
+            f"would train nothing. PEFT >= 0.21 re-enables adapters by matching the parameter names of "
+            f"`named_parameters()` against the module names of `named_modules()`, and a wrapper model that yields "
+            f"other names (UlyssesModel under context parallelism, huggingface/peft#4181) leaves every adapter "
+            f"frozen. Pin peft below 0.21, or use a release that fixes peft#4181."
+        )
+
+
 def _peft_module_casting_to_bf16(model):
     for name, module in model.named_modules():
         if isinstance(module, BaseTunerLayer):

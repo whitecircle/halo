@@ -32,16 +32,12 @@ from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnviro
 from halo.environments.protocols.react import ReActEnvironment
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
-from halo.environments.sandbox.local import (
-    LOCAL_FSIZE_LIMIT,
-    TAMPERED_WORKDIR_RETURNCODE,
-    LocalSubprocessSandbox,
-    _grant_owner,
-    _restore_owner_access,
-)
+from halo.environments.sandbox.limits import LOCAL_FSIZE_LIMIT, TAMPERED_WORKDIR_RETURNCODE
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult
+from halo.environments.sandbox.workspace import Workspace, grant_owner
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 from halo.environments.tasks.coding.swe import SweEnvironment
@@ -578,8 +574,8 @@ def test_a_link_raced_in_after_the_type_check_is_left_alone(tmp_path, monkeypatc
     try:
         with monkeypatch.context() as patched:
             patched.setattr(os, "stat", a_directory_when_checked)
-            _grant_owner("entry", stat.S_IRWXU, dir_fd)
-            _grant_owner(str(workdir / "entry"), stat.S_IRWXU)
+            grant_owner("entry", stat.S_IRWXU, dir_fd)
+            grant_owner(str(workdir / "entry"), stat.S_IRWXU)
     finally:
         os.close(dir_fd)
     assert host.stat().st_mode & 0o777 == 0o500
@@ -589,10 +585,10 @@ def test_a_source_write_refused_after_the_restore_is_the_programs_runtime_error(
     """A child that escaped the process group can lock a written file again between the host's restore
     and its write: the refusal is the program's runtime error, never an infra error."""
 
-    def locked(self, workdir, name, content):
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(workdir, name))
+    def locked(self, name, content):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(self.path, name))
 
-    monkeypatch.setattr(LocalSubprocessSandbox, "_write_member", locked)
+    monkeypatch.setattr(Workspace, "write", locked)
     tests = [{"input": "", "output": "1"}] * 2
     grade = run_solution_against_tests("print(1)", tests, sandbox=LocalSubprocessSandbox())
     assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 0), grade.details
@@ -662,7 +658,7 @@ def test_restoring_owner_access_reaches_nested_entries_and_never_follows_a_link(
     workdir.chmod(0o500)
     host.chmod(0o500)
     try:
-        _restore_owner_access(str(workdir))
+        Workspace(str(workdir)).restore_owner_access()
         assert workdir.stat().st_mode & 0o700 == 0o700
         assert (workdir / "sub").stat().st_mode & 0o700 == 0o700
         assert (workdir / "sub" / "kept.txt").stat().st_mode & 0o700 == 0o600

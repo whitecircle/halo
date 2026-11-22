@@ -12,13 +12,8 @@ import requests
 
 from halo import hardware
 from halo.environments.sandbox.factory import build_sandbox
-from halo.environments.sandbox.local import (
-    LOCAL_NPROC_LIMIT,
-    SANDBOX_DEFAULT_MEMORY_MB,
-    ExecutionGate,
-    LocalSubprocessSandbox,
-    _resolve_execution_slots,
-)
+from halo.environments.sandbox.limits import LOCAL_NPROC_LIMIT, SANDBOX_DEFAULT_MEMORY_MB
+from halo.environments.sandbox.local import ExecutionGate, LocalSubprocessSandbox, _resolve_execution_slots
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.repl import format_sandbox_repl_output, run_code_via_sandbox
 from halo.environments.sandbox.results import SandboxInfraError, SandboxResult

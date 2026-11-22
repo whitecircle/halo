@@ -197,7 +197,6 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
     # a new scripts/ subtree (profiling, inference, ...) must index without a hand-maintained list
     write_script(tmp_path / "scripts/profiling/trace_report.py")
     write_script(tmp_path / "scripts/after_training/merge_models.py")
-    write_script(tmp_path / "scripts/diagrams/gen_roofline.py")
     write_script(tmp_path / "scripts/training/sft.py")
 
     index = tool_commands(tmp_path)
@@ -206,9 +205,6 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
     assert index["after-training/merge-models"] == tmp_path / "scripts/after_training/merge_models.py"
     assert all(not name.startswith("training/") for name in index)
     assert "sft" not in index
-    # diagrams regenerates doc assets through generators that must run as a script, so advertising them as tools would
-    # mislead.
-    assert all(not name.startswith("diagrams/") for name in index)
 
 
 def test_real_repo_profiling_tools_are_indexed():
@@ -736,6 +732,35 @@ def test_a_launch_without_numa_binding_is_unchanged(tmp_path, launcher, expected
         str((tmp_path / "config.yaml").resolve()),
         "--packing",
     ]
+
+
+@pytest.mark.parametrize("command", ["launch", "run"])
+def test_rollout_backend_modal_reaches_the_exec_environment(tmp_path, monkeypatch, command):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+    write_config(tmp_path / "config.yaml")
+    envs: list[dict[str, str]] = []
+    _, argvs = stub_exec(monkeypatch, envs)
+    target = ["grpo/environmental", "config.yaml"] if command == "launch" else ["merge-ep-shards"]
+
+    result = runner.invoke(app, [command, *target, "--halo-rollout-backend", "modal", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert envs[0]["HALO_SANDBOX_BACKEND"] == "modal" and envs[0]["HALO_SANDBOX_REPL"] == "1"
+    assert "--halo-rollout-backend" not in argvs[0]
+
+
+def test_unknown_rollout_backend_is_refused_before_exec(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_config(tmp_path / "config.yaml")
+    _, argvs = stub_exec(monkeypatch)
+
+    result = runner.invoke(
+        app, ["launch", "grpo/environmental", "config.yaml", "--halo-rollout-backend", "nope", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 2 and argvs == []
+    assert "unknown --halo-rollout-backend 'nope'" in " ".join(result.output.split())
 
 
 if __name__ == "__main__":

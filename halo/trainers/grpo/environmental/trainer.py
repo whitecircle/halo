@@ -18,13 +18,14 @@ from halo.models.introspection.context_window import is_bounded_length
 from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.full_logits_memory import LogitsWidth
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
+    reject_negative_reward_terms_under_maxrl,
     reject_off_policy_mask_threshold,
     reject_open_ended_tool_turns,
-    reject_prefetch_past_retry_budget,
     reject_straddling_eval_groups,
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
@@ -44,14 +45,17 @@ from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.tool_call_watch import ToolCallParserWatch, build_tool_call_watch
 from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
-from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
-from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
+from halo.trainers.grpo.grpo_rules import (
+    reject_conflicting_maxrl,
+    reject_inert_std_floor,
+    reject_unbalanceable_token_mass,
+)
+from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
 from halo.trainers.grpo.row_span_stash import RowSpanStashMixin
 from halo.trainers.metrics.world_metrics import WorldMetrics
-from halo.weight_sync.registry import resolve_weight_sync_client
 
 
 def _resolve_environment_spec(environment_config, environment_cls, environment_kwargs) -> tuple[Any, dict]:
@@ -181,6 +185,10 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config
+        if cfg.use_maxrl:
+            # First, since a floor beside MaxRL would also trip the inert-floor check, with a less direct message.
+            reject_conflicting_maxrl(self.args.scale_rewards, cfg.scale_rewards_std_floor)
+            reject_negative_reward_terms_under_maxrl(cfg, price_on=self._reasoning_price_on)
         self._rollout_backend = cfg.rollout_backend
         self._rollout_weight_precision = cfg.rollout_weight_precision
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
@@ -196,7 +204,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
-        reject_prefetch_past_retry_budget(resolve_weight_sync_client(cfg.rollout_backend), cfg, self.args)
         reject_unsupported_score_centering(cfg)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)

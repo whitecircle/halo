@@ -13,6 +13,7 @@ import torch.nn as nn
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
+from halo.cli import BENCHMARK_HARNESS_ROOT
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.repo import REPO_ROOT
@@ -57,7 +58,8 @@ TERMINAL_LOADERS = (
     ("halo/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
-# Includes every halo module a CLI outside scripts/training imports, so a driver moved to another module stays swept.
+# Includes every halo module a tool CLI imports, so a driver moved to another module stays swept. The benchmark
+# harnesses are left out with scripts/training: Halo's own one runs a trainer, whose loaders are no tool's.
 TOOL_DRIVER_ROOTS = (
     "scripts",
     *imported_module_files(
@@ -65,6 +67,7 @@ TOOL_DRIVER_ROOTS = (
             path.relative_to(REPO_ROOT).as_posix()
             for path in (REPO_ROOT / "scripts").rglob("*.py")
             if not path.is_relative_to(REPO_ROOT / "scripts" / "training")
+            and not path.is_relative_to(REPO_ROOT / BENCHMARK_HARNESS_ROOT)
         ),
         "halo",
     ),

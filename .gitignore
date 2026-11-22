@@ -15,8 +15,9 @@ wandb/
 .agents/*
 !.agents/skills
 .cursor/
-# Local editor state.
+# Local editor and OS state.
 .vscode/
+.DS_Store
 
 # checkpoints
 checkpoints/*

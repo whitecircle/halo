@@ -134,7 +134,7 @@ A bare `docker build` targets Hopper (`ARG TARGET_GPU=hopper`). The server tags 
 release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `ARG SGLANG_VERSION`).
 
 - **uv, not Poetry.** Dependencies install into the system interpreter: `uv export --locked` (the dev
-  group plus the `gigatoken` and `flash-optimizers` extras) into a requirements file, then
+  group plus the `gigatoken`, `flash-optimizers` and `modal` extras) into a requirements file, then
   `uv pip install --system --no-deps -r` it. `--no-deps` is load-bearing: without it the resolver
   reinstalls torch, Flash Attention and DeepEP over the source builds. The source-built pre-installs
   (`causal-conv1d`, `flash-linear-attention`) take it too, so their dependencies come from the lock.
@@ -185,6 +185,7 @@ DeepEP or the base image.
 | `PYTHONPATH` | `/workspace` | Lets `python tests/.../foo.py` resolve the `tests` package. |
 | `TOKENIZERS_PARALLELISM` | `false` | — |
 | `HF_XET_HIGH_PERFORMANCE` | `1` | High-throughput Hub transfers (supersedes `HF_HUB_ENABLE_HF_TRANSFER`). |
+| `HF_HUB_DISABLE_TELEMETRY` | `1` | Stops the Hub usage pings, such as the one TRL's trainers send from rank 0 at construction. Export `0` to send them. |
 | `TRANSFORMERS_NO_ADVISORY_WARNINGS` | `1` | Silences transformers' advisory warnings. |
 
 `FLASH_ATTENTION_CUTE_DSL_CACHE_DIR` and `TRITON_CACHE_DIR` are not baked: the toolkit points each at
