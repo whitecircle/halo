@@ -2,6 +2,7 @@
 redirection that keeps the wrapper's forward hooks firing, the EP capacity scope and the verified head transform."""
 
 import inspect
+from dataclasses import dataclass
 
 import torch
 from trl.models.utils import _ForwardRedirection
@@ -10,6 +11,7 @@ from halo.distributed.expert_parallel.deepep.capacity import bump_forward_genera
 from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.introspection.module_tree import hidden_state_backbone
 from halo.models.introspection.unwrapping import base_transformers_model
+from halo.trainers.head_projection import OutputEmbedding, resolve_output_embedding
 
 
 def _takes_pixel_values(module: torch.nn.Module) -> bool:
@@ -29,6 +31,24 @@ def reject_backbone_without_image_inputs(model: torch.nn.Module) -> None:
             f"model directly, so it would drop every image. Set use_chunked_distillation_loss: false, or load the "
             f"text model alone for a text-only run (text_only_model: true)."
         )
+
+
+def reject_metrics_reading_logits(compute_metrics, preprocess_logits_for_metrics) -> None:
+    """Refuse the trainer arguments that read the evaluation logits, which a hidden-state loss never builds."""
+    if compute_metrics is not None or preprocess_logits_for_metrics is not None:
+        raise ValueError(
+            "use_chunked_distillation_loss builds no logits, and compute_metrics / preprocess_logits_for_metrics "
+            "read the evaluation logits. Drop them, or set use_chunked_distillation_loss: false."
+        )
+
+
+@dataclass(frozen=True)
+class ProjectedModel:
+    """A model read as its :func:`hidden_state_backbone` and its output embedding, so a caller applies the head itself.
+    Holds modules, never tensors, so it outlives a step."""
+
+    backbone: torch.nn.Module
+    head: OutputEmbedding
 
 
 class HiddenStateForwardMixin:
@@ -74,3 +94,12 @@ class HiddenStateForwardMixin:
         if id(base) not in transforms:
             transforms[id(base)] = resolve_head_transform(base)
         return transforms[id(base)]
+
+    def _resolve_projected_model(self, model: torch.nn.Module) -> ProjectedModel:
+        """Raises where projecting the last hidden state cannot reproduce ``model``'s forward: a backbone that drops its
+        images, an unverified head transform, an adapter on the head the projection does not add. Reads module types
+        and signatures only, so every rank reaches the same verdict."""
+        reject_backbone_without_image_inputs(model)
+        return ProjectedModel(
+            hidden_state_backbone(model), resolve_output_embedding(model, self._head_transform(model))
+        )
