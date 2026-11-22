@@ -163,6 +163,17 @@ def lowp_converted_modules(model: nn.Module) -> list[str]:
     ]
 
 
+def lowp_computing_modules(model: nn.Module) -> list[str]:
+    """The :func:`lowp_converted_modules` whose forward applies the format, as :func:`apply_lowp_compute` counts them:
+    an EP layer on the per-expert loop path carries the format but computes its experts unquantized."""
+    modules = dict(model.named_modules())
+    return [
+        name
+        for name in lowp_converted_modules(model)
+        if not (isinstance(modules[name], EPMoELayerBase) and not modules[name]._use_grouped_mm)
+    ]
+
+
 def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cacheable: bool) -> dict:
     """Enable ``lowp`` on ``model`` in place and return ``{precision, moe_layers, dense_linears,
     kept_blocks}``. ``expert_weight_cacheable`` is False when FSDP2 manages the experts: it pins the
