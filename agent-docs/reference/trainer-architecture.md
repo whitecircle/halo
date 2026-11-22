@@ -125,9 +125,10 @@ and self-distillation under EP only. A **No** PP trainer is refused at config ti
 `DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
 
 A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
-`SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,
+`SUPPORTS_CP` and `PP_REFUSAL` are read by `reject_undeclared_axes(cp_size=,
 pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
-`_init_distributed_config` runs again at construction:
+`_init_distributed_config` runs again at construction. `SUPPORTS_HYBRID_CP` is read by
+`reject_hybrid_cp_training` on the concrete trainer class:
 
 | ClassVar | Default | Meaning |
 |---|---|---|
