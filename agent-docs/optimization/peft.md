@@ -539,8 +539,9 @@ the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` 
 `--fp32_norms` and `--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
 first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
 a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
-grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
-those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
+grown vocabulary) and on embedding LoRA; merge those in memory. A `training_provenance.json` recording neutralized
+GptOss sinks is re-applied: the merge writes every sink tensor at its dtype minimum, as `reset_sinks.py` does, and
+refuses a base that stores none. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
 the adapter config lands in `original_adapter_config/`.
 
 **Adapters must train.** Trainer construction runs `verify_adapters_trainable` (`halo/model_loading/parallel/peft_setup.py`)

@@ -199,7 +199,8 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
 
 def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     """COLLECTIVE: write the native EP grouped-LoRA adapters as a standalone checkpoint without the frozen base, at the
-    save dtype or, in a training checkpoint whose fp32 adapters must resume unrounded, the live one."""
+    save dtype or, in a training checkpoint whose fp32 adapters must resume unrounded, the live one, with the run's
+    provenance beside them."""
     model = unwrap_toolkit_wrappers(ctx.model)  # a wrapper walk would prefix every adapter key
     fs_aware_makedirs(output_dir)
     # Collective on every rank; only the writer keeps the result, else one host holds local_ranks copies.
@@ -211,6 +212,7 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
                 _adapter_file_state(ctx, adapters), os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE)
             )
             write_adapter_config(expert_lora_adapter_config(ctx.parallelism_config.expert_lora, base_name), output_dir)
+            write_training_provenance(ctx.model, output_dir)
             tag_model_card(output_dir)
             logger.info(f"✓ EP LoRA adapters saved to {output_dir} ({len(adapters)} tensors)")
 
