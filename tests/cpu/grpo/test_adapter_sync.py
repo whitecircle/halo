@@ -1015,7 +1015,19 @@ def test_a_server_launched_without_what_the_adapters_need_is_refused(launch, rea
 _VLLM_LORA = {"max_lora_rank": 16, "max_loras": 2, "max_cpu_loras": 4}
 
 
-@pytest.mark.parametrize(("runtime_routes", "refused"), [(False, True), (True, False), (None, False)])
+@pytest.mark.parametrize(
+    ("runtime_routes", "refused"),
+    [
+        (False, True),
+        ("False", True),
+        ("0", True),
+        ("", True),
+        (True, False),
+        ("true", False),
+        ("1", False),
+        (None, False),
+    ],
+)
 def test_a_vllm_server_without_its_runtime_adapter_routes_is_refused_before_any_load(runtime_routes, refused):
     """Its load route answers 404, which reads as a directory the server cannot see."""
     fake = FakeVLLMServer()
