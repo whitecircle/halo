@@ -13,6 +13,7 @@ from sentence_transformers.base.modules.module import Module
 from tokenizers import Tokenizer, models, pre_tokenizers
 from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3Model
 
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR
 from tests.common.models import TINY_QWEN3_CONFIG
 
 _MODULE = "halo.trainers.embedding.preloaded_transformer"
@@ -82,6 +83,21 @@ def test_the_collator_length_and_the_prompt_reach_the_tokenizer():
     assert model.preprocess([text])["input_ids"].shape[1] == 8
     assert model.preprocess([text], max_length=4)["input_ids"].shape[1] == 4
     assert model.preprocess([("a b", "c")], prompt="p q ")["input_ids"].shape[1] == 5
+
+
+def test_the_wrappers_save_reads_its_source_at_the_commit_the_weights_were_read_at(tmp_path, monkeypatch):
+    module = _reimport_under_deprecation_errors()
+    seen: dict = {}
+    monkeypatch.setattr(module, "finalize_exported_config", lambda config, output_dir, **kwargs: seen.update(kwargs))
+    backend = Tokenizer(models.WordLevel({"[PAD]": 0, "[UNK]": 1}, unk_token="[UNK]"))
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, pad_token="[PAD]", unk_token="[UNK]")
+    auto_model = Qwen3Model(Qwen3Config(**TINY_QWEN3_CONFIG))
+    setattr(auto_model, LOADED_WEIGHTS_FROM_ATTR, "org/base")
+    setattr(auto_model, LOADED_WEIGHTS_REVISION_ATTR, "c0ffee")
+
+    module.PreloadedTransformer(auto_model, tokenizer, max_seq_length=8).save(str(tmp_path))
+
+    assert seen == {"source": "org/base", "revision": "c0ffee"}
 
 
 if __name__ == "__main__":

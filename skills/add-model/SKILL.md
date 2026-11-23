@@ -29,8 +29,8 @@ carries the templates and the commands to run.
 1. **Dense or MoE?** Dense `AutoModelForCausalLM` / multimodal `AutoModelForImageTextToText`
    needs **no EP work** — plain FSDP works as is. Only MoE families need an EP layer.
 2. **MoE → add an EP layer.** Create `halo/distributed/expert_parallel/families/<name>.py`
-   subclassing `EPMoELayerBase` (`moe_layer/layer.py`) — or `EPSharedExpertsMoELayerBase` (the routed
-   forward template), `EPGroupLimitedMoELayerBase` where the family fits one. The base
+   subclassing `EPSharedExpertsMoELayerBase` (the routed forward template; `EPGroupLimitedMoELayerBase` for
+   group-limited routing), or `EPMoELayerBase` (`moe_layer/layer.py`) for a forward of another shape. The base
    owns `__init__` and calls one hook per construction step (`_detect_hidden_dim`, `_adopt_routing`,
    `_adopt_shared_experts`, `_adopt_expert_compute`, `_adopt_expert_params`); the EP layer supplies
    `forward` and overrides only the hooks that differ. The family's facts go into one frozen
