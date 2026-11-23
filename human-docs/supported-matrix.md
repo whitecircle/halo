@@ -114,7 +114,8 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: Step-3.7-Flash on a TP=2 server, a weight push at `ep2` and an expert-LoRA row at `ep4`; a full fine-tune at `ep4` does not fit four GPUs |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
 | GLM-5 Next | Yes | Yes | Not run | On 1.3.0rc1, a tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
-| Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
+| Qwen3.8-Flash-Next | Yes | Yes, from this repo's image only | Not run | On 1.3.0rc1, tiny composite checkpoints on both engines at two ranks: an exact weight push and a LoRA adapter sync. No GRPO run on the release checkpoint |
+| Inkling, Qwen3-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has
 no validated expert layout on either engine and is refused too. Offline GRPO needs no
