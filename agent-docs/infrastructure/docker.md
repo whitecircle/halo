@@ -137,7 +137,7 @@ release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `A
 `ARG SGLANG_VERSION`).
 
 - **uv, not Poetry.** Dependencies install into the system interpreter: `uv export --locked` (the dev
-  group plus the `gigatoken` and `flash-optimizers` extras) into a requirements file, then
+  group plus the `gigatoken`, `flash-optimizers` and `modal` extras) into a requirements file, then
   `uv pip install --system --no-deps -r` it. `--no-deps` is load-bearing: without it the resolver
   reinstalls torch, Flash Attention and DeepEP over the source builds. The source-built pre-installs
   (`causal-conv1d`, `flash-linear-attention`) take it too, so their dependencies come from the lock.

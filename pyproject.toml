@@ -76,6 +76,9 @@ flash-optimizers = [
 gigatoken = [
     "gigatoken>=0.9.0,<0.10.0",  # Rust bulk tokenizer backend for dataset preprocessing (pre-1.0 API)
 ]
+modal = [
+    "modal>=1.3,<2",  # Modal Sandboxes code-execution backend (sandbox_backend: modal)
+]
 
 # --- Dev tooling groups (PEP 735). Installed in-image so the image is the test runtime;
 # `ty` is intentionally absent — type-checking is pyright (basic), run via Pylance / a Node install

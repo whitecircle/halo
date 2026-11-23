@@ -10,6 +10,7 @@ from typing import NoReturn
 import requests
 import torch
 
+from halo.env import parse_flag
 from halo.models.moe.family_specs import INKLING2
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
@@ -195,7 +196,11 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             extras={
                 **pick_launch_facts(config, self.LAUNCH_FACTS),
                 "enable_lora": bool(config.get("lora_config")),
-                **({RUNTIME_ADAPTER_ROUTES_FACT: bool(env[_RUNTIME_LORA_KEY])} if _RUNTIME_LORA_KEY in env else {}),
+                **(
+                    {RUNTIME_ADAPTER_ROUTES_FACT: parse_flag(str(env[_RUNTIME_LORA_KEY])) is True}
+                    if _RUNTIME_LORA_KEY in env
+                    else {}
+                ),
             },
         )
 

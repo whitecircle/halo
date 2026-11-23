@@ -38,6 +38,7 @@ from tests.common.on_policy_e2e import (
     qa_dataset,
     record_adapter_training,
     record_dp_layout,
+    record_maxrl_logged,
     record_optimizer_restore,
     record_parallelism_engaged,
     record_resume_continuity,
@@ -117,7 +118,14 @@ def reward_len(completions, **kwargs):
     return [-abs(len(str(completion)) - 32) / 32.0 for completion in completions]
 
 
-def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, save_steps) -> GRPOConfig:
+def reward_len_positive(completions, **kwargs):
+    """``reward_len`` mapped into (0, 1]: MaxRL divides by the group mean and refuses a negative reward."""
+    return [1.0 / (1.0 + abs(len(str(completion)) - 32) / 32.0) for completion in completions]
+
+
+def _grpo_config(
+    spec: _Mode, *, output_dir, server_url, group_port, max_steps, save_steps, maxrl: bool = False
+) -> GRPOConfig:
     parsed = urlparse(server_url)
     return GRPOConfig(
         output_dir=output_dir,
@@ -145,6 +153,7 @@ def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, 
         beta=spec.beta,
         generation_kwargs={"temperature": 0.7},
         remove_unused_columns=False,
+        **({"scale_rewards": "none"} if maxrl else {}),
     )
 
 
@@ -160,14 +169,15 @@ def _build_trainer(
     max_steps: int,
     save_steps: int,
     weights_source: str | None = None,
+    maxrl: bool = False,
 ):
     """Construct the row's trainer; returns ``(trainer, parallelism_config)``. ``weights_source`` is a hub id or a
-    resume checkpoint."""
+    resume checkpoint. ``maxrl`` turns on ``use_maxrl`` with ``scale_rewards: none`` and a non-negative reward."""
     parallelism_config = spec.layout.parallelism_config()
     model, peft_config = load_policy(weights_source or model_name, parallelism_config, spec.adapter)
     kwargs = {
         "model": model,
-        "reward_funcs": [reward_len],
+        "reward_funcs": [reward_len_positive if maxrl else reward_len],
         "args": _grpo_config(
             spec,
             output_dir=output_dir,
@@ -175,6 +185,7 @@ def _build_trainer(
             group_port=group_port,
             max_steps=max_steps,
             save_steps=save_steps,
+            maxrl=maxrl,
         ),
         "train_dataset": qa_dataset(NUM_TRAIN_SAMPLES),
         "processing_class": tokenizer,
@@ -194,7 +205,7 @@ def _build_trainer(
             sdpg_beta_base=1.0,
         )
     else:
-        trainer = DistributedOnlineGRPOTrainer(**kwargs)
+        trainer = DistributedOnlineGRPOTrainer(**kwargs, use_maxrl=maxrl)
     return trainer, parallelism_config
 
 
@@ -457,11 +468,25 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
 
 
 def run_online_grpo_e2e(
-    ctx, *, trainer_kind: str, mode: str, resume: bool, server_url: str, group_port: int, model_name: str
+    ctx,
+    *,
+    trainer_kind: str,
+    mode: str,
+    resume: bool,
+    server_url: str,
+    group_port: int,
+    model_name: str,
+    maxrl: bool = False,
 ) -> dict:
+    if resume and maxrl:
+        # Before any load: the resume body builds both phases' trainers without MaxRL and skips its metric check.
+        raise ValueError("maxrl has no resume row: the resume phases would train and pass without MaxRL")
     spec = MODES[mode]
     checks: dict[str, bool] = {}
-    log(f"\n  row: trainer={trainer_kind} mode={mode} resume={resume} model={model_name} server={server_url}")
+    log(
+        f"\n  row: trainer={trainer_kind} mode={mode} resume={resume} maxrl={maxrl} model={model_name} "
+        f"server={server_url}"
+    )
 
     if spec.rejects_expert_lora:
         refusal = expert_lora_under_etp_refusal(spec.layout.expert_tp_size)
@@ -502,7 +527,7 @@ def run_online_grpo_e2e(
             checks=checks,
         )
 
-    trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0)
+    trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0, maxrl=maxrl)
     ctx.on_teardown(lambda: _release(trainer))
     record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
@@ -517,6 +542,8 @@ def run_online_grpo_e2e(
     trainer.train()
     log("  training completed")
     losses, trained = record_step_losses(trainer, checks)
+    if maxrl:
+        record_maxrl_logged(trainer, checks)
     reshard_fsdp2_modules(unwrap(trainer.model))
 
     if spec.adapter:

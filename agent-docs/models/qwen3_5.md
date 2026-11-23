@@ -2,7 +2,7 @@
 
 A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSparseMoeBlock`, `Qwen3_5MoeAttention`). Three traits drive parallelism: a sigmoid-gated shared expert, a double-width `q_proj` fusing query with a sigmoid gate, and a hybrid `layer_types` scheme interleaving full attention with `Qwen3_5MoeGatedDeltaNet` linear-attention layers.
 
-Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). Dense text towers have an [unpacked CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft); MoE hybrid CP remains refused. Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 
@@ -32,7 +32,7 @@ The imports reach the layer through transformers' hub-kernel funnel, whose packa
 
 On Blackwell fla autotunes the delta rule's state kernel (`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`, shared by the gated delta rule and KDA) only over its `num_warps=2` configs (fla #953, from 0.5.2), whether the kernel is reached through this funnel or a remote-code module's own `fla` import. Under the image's Triton 3.6 its `num_warps=4` configs give run-to-run different, at some positions wrong, outputs and gradients on packed (`cu_seqlens`) rows, and on B300 also on larger unpacked batches. `tests/gpu/kernels/test_fla_blackwell_autotune.py` pins the restriction, with a `num_warps=4` control that must still miss.
 
-fla 0.6 forms the gradient of the decay `g` as the difference of two separately rounded dot products, so the gradient carries their rounding where the two nearly cancel. That is under strong decay, which a random-init tiny model has throughout (`g` down to -21): there the fp32 `A_log` and `dt_bias` gradients sit 1 to 4 times their own norm from an fp64 recurrence and move by percents for a 1e-7 change of the input. The rounding comes from Triton's default fp32 dot precision (TF32, 10 mantissa bits): with `TRITON_F32_DEFAULT=ieee` the same `A_log` gradient is 5.0e-4 from fp64 on fla 0.6.0 and 3.6e-4 on 0.4.2 (upstream report: [fla #1802](https://github.com/fla-org/flash-linear-attention/issues/1802)). On released weights the effect is inside the dtype's rounding. One step of Qwen3.5-4B on 2,048 tokens of text, each of its 24 layers' calls replayed on a B300 against the fp64 recurrence, worst layer:
+fla 0.6 forms the gradient of the decay `g` as the difference of two separately rounded dot products, so the gradient carries their rounding where the two nearly cancel. That is under strong decay, which a random-init tiny model has throughout (`g` down to -21): there the fp32 `A_log` and `dt_bias` gradients sit 1 to 4 times their own norm from an fp64 recurrence and move by percents for a 1e-7 change of the input. The rounding comes from Triton's default fp32 dot precision (TF32, 10 mantissa bits): with `TRITON_F32_DEFAULT=ieee` the same `A_log` gradient is 5.0e-4 from fp64 on fla 0.6.0 and 3.6e-4 on 0.4.2 (upstream report: [fla #1802](https://github.com/fla-org/flash-linear-attention/issues/1802)). On released weights the effect is inside the dtype's rounding in bf16. In fp32 it is not: the `A_log` and `dt_bias` gradients sit up to 4.4e-2 and 3.5e-2 from fp64, where `q`/`k`/`v` stay within 2.2e-3. For an fp32 run set `TRITON_F32_DEFAULT=ieee`, under which the two sit within 4.5e-3 and 4.8e-3. One step of Qwen3.5-4B on 2,048 tokens of text, each of its 24 layers' calls replayed on a B300 against the fp64 recurrence, worst layer:
 
 | Gradient | bf16 | fp32 |
 |---|---|---|
@@ -87,14 +87,19 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family qwen3_5_moe_text`.
 
-## Why CP is blocked on real checkpoints
+Dense `Qwen3_5GatedDeltaNet` is claimed by `ULYSSES_GATED_DELTA_MAP` through
+`Qwen3_5UlyssesGatedDelta` in `halo/distributed/context_parallel/gated_delta.py`. It redistributes
+projected head groups before the causal convolution and delta recurrence, then returns each rank's
+sequence chunk. Its admitted scope is [dense hybrid CP2 SFT](../parallelism/context-parallelism.md#dense-hybrid-sft).
 
-Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
+## Why MoE hybrid CP is refused
+
+MoE checkpoints ship hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
 
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/causal_conv1d/cp.py` for the conv), but the Ulysses path does not call them. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+The validator refuses MoE GatedDeltaNet and unclaimed linear-attention layers. Dense CP2 SFT instead redistributes heads before these sequence operations ([Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft)); it does not use FLA's CP context. For MoE, train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards pretrained linear-attention weights).
 
 ## TP and ETP
 

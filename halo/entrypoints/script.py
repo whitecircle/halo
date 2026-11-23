@@ -31,6 +31,7 @@ from halo.log import configure_training_logging
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.models.attention.selection import effective_attn_implementation, enable_flash_attention_deterministic
 from halo.models.introspection.unwrapping import base_transformers_model
+from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import run_on_rank0_raising_everywhere
 from halo.runtime.filesystem import verify_input_filesystem_sharing, verify_output_filesystem_sharing
@@ -189,6 +190,18 @@ def distributed_trainer_kwargs(args, parallelism_config: ParallelismConfig, *, d
     }
 
 
+def warn_bias_update_against_teacher_copy(mode: str) -> None:
+    """For a frozen teacher on the student's own checkpoint. The bias update moves only the student's router, so the
+    student's routing drifts from the teacher's whatever the loss does."""
+    if mode in BIAS_UPDATE_MODES and is_global_main_process():
+        logger.warning(
+            f"moe_balancing resolved to {mode} while teacher_model is the student's own checkpoint. The bias update "
+            "moves the student's router biases after every optimizer step, even at learning rate 0, and the frozen "
+            "teacher's never move, so the student's routing drifts from the teacher's and distillation_loss counts "
+            "that drift on top of the quantization gap. Set moe_balancing: none to distill against an unchanged copy."
+        )
+
+
 def configure_balancing_and_build_callbacks(
     args,
     training_config,
@@ -199,9 +212,11 @@ def configure_balancing_and_build_callbacks(
     max_seq_len: int | None = None,
     packed_rows: bool = False,
     multimodal_rows: bool = False,
+    teacher_is_student_checkpoint: bool = False,
 ) -> list:
     """COLLECTIVE. Configure MoE balancing for ``context.trainer_cls``'s loss and weight-sync capabilities, then build
-    the callback roster, the checkpointing plan last. ``packed_rows`` and ``multimodal_rows`` describe the collator."""
+    the callback roster, the checkpointing plan last. ``packed_rows`` and ``multimodal_rows`` describe the collator.
+    ``teacher_is_student_checkpoint`` warns on a resolved bias update, ``auto`` included."""
     balancing_mode = configure_moe_balancing(
         args,
         model,
@@ -209,6 +224,8 @@ def configure_balancing_and_build_callbacks(
         policy_gradient_loss=context.trainer_cls.POLICY_GRADIENT_LOSS,
         syncs_to_external_generator=context.trainer_cls.SYNCS_TO_EXTERNAL_GENERATOR,
     )
+    if teacher_is_student_checkpoint:
+        warn_bias_update_against_teacher_copy(balancing_mode)
     callbacks = build_run_callbacks(
         args,
         training_config,

@@ -125,16 +125,18 @@ and self-distillation under EP only. A **No** PP trainer is refused at config ti
 `DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
 
 A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
-`SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,
+`SUPPORTS_CP` and `PP_REFUSAL` are read by `reject_undeclared_axes(cp_size=,
 pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
-`_init_distributed_config` runs again at construction:
+`_init_distributed_config` runs again at construction. `SUPPORTS_HYBRID_CP` is read by
+`reject_hybrid_cp_training` on the concrete trainer class:
 
 | ClassVar | Default | Meaning |
 |---|---|---|
 | `SUPPORTS_CP` | `False` | CP admitted |
+| `SUPPORTS_HYBRID_CP` | `False` | dense hybrid CP admitted only when declared on the concrete SFT trainer; subclasses must opt in separately ([restrictions](../parallelism/context-parallelism.md#dense-hybrid-sft)) |
 | `PP_REFUSAL` | a generic refusal | the mechanism the PP refusal names; `None` where PP is supported |
 | `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
-| `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT) |
+| `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT, and teacher distillation on the student) |
 | `POLICY_GRADIENT_LOSS` | `False` | the loss runs outside the forward with no labels (the GRPO family): it never adds the router aux loss, and an applied Liger FLCE draws a warning |
 | `SYNCS_TO_EXTERNAL_GENERATOR` | `False` | on-policy RL that syncs weights to a rollout engine (online and async GRPO, SDPG) |
 | `ROUTER_AUX_LOSS_ADDED_BY` | `None` | what adds the router aux loss: `"model_forward"` (SFT's `labels` forward), `"trl_loss"` (DPO, KTO; TRL is handed the balancing mode's coefficient, every other trainer `0.0`), or nothing, where `moe_balancing: aux_loss` is refused and `auto` turns the router logits back off |
@@ -574,7 +576,7 @@ constructor; `early_stop.py`; `phase_timing.py` (`PhaseTimedMixin`, the phase sp
 `DistributedTrainerMixin`; `rounds/packed_rounds.py` (`PackedRoundMixin`, the packed micro-batches' plan, slot layout and bin-by-bin
 scoring), `rounds/packed_rules.py` (their refusals), `rounds/microbatch_plan.py` and `rounds/row_order.py` (the row permutation and the loss types
 that admit a regrouping of rows), which both on-policy trainers share; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
-`halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
+`halo/kernels/head_logprobs.py`, the full-logits memory guard on the shared `halo/trainers/full_logits_memory.py`, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
 (`weight_push.py`, the push and its construction gate; `engine_preflight.py`, the COLLECTIVE rollout-server
@@ -662,7 +664,8 @@ load). The shared reference mixin overrides the write for DPO/KTO and offline GR
 DPO/KTO read it back during TRL's `__init__`, and offline GRPO restores it during construction,
 not through the resume hook. The async GRPO rollout mixin overrides both for its pending prefetch
 rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases,
-so the empty defaults do not shadow it.
+and each override calls `super()` first, so the defaults still run: they write and read back
+`moe_expert_token_counts.json` ([Callbacks](../training-methods/callbacks.md#expert-token-counts-over-the-run)).
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP layers (`ep_size: 1`
