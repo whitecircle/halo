@@ -287,10 +287,10 @@ RUN export TORCH_CUDA_ARCH_LIST=$(cat /etc/cuda_arch) \
     && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.4.2"
 
 # Remaining locked deps (flat export; compiled deps already satisfy their pins and are skipped).
-# The export carries the dev group — this image is also the test/docs/lint runtime — and both optional
-# extras, so FlashAdamW, Gigatoken and their dependencies install at their locked versions.
+# The export carries the dev group — this image is also the test/docs/lint runtime — and all three optional
+# extras, so FlashAdamW, Gigatoken, the Modal client and their dependencies install at their locked versions.
 COPY pyproject.toml uv.lock* ./
-RUN uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers \
+RUN uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra flash-optimizers --extra modal \
       --format requirements-txt -o /tmp/requirements.txt \
     && uv pip install --system --no-deps -r /tmp/requirements.txt \
     && rm -rf ${UV_CACHE_DIR} /tmp/requirements.txt

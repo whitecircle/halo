@@ -93,6 +93,25 @@ An image run maps through the shared `prepare_vlm_dataset` and forces `remove_un
 
 `train_on_completions_only` is honored on both paths via `assistant_message_template`: both loss terms mask on `labels`. Without it, the text path's padded collator keeps the turn-ending EOS label where pad and EOS share an id.
 
+## Quantization-aware distillation
+
+`lowp_precision` and the other `lowp_*` knobs apply to the **student** as under [SFT](../sft.md): it loads through the same loader, which fake-quantizes its dense MLP and MoE expert GEMMs over bf16/fp32 masters ([Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)). The teacher loads through `load_frozen_auxiliary_model`, which takes no parallelism config and never applies them, so it scores in the run's dtype. The trainer refuses a teacher that holds a converted module (`reject_lowp_teacher`), and a student passed as a path, which it would load without them. Every trainer's setup then checks the student it holds against the config (`verify_lowp_conversion`, [Low-Precision Kernels](../../optimization/low-precision-moe-kernels.md#usage)), so a module loaded elsewhere and passed in unconverted is refused too.
+
+Pointing `teacher_model` at the student's own checkpoint fits the quantized student to the full-precision model's token distribution rather than to the dataset's labels:
+
+```yaml
+model_name_or_path: <moe-checkpoint>
+teacher_model: <moe-checkpoint>              # the student's own weights, unquantized
+lowp_precision: fp4                          # nvfp4; mxfp4 and fp8 apply too
+distill_loss: kl_divergence
+distill_alpha: 1.0                           # distillation only; the CE stays logged as sft_loss
+moe_balancing: none                          # a bias update would move only the student's router
+```
+
+With both models on one checkpoint and one attention backend, step 0's `distillation_loss` is the divergence the quantization causes, plus any dropout in the student: this trainer keeps the student's dropout on, and the teacher runs in eval mode. `fp32_router` and the grouped GEMM apply to the EP student only, and the teacher runs the stock forward, so a bf16 student starts near zero, not at it. `use_chunked_distillation_loss` runs the same converted layers, and lowp never converts the output embedding, so it keeps the run's dtype on both paths. Native expert-LoRA adapters on the student compute in bf16, as under SFT. The teacher is not parallelized, so every rank holds a full copy beside its share of the EP student, and `moe_balancing: aux_loss` stays refused (this trainer adds no router aux loss). A bias update (`bias_update`, `bias_update_transient`, or `auto` where it resolves to one, as on Zaya) moves only the student's router biases after every optimizer step, even at learning rate 0, so the student's routing drifts from the frozen teacher's whatever the loss does. The example sets `moe_balancing: none`, and the script warns when the resolved mode is a bias update and `teacher_model` names the student's checkpoint.
+
+To export the trained student, pass the run's four `lowp_*` scope flags to [`quantize_to_lowp.py`](../../optimization/low-precision-moe-kernels.md#qat--low-precision-inference) (`--lowp_apply_dense_mlp`, `--lowp_apply_moe_experts`, `--lowp_keep_first_blocks`, `--lowp_keep_last_blocks`): the weights do not carry them. An adapter run (`use_peft` or native expert LoRA) saves the adapter alone unless it [merges on save](../../reference/checkpoints.md#merge-on-save-checkpoints), so fold it into its base with `scripts/after_training/merge_peft_adapters.py` first and export the merged directory. An adapter on a projection lowp converted trained as a bf16 delta beside the quantized base, but the export quantizes base and delta together, so the rounding can drop part of a small delta: compare the exported model's outputs with the trained student's before serving it.
+
 ## Testing a setup
 
 ```bash
@@ -100,7 +119,7 @@ torchrun --nproc_per_node=2 scripts/training/distillation/teacher_distill.py <co
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu` (the chunked loss against the default path in `test_teacher_distillation_chunked_loss.py`), `tests/gpu/trainers/other/test_distillation.py`, `test_distillation_oss20b.py` and `tests/gpu/trainers/lora/test_lora_teacher_distill.py`.
+Covering tests: `pytest tests/cpu/trainers -m cpu` (the chunked loss against the default path in `test_teacher_distillation_chunked_loss.py`), `tests/gpu/trainers/other/test_distillation.py`, `test_distillation_oss20b.py`, `test_lowp_teacher_distill.py` (QAD) and `tests/gpu/trainers/lora/test_lora_teacher_distill.py`.
 
 ## What to watch
 

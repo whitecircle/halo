@@ -15,7 +15,7 @@ Two columns: `prompt` (a string or a `{"role", "content"}` message list) and `an
 {"prompt": [{"role": "user", "content": "What is 2 + 3?"}], "answer": "5"}
 ```
 
-- `prompt_field` and `answer_field` must name real columns; a typo raises at load.
+- `prompt_field` must name a real column, and so must `answer_field` when something reads the answer: an `accuracy` term, a judge with `include_reference`, an SDPG hint. A typo raises at load.
 - A row with a null or empty prompt is dropped at load.
 - `system_prompt` is prepended unless the row already opens with a system turn.
 - A rendered prompt over `max_prompt_length` is **dropped**, never truncated.
@@ -35,7 +35,13 @@ Accuracy is strict: the answer keeps only its text after a GSM8K `####`, both si
 
 A judge reads the `answer` column as its reference. A veto judge (one listing `checks`) is refused at config time; list `requirements` instead.
 
-A `judge` or `reward_model` term reads the row's `conversation` and `answer` columns, so keep `remove_unused_columns: false` (TRL's GRPO default): at `true` TRL forwards neither column and the term raises at its first scoring call.
+A `whitecircle` term checks each completion against your White Circle policies ([White Circle](rewards/whitecircle.md)), launched in one line:
+
+```bash
+WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+```
+
+A `judge`, `reward_model` or `whitecircle` term reads the row's `conversation` and `answer` columns, so keep `remove_unused_columns: false` (TRL's GRPO default): at `true` TRL forwards neither column and the term raises at its first scoring call.
 
 ## Configuration
 

@@ -15,6 +15,7 @@ from halo.rewards.samples import ScoringSample
 from halo.rewards.scorers.base import Scorer, ScoreResult
 from halo.rewards.scorers.judge import GenerativeJudge
 from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.scorers.whitecircle import WhiteCircleScorer
 from halo.rewards.terms import (
     Check,
     EnvironmentTerm,
@@ -22,6 +23,7 @@ from halo.rewards.terms import (
     Requirement,
     RewardModelTerm,
     RewardTerm,
+    WhiteCircleTerm,
     scored_metric_key,
 )
 from halo.rewards.trl_reward_functions import ScorerRewardFunction, TermRewardFunction, build_trl_reward_functions
@@ -189,7 +191,11 @@ def test_unknown_term_type_is_refused():
 
 
 def test_the_catalog_is_derived_from_each_scorers_term_type():
-    assert {JudgeTerm: GenerativeJudge, RewardModelTerm: ServedRewardModel} == SCORERS
+    assert {
+        JudgeTerm: GenerativeJudge,
+        RewardModelTerm: ServedRewardModel,
+        WhiteCircleTerm: WhiteCircleScorer,
+    } == SCORERS
     assert GenerativeJudge.term_type is JudgeTerm and ServedRewardModel.term_type is RewardModelTerm
     scorer = build_scorer(PREF)
     assert isinstance(scorer, ServedRewardModel) and scorer.term is PREF

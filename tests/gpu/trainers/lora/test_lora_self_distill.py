@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """The SDPG self-distillation trainer under adapters and full fine-tuning, on every parallel layout.
 
+``--chunked`` also pins the first step's loss to the full-logits loss of the same batch.
+
 ``--per-rank-adapters`` redraws each rank's zero-init adapter halves from its own RNG, as a draw on some ranks only
 leaves the streams, so the layout checks hold the wrap to starting every copy from the first one.
 """
@@ -33,7 +35,7 @@ from tests.common.adapters import (
     unwrap,
 )
 from tests.common.checkpoint_io import loading_problems
-from tests.common.distributed import group_max_abs_diff, shared_output_dir, world_any
+from tests.common.distributed import group_max_abs_diff, shared_output_dir, world_all, world_any
 from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
@@ -53,6 +55,8 @@ FULL_LEARNING_RATE = 1e-5
 # Small enough to leave the initial delta near the zero-init one.
 PER_RANK_ADAPTER_STD = 1e-3
 SEED = 1234
+# Both paths run the same bf16 matmuls per position, so the first step's losses agree to a few ulps.
+STEP0_RTOL = 1e-4
 # Each mode's model, adapter (None: full fine-tune), ParallelismConfig fields and default world size.
 MODES = {
     "lora": ("dense", "lora", lambda ep, world: {}, 2),
@@ -82,6 +86,7 @@ parser.add_argument("--ep", type=int, default=2)
 parser.add_argument("--world", type=int, default=None, help="ranks (default: the mode's own)")
 parser.add_argument("--gpus-per-node", type=int, default=0, help="simulated NVLink domain width (0: the launch's)")
 parser.add_argument("--per-rank-adapters", action="store_true", help="redraw each rank's lora_B from its own stream")
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
 ARGS = parser.parse_args()
 FAMILY, ADAPTER, FIELDS_FOR, DEFAULT_WORLD = MODES[ARGS.mode]
 WORLD_SIZE = ARGS.world or DEFAULT_WORLD
@@ -171,6 +176,32 @@ def _full_checkpoint_round_trip(ctx, trainer) -> dict[str, bool]:
     return {"full_checkpoint_loads_every_weight": not problems}
 
 
+class _FirstStepLosses:
+    """Wraps ``compute_loss``: on the first batch it also computes the full-logits loss with no grad and the dropout
+    seeded alike, then the trainer's own loss. Collective, so every rank runs it."""
+
+    def __init__(self, trainer):
+        self.trainer = trainer
+        self.compute_loss = trainer.compute_loss
+        self.full_logits = self.chunked = None
+
+    def __call__(self, model, inputs, *args, **kwargs):
+        if self.full_logits is not None:
+            return self.compute_loss(model, inputs, *args, **kwargs)
+        trainer, store_metrics = self.trainer, self.trainer.store_metrics
+        trainer.use_chunked_distillation_loss, trainer.store_metrics = False, lambda *a, **k: None
+        try:
+            torch.manual_seed(SEED)
+            with torch.no_grad():
+                self.full_logits = float(self.compute_loss(model, dict(inputs), *args, **kwargs))
+        finally:
+            trainer.use_chunked_distillation_loss, trainer.store_metrics = True, store_metrics
+        torch.manual_seed(SEED)
+        loss = self.compute_loss(model, inputs, *args, **kwargs)
+        self.chunked = float(loss.detach())
+        return loss
+
+
 @gpu_test_main(exact_world_size=WORLD_SIZE, prefix="lora_self_distill")
 def run(ctx) -> dict:
     fields = {
@@ -232,6 +263,7 @@ def run(ctx) -> dict:
         reference_kl_loss="unnormalized_kl",
         confidence_weight_opd=True,
         opd_exclude_eos=True,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
@@ -247,6 +279,11 @@ def run(ctx) -> dict:
     else:
         before = _layer0_weights(wrapped)
 
+    first_step = None
+    if ARGS.chunked:
+        first_step = _FirstStepLosses(trainer)
+        trainer.compute_loss = first_step
+
     barrier()
     result = trainer.train()
     checks["loss_finite"] = math.isfinite(result.training_loss)
@@ -255,6 +292,12 @@ def run(ctx) -> dict:
     checks["opd_fired"] = bool(opd)
     checks["opd_term_above_the_unhinted_floor"] = bool(opd) and max(opd) > OPD_FLOOR
     log(f"  training_loss={result.training_loss:.5f}, steps={result.global_step}, opd_loss per step={opd}")
+    if first_step is not None:
+        full_logits, chunked = first_step.full_logits, first_step.chunked
+        checks["step0_loss_is_the_full_logits_loss"] = world_all(
+            full_logits is not None and abs(chunked - full_logits) <= STEP0_RTOL * abs(full_logits)
+        )
+        log(f"  step-0 loss: chunked {chunked!r}, full logits {full_logits!r}")
     checks |= dp_layout_checks(
         wrapped,
         fields,

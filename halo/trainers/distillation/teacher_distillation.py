@@ -22,6 +22,7 @@ from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.dtype import resolve_training_dtype
+from halo.model_loading.parallel.lowp_compute import lowp_converted_modules
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
@@ -31,9 +32,9 @@ from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     stamped_sinks_policy,
 )
-from halo.models.introspection.module_tree import hidden_state_backbone
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distillation.divergences import (
+    ProjectedTarget,
     hard_labels_coefficient,
     logits_forward_inputs,
     place_frozen_scorer,
@@ -48,8 +49,12 @@ from halo.trainers.distillation.divergences import (
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.full_logits_memory import LogitsWidth, warn_if_full_logits_large
-from halo.trainers.head_projection import HeadProjector, OutputEmbedding, resolve_output_embedding
-from halo.trainers.hidden_state_forward import HiddenStateForwardMixin, reject_backbone_without_image_inputs
+from halo.trainers.head_projection import HeadProjector
+from halo.trainers.hidden_state_forward import (
+    HiddenStateForwardMixin,
+    ProjectedModel,
+    reject_metrics_reading_logits,
+)
 from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
@@ -61,15 +66,8 @@ _FULL_LOGITS_PLANES = 3
 
 @dataclass(frozen=True)
 class _ChunkedLossModules:
-    student_backbone: nn.Module
-    student_head: OutputEmbedding
-    teacher_backbone: nn.Module
-    teacher_head: OutputEmbedding
-
-
-def _at_positions(inputs: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-    """``[N, ...]`` rows of ``[B, T, ...]`` at flat ``positions`` over ``B * T``, whose backward needs no host read."""
-    return inputs.flatten(0, 1).index_select(0, positions)
+    student: ProjectedModel
+    teacher: ProjectedModel
 
 
 def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
@@ -84,6 +82,19 @@ def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
     return loss_fn
 
 
+def reject_lowp_teacher(teacher_model: nn.Module) -> None:
+    """Refuse a teacher holding low-precision modules. ``lowp_precision`` fake-quantizes the student only: the
+    teacher's logits are the target, and a quantized target would train the student toward its own rounding."""
+    converted = lowp_converted_modules(teacher_model)
+    if converted:
+        shown = ", ".join(converted[:3]) + (f" and {len(converted) - 3} more" if len(converted) > 3 else "")
+        raise ValueError(
+            f"The teacher holds {len(converted)} low-precision module(s) ({shown}). lowp_precision applies to the "
+            f"student only, so the teacher must compute in its load dtype. Load it through "
+            f"load_frozen_auxiliary_model, which applies no lowp_precision."
+        )
+
+
 class DistributedTeacherDistillationTrainer(
     HiddenStateForwardMixin, StoredMetricsMixin, DistributedTrainerMixin, Trainer
 ):
@@ -93,6 +104,9 @@ class DistributedTeacherDistillationTrainer(
     _tag_names = ["trl", "distillation", "knowledge-distillation"]
     LOSS_IS_OWN_MEAN = True
     _chunked_loss_modules: _ChunkedLossModules | None = None
+    # Quantization-aware distillation: the student loads through the SFT loader, which applies lowp; the teacher loads
+    # frozen through a path that never does, and the constructor refuses one that holds a converted module.
+    SUPPORTS_LOWP_PRECISION = True
 
     PP_REFUSAL = (
         "each microbatch needs a second forward through a distinct frozen teacher network whose "
@@ -145,6 +159,14 @@ class DistributedTeacherDistillationTrainer(
                 f"reset_sinks=False (load_frozen_auxiliary_model), on a sink-carrying attention implementation "
                 f"({SINK_CARRYING_ATTN_HINT})."
             )
+        reject_lowp_teacher(teacher_model)
+        if isinstance(student_model, str) and parallelism_config is not None and parallelism_config.lowp.enabled:
+            raise ValueError(
+                f"student_model is a path ({student_model!r}), and the trainer loads a path without "
+                f"lowp_precision={parallelism_config.lowp.precision!r}, so the student would train unquantized. Load it "
+                f"with load_distributed_model under this parallelism_config, as scripts/training/distillation/"
+                f"teacher_distill.py does, and pass the model."
+            )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
         student_model = resolve_trainer_model(student_model, args, parallelism_config=parallelism_config)
@@ -196,11 +218,7 @@ class DistributedTeacherDistillationTrainer(
     def _reject_unchunkable_loss(self) -> None:
         """Raise where ``use_chunked_distillation_loss`` cannot reproduce the full-logits loss, before the first step.
         Reads module types and configs only, so every rank reaches the same verdict."""
-        if self.compute_metrics is not None or self.preprocess_logits_for_metrics is not None:
-            raise ValueError(
-                "use_chunked_distillation_loss builds no logits, and compute_metrics / preprocess_logits_for_metrics "
-                "read the evaluation logits. Drop them, or set use_chunked_distillation_loss: false."
-            )
+        reject_metrics_reading_logits(self.compute_metrics, self.preprocess_logits_for_metrics)
         self._resolve_chunked_loss_modules()
 
     def _warn_if_full_logits_large(self) -> None:
@@ -229,13 +247,9 @@ class DistributedTeacherDistillationTrainer(
         """Resolved once, as each lookup unwraps a model through its whole module tree. Raises where the projection
         cannot reproduce a model's output embedding."""
         if self._chunked_loss_modules is None:
-            reject_backbone_without_image_inputs(self.model)
-            reject_backbone_without_image_inputs(self.teacher_model)
             self._chunked_loss_modules = _ChunkedLossModules(
-                student_backbone=hidden_state_backbone(self.model),
-                student_head=resolve_output_embedding(self.model, self._head_transform(self.model)),
-                teacher_backbone=hidden_state_backbone(self.teacher_model),
-                teacher_head=resolve_output_embedding(self.teacher_model, self._head_transform(self.teacher_model)),
+                student=self._resolve_projected_model(self.model),
+                teacher=self._resolve_projected_model(self.teacher_model),
             )
         return self._chunked_loss_modules
 
@@ -315,7 +329,7 @@ class DistributedTeacherDistillationTrainer(
         return student_outputs, distillation_loss, token_cross_entropy, gate
 
     def _projected_loss_terms(self, model, model_inputs, hard_labels, supervised):
-        """``(distillation, cross-entropy, gate)`` per supervised position, the only ones projected, with no
+        """``(distillation, cross-entropy, gate or None)`` per supervised position, the only ones projected, with no
         ``[tokens, V]`` logits built. A micro-batch with none still runs its backward through the head and the backbone,
         and every collective in them, through the empty selection."""
         modules = self._resolve_chunked_loss_modules()
@@ -323,9 +337,9 @@ class DistributedTeacherDistillationTrainer(
         rows, columns = supervised.nonzero().unbind(-1)
         positions = rows * (supervised.size(1) + 1) + columns
         with torch.no_grad():
-            teacher_hidden = modules.teacher_backbone(**model_inputs).last_hidden_state
-            teacher_head = modules.teacher_head.projector(self._vocab_width)
-            teacher_rows = [_at_positions(inputs, positions) for inputs in teacher_head.head_inputs(teacher_hidden)]
+            teacher_hidden = modules.teacher.backbone(**model_inputs).last_hidden_state
+            teacher_head = modules.teacher.head.projector(self._vocab_width)
+            teacher_rows = teacher_head.head_inputs_at(teacher_hidden, positions)
         unwrapped = self.accelerator.unwrap_model(model)
         # The teacher's tensors ride in a closure: as forward arguments FSDP2 would cast them to the student's dtype.
         student_terms = functools.partial(
@@ -340,7 +354,8 @@ class DistributedTeacherDistillationTrainer(
             positions=positions,
             **model_inputs,
         )
-        return terms.unbind(-1)
+        cross_entropy, distillation, *gate = terms.unbind(-1)
+        return distillation, cross_entropy, gate[0] if gate else None
 
     def _projected_student_terms(
         self,
@@ -356,23 +371,23 @@ class DistributedTeacherDistillationTrainer(
         modules = self._resolve_chunked_loss_modules()
         autocast = functools.partial(peft_bf16_autocast, self._peft_has_been_casted_to_bf16, self.accelerator.device)
         with autocast():
-            hidden = self._backbone_last_hidden_state(modules.student_backbone, **model_inputs)
-            student_head = modules.student_head.projector(self._vocab_width)
-            student_rows = [_at_positions(inputs, positions) for inputs in student_head.head_inputs(hidden)]
+            hidden = self._backbone_last_hidden_state(modules.student.backbone, **model_inputs)
+            student_head = modules.student.head.projector(self._vocab_width)
+            student_rows = student_head.head_inputs_at(hidden, positions)
 
         def student_logits(*rows: torch.Tensor) -> torch.Tensor:
             with autocast():
                 return student_head.project(*rows)
 
+        teacher = ProjectedTarget(
+            self.distillation_loss_fn, teacher_head.project, teacher_rows, gates=self.args.apply_hard_labels
+        )
         return projected_distillation_terms(
-            self.distillation_loss_fn,
             student_logits,
             student_rows,
-            teacher_head.project,
-            teacher_rows,
+            [teacher],
             hard_labels,
             self.args.distill_temperature,
             vocab=student_head.width,
             trains_cross_entropy=self.args.distill_alpha != 1.0,
-            gates=self.args.apply_hard_labels,
         )
