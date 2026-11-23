@@ -15,8 +15,10 @@ from transformers import AutoConfig, PreTrainedTokenizer
 from halo.data.completion_spans import (
     PACKED_SPAN_POLICY,
     PADDED_SPAN_POLICY,
+    SpanBounds,
     build_training_labels,
     mask_batch_to_completion_spans,
+    resolve_span_bounds,
 )
 from halo.data.conversation import TEMPLATE_COLUMN_KNOBS, reject_unsupported_media_parts, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
@@ -33,6 +35,7 @@ from halo.data.vlm_render import (
     run_vlm_processor,
 )
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.model_preparation import find_generation_config
 from halo.model_loading.tokenizer_backend import install_processor_backend, resolve_tokenizer_backend
 from halo.model_loading.tokenizer_setup import record_special_token_id, resolve_tokenizer
 
@@ -62,6 +65,7 @@ def _completion_only_labels(
     eos_token_ids: frozenset[int],
     extra_ignore_token_ids: tuple[int, ...] = (),
     span_policy: dict[str, bool] = PADDED_SPAN_POLICY,
+    span_bounds: SpanBounds | None = None,
 ) -> list[int]:
     """By the span rule every runtime collator labels through, so a baked row masks exactly like an untouched one;
     ``span_policy`` is that collator's, ``extra_ignore_token_ids`` (image tokens) are masked on top."""
@@ -76,19 +80,23 @@ def _completion_only_labels(
         tokenizer=tokenizer,
         span_policy=span_policy,
         extra_ignore_token_ids=extra_ignore_token_ids,
+        span_bounds=span_bounds,
     )
     return batch["labels"][0].tolist()
 
 
 def resolve_label_eos_token_ids(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) -> frozenset[int]:
-    """The bake's turn terminators, which close a row's last assistant turn and end a completion span: the model
-    config's ``eos_token_id`` list folded with the tokenizer's, as the runtime collator reads them once the run has
-    recorded an ``eos_token`` override on its config. An unreadable config raises: GLM-4's turn terminators are listed
-    only there."""
+    """The bake's turn terminators, which close a row's last assistant turn and end a completion span: what
+    :func:`~halo.data.turn_markers.resolve_eos_token_ids` reads off the checkpoint's model and generation configs, as
+    a run reads them off its model once it has recorded an ``eos_token`` override on both. An unreadable model config
+    raises: GLM-4's turn terminators are listed only there."""
     hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
+    generation_config = find_generation_config(config.model_name_or_path)
     if config.eos_token:
-        record_special_token_id(hf_config, "eos_token_id", tokenizer.eos_token_id)
-    return resolve_eos_token_ids(tokenizer, hf_config)
+        for level in (hf_config, generation_config):
+            if level is not None:
+                record_special_token_id(level, "eos_token_id", tokenizer.eos_token_id)
+    return resolve_eos_token_ids(tokenizer, hf_config, generation_config)
 
 
 def _drop_rejected_rows(
@@ -174,6 +182,7 @@ def _bake_labels(
         return tokenized
     marker = config.assistant_message_template
     response_token_ids = tokenize_response_template(marker, tokenizer)
+    span_bounds = resolve_span_bounds(tokenizer, marker, eos_token_ids)
     span_policy = PACKED_SPAN_POLICY if config.pack_sequences else PADDED_SPAN_POLICY
     return coordinated_map(
         tokenized,
@@ -184,6 +193,7 @@ def _bake_labels(
                 marker,
                 response_token_ids,
                 eos_token_ids=eos_token_ids,
+                span_bounds=span_bounds,
                 span_policy=span_policy,
             )
         },
@@ -265,6 +275,7 @@ def _vlm_labels(
     response_token_ids: list[int] | None,
     image_token_ids: tuple[int, ...],
     eos_token_ids: frozenset[int],
+    span_bounds: SpanBounds | None,
 ) -> list[int]:
     if config.train_on_completions_only:
         return _completion_only_labels(
@@ -274,6 +285,7 @@ def _vlm_labels(
             response_token_ids,
             extra_ignore_token_ids=image_token_ids,
             eos_token_ids=eos_token_ids,
+            span_bounds=span_bounds,
         )
     # The runtime builder, given the row's all-ones mask so its pad-value fallback cannot erase a real EOS at pad==eos.
     return build_training_labels(
@@ -295,6 +307,7 @@ def tokenize_vlm_row(
     response_token_ids: list[int] | None,
     image_token_ids: tuple[int, ...],
     eos_token_ids: frozenset[int],
+    span_bounds: SpanBounds | None,
 ) -> dict[str, Any]:
     """Through the runtime VLM path's own builder and renderer, so it tokenizes as an untouched run renders it, its
     last assistant turn closed against ``eos_token_ids`` alike. An empty, over-length or bad-data row becomes the
@@ -340,6 +353,7 @@ def tokenize_vlm_row(
             response_token_ids=response_token_ids,
             image_token_ids=image_token_ids,
             eos_token_ids=eos_token_ids,
+            span_bounds=span_bounds,
         )
         return output
     except _VLM_ROW_DATA_ERRORS as e:
@@ -382,6 +396,11 @@ def tokenize_vlm_dataset(
         # Read once from the full vocab; sorted so the key does not depend on set order.
         image_token_ids=tuple(sorted(resolve_image_token_ids(tokenizer, processor))),
         eos_token_ids=eos_token_ids,
+        span_bounds=(
+            resolve_span_bounds(tokenizer, config.assistant_message_template, eos_token_ids, template_owner=processor)
+            if config.train_on_completions_only
+            else None
+        ),
     )
     tokenized = coordinated_map(
         dataset,

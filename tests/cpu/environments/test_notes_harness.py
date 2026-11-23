@@ -323,6 +323,20 @@ def test_the_system_prompt_trades_the_summary_rule_for_the_notes_way_of_working(
     assert notes == head + _NOTES_REPLY_RULE
 
 
+def test_an_observation_cap_that_cuts_the_saved_marker_refuses_the_notes_harness():
+    """The view replays a notes call only from a reply opening with "Notes saved": a cap below its 11 characters would
+    drop every call from the prompts while the episode keeps it."""
+    with pytest.raises(ValueError, match=r"max_observation_chars to at least 11, or to 0 \(uncapped\)"):
+        _env(notes={}, max_observation_chars=8)
+    _env(max_observation_chars=8)
+    _env(notes={}, max_observation_chars=0)
+    env = _env(notes={}, max_observation_chars=11)
+    ids, _ = _reset(env)
+    step = _turn(env, ids, "", ("notes", {"text": "## idea\nn + 1"}))
+    assert step.observation[-2]["content"].startswith("Notes saved\n")
+    assert _notes_block(step.observation) == "<notes>\n## idea\nn + 1\n</notes>"
+
+
 @pytest.mark.parametrize("max_chars", [0, 6000.0])
 def test_notes_config_refuses_nonsense(max_chars):
     with pytest.raises(ValueError, match="notes: max_chars must be an integer >= 1"):

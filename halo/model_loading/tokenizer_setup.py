@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from jinja2 import TemplateError
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase
 from transformers.utils import cached_file
 
@@ -125,6 +126,55 @@ def reject_dropped_chat_template(args: CommonScriptArguments, tokenizer: PreTrai
         f"chat_template differs from the template {tokenizer.name_or_path or 'the checkpoint'} ships, which the run "
         f"would keep, train on and export. Set force_chat_template: true to use chat_template, or remove chat_template "
         f"to keep the shipped one."
+    )
+
+
+def _render_reasoning_effort_probe(processing_class, level: str | None, *, open_turn: bool) -> str | None:
+    """The probe conversation closed by an assistant turn, or open on the generation prompt; ``None`` where the
+    template raises."""
+    conversation = [{"role": "user", "content": "q"}]
+    if not open_turn:
+        conversation.append({"role": "assistant", "content": "a"})
+    try:
+        return processing_class.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=open_turn,
+            **({} if level is None else {"reasoning_effort": level}),
+        )
+    except (TemplateError, ValueError):  # a template refusing the level, or no template at all
+        return None
+
+
+def reject_unrendered_reasoning_effort(processing_class, reasoning_effort_field: str | None) -> None:
+    """Refuse ``reasoning_effort_field`` under a chat template rendering a conversation alike at no level, ``none``,
+    ``low`` and ``high``, both closed by an assistant turn and open on the generation prompt, which would drop every
+    row's level from its render. A form raising at some level reads it; one raising at every level leaves the template
+    to the row render."""
+    if not reasoning_effort_field:
+        return
+    # A template may read the level in one form alone (Cohere Command A, only 'none' and only in its generation
+    # prompt), and may refuse a level it does not take (Mistral 4 'low', Qwen3.8 'high').
+    for open_turn in (False, True):
+        renders = {
+            _render_reasoning_effort_probe(processing_class, level, open_turn=open_turn)
+            for level in (None, "none", "low", "high")
+        }
+        if len(renders) > 1 or None in renders:
+            return
+    tokenizer = resolve_tokenizer(processing_class)
+    template = (
+        "the run's chat_template"
+        if getattr(tokenizer, _RUN_CHAT_TEMPLATE_ATTR, False)
+        else f"the chat template {tokenizer.name_or_path or 'the checkpoint'} ships"
+    )
+    raise ValueError(
+        f"reasoning_effort_field='{reasoning_effort_field}' hands each row's level to the chat template as "
+        f"reasoning_effort, but {template} renders a conversation alike at no level, 'none', 'low' and 'high', "
+        f"whether closed by an assistant turn or open on its generation prompt, so no row's level would reach its "
+        f"render. Set chat_template to a template that states the level, such as "
+        f"jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja or jinja-templates/gemma4/gemma4-reasoning-effort.jinja "
+        f"(with force_chat_template: true over a shipped template), or drop reasoning_effort_field."
     )
 
 
@@ -261,6 +311,7 @@ def configure_run_tokenizer(
     reject_dropped_chat_template(args, tokenizer)
     if tokenizer.chat_template is None or (args.chat_template is not None and args.force_chat_template):
         set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
+    reject_unrendered_reasoning_effort(tokenizer, args.reasoning_effort_field)
 
     return resolve_tokenizer_backend(tokenizer, args.tokenizer_backend)
 

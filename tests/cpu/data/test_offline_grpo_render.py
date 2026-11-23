@@ -3,6 +3,7 @@
 (standalone raises on strict templates and injects a mid-sequence BOS) at the row's level, and the eval-generation
 prompt's null cap means no cap."""
 
+import json
 from functools import partial
 from types import SimpleNamespace
 
@@ -19,6 +20,8 @@ from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.data.pipeline.text_rows import prepare_generative_row
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.grpo.offline.offline_rules import reject_unsupported_reference_input
+from tests.common.models import GPT_OSS_20B
+from tests.common.tokenizers import load_cached_tokenizer
 
 
 class StrictTemplateTokenizer:
@@ -108,6 +111,56 @@ def test_main_renders_each_rows_level(monkeypatch, tmp_path):
     render = reached.value.args[0]
     row = {**ROW, "completions": [list(c) for c in ROW["completions"]], "effort": "high"}
     assert render(row)["prompt"] == "<|effort|>high<|end|><|user|>What is 2+2?<|end|>"
+
+
+def test_main_generation_prompts_render_each_rows_level_and_tools(monkeypatch, tmp_path):
+    """``main()``'s eval-generation map is the one path from the template columns to the generation prompts."""
+    tokenizer = load_cached_tokenizer(GPT_OSS_20B)
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "lookup_weather",
+                "description": "Look up the weather.",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    row = {**ROW, "effort": "high", "tools": json.dumps(tools)}
+    args = OfflineGRPOScriptArguments(
+        dataset="org/offline", reasoning_effort_field="effort", tools_field="tools", generate_eval_examples=True
+    )
+    config = OfflineGRPOConfig(output_dir=str(tmp_path), use_cpu=True, bf16=False, report_to="none")
+    splits = DatasetDict(train=Dataset.from_list([row]), test=Dataset.from_list([row]))
+    maps = []
+
+    def reach_the_generation_map(dataset, function, **_kwargs):
+        maps.append(function)
+        if len(maps) == 2:
+            raise _RenderMapReached(function)
+        return dataset
+
+    stubs = {
+        "parse_script_args": lambda *_: (args, config, ModelArguments(model_name_or_path="local"), SimpleNamespace()),
+        "init_training_script": lambda *a, **k: SimpleNamespace(parallelism_config=ParallelismConfig()),
+        "load_script_datasets": lambda *a, **k: (splits, False),
+        "default_padded_attn_implementation": lambda *a, **k: "sdpa",
+        "load_model_and_tokenizer": lambda *a, **k: (None, tokenizer),
+        "apply_prompt_completion_window": lambda *a, **k: (tokenizer, None),
+        "configure_adapter_training": lambda *a, **k: None,
+        "_load_kl_reference": lambda *a, **k: None,
+        "log_model_info": lambda *a, **k: None,
+        "coordinated_map": reach_the_generation_map,
+    }
+    for name, stub in stubs.items():
+        monkeypatch.setattr(offline_script, name, stub)
+    with pytest.raises(_RenderMapReached) as reached:
+        offline_script.main()
+
+    prompt = tokenizer.decode(reached.value.args[0](row)["input_ids"])
+    assert "Reasoning: high" in prompt and "lookup_weather" in prompt
+    default = tokenizer.decode(reached.value.args[0](ROW)["input_ids"])
+    assert "Reasoning: high" not in default and "lookup_weather" not in default
 
 
 def test_offline_grpo_rendered_supplied_references_are_refused_by_the_trainer():

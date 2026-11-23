@@ -10,6 +10,7 @@ import re
 import statistics
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import replace
 from functools import partial
 from typing import Any
 
@@ -156,9 +157,29 @@ def _written_body_fields(
     return keywords, {**capture_request_fields(rollout), **generation_control_fields(rollout, level)}
 
 
-def resolve_eval_extra_body(rollout: RolloutConfig) -> dict[str, Any]:
+def _bind_eval_effort(
+    env: EnvironmentBase, prompt: str | list[dict[str, Any]], context: dict[str, Any], rollout: RolloutConfig
+) -> tuple[dict[str, Any], EpisodeEffort]:
+    """Bound as the training rollout binds it; a ``random`` level is drawn from the problem, so every checkpoint scores
+    a problem at the same level."""
+    if env.reasoning_effort == RANDOM_REASONING_EFFORT and not (context or {}).get("reasoning_effort"):
+        context = {**(context or {}), "reasoning_effort": stable_reasoning_effort(prompt)}
+    effort = bind_episode_effort(
+        context,
+        env,
+        max_tokens=rollout.max_tokens,
+        max_thinking_tokens=rollout.max_thinking_tokens,
+        max_episode_tokens=rollout.max_episode_tokens,
+        max_answer_tokens=rollout.max_answer_tokens,
+    )
+    if effort.level is not None:
+        context = {**(context or {}), "reasoning_effort": effort.level}
+    return context, effort
+
+
+def resolve_eval_extra_body(env: EnvironmentBase, rollout: RolloutConfig) -> dict[str, Any]:
     """``HALO_EVAL_EXTRA_BODY``, the fields laid over every eval request's body for an endpoint's own options
-    (OpenRouter's ``provider`` routing). Raises on anything but a JSON object, and on a field the request writes
+    (OpenRouter's ``provider`` routing). Raises on anything but a JSON object, and on a field a turn's request writes
     itself, top-level or nested: the SDK lays ``extra_body`` over the whole body, so the overlay would replace it."""
     raw = env_str("HALO_EVAL_EXTRA_BODY") or "{}"
     try:
@@ -169,8 +190,11 @@ def resolve_eval_extra_body(rollout: RolloutConfig) -> dict[str, Any]:
         ) from e
     if not isinstance(body, dict):
         raise ValueError(f"HALO_EVAL_EXTRA_BODY must be a JSON object of endpoint options, got {type(body).__name__}.")
-    # Any level: generation_control_fields writes reasoning_effort only when given one.
-    keywords, nested = _written_body_fields(rollout, VALID_REASONING_EFFORTS[0], [], None)
+    # A turn's request under the episode's caps, which carry the reasoning cap a run derives from its answer room; at
+    # a level, since a request writes reasoning_effort only under one.
+    _, effort = _bind_eval_effort(env, "", {"reasoning_effort": VALID_REASONING_EFFORTS[0]}, rollout)
+    turn = replace(rollout, **effort.turn_caps(0))
+    keywords, nested = _written_body_fields(turn, effort.level, [], None)
     overlap = sorted(body.keys() & (keywords.keys() | nested.keys()))
     if overlap:
         raise ValueError(
@@ -220,26 +244,6 @@ async def _request_turn(
         # Unlogged, an early end yields an all-zero eval indistinguishable from a bad endpoint.
         logger.warning("generation failed, ending episode early", exc_info=True)
         raise
-
-
-def _bind_eval_effort(
-    env: EnvironmentBase, prompt: str | list[dict[str, Any]], context: dict[str, Any], rollout: RolloutConfig
-) -> tuple[dict[str, Any], EpisodeEffort]:
-    """Bound as the training rollout binds it; a ``random`` level is drawn from the problem, so every checkpoint scores
-    a problem at the same level."""
-    if env.reasoning_effort == RANDOM_REASONING_EFFORT and not (context or {}).get("reasoning_effort"):
-        context = {**(context or {}), "reasoning_effort": stable_reasoning_effort(prompt)}
-    effort = bind_episode_effort(
-        context,
-        env,
-        max_tokens=rollout.max_tokens,
-        max_thinking_tokens=rollout.max_thinking_tokens,
-        max_episode_tokens=rollout.max_episode_tokens,
-        max_answer_tokens=rollout.max_answer_tokens,
-    )
-    if effort.level is not None:
-        context = {**(context or {}), "reasoning_effort": effort.level}
-    return context, effort
 
 
 async def run_episode(
@@ -324,7 +328,7 @@ async def collect_results(
         max_episode_tokens=rollout.max_episode_tokens,
         max_answer_tokens=rollout.max_answer_tokens,
     )
-    extra_body = resolve_eval_extra_body(rollout)
+    extra_body = resolve_eval_extra_body(env, rollout)
     tasks = [task_prompt(example["prompt"]) for example in examples]
     semaphore = asyncio.Semaphore(max_workers)
 

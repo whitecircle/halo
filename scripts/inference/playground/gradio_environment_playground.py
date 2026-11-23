@@ -125,7 +125,7 @@ def run_playground_episode(
             max_tokens=int(max_tokens),
             top_p=top_p,
         )
-        extra_body = resolve_eval_extra_body(rollout)
+        extra_body = resolve_eval_extra_body(env, rollout)
         start_time = time.time()
         trajectory = asyncio.run(run_episode(env, prompt, context, client, rollout=rollout, extra_body=extra_body))
         elapsed = time.time() - start_time

@@ -240,6 +240,7 @@ def _script_args():
         force_chat_template=False,
         added_special_tokens=None,
         tokenizer_backend="hf",
+        reasoning_effort_field=None,
     )
 
 

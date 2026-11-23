@@ -69,7 +69,7 @@ def test_raw_vlm_map_keeps_mixed_modality_rows_intact():
     training_config = _training_config()
     with mock.patch("halo.entrypoints.data_setup.VLMDataCollator"):
         train, test, _ = prepare_raw_vlm_split(
-            ds, _args(), training_config, _Processor(), _Tokenizer(), None, desc="Processing VLM dataset"
+            ds, _args(), training_config, _Processor(), _Tokenizer(), None, None, desc="Processing VLM dataset"
         )
     assert training_config.remove_unused_columns is False, "the mapped columns would be stripped before the collator"
     for split in (train, test):

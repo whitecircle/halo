@@ -13,8 +13,8 @@ from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
 from halo.data.completion_spans import build_training_labels
 from halo.data.pipeline.text_rows import build_chat_row_processor, tokenize_training_row
 from halo.data.turn_markers import resolve_eos_token_ids
-from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
-from tests.common.open_turn_templates import OPEN_FINAL_TURN_TEMPLATES
+from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, INKLING_SMALL, QWEN3_0_6B, QWEN3_5_2B
+from tests.common.open_turn_templates import OPEN_FINAL_TURN_TEMPLATES, load_open_turn_tokenizer
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 
@@ -60,14 +60,17 @@ CONVO = [
 ]
 
 
-def _load(model_id):
-    tok = load_cached_tokenizer(model_id, trust_remote_code=True)
-    cfg = load_cached_config(model_id, trust_remote_code=True)
+def _right_padded(tok):
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     # GLM-4.7-Flash/Gemma default to left padding, which the packing collator rejects.
     tok.padding_side = "right"
-    return tok, cfg
+    return tok
+
+
+def _load(model_id):
+    tok = load_cached_tokenizer(model_id, trust_remote_code=True)
+    return _right_padded(tok), load_cached_config(model_id, trust_remote_code=True)
 
 
 def _render_ids(tok, model_id):
@@ -160,11 +163,8 @@ def test_every_completion_collator_agrees_with_the_builder(model_id):
 
 
 def _load_open_template(name):
-    tok, cfg = _load(GLM4_FLASH)
-    path = OPEN_FINAL_TURN_TEMPLATES[name]
-    if path:
-        tok.chat_template = (REPO_ROOT / path).read_text()
-    return tok, resolve_eos_token_ids(tok, cfg)
+    tok, cfg = load_open_turn_tokenizer(name)
+    return _right_padded(tok), resolve_eos_token_ids(tok, cfg)
 
 
 def _plain_ids(tok, conversation, **kwargs):
@@ -233,6 +233,15 @@ def test_a_final_turn_the_template_terminates_gets_no_second_terminator(model_id
     eos_set = resolve_eos_token_ids(tok, cfg)
     row = tokenize_training_row({"messages": CONVO}, tok, eos_set, conversation_field="messages")
     assert row["input_ids"] == _plain_ids(tok, CONVO)
+
+
+def test_inklings_text_config_default_eos_ends_no_turn():
+    """Inkling-Small declares its eos at the top level alone, so its text config holds the class default 2, ``#``; read
+    as a terminator, a turn holding a markdown heading would train only up to it."""
+    tok = load_cached_tokenizer(INKLING_SMALL, trust_remote_code=True)
+    cfg = load_cached_config(INKLING_SMALL, trust_remote_code=True)
+    assert tok.convert_ids_to_tokens(cfg.text_config.eos_token_id) == "#", "the text config's eos moved"
+    assert resolve_eos_token_ids(tok, cfg) == frozenset({cfg.eos_token_id})
 
 
 def test_only_a_training_row_that_ends_on_an_assistant_turn_is_closed():

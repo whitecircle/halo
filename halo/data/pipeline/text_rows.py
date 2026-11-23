@@ -6,7 +6,12 @@ from typing import Any
 
 from transformers import PreTrainedTokenizer
 
-from halo.data.chat_render import close_final_assistant_turn, render_conversation, tokenize_rendered
+from halo.data.chat_render import (
+    render_chat_template,
+    render_conversation,
+    tokenize_rendered,
+    tokenize_training_conversation,
+)
 from halo.data.conversation import (
     TEMPLATE_COLUMN_KNOBS,
     chat_template_kwargs,
@@ -69,23 +74,23 @@ def tokenize_training_row(
     conversation_field: str,
     **render_kwargs,
 ):
-    """One row's whole conversation as an untruncated training row, its last assistant turn closed where the template
-    leaves it open (:func:`close_final_assistant_turn`)."""
-    conversation = resolve_json_value(row[conversation_field])
-    rendered = render_conversation(
-        tokenizer, conversation, row, conversation_field=conversation_field, **render_kwargs
+    """One row's whole conversation as an untruncated training row (:func:`tokenize_training_conversation`)."""
+    return tokenize_training_conversation(
+        tokenizer,
+        resolve_json_value(row[conversation_field]),
+        row,
+        eos_token_ids,
+        conversation_field=conversation_field,
+        **render_kwargs,
     )
-    encoded = tokenize_rendered(tokenizer, rendered, truncation=False, padding=False)
-    close_final_assistant_turn(encoded, conversation, tokenizer, eos_token_ids)
-    return encoded
 
 
 def prepare_generative_row(row, tokenizer, max_length, tools_field=None, reasoning_effort_field=None):
     """``row["prompt"]`` messages to a tokenized, padded generation prompt, capped at a bounded ``max_length``."""
     reject_image_content(row["prompt"], "prompt field 'prompt'")
-    constructed_prompt = tokenizer.apply_chat_template(
+    constructed_prompt = render_chat_template(
+        tokenizer,
         row["prompt"],
-        tokenize=False,
         add_generation_prompt=True,
         **chat_template_kwargs(
             row, interleaved_thinking=False, tools_field=tools_field, reasoning_effort_field=reasoning_effort_field

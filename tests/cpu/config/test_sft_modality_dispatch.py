@@ -77,6 +77,7 @@ def _run_sft(tmp_path, yaml_body: str, dataset: DatasetDict, *, stub_vlm_prep: b
 
     model = torch.nn.Module()
     model.config = CONFIG_MAPPING["gemma3"]()
+    model.generation_config = None
     processing_class = types.SimpleNamespace(tokenizer=None)
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(cp_size=1, is_cp_mode=False, pp_size=1),
@@ -262,6 +263,13 @@ def test_text_only_model_refuses_embedded_images_before_the_model_load(tmp_path)
     loads = []
     with pytest.raises(ValueError, match="text_only_model=True loads the text-only CausalLM"):
         _run_sft(tmp_path, "text_only_model: true\n", dataset, stub_vlm_prep=True, loads=loads)
+    assert not loads
+
+
+def test_text_only_model_refuses_an_image_column_before_the_model_load(tmp_path):
+    loads = []
+    with pytest.raises(ValueError, match="carries an image column .* text_only_model=True loads the text-only"):
+        _run_sft(tmp_path, "text_only_model: true\n", _dataset({"images": [[]]}), stub_vlm_prep=True, loads=loads)
     assert not loads
 
 

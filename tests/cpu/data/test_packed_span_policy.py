@@ -38,11 +38,14 @@ UNTERMINATED_ROW = [20, RESP_1, RESP_2, 30, 31]
 
 class _Tokenizer:
     """The surface the collators read: ``encode`` returns the pre-tokenized marker, ``decode`` feeds
-    the terminator walk and the span-miss warning."""
+    the terminator walk and the span-miss warning, and the special ids, none of them the marker's first token, leave
+    its spans bounded by markers alone."""
 
     pad_token_id = PAD
     eos_token_id = EOS
     padding_side = "right"
+    all_special_ids = (PAD, EOS)
+    added_tokens_decoder: dict = {}
 
     def encode(self, *_args, **_kwargs):
         return TEMPLATE_IDS

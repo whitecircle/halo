@@ -5,7 +5,13 @@ from collections.abc import Mapping
 import numpy as np
 from datasets import Dataset, DatasetDict, Value, concatenate_datasets
 
-from halo.data.render_columns import drop_empty_conversation_rows, missing_render_column_splits
+from halo.data.render_columns import (
+    drop_empty_conversation_rows,
+    has_render_column,
+    missing_render_column_splits,
+    reject_missing_render_column,
+    resolve_declared_render_columns,
+)
 from halo.data.sources.paths import reject_partial_splits
 from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
 from halo.log import info_logger
@@ -78,25 +84,25 @@ def subset_dataset_dict(dataset: DatasetDict, dataset_ratio: float | None, seed:
 
 
 def _reject_template_column_nowhere(paths: list, datasets: list, knob: str, column: str) -> None:
-    """Refuse an optional template column no entry carries (a typo); warn about entries without it, as in a mixed
-    corpus."""
-    without = [
-        entry_path
+    """Refuse an optional template column no rendered split of any entry carries (a typo); warn about the splits
+    lacking it, whose rows the concatenation null-fills, as in a mixed corpus."""
+    absent = {
+        entry_path: splits
         for entry_path, ds_dict in zip(paths, datasets, strict=True)
-        if missing_render_column_splits(ds_dict, column)
-    ]
-    if not without:
+        if (splits := missing_render_column_splits(ds_dict, column))
+    }
+    if not absent:
         return
-    if len(without) == len(paths):
+    if not any(has_render_column(ds_dict, column) for ds_dict in datasets):
         raise ValueError(
             f"{knob}='{column}' names a column NONE of the {len(paths)} configured "
-            f"dataset(s) carry ({without}) — every row would render as if {knob} were unset. Point {knob} "
+            f"dataset(s) carry ({list(absent)}) — every row would render as if {knob} were unset. Point {knob} "
             f"at an existing column in the YAML, or drop it."
         )
     if is_global_main_process():
         logger.warning(
-            f"{knob}='{column}' is absent from {without}; rows from those source(s) render as if {knob} were "
-            f"unset. Intentional for a mixed corpus — check the column name if it is not."
+            f"{knob}='{column}' is absent from {absent} (dataset: split(s)); rows from those splits render as if "
+            f"{knob} were unset. Intentional for a mixed corpus — check the column name if it is not."
         )
 
 
@@ -235,26 +241,22 @@ def build_corpus(
     """One train/test ``DatasetDict``. Each entry is checked and filtered on its own, so a refusal names the offending
     dataset; declared render columns are pinned through the concatenation. ``template_columns`` maps each optional
     template knob to the column it names."""
+    declared_render_columns = resolve_declared_render_columns(
+        conversation_knob, conversation_field if conversation_declared else None, template_columns
+    )
+    conversation_column = declared_render_columns.get(conversation_knob)
     # A SHARDED entry missing a split is a per-rank shard-index fault, not a source that ships only train.
     for entry_path, (entry_ds, entry_sharded) in zip(paths, loaded, strict=True):
         if entry_sharded:
             reject_partial_splits(entry_ds, entry_path)
-        drop_empty_conversation_rows(
-            entry_ds, entry_path, conversation_field, required=conversation_declared, knob=conversation_knob
-        )
+        if conversation_column:
+            reject_missing_render_column(entry_ds, entry_path, conversation_knob, conversation_column)
+        drop_empty_conversation_rows(entry_ds, conversation_field)
     datasets = [entry_ds for entry_ds, _ in loaded]
     for knob, column in template_columns.items():
         if column:
             _reject_template_column_nowhere(paths, datasets, knob, column)
 
-    declared_render_columns = {
-        knob: column
-        for knob, column in (
-            (conversation_knob, conversation_field if conversation_declared else None),
-            *template_columns.items(),
-        )
-        if column
-    }
     subsets = [
         subset_dataset_dict(entry_ds, ratio, seed + i)
         for i, (entry_ds, ratio) in enumerate(zip(datasets, ratios, strict=True))

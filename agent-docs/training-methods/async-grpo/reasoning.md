@@ -14,10 +14,13 @@ per-turn reasoning cap is run-wide and the same at every level. No budget, price
 - `random` draws one level per generation group, so a group shares its conditioning. An eval round draws it from the
   problem's text, so every checkpoint scores a problem at the same level.
 - A row's own level reaches its episode as a `reasoning_effort` column named in `context_fields` and takes
-  precedence over the environment's `reasoning_effort`; a null cell keeps the environment's, and under `random` the
-  trainer stamps the group's draw over the row's. The [reasoning length terms](#reasoning-length-reward) switch on
-  from the levels the environment draws alone ([Construction checks](#construction-checks)), so a row's other level
-  is priced only while one of those is.
+  precedence over the environment's `reasoning_effort`; a null cell keeps the environment's. Under an environment
+  level of `random`, the trainer stamps the group's draw over every row's level, in training and in its eval rounds;
+  otherwise, and in the standalone eval, a row's cell is read, and one other than `low`, `medium`, `high` or null
+  raises (a row's own `random` would draw differently across its group). The standalone eval draws from the problem's
+  text only for a row with no level. The
+  [reasoning length terms](#reasoning-length-reward) switch on from the levels the environment draws alone
+  ([Construction checks](#construction-checks)), so a row's other level is priced only while one of those is.
 - A profile takes `reasoning_budget` (int ≥ 0) and `reasoning_price` (≥ 0), the
   [reasoning length terms](#reasoning-length-reward). Environment classes add keys, such as code contests' tool
   budgets ([Reasoning effort](environments/tasks/code-contests/README.md#reasoning-effort)).
@@ -71,13 +74,15 @@ Refused when the config is parsed, each reading reasoning no turn has:
   would pay the full weight, a gradient back toward reasoning;
 - `reasoning_price_cap` off its default, and `reasoning_terms_in_failed_groups`;
 - `rollout_max_thinking_tokens` and `rollout_max_answer_tokens`: a cap counts a turn's sampled tokens as reasoning up
-  to a close the turn never writes;
-- `enable_thinking` in `rollout_chat_template_kwargs`, which `rollout_thinking` writes.
+  to a close the turn never writes.
 
-Refused at startup (by the training script and again by the trainer's constructor), and when an eval loads the training
-config, by the environment's `reject_settings_without_thinking`: `carry_reasoning`, a `reasoning_budget` or `reasoning_price` in any level's
-profile, and code contests without the [notes harness](environments/tasks/code-contests/tools.md#notes), whose reply
-rule otherwise leaves a policy with no reasoning nowhere to work.
+The environment's `reject_settings_without_thinking` refuses more, in the training script, again in the trainer's
+constructor, and when an eval loads the training config:
+
+- `carry_reasoning`: no turn reasons, so there is nothing to send back;
+- a `reasoning_budget` or `reasoning_price` in any level's profile;
+- code contests without the [notes harness](environments/tasks/code-contests/tools.md#notes), whose reply rule
+  otherwise leaves a policy with no reasoning nowhere to work.
 
 ## Reasoning cap
 

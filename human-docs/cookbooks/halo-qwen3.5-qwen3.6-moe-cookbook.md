@@ -106,7 +106,8 @@ the EP size. Two full fine-tune ep1 code-contests curricula ship: `qwen3.6-35b-a
 and `qwen3.6-35b-a3b-code-contests-notes-no-thinking-full-ep1-stage*`. Run a curriculum's `-stage1-codeforces`,
 `-stage2-hard` and `-stage3-extra-hard` in order, each from the previous stage's checkpoint.
 
-The notes curriculum trains with no reasoning step (`rollout_thinking: false`) and starts from a notes SFT checkpoint
+The notes curriculum trains with no reasoning step (`rollout_thinking: false`) and starts from a
+[notes SFT checkpoint](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/README.md#notes-sft-checkpoint) ↗
 ([Thinking off](../../agent-docs/training-methods/async-grpo/reasoning.md#thinking-off) ↗).
 
 The `sglang/` configs (ep1) run on SGLang. The full fine-tune expects two TP=1 servers on GPUs 6 and 7

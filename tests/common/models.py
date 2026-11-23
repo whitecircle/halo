@@ -33,6 +33,7 @@ MISTRAL3_119B_MOE = "mistralai/Mistral-Small-4-119B-2603"
 COMMAND_A_PLUS = "CohereLabs/command-a-plus-05-2026-bf16"
 ZAYA_8B = "Zyphra/ZAYA1-8B"
 STEP3P7_FLASH = "stepfun-ai/Step-3.7-Flash"
+INKLING_SMALL = "thinkingmachines/Inkling-Small"
 
 # Local patch_vocab.py outputs under the toolkit scratch root; a suite defaulting to one skips when it is absent.
 

@@ -62,7 +62,7 @@ mean-over-samples pass@1 ([Running an evaluation](../../../evaluation.md#running
 - Evaluate a non-thinking model with `--reasoning_effort none`; a think-tag parser reads its whole answer as
   reasoning. `none` means no level, not no thinking: the request carries no `reasoning_effort`, so the template keeps
   its own default, and Qwen3/3.5/3.6 still think unless the server's `--default-chat-template-kwargs` sets
-  `enable_thinking: false`.
+  `enable_thinking: false` or a `--training_config` with `rollout_thinking: false` sends it on every request.
 - Evaluate a policy trained with `rollout_thinking: false` under `--training_config` of that run: every request
   carries `enable_thinking: false`, at the level `--reasoning_effort` picks
   ([Thinking off](../../../reasoning.md#thinking-off)). A server default cannot do it at a level: vLLM sets

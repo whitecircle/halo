@@ -309,7 +309,56 @@ def test_a_corpus_checks_each_template_column_across_its_entries(tmp_path, caplo
         load([carrying, carrying], template_columns={knob: "extra"})
         assert not [record for record in caplog.records if knob in record.getMessage()], caplog.records
         load([carrying, plain], template_columns={knob: "extra"})
-    assert any(f"{knob}='extra' is absent from {[plain]}" in record.getMessage() for record in caplog.records)
+    absent = {plain: ["test", "train"]}
+    assert any(f"{knob}='extra' is absent from {absent}" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+def test_a_template_column_one_entry_carries_in_train_only_is_no_typo(tmp_path, caplog, knob):
+    """The column exists, so the corpus refuses nothing whatever the other entries carry: the splits lacking it render
+    as if the knob were unset, which the load names split by split."""
+    train_only = _save_raw_dataset(
+        str(tmp_path / "train_only"), _conversation_dataset(4).add_column("extra", ["x"] * 4), _conversation_dataset(2)
+    )
+    plain = _save_raw_dataset(str(tmp_path / "plain"), _conversation_dataset(4), _conversation_dataset(2))
+
+    with caplog.at_level(logging.WARNING, logger="halo.data.sources.corpus"):
+        ds = load_datasets(
+            [train_only, plain],
+            test_size=None,
+            dataset_ratio=1,
+            conversation_field="messages",
+            template_columns={knob: "extra"},
+        )
+
+    assert ds["train"]["extra"] == ["x"] * 4 + [None] * 4
+    assert ds["test"]["extra"] == [None] * 4
+    absent = {train_only: ["test"], plain: ["test", "train"]}
+    assert any(f"{knob}='extra' is absent from {absent}" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+def test_a_pinned_template_column_keys_the_loaded_fingerprint(tmp_path, knob):
+    """Pinned, the column survives the concatenation; unpinned, the schema intersection drops it. A map keyed by the
+    loaded fingerprint (TRL's own) would otherwise serve one load's rows to the other."""
+    carrying = _save_raw_dataset(
+        str(tmp_path / "carrying"),
+        _conversation_dataset(4).add_column("extra", ["x"] * 4),
+        _conversation_dataset(2).add_column("extra", ["x"] * 2),
+    )
+    plain = _save_raw_dataset(str(tmp_path / "plain"), _conversation_dataset(4), _conversation_dataset(2))
+    load = partial(load_datasets, [carrying, plain], test_size=None, dataset_ratio=1, conversation_field="messages")
+
+    pinned = load(template_columns={knob: "extra"})
+    unpinned = load()
+    pinned_again = load(template_columns={knob: "extra"})
+
+    assert "extra" in pinned["train"].column_names and "extra" not in unpinned["train"].column_names
+    for split in ("train", "test"):
+        assert pinned[split]._fingerprint != unpinned[split]._fingerprint, split
+        assert pinned[split]._fingerprint == pinned_again[split]._fingerprint, split
 
 
 def test_a_tools_column_typed_differently_across_sources_is_refused():

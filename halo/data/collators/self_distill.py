@@ -9,9 +9,9 @@ from typing import Any
 import torch
 from trl.trainer.utils import pad
 
-from halo.data.chat_render import close_final_assistant_turn, render_conversation, tokenize_rendered
+from halo.data.chat_render import tokenize_training_conversation
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.completion_spans import SELF_DISTILL_SPAN_POLICY, build_training_labels
+from halo.data.completion_spans import SELF_DISTILL_SPAN_POLICY, build_training_labels, resolve_span_bounds
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
@@ -197,6 +197,7 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         reasoning_effort_field: str | None = None,
         interleaved_thinking: bool = False,
         model_config=None,
+        generation_config=None,
     ):
         reject_unusable_response_marker(
             tokenizer, response_prompt_template, train_on_completions_only, "Self-distillation"
@@ -214,7 +215,12 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         self.interleaved_thinking = interleaved_thinking
         self.response_prompt_template = response_prompt_template
         self.train_on_completions_only = train_on_completions_only
-        self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
+        self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config, generation_config)
+        self.span_bounds = (
+            resolve_span_bounds(tokenizer, response_prompt_template, self.eos_token_ids)
+            if train_on_completions_only
+            else None
+        )
 
     def encode_row(self, example: dict[str, Any]) -> dict[str, list[int]]:
         return encode_self_distill_row(example, self)
@@ -307,10 +313,11 @@ def _encode_branch(
     """Token ids, the last assistant turn closed where the template leaves it open and the row refused rather than
     truncated past ``max_length``, and labels masked outside completions with ``train_on_completions_only``. Both
     branches end on the same turn, so both take the closing eos and stay response-aligned."""
-    rendered = render_conversation(
+    encoded = tokenize_training_conversation(
         collator.tokenizer,
         conversation,
         row,
+        collator.eos_token_ids,
         conversation_field=collator.conversation_field,
         system_prompt=collator.system_prompt,
         model_supports_system_role=collator.model_supports_system_role,
@@ -318,9 +325,6 @@ def _encode_branch(
         tools_field=collator.tools_field,
         reasoning_effort_field=collator.reasoning_effort_field,
     )
-    # tokenize_rendered single-sources the specials: add_special_tokens=True double-BOSes templates emitting BOS.
-    encoded = tokenize_rendered(collator.tokenizer, rendered)
-    close_final_assistant_turn(encoded, conversation, collator.tokenizer, collator.eos_token_ids)
     input_ids = torch.tensor([encoded["input_ids"]])
     if input_ids.size(1) > collator.max_length:
         raise ValueError(
@@ -337,6 +341,7 @@ def _encode_branch(
         collator.train_on_completions_only,
         attention_mask=torch.ones_like(input_ids),
         eos_token_ids=collator.eos_token_ids,
+        span_bounds=collator.span_bounds,
     )
     return input_ids[0].tolist(), labels[0].tolist()
 

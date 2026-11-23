@@ -106,6 +106,25 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         self._trajectories: dict[int, Trajectory] = {}
         self._episode_ids = itertools.count()
 
+    def reject_settings_without_thinking(self) -> None:
+        """For a run that samples with no reasoning block (``rollout_thinking: false``): refuses ``carry_reasoning`` and
+        an effort level whose profile budgets or prices reasoning. An environment that needs more of such a run extends
+        it."""
+        if self.carry_reasoning:
+            raise ValueError(
+                "carry_reasoning: true with rollout_thinking: false: no turn reasons, so there is no reasoning to send "
+                "back. Remove carry_reasoning, or set rollout_thinking: true."
+            )
+        reasoning_levels = [
+            level for level in VALID_REASONING_EFFORTS if self.reasoning_terms_for_effort(level) != (None, 0.0)
+        ]
+        if reasoning_levels:
+            raise ValueError(
+                f"reasoning_effort_profiles {reasoning_levels} set {REASONING_BUDGET_KEY} or {REASONING_PRICE_KEY} with "
+                "rollout_thinking: false: they set how the reasoning terms charge an episode's reasoning tokens, and no "
+                "turn reasons, so they would have no effect. Remove them, or set rollout_thinking: true."
+            )
+
     def reset(
         self, prompts: list[str | list[dict[str, str]]], contexts: list[dict[str, Any]] | None = None
     ) -> tuple[list[int], list[EnvStep]]:
@@ -159,6 +178,10 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
     def get_tools_schema(self) -> list[dict[str, Any]] | None:
         """Passed to the rollout engine as ``tools=``; overridden by the tool-use envs."""
         return None
+
+    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
+        """What the engine reads for the turn after ``messages``; the trainer's per-turn re-render reads the same."""
+        return engine_view(messages, self.carry_reasoning)
 
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
         """Per-episode metrics the trainer means, by full path: ``outcome/*`` (added by task envs), ``episode/*``,
@@ -314,30 +337,6 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
 
         self._trajectories[episode_id] = trajectory
         return self._env_step(trajectory, reward)
-
-    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
-        """What the engine reads for the turn after ``messages``; the trainer's per-turn re-render reads the same."""
-        return engine_view(messages, self.carry_reasoning)
-
-    def reject_settings_without_thinking(self) -> None:
-        """For a run that samples with no reasoning block (``rollout_thinking: false``): refuses ``carry_reasoning`` and
-        an effort level whose profile budgets or prices reasoning. An environment that needs more of such a run extends
-        it."""
-        if self.carry_reasoning:
-            raise ValueError(
-                "carry_reasoning: true with rollout_thinking: false: no turn reasons, so there is no reasoning to send "
-                "back. Remove carry_reasoning, or set rollout_thinking: true."
-            )
-        reasoning_levels = [
-            level for level in VALID_REASONING_EFFORTS if self.reasoning_terms_for_effort(level) != (None, 0.0)
-        ]
-        if reasoning_levels:
-            raise ValueError(
-                f"reasoning_effort_profiles {reasoning_levels} set {REASONING_BUDGET_KEY} or {REASONING_PRICE_KEY} with "
-                "rollout_thinking: false: an episode reasons no tokens, so the price charges nothing and a budget "
-                "feeds only the floor, which would charge every failed episode in full. Remove them, or set "
-                "rollout_thinking: true."
-            )
 
     def _env_step(self, trajectory: Trajectory, reward: float = 0.0) -> EnvStep:
         """``reward`` is this step's delta; the rest mirrors ``trajectory`` as it stands."""

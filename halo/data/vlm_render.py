@@ -10,7 +10,7 @@ from typing import Any, get_type_hints
 from datasets import Features, Sequence, Value
 from PIL import Image
 
-from halo.data.chat_render import has_open_final_assistant_turn
+from halo.data.chat_render import has_open_final_assistant_turn, render_chat_template
 from halo.data.conversation import (
     IMAGE_PART_PAYLOAD_KEY,
     IMAGE_PART_SOURCE_KEYS,
@@ -36,6 +36,10 @@ VLM_OUTPUT_FEATURES = Features(
 
 # Per-token processor tensors (M-RoPE): padded and swapped with ``input_ids``, never row-major concatenated.
 SEQUENCE_ALIGNED_VISION_KEYS = frozenset({"mm_token_type_ids", "token_type_ids"})
+# The history message key holding, as JSON text, every key the message carries beside its role and content (tool calls,
+# reasoning, a tool reply's call id and name): the mapped schema pins one struct for every message, which would drop a
+# key it does not name, and JSON text keeps a call's arguments exact.
+MESSAGE_FIELDS_KEY = "fields_json"
 
 
 def vlm_row_template_kwargs(row: dict[str, Any]) -> dict[str, Any]:
@@ -50,9 +54,17 @@ def vlm_row_template_kwargs(row: dict[str, Any]) -> dict[str, Any]:
     return template_kwargs
 
 
+def _decode_message_fields(message: dict[str, Any]) -> dict[str, Any]:
+    """The message with the keys :func:`_encode_message_fields` folded restored; a mapped row's null slot drops."""
+    fields = message.get(MESSAGE_FIELDS_KEY)
+    restored = {key: value for key, value in message.items() if key != MESSAGE_FIELDS_KEY}
+    return {**restored, **json.loads(fields)} if fields else restored
+
+
 def render_vlm_text(processor, history: list[dict[str, Any]], **template_kwargs) -> str:
-    """Every VLM path renders here, so an artifact, a runtime batch and a preference pair tokenize alike."""
-    return processor.apply_chat_template(history, tokenize=False, add_generation_prompt=False, **template_kwargs)
+    """Every VLM path renders here, so an artifact, a runtime batch and a preference pair tokenize alike: each message
+    whole again, its tool calls' arguments as the processor's template takes them (:func:`render_chat_template`)."""
+    return render_chat_template(processor, [_decode_message_fields(message) for message in history], **template_kwargs)
 
 
 def render_vlm_training_text(
@@ -203,12 +215,28 @@ def resolve_image_token_ids(tokenizer, processor=None) -> set:
     return image_token_ids
 
 
+def _encode_message_fields(message: dict[str, Any]) -> dict[str, str]:
+    """A null key is Arrow's padding of one a sibling message carries, so it is no field of this message."""
+    fields = {key: value for key, value in message.items() if key not in ("role", "content") and value is not None}
+    if not fields:
+        return {}
+    try:
+        return {MESSAGE_FIELDS_KEY: json.dumps(fields)}
+    except TypeError as exc:
+        raise ValueError(
+            f"A '{message.get('role')}' message carries {sorted(fields)} beside its role and content, which the VLM "
+            f"row map hands the chat template as JSON, and one holds a value JSON cannot write ({exc}). Store that "
+            f"value as JSON text or drop the key from the conversation column."
+        ) from exc
+
+
 def extract_conversation_images(
     conversation: list[dict[str, Any]],
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
 ) -> tuple[list[dict[str, Any]], list[Image.Image]]:
-    """The conversation with each image replaced by a bare placeholder, and the decoded images."""
+    """The conversation with each image replaced by a bare placeholder, and the decoded images. Each message keeps every
+    key it carries, those beside its role and content under :data:`MESSAGE_FIELDS_KEY`."""
     reject_unsupported_media_parts(conversation, "This row")
     # Without a system role the prompt is folded into the first turn, not emitted as one the template drops.
     conversation = fold_system_into_conversation(
@@ -220,12 +248,17 @@ def extract_conversation_images(
 
     for msg in conversation:
         role = msg["role"]
-        content = msg["content"]
+        content = msg.get("content")
+        fields = _encode_message_fields(msg)
 
-        if isinstance(content, str):
-            # Uniformly parts-form: mixed string/list content makes Arrow type inference diverge across
-            # .map workers (struct vs Json vs null). Processors render parts-form text byte-identically.
-            history.append({"role": role, "content": [{"type": "text", "text": content}]})
+        if content is None or content == "":
+            # As the text path hands it over: a template tests an empty content (Qwen3-VL's newline before a call,
+            # Inkling's empty turn), where an empty text part reads as text and no part as no turn.
+            history.append({"role": role, "content": content, **fields})
+        elif isinstance(content, str):
+            # Parts-form: the mapped schema's Json content would read a string holding JSON ("42") back as its value.
+            # Processors render parts-form text byte-identically.
+            history.append({"role": role, "content": [{"type": "text", "text": content}], **fields})
         elif isinstance(content, list):
             new_content = []
             for item in content:
@@ -236,7 +269,7 @@ def extract_conversation_images(
                     # Arrow pads a text part with a null image key, which templates test for (Qwen-VL).
                     new_content.append({key: value for key, value in item.items() if value is not None})
 
-            history.append({"role": role, "content": new_content})
+            history.append({"role": role, "content": new_content, **fields})
         else:
             raise ValueError(f"Unsupported message content type {type(content).__name__} for role '{role}'")
 

@@ -1,14 +1,14 @@
 # Tools
 
-The model gets two tools: a scratchpad that runs a program on an input it supplies, and `submit_solution`, the
+The model gets two tools (three under [notes](#notes)): a scratchpad that runs a program on an input it supplies, and `submit_solution`, the
 only graded channel. Their per-episode budgets, `max_test_calls` and `max_submissions`, are set per
 [effort level](README.md#reasoning-effort). Both tools:
 
 - State no budget, in their description or in any reply. A refusal names what to do, never a number.
 - Neither refuse nor price a program's comments or what a run showed; the [audit judge](reward.md#audit-judge)
   handles both.
-- Cut output that would push a reply past `max_observation_chars` (`…[truncated N chars]`), so the notes after it
-  survive.
+- Cut a scratchpad run's output that would push its reply past `max_observation_chars` (`…[truncated N chars]`),
+  so the notices after it survive; a submission's reply is cut at the cap from its end.
 
 ## Scratchpad
 
@@ -102,22 +102,24 @@ notes' size ([default](README.md#configuration)).
   description, prompt, reply, refusal or notes block gives a size.
 - Every turn's prompt ends with the whole notes as a user turn of their own (`<notes>…</notes>`), after the tool
   replies, never inside a tool's output; notes calls stay in the history as written. The replay pairs each call with
-  its reply by position and reads it through the parsing and binding it ran under.
+  its reply by position, replays only a call whose reply opens `Notes saved`, and reads it through the parsing and
+  binding it ran under; a `max_observation_chars` that would cut that prefix (1 to 10) is refused at construction.
 - The system prompt's brief-summary rule gives way to working in the message and keeping `problem`, `idea`, `tests` and
   `next` sections current.
-- A turn of text alone does not end the episode: it is nudged to act, within `max_turns`. Logged: `episode/notes_calls`,
-  `episode/notes_chars`, `episode/text_turns`.
+- A turn of text alone does not end the episode: it is nudged to act. A text turn at `max_turns`, or when the
+  [episode output budget](../../../episodes.md#episode-output-budget) affords no further turn, ends the episode
+  truncated, which pays the overflow. Counters: [Behavior counters](reward.md#behavior-counters).
 - The [audit judge](reward.md#audit-judge) reads the messages and the notes as the policy's working, beside its
   reasoning where one is shown (`NOTES_CHECK_DESCRIPTIONS`): `reasoning_in_actions` covers programs alone, a notes call
   is never a `notepad_run`, and `verdict_probe` reads intent from the messages and notes too. Two logged checks audit
-  the notes, `false_record` and `unexplained_program`. A run without a reasoning step takes its own judge
-  [setting](reward.md#audit-judge).
+  the notes, `false_record` and `unexplained_program`. The no-thinking recipes give the judge `notes-no-thinking.txt`
+  as its [context](reward.md#audit-judge).
 - The prompt is a function of the history alone (`observation_view`). Its notes turn moves to the end of every prompt,
   so no prompt extends the one before it and training needs `train_on_sampled_tokens: true`
   ([Single-row fallback](../../../objective.md#single-row-fallback)).
 
 ## Recovery nudges
 
-A final text answer ends the episode ungraded, so the nudge after a cut or empty turn
+Outside notes, a final text answer ends the episode ungraded, so the nudge after a cut or empty turn
 ([Unproductive turns](../../../episodes.md#unproductive-turns)) asks for a tool call and names `submit_solution`. A
 turn cut while writing its call is asked to call again with its working kept out of the program's comments.

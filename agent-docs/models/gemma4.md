@@ -99,6 +99,16 @@ The KV-repeat override is not what makes the global layers legal — transformer
 
 Gemma 4 never reaches a varlen kernel, so `select_data_collator` rejects **`padding_free`** for it — the gate is the resolved `_attn_implementation`, and only `flash_attention_2/_3/_4` qualify. `packing: true` (what the example config uses) still isolates documents through per-document `position_ids`, at the cost of a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of `cu_seqlens` ([Collators](../data/collators.md)).
 
+## Tool-call rows
+
+Gemma 4's `generation_config.json` lists `<|tool_response>` beside `<eos>` and `<turn|>`, so a served turn
+stops right after a call, and training ends a call's span there: a row ending on a call trains
+`<|tool_call>…<tool_call|><|tool_response>` with no `<eos>` after it. Both the hub template and
+`gemma4-reasoning-effort.jinja` write the tool's reply inside the same model turn and the answer after it
+with no new `<|turn>model`, so the span restarts after `<tool_response|>`: a tool round trains the call and
+its stop, then the answer and `<turn|>`, never the reply
+([Collators](../data/collators.md#eos-pad-and-the-response-template)).
+
 ## RL chat template
 
 The async GRPO recipes pin `jinja-templates/gemma4/gemma4-reasoning-effort.jinja` with `force_chat_template: true`,

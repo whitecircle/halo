@@ -21,7 +21,13 @@ from halo.data.pipeline.rejected_rows import dataset_total_size, report_rejected
 from halo.data.render_columns import reject_missing_render_column
 from halo.data.turn_markers import reject_missing_response_marker
 from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
-from halo.data.vlm_render import extract_conversation_images, render_vlm_training_text, vlm_row_template_kwargs
+from halo.data.vlm_render import (
+    MESSAGE_FIELDS_KEY,
+    extract_conversation_images,
+    render_vlm_training_text,
+    vlm_row_template_kwargs,
+)
+from halo.model_loading.tokenizer_setup import reject_unrendered_reasoning_effort
 from halo.runtime.consensus import agree_probe_across_ranks
 
 # A row's history to the longest conversation its collator renders from it, for the over-length filter.
@@ -29,15 +35,16 @@ _MeasuredHistory = Callable[[list[dict[str, Any]], dict[str, Any]], list[dict[st
 
 
 def normalize_vlm_conversation(conversation: list[dict[str, Any]], images: Any = None) -> list[dict[str, Any]]:
-    """Role/content messages for a hub conversation, also from HuggingFaceM4's ``{"user", "assistant"}`` pairs
-    (FineVision, the_cauldron, Docmatix); top-level ``images`` fill placeholders, else lead the first user text."""
+    """A hub conversation's messages, every key a message carries kept, also from HuggingFaceM4's ``{"user",
+    "assistant"}`` pairs (FineVision, the_cauldron, Docmatix); top-level ``images`` fill placeholders, else lead the
+    first user text."""
     messages: list[dict[str, Any]] = []
     for turn in conversation:
         if "role" in turn:
-            content = turn["content"]
+            content = turn.get("content")
             if isinstance(content, list):  # copy part dicts so image fill-in never mutates the source row
                 content = [dict(part) for part in content]
-            messages.append({"role": turn["role"], "content": content})
+            messages.append({**turn, "content": content})
         elif "user" in turn:
             messages.append({"role": "user", "content": turn["user"]})
             if turn.get("assistant") is not None:
@@ -139,10 +146,13 @@ def build_vlm_row_processor(
 def vlm_map_features() -> datasets.Features:
     """Pinned because inference per shard or writer batch disagrees on a mixed dataset (text-only ``content`` infers
     ``List(struct)``, image parts ``Json``, no images ``List(null)``, no tools or level ``null``), failing a
-    multiprocess map's shard alignment or a later batch's cast."""
+    multiprocess map's shard alignment or a later batch's cast. A message's other keys ride as JSON text
+    (:data:`~halo.data.vlm_render.MESSAGE_FIELDS_KEY`), as the struct drops any key it does not name."""
     return datasets.Features(
         {
-            "history": [{"role": datasets.Value("string"), "content": Json()}],
+            "history": [
+                {"role": datasets.Value("string"), "content": Json(), MESSAGE_FIELDS_KEY: datasets.Value("string")}
+            ],
             "images": datasets.Sequence(datasets.Image()),
             "tools_json": datasets.Value("string"),
             "reasoning_effort": datasets.Value("string"),
@@ -213,6 +223,8 @@ def prepare_vlm_dataset(
             "interleaved_thinking is text-only: no supported VLM family's chat template renders a "
             "clear_thinking kwarg, so on the VLM path the flag would silently do nothing."
         )
+    # The processor's own template renders these rows, which may not be the one its tokenizer was probed on.
+    reject_unrendered_reasoning_effort(processor, args.reasoning_effort_field)
     # Here, not per script: every consumer would otherwise train text-only on a mistyped column in silence.
     if args.images_field:
         reject_missing_render_column(ds, str(args.dataset), "images_field", args.images_field)

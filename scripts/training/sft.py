@@ -95,7 +95,7 @@ def _reject_empty_split(dataset, split: str, max_length: int) -> None:
         )
 
 
-def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
+def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, generation_config, **processor_kwargs):
     """``processor_kwargs`` are the render and map arguments of the flat path."""
     reject_unusable_response_marker(
         tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
@@ -106,7 +106,7 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
         sft_config.max_length,
         share_markers=tuple(args.tree_share_markers),
         share_requires=args.tree_share_requires,
-        eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
+        eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config, generation_config),
         assistant_message_template=args.assistant_message_template,
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         **processor_kwargs,
@@ -114,7 +114,7 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
     return ds["train"], ds["test"]
 
 
-def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
+def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config, generation_config):
     """COLLECTIVE: ``(train, eval, generate)``, one chat-template tokenize as flat rows or trees, then the packing."""
     render_kwargs = text_render_kwargs(args)
     num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
@@ -127,7 +127,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
                 tokenizer=tokenizer,
                 max_length=sft_config.max_length,
                 add_generation_prompt=True,
-                eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
+                eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config, generation_config),
                 **render_kwargs,
             ),
             desc="Processing generate dataset",
@@ -136,11 +136,11 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
         )
     if args.tree_packing:
         train_dataset, eval_dataset = _prepare_tree_rows(
-            ds, args, sft_config, tokenizer, hf_config, **render_kwargs, num_proc=num_proc
+            ds, args, sft_config, tokenizer, hf_config, generation_config, **render_kwargs, num_proc=num_proc
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, sft_config, hf_config, desc="Processing dataset"
+            ds, tokenizer, args, sft_config, hf_config, generation_config, desc="Processing dataset"
         )
     _reject_empty_split(train_dataset, "training", sft_config.max_length)
     if sft_config.packing:
@@ -152,7 +152,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
     return train_dataset, eval_dataset, generate_dataset
 
 
-def _verify_metadata(metadata, args, sft_config, model_config, processing_class) -> None:
+def _verify_metadata(metadata, args, sft_config, model_config, processing_class, eos_token_ids) -> None:
     verify_preprocessed_dataset(
         metadata,
         required_max_length=sft_config.max_length,
@@ -161,6 +161,7 @@ def _verify_metadata(metadata, args, sft_config, model_config, processing_class)
         render_args=args,
         required_packing=sft_config.packing,
         run_processing_class=processing_class,
+        required_eos_token_ids=eos_token_ids,
     )
 
 
@@ -180,14 +181,22 @@ def _prepare_text_data(
     tokenizer,
     parallelism_config,
     hf_config,
+    generation_config,
 ):
     """Pre-processed splits as baked, or raw ones tokenized and packed; ``(train, eval, generate, collator)``."""
     if metadata is not None:
-        _verify_metadata(metadata, args, sft_config, model_config, processing_class)
+        _verify_metadata(
+            metadata,
+            args,
+            sft_config,
+            model_config,
+            processing_class,
+            resolve_eos_token_ids(tokenizer, hf_config, generation_config),
+        )
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
         train_dataset, eval_dataset, generate_dataset = _prepare_raw_text_splits(
-            ds, args, sft_config, tokenizer, hf_config
+            ds, args, sft_config, tokenizer, hf_config, generation_config
         )
 
     if args.tree_packing:
@@ -211,6 +220,7 @@ def _prepare_text_data(
         use_context_parallel=parallelism_config.is_cp_mode,
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         model_config=hf_config,
+        generation_config=generation_config,
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
         per_device_eval_batch_size=evaluation_batch_size(sft_config),
         keeps_packed_rows=parallelism_config.pp_size > 1,
@@ -221,16 +231,38 @@ def _prepare_text_data(
 
 
 def _prepare_vlm_data(
-    ds, metadata: PreprocessedDatasetMetadata | None, args, sft_config, model_config, processor, tokenizer, hf_config
+    ds,
+    metadata: PreprocessedDatasetMetadata | None,
+    args,
+    sft_config,
+    model_config,
+    processor,
+    tokenizer,
+    hf_config,
+    generation_config,
 ):
     """The pre-processed splits as baked, or the raw VLM map; returns ``(train, eval, None, collator)``, since
     GenerateExamplesCallback needs tokenized input_ids."""
     if metadata is None:
         train_dataset, eval_dataset, collator = prepare_raw_vlm_split(
-            ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"
+            ds,
+            args,
+            sft_config,
+            processor,
+            tokenizer,
+            hf_config,
+            generation_config,
+            desc="Processing train/eval dataset",
         )
         return train_dataset, eval_dataset, None, collator
-    _verify_metadata(metadata, args, sft_config, model_config, processor)
+    _verify_metadata(
+        metadata,
+        args,
+        sft_config,
+        model_config,
+        processor,
+        resolve_eos_token_ids(tokenizer, hf_config, generation_config),
+    )
     if not metadata.is_vlm:
         raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
     collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
@@ -379,7 +411,15 @@ def main():
 
     if is_vlm:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_vlm_data(
-            ds, metadata, args, sft_config, model_config, processing_class, tokenizer, model.config
+            ds,
+            metadata,
+            args,
+            sft_config,
+            model_config,
+            processing_class,
+            tokenizer,
+            model.config,
+            model.generation_config,
         )
     else:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_text_data(
@@ -392,6 +432,7 @@ def main():
             tokenizer,
             parallelism_config,
             model.config,
+            model.generation_config,
         )
 
     log_script_dataset_examples(

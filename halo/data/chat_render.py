@@ -99,9 +99,10 @@ def _strip_trailing_special_ids(encoded: Any, trailing_special_ids: tuple[int, .
             encoded[key] = value[:keep]
 
 
-def _render_probe_call(tokenizer: PreTrainedTokenizer, arguments: Any, with_tools: bool) -> str | None:
-    """The template's text for a conversation whose one tool call carries ``arguments``, declaring its tool under
-    ``with_tools``; ``None`` where it raises."""
+def render_tool_round_probe(template_owner: Any, arguments: Any, *, with_tools: bool, answer: str = "a") -> str | None:
+    """The chat template's text for a user turn, one tool call carrying ``arguments``, its reply and the assistant's
+    ``answer``, declaring the tool under ``with_tools``; ``None`` where it raises. ``template_owner`` is the tokenizer
+    or processor whose template renders the rows."""
     tool = {
         "type": "function",
         "function": {
@@ -119,10 +120,12 @@ def _render_probe_call(tokenizer: PreTrainedTokenizer, arguments: Any, with_tool
         {"role": "user", "content": "q"},
         {"role": "assistant", "content": "", "tool_calls": [call]},
         {"role": "tool", "tool_call_id": "call_0", "content": "r"},
-        {"role": "assistant", "content": "a"},
+        {"role": "assistant", "content": answer},
     ]
     try:
-        return tokenizer.apply_chat_template(conversation, tokenize=False, **({"tools": [tool]} if with_tools else {}))
+        return template_owner.apply_chat_template(
+            conversation, tokenize=False, **({"tools": [tool]} if with_tools else {})
+        )
     except Exception as exc:  # a template's own raise on a call it does not render
         logger.debug(f"Tool-call probe render failed: {exc}")
         return None
@@ -132,8 +135,10 @@ def supports_wire_form_arguments(tokenizer: PreTrainedTokenizer, *, with_tools: 
     """Whether the chat template writes a tool call whose ``arguments`` is JSON text (the OpenAI wire form) as that
     text, or as it writes the mapping. False where it renders the mapping and raises on the text, as a template writing
     one block per argument does (Qwen3.5/3.6, Gemma 4, GLM), or re-encodes the text as a JSON string, as one applying
-    ``tojson`` to it does. Probed once per tokenizer, template and ``with_tools``: a tokenizer holding named templates
-    renders a conversation that declares tools with its ``tool_use`` one."""
+    ``tojson`` to it does; false too where it raises on both probes, which then tell nothing (Mistral v0.3's checks a
+    call id's length): such a template takes the mapping a serving engine hands it. Probed once per tokenizer, template
+    and ``with_tools``: a tokenizer holding named templates renders a conversation that declares tools with its
+    ``tool_use`` one."""
     template = str(getattr(tokenizer, "chat_template", None))
     cached = _wire_form_support_cache.get(tokenizer)
     if cached is None or cached[0] != template:
@@ -143,11 +148,9 @@ def supports_wire_form_arguments(tokenizer: PreTrainedTokenizer, *, with_tools: 
         arguments = {"value": "1"}
         # Compact, so a template writing the text as stored is told from one writing the mapping.
         wire = json.dumps(arguments, separators=(",", ":"))
-        as_text = _render_probe_call(tokenizer, wire, with_tools)
-        as_mapping = _render_probe_call(tokenizer, arguments, with_tools)
-        verdicts[with_tools] = as_mapping is None or (
-            as_text is not None and (as_text == as_mapping or wire in as_text)
-        )
+        as_text = render_tool_round_probe(tokenizer, wire, with_tools=with_tools)
+        as_mapping = render_tool_round_probe(tokenizer, arguments, with_tools=with_tools)
+        verdicts[with_tools] = as_text is not None and (as_mapping is None or as_text == as_mapping or wire in as_text)
     return verdicts[with_tools]
 
 
@@ -158,6 +161,19 @@ def resolve_template_conversation(tokenizer: PreTrainedTokenizer, conversation: 
     if not has_wire_form_arguments(conversation) or supports_wire_form_arguments(tokenizer, with_tools=with_tools):
         return conversation
     return parse_tool_call_arguments(conversation)
+
+
+def render_chat_template(
+    tokenizer: PreTrainedTokenizer, conversation: Any, *, add_generation_prompt: bool = False, **template_kwargs
+) -> str:
+    """The chat template's text for ``conversation`` under ``template_kwargs``, its tool calls' arguments as the
+    template takes them (:func:`resolve_template_conversation`)."""
+    return tokenizer.apply_chat_template(
+        resolve_template_conversation(tokenizer, conversation, with_tools=template_kwargs.get("tools") is not None),
+        tokenize=False,
+        add_generation_prompt=add_generation_prompt,
+        **template_kwargs,
+    )
 
 
 def render_conversation(
@@ -178,12 +194,11 @@ def render_conversation(
     post-processor does not add."""
     reject_image_content(conversation, f"conversation_field '{conversation_field}'")
     conversation = fold_system_into_conversation(conversation, system_prompt, model_supports_system_role)
-    template_kwargs = chat_template_kwargs(row, interleaved_thinking, tools_field, reasoning_effort_field)
-    return tokenizer.apply_chat_template(
-        resolve_template_conversation(tokenizer, conversation, with_tools=template_kwargs.get("tools") is not None),
-        tokenize=False,
+    return render_chat_template(
+        tokenizer,
+        conversation,
         add_generation_prompt=add_generation_prompt,
-        **template_kwargs,
+        **chat_template_kwargs(row, interleaved_thinking, tools_field, reasoning_effort_field),
     )
 
 
@@ -197,12 +212,7 @@ def render_generation_prompt(
     """A GRPO generation prompt, or ``None`` past ``max_prompt_length``: cutting it would remove the question the
     verifier grades. The rendered BOS is stripped only where the post-processor prepends its own."""
     reject_image_content(messages, "generation prompt")
-    text = tokenizer.apply_chat_template(
-        resolve_template_conversation(tokenizer, messages, with_tools=template_kwargs.get("tools") is not None),
-        tokenize=False,
-        add_generation_prompt=True,
-        **template_kwargs,
-    )
+    text = render_chat_template(tokenizer, messages, add_generation_prompt=True, **template_kwargs)
     if probe_tokenizer_specials(tokenizer).adds_leading_bos:
         text = _strip_leading_bos(text, tokenizer)
     if max_prompt_length is not None:
@@ -259,3 +269,19 @@ def close_final_assistant_turn(
     for name, column in encoded.items():
         if isinstance(column, list) and len(column) == width:
             column.append(tokenizer.eos_token_id if name == "input_ids" else column[-1])
+
+
+def tokenize_training_conversation(
+    tokenizer: PreTrainedTokenizer,
+    conversation: list[dict[str, Any]],
+    row: dict[str, Any],
+    eos_token_ids: frozenset[int],
+    **render_kwargs,
+):
+    """``conversation`` rendered by :func:`render_conversation` under ``render_kwargs`` and tokenized as an untruncated
+    training row, the last assistant turn closed where the template leaves it open (:func:`close_final_assistant_turn`).
+    ``eos_token_ids`` are the model's terminators."""
+    rendered = render_conversation(tokenizer, conversation, row, **render_kwargs)
+    encoded = tokenize_rendered(tokenizer, rendered, truncation=False, padding=False)
+    close_final_assistant_turn(encoded, conversation, tokenizer, eos_token_ids)
+    return encoded

@@ -70,9 +70,10 @@ def _parse_call_arguments(call: Any) -> Any:
     if not isinstance(arguments, dict):
         shown = text if len(text) <= 200 else f"{text[:200]}… (+{len(text) - 200} more characters)"
         raise ValueError(
-            f"Tool call '{function.get('name')}' carries arguments that are not a JSON object ({shown!r}), and the "
-            f"chat template renders a call's arguments as a mapping, one pair at a time. Store the arguments as a JSON "
-            f"object or its text, or drop the row."
+            f"Tool call '{function.get('name')}' carries arguments that are not a JSON object ({shown!r}). The chat "
+            f"template does not write a call's argument text as stored, so it is handed the mapping that text parses "
+            f"into, and only a JSON object's text parses into one. Store the arguments as a JSON object or its text, or "
+            f"drop the row."
         )
     parsed = {**function, "arguments": arguments}
     return parsed if function is call else {**call, "function": parsed}

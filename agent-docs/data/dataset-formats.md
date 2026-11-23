@@ -93,10 +93,16 @@ classification, embedding) declare none and skip the check.
 `tools_field` and `reasoning_effort_field` (each row's own level, rendered as the template's
 `reasoning_effort`: [Configuration Reference](../reference/configuration-reference.md#commonscriptarguments))
 are checked the same way for a single dataset. Across a `dataset:` list each raises only when **no**
-source carries its column and warns per source otherwise — a tool-use or effort-labelled corpus
-concatenated with plain chat is a legitimate shape, and only the rows of the sources without the column
-render toolless or with no level. Pre-processed datasets skip these checks; their rows are already
-tokenized.
+source carries its column in either split and otherwise warns, naming each source's splits without it —
+a tool-use or effort-labeled corpus concatenated with plain chat is a legitimate shape, and only the rows
+of the splits without the column render toolless or with no level. Pre-processed datasets skip these
+checks; their rows are already tokenized. `reasoning_effort_field` is also refused at setup under a chat
+template that renders a conversation alike at no level, `none`, `low` and `high`, whether closed by an assistant
+turn or open on its generation prompt (`reject_unrendered_reasoning_effort`, `halo/model_loading/tokenizer_setup.py`),
+as the hub Qwen3, Qwen3.5/3.6, GLM-4.7 and Gemma 4 templates do: the run's tokenizer is probed, and a VLM run's
+processor again on its own template. A template refusing a level it does not take (Mistral 4 `low`, Qwen3.8 `high`)
+reads the level and passes, as does one reading it in one form only (Command A reads `none` in its generation
+prompt alone).
 
 ## SFT
 
@@ -108,16 +114,7 @@ Multi-turn: include all turns in the single `prompt` list.
 
 Tool-use rows keep the OpenAI message shape: an assistant turn carries `tool_calls`, a `tool` turn its
 result, and `tools_field` names the column of tool schemas. A call's `arguments` is a mapping or its JSON
-text (the wire form). Chat templates take the mapping: one that writes a block per argument (Qwen3.5/3.6,
-Gemma 4, GLM native) raises on the text, and one that applies `tojson` to it writes a quoted, escaped
-string. Under those the text SFT render (`conversation_field` rows, self-distillation
-included) and the online and environmental GRPO prompt render parse the text first, as a serving engine
-parses a request's, and raise on text that is not a JSON object. A template that writes the text as stored
-(the bundled `qwen3-native.jinja` and `gpt-oss-harmony.jinja`) keeps the row's spelling.
-`resolve_template_conversation` (`halo/data/chat_render.py`) decides per template, and separately for a render
-that declares tools and one that does not: a tokenizer holding named templates renders the first with its
-`tool_use` one. SFT-VLM rows and the preference, offline GRPO, reward and classification renderers hand a call to
-the template as stored.
+text: [Tool-call arguments](#tool-call-arguments).
 
 ```yaml
 conversation_field: "prompt"             # conversation column (default "prompt")
@@ -286,6 +283,37 @@ The template lands on the tokenizer and, for a VLM run, on its processor as well
 (`adopt_tokenizer_chat_template`): a processor renders and saves with a `chat_template` of its own,
 so the processor is what decides both the VLM rows and the exported `chat_template.jinja`. The same
 holds for `prepare_dataset.py --is_vlm` and `patch_vocab.py --chat_template`.
+
+### Tool-call arguments
+
+A tool call's `arguments` is a mapping or its JSON text (the OpenAI wire form). The text is parsed into the
+mapping, as a serving engine parses a request's before it renders, unless the chat template writes the text
+as stored. `supports_wire_form_arguments` (`halo/data/chat_render.py`) renders one probe call both ways, once
+per template and separately for a render that declares tools and one that does not (a tokenizer holding named
+templates renders the first with its `tool_use` one). A row keeps its text where the template writes it
+verbatim (the bundled `qwen3-native.jinja`, `ling-native.jinja` and `gpt-oss-harmony.jinja`), renders it as it renders the mapping
+(`qwen3-multiturn.jinja` leaves calls out) or raises on the mapping alone. Every other template takes the
+mapping:
+
+- one that writes a block per argument (Qwen3.5/3.6, Gemma 4, GLM native) raises on the text;
+- one that applies `tojson` to it writes a quoted, escaped string;
+- one that raises on both probes tells nothing, so it takes what a serving engine hands it: Mistral v0.3's
+  checks a call id's length, and a single-turn template (the bundled `*-instruct` ones and `gpt-oss-thinking.jinja`)
+  refuses the multi-turn probe.
+
+Parsing reads empty text as no arguments and raises on other text that is not a JSON object, also under a
+single-turn template, whose render leaves the call out. Every text renderer applies the rule
+(`resolve_template_conversation`): SFT (`conversation_field` rows, self-distillation
+included), preference text (DPO and SMPO) and its generation-eval prompts,
+classification, the offline and online GRPO prompts, the env-GRPO prompt-length probe and the generation
+CLIs' reward-model scoring (`encode_for_scoring`). KTO and reward modeling, whose rows TRL templates itself,
+and a `source: reward_model` reward term (`ServedRewardModel`) hand a call to the template as stored. The VLM render
+(`render_vlm_text`, `halo/data/vlm_render.py`) applies it under the processor's own template to every row it
+renders: SFT-VLM and VLM self-distillation, the `--is_vlm` bake, and the SMPO and Bradley-Terry reward image
+rows. A VLM row's messages keep every key beside their role and content (`tool_calls`, `reasoning_content`, a
+tool reply's `tool_call_id` and `name`) through the row map's pinned schema, as JSON text
+(`MESSAGE_FIELDS_KEY`), so such a row renders as the text path renders it, its image placeholders aside, except
+under a template that writes a tool reply only from string content ([Inkling](../models/inkling.md#multimodal-training)).
 
 ### Special-token ownership
 

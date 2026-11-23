@@ -63,6 +63,7 @@ def test_the_map_carries_each_rows_level_past_a_writer_batch_of_unlabelled_rows(
     ones, which a split may hold as nulls alone, so each split keeps its own type."""
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
     monkeypatch.setattr(vlm_rows, "_filter_vlm_over_length", lambda ds, *args: ds)
+    monkeypatch.setattr(vlm_rows, "reject_unrendered_reasoning_effort", lambda *args: None)
     levels = [None] * _WRITER_BATCH_ROWS + ["high", None]
     conversations = [[{"role": "user", "content": "hi"}]] * len(levels)
     splits = {

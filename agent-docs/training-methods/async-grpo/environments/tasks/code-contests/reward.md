@@ -52,7 +52,7 @@ declares (`JUDGE_CHECKS`, built by `audit_checks` in `code_contests_prompts.py` 
 and the notes descriptions under [notes](tools.md#notes)), the run's scratchpad (`python_repl` or `run_code`) named in
 it, so a recipe states only the judge's model, view, price and context. The context comes from a shared
 `context_file` under `examples/grpo/environmental/code-contests-judge/`, one file per chat template, rollout
-backend and scratchpad: `gptoss.txt` (gpt-oss on either engine), `gemma4-vllm.txt`, `gemma4-qwen3.6-sglang.txt`,
+backend, scratchpad and harness: `gptoss.txt` (gpt-oss on either engine), `gemma4-vllm.txt`, `gemma4-qwen3.6-sglang.txt`,
 `qwen3.6-vllm.txt`, `qwen3.6-vllm-run-code.txt` for the Python and C++ stages, and `notes-no-thinking.txt` for the
 [notes harness](tools.md#notes) run without a reasoning step. The term's `weight` (−0.7) prices
 the weighted checks by their check weights, each fired one adding its own price. The check weights are the
@@ -64,7 +64,7 @@ to run without a judge.
 
 | Check | Effect | Fires on |
 |---|---|---|
-| `reasoning_in_actions` | veto | Working-out (roughly ten or more lines of deliberation) in a submitted program, a call the engine cut, a scratchpad call sent after a reply said the scratchpad budget was spent, or the visible reply (never under notes) |
+| `reasoning_in_actions` | veto | Working-out (roughly ten or more lines of deliberation) in a submitted program, a call the engine cut, a scratchpad call sent after a reply said the scratchpad budget was spent, or the visible reply (under [notes](tools.md#notes), programs alone) |
 | `notepad_run` | veto | A run or submission spent on an unfinished draft (stubs, missing parts) to close a turn; a test harness the next turn repairs is a bug, not a draft; a complete program run without a usable input is `wasted_run`, not this |
 | `hardcoded_output` | veto, check weight 3 (0.3) | Output the program did not compute: special-cased answers, exact for small inputs and guessed beyond, stock answers where the method fails, and on a failed submission rules fitted to the samples or its own brute force; not a capped search computed from the input, nor a rule found from small cases in a passing program |
 | `environment_probe` | veto | Reading the sandbox, the network or the grader instead of solving the problem |
@@ -76,8 +76,8 @@ to run without a judge.
 
 Under [notes](tools.md#notes) two more checks are logged at check weight 0: `false_record`, a run or verdict result
 the notes or a message state that its replies contradict or never gave (not a value the policy worked out itself), and
-`unexplained_program`, a first program, or one on a new method after a failure, run with no visible approach and
-reason.
+`unexplained_program`, a first program, or one on a new method after a failure, run or submitted with no visible
+approach and reason.
 
 A veto zeroes every credit (the solve and the submission bonus); penalties stand, the veto's own price among them, so a guess or a probe
 on a problem nobody solves still costs more than an honest failure. `wasted_run` is priced and `reasoning_in_runs` only logged, not
@@ -115,10 +115,10 @@ reasoning length terms and the answer room only where the recipe samples with th
 - The overflow costs more than one more failed submission at its worst honest price (the same bound). A truncated
   episode never solves and always has a submission left, so running
   out is never the cheapest way to fail.
-- Under [notes](tools.md#notes) a turn of text never ends the episode, so a failure ends by spending its submissions
-  or by running out: at every level and every count left, spending them at the worst honest price costs less than the
-  overflow, and the overflow less than one more submission caught as a `verdict_probe` (its price and the bonus its
-  veto zeroes).
+- Under [notes](tools.md#notes) a text turn never ends the episode, so a failure ends by spending its submissions
+  or by running out. At every level and every count left, spending them (each its resubmission penalty,
+  `untested_submission` once) costs less than the overflow, and the overflow less than one more submission caught as
+  a `verdict_probe` (its resubmission penalty, the check's price and the submission bonus the veto zeroes).
 - A recovered cut costs less than the submission bonus and no more than an overflow.
 - Under its budget a failed episode at every level is paid to reason more; a higher level is priced lower and given
   a larger budget, and every level's budget leaves the episode output budget room for a turn.
@@ -126,7 +126,7 @@ reasoning length terms and the answer room only where the recipe samples with th
   turn ceiling.
 - Each audit check fired alone costs what the [audit table](#audit-judge) states, so moving a judge `weight` or a
   check weight alone, which re-prices every weighted check, fails here; each shaping price is the one the
-  [recipe table](README.md#shipped-recipes) states.
+  [recipe table](README.md#shipped-recipes) states (`resubmission_penalty` 0.1 under the no-thinking curriculum).
 
 ## Behavior counters
 
@@ -138,7 +138,8 @@ reasoning length terms and the answer room only where the recipe samples with th
 - `episode/unrun_failed_submission`: a failed graded submission was a program never run as submitted while a run was left, comments, whitespace and dropped output statements aside. The match is textual, so a tested program that a guard, a rename or a harness changed counts as unrun; `untested_submission` is the price that reads the change
 - `episode/resubmission_improved`: [Resubmissions](#resubmissions)
 - `episode/language_switches`: where the model picks the language
-- Under [notes](tools.md#notes), the harness's own counters
+- Under [notes](tools.md#notes): `episode/notes_calls`, `episode/notes_chars` (the notes' size at the end) and
+  `episode/text_turns` (turns of text alone)
 
 Grade outcomes (`episode/grade_inconclusive`, `episode/grading_infra_outage`, `episode/tests_graded_frac`):
 [Grading](grading.md).

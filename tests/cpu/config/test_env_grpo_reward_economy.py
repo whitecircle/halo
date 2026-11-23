@@ -488,9 +488,10 @@ _NOTES_RECIPES = [p for p in RECIPES if _runs_notes(_yaml.load(p)["environment_k
 @pytest.mark.parametrize("path", _NOTES_RECIPES, ids=_ids(_NOTES_RECIPES))
 def test_under_notes_a_failure_spends_its_submissions_rather_than_run_out(path):
     """A turn of text never ends a notes episode, so a failure with submissions left ends by spending them or by
-    running out. Spending every one at its worst honest price must cost less than the overflow, or stalling to the cut
-    is the cheapest failure; and the overflow less than one more submission caught as a probe (its price and the bonus
-    its veto zeroes), or a guess is."""
+    running out. Spending them honestly, the resubmission price per submission left plus the failure-only checks once
+    (a check fires once per episode), must cost less than the overflow, or stalling to the cut is the cheapest failure;
+    and the overflow less than one more submission caught as a probe (its resubmission price, the submission bonus its
+    veto zeroes and the verdict_probe price), or a guess is."""
     e = _economy(path)
     probe = _check_price(_audit(path), "verdict_probe")
     for level in VALID_REASONING_EFFORTS:

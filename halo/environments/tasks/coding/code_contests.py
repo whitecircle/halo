@@ -65,6 +65,7 @@ from halo.environments.tools.definitions import (
     ToolCallRefused,
 )
 from halo.environments.tools.notes import (
+    NOTES_SAVED_PREFIX,
     NOTES_TOOL,
     NotesConfig,
     build_notes_tool,
@@ -264,6 +265,14 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             level: without_eval_protocol_pins(entry, eval_protocol, f"reasoning_effort_profiles[{level!r}]")
             for level, entry in self.reasoning_effort_profiles.items()
         }
+        marker_chars = len(NOTES_SAVED_PREFIX)
+        if self.notes is not None and 0 < self.max_observation_chars < marker_chars:
+            raise ValueError(
+                f"notes with max_observation_chars={self.max_observation_chars}: the notes view replays a call only "
+                f"from a reply that opens with {NOTES_SAVED_PREFIX!r}, which a cap below {marker_chars} characters "
+                f"cuts, so every prompt's notes would drop calls the episode applied. Set max_observation_chars to at "
+                f"least {marker_chars}, or to 0 (uncapped)."
+            )
 
     @staticmethod
     def _resolve_eval_protocol_knobs(eval_protocol: str, **configured: int | None) -> dict[str, int]:
@@ -300,6 +309,19 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         if not self.chooses_language or language is None:
             return None
         return find_evident_language(code, language, self.languages)
+
+    def reject_settings_without_thinking(self) -> None:
+        super().reject_settings_without_thinking()
+        if self.notes is None:
+            raise ValueError(
+                "code contests with rollout_thinking: false needs the notes harness (environment_kwargs.notes): without "
+                "it the reply rule allows a brief summary only and the audit vetoes working-out in the visible reply, so "
+                "a policy with no reasoning step has nowhere to work. Set notes: {}, or rollout_thinking: true."
+            )
+
+    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
+        view = super().observation_view(messages)
+        return view if self.notes is None else notes_view(view, self.notes, self.registry.get(NOTES_TOOL))
 
     def _reset_single(
         self,
@@ -446,19 +468,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         updated = notes_after_call(trajectory.info.get(NOTES_KEY, {}), text, mode, self.notes.max_chars)
         trajectory.info[NOTES_KEY] = updated
         return notes_saved_reply(updated)
-
-    def reject_settings_without_thinking(self) -> None:
-        super().reject_settings_without_thinking()
-        if self.notes is None:
-            raise ValueError(
-                "code contests with rollout_thinking: false needs the notes harness (environment_kwargs.notes): without "
-                "it the reply rule allows a brief summary only and the audit vetoes working-out in the visible reply, so "
-                "a policy with no reasoning step has nowhere to work. Set notes: {}, or rollout_thinking: true."
-            )
-
-    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
-        view = super().observation_view(messages)
-        return view if self.notes is None else notes_view(view, self.notes, self.registry.get(NOTES_TOOL))
 
     def _finalize_text_response(self, trajectory: Trajectory, action: str, *, last_turn: bool) -> StepOutcome:
         """With notes, a turn of text alone is working, not a final answer: the episode goes on, nudged to act, within

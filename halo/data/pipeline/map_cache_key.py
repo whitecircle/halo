@@ -160,10 +160,17 @@ def _warn_unfingerprintable(owner: str, kind: str) -> None:
     )
 
 
+def _is_scalar_sequence(val: Any) -> bool:
+    """A list or tuple of scalars and of such sequences (a NamedTuple of ids nesting another)."""
+    return isinstance(val, (list, tuple)) and all(
+        isinstance(item, _SCALAR_TYPES) or _is_scalar_sequence(item) for item in val
+    )
+
+
 def _scalar_collection_repr(val: Any) -> str | None:
-    """For a list, tuple or (sorted) set of scalars, or None. Dicts are left out: a captured dict is a schema carrier
-    (``none_example``) and takes the skip warning."""
-    if isinstance(val, (list, tuple)) and all(isinstance(item, _SCALAR_TYPES) for item in val):
+    """For a list or tuple of scalars, nested ones included, or a (sorted) set of scalars, or None. Dicts are left
+    out: a captured dict is a schema carrier (``none_example``) and takes the skip warning."""
+    if _is_scalar_sequence(val):
         return repr(val)
     if isinstance(val, (set, frozenset)) and all(isinstance(item, _SCALAR_TYPES) for item in val):
         return repr(sorted(val, key=repr))

@@ -2,11 +2,13 @@
 policies every loaded model takes."""
 
 import logging
+import os
 
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    GenerationConfig,
     PretrainedConfig,
     PreTrainedModel,
 )
@@ -126,6 +128,17 @@ def resolve_build_config(
     config = AutoConfig.from_pretrained(model_name_or_path, revision=revision, trust_remote_code=trust_remote_code)
     drop_toolkit_stamps(config)
     return config
+
+
+def find_generation_config(model_name_or_path: str, *, revision: str | None = None) -> GenerationConfig | None:
+    """The checkpoint's ``generation_config.json``, ``None`` where it ships none. A local file that does not parse
+    raises: the stops it lists would be lost in silence."""
+    try:
+        return GenerationConfig.from_pretrained(model_name_or_path, revision=revision)
+    except OSError:
+        if os.path.isfile(os.path.join(model_name_or_path, "generation_config.json")):
+            raise
+        return None
 
 
 def declared_load_ignores(config) -> tuple[str, ...]:

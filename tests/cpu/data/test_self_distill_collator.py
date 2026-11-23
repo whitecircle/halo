@@ -262,7 +262,9 @@ def test_collating_rows_encoded_at_prep_builds_the_whole_batch_collation(padding
     encoded = [collator.encode_row(row) for row in rows]
     assert set(encoded[0]) == {"input_ids", "labels", "teacher_input_ids", "teacher_labels"}
 
-    monkeypatch.setattr(self_distill_collator, "render_conversation", lambda *a, **k: pytest.fail("rendered"))
+    monkeypatch.setattr(
+        self_distill_collator, "tokenize_training_conversation", lambda *a, **k: pytest.fail("rendered")
+    )
     batch = collator(encoded)
     monkeypatch.undo()
 
@@ -447,6 +449,7 @@ def test_the_script_runs_the_vlm_audit_at_prep(hint_template, tmp_path, monkeypa
         _tokenizer(),
         256,
         1,
+        None,
         None,
     )
     if hint_template is None:

@@ -47,7 +47,11 @@ from halo.data.chat_render import render_generation_prompt
 from halo.data.conversation import as_conversation, template_column_kwargs
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
-from halo.data.render_columns import missing_render_column_splits, reject_missing_render_column
+from halo.data.render_columns import (
+    missing_render_column_splits,
+    reject_missing_render_column,
+    render_column_checks_across_ranks,
+)
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
@@ -229,23 +233,24 @@ def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> l
     ]
 
 
-def reject_missing_carried_columns(args: EnvironmentalGRPOScriptArguments, ds) -> None:
-    """A renamed answer_field resolving to no column is a typo, yielding a full RL run with no ground truth. The default
-    spelling is not checked: the trainer gates on the environment's requires_answer. prompt_field is the loader's
-    conversation_field, already guarded."""
-    if args.answer_field:
-        if args.answer_field != DEFAULT_ANSWER_FIELD:
-            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
-        elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
-            logger.warning(
-                f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
-                f"environment that grades against one refuses this dataset at trainer construction; "
-                f"one that grades against an answer only where a row has one pays every episode for "
-                f"completing the task instead."
-            )
-    for column in args.context_fields or []:
-        if column:
-            reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
+def reject_missing_carried_columns(args: EnvironmentalGRPOScriptArguments, ds, *, sharded: bool) -> None:
+    """COLLECTIVE when ``sharded`` (:func:`render_column_checks_across_ranks`). A renamed answer_field resolving to no
+    column is a typo, yielding a full RL run with no ground truth. The default spelling is not checked: the trainer
+    gates on the environment's requires_answer. prompt_field is the loader's conversation_field, already guarded."""
+    with render_column_checks_across_ranks(str(args.dataset), sharded=sharded):
+        if args.answer_field:
+            if args.answer_field != DEFAULT_ANSWER_FIELD:
+                reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+            elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
+                logger.warning(
+                    f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
+                    f"environment that grades against one refuses this dataset at trainer construction; "
+                    f"one that grades against an answer only where a row has one pays every episode for "
+                    f"completing the task instead."
+                )
+        for column in args.context_fields or []:
+            if column:
+                reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
 
 
 def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
@@ -305,8 +310,8 @@ def main():
     )
 
     reject_unsupported_args(
-        "Environmental GRPO (the environment renders every episode; a row's own level reaches it as a "
-        "reasoning_effort column named in context_fields)",
+        "Environmental GRPO (the environment renders every episode with its own tools; a row's own level reaches it "
+        "as a reasoning_effort column named in context_fields)",
         **template_column_kwargs(args),
     )
     # The weight sync forwards names verbatim: a text-only sibling's model.layers.* would miss a multimodal server's
@@ -359,8 +364,9 @@ def main():
         conversation_knob="prompt_field",
     )
     # process_dataset prunes to prompt/answer/context_fields, so an image column would vanish and train on text alone.
-    reject_image_columns(ds, "Environmental GRPO")
-    reject_missing_carried_columns(args, ds)
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "Environmental GRPO")
+    reject_missing_carried_columns(args, ds, sharded=dataset_presharded)
 
     # Trajectories are collated into padded batches.
     requested_attn = grpo_row_attn_implementation(

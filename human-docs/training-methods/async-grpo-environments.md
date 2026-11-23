@@ -139,7 +139,7 @@ unless `reasoning_terms_in_failed_groups: true`
 ([Reasoning length reward](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ↗).
 
 `rollout_thinking: false` trains with no reasoning step and refuses these caps and budgets. The code-contests notes
-curriculum runs this way, starting from a notes SFT checkpoint
+curriculum runs this way, starting from a [notes SFT checkpoint](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/README.md#notes-sft-checkpoint) ↗
 ([Thinking off](../../agent-docs/training-methods/async-grpo/reasoning.md#thinking-off) ↗).
 
 ### One server or several

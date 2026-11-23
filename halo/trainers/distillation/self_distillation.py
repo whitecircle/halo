@@ -132,8 +132,10 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
 
     def _resolve_stop_token_ids(self):
         tok = resolve_tokenizer(self.processing_class)
-        model_config = getattr(getattr(self, "model", None), "config", None)
-        self._stop_token_ids = set(resolve_eos_token_ids(tok, model_config))
+        model = getattr(self, "model", None)
+        self._stop_token_ids = set(
+            resolve_eos_token_ids(tok, getattr(model, "config", None), getattr(model, "generation_config", None))
+        )
         self._stop_ids_tensor = None
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):

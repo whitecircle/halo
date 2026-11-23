@@ -84,6 +84,7 @@ def _prepare(train_messages, test_messages, generate_eval_examples: bool = False
         tokenizer,
         SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
         hf_config=hf_config,
+        generation_config=None,
     )
 
 

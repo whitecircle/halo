@@ -180,6 +180,15 @@ async def test_an_extra_body_over_a_field_the_sdk_takes_as_a_keyword_refuses_the
         await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING)
 
 
+async def test_an_extra_body_over_the_thinking_cap_the_answer_room_derives_refuses_the_eval(monkeypatch):
+    """No rollout_max_thinking_tokens: the cap is the turn less its answer room, which every vLLM turn writes as
+    thinking_token_budget, so the overlay would replace the episode's cap."""
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({"thinking_token_budget": 7}))
+    rollout = RolloutConfig(model_name="m", max_tokens=100, max_answer_tokens=20)
+    with pytest.raises(ValueError, match=r"HALO_EVAL_EXTRA_BODY sets \['thinking_token_budget'\]"):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=rollout)
+
+
 async def test_an_extra_body_set_before_the_run_reaches_every_request(monkeypatch):
     sent = []
     replies = iter([_tool_call_response(), chat_reply("done")])

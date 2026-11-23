@@ -18,6 +18,7 @@ _MESSAGES = [{"role": "user", "content": "Probe."}]
 _LOW = SimpleNamespace(level="low")
 _HIGH = SimpleNamespace(level="high")
 _LEVEL_IDS = {"low": 11, "high": 12, None: 13}
+_THINKING_OFF = {"enable_thinking": False}
 
 
 def _trainer_ids(effort) -> list[int]:
@@ -94,18 +95,59 @@ def test_with_thinking_off_a_render_that_differs_is_refused(engine):
     server, client_cls = engine
     server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2, 99]
     with pytest.raises(ValueError, match="first at token 3 of 4/3.*enable_thinking") as refused:
-        _verify(server, client_cls, template_kwargs={"enable_thinking": False})
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
     assert client_cls.CHAT_TEMPLATE_FLAG in str(refused.value)
     bodies = [body for path, body in server.posted if path == "/v1/chat/completions"]
     assert all(body["chat_template_kwargs"]["enable_thinking"] is False for body in bodies)
+
+
+def _differs_at_the_second_contract(body: dict) -> list[int]:
+    return [1, 11, 2] if _level_of(body) == "low" else [1, 12, 2, 99]
+
+
+def test_with_thinking_off_a_second_contract_that_differs_is_refused(engine):
+    """Episodes drawn at the second level sample under its prompt, which the first one's agreement says nothing of."""
+    server, client_cls = engine
+    server.render_prompt = _differs_at_the_second_contract
+    with pytest.raises(ValueError, match="reasoning_effort high, first at token 3 of 4/3.*enable_thinking"):
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+
+
+def test_with_thinking_on_a_second_contract_that_differs_stays_silent(engine, caplog):
+    server, client_cls = engine
+    server.render_prompt = _differs_at_the_second_contract
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls)
+    assert "differently" not in caplog.text
 
 
 def test_with_thinking_off_a_matching_server_passes(engine, caplog):
     server, client_cls = engine
     server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2]
     with caplog.at_level(logging.WARNING):
-        _verify(server, client_cls, template_kwargs={"enable_thinking": False})
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
     assert "differently" not in caplog.text
+
+
+def test_with_thinking_off_a_reply_without_prompt_ids_is_refused(engine):
+    """Nothing else tells a server template that ignores enable_thinking from the trainer's."""
+    server, client_cls = engine
+    server.render_prompt = lambda body: None
+    with pytest.raises(ValueError, match="returned no prompt ids.*rollout_thinking: true") as refused:
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+    assert client_cls.CHAT_TEMPLATE_FLAG in str(refused.value)
+
+
+def test_with_thinking_off_a_trainer_render_that_raises_still_passes_with_a_warning(engine, caplog):
+    """The script's verify_template_closes_thinking already refuses a template that fails at a level the run draws."""
+    server, client_cls = engine
+
+    def raises(effort):
+        raise ValueError("this template needs a level")
+
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls, trainer=raises, efforts=(_LOW, None), template_kwargs=_THINKING_OFF)
+    assert "this template needs a level" in caplog.text
 
 
 def test_a_trainer_template_with_no_level_cannot_refuse(engine):

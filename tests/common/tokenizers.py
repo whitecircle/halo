@@ -6,8 +6,9 @@ from pathlib import Path
 from typing import NoReturn
 
 import pytest
-from transformers import AutoConfig, AutoProcessor, AutoTokenizer
+from transformers import AutoConfig, AutoProcessor, AutoTokenizer, GenerationConfig
 
+from halo.data.turn_markers import resolve_eos_token_ids
 from halo.env import env_flag
 from tests.common.hub_seed import GATED_REPOS, is_hub_repo, seed_repos
 
@@ -86,3 +87,18 @@ def load_cached_config(reference: str, **kwargs):
     if config is None:
         skip_uncached(reference, "config", kwargs.get("revision"))
     return config
+
+
+def load_cached_generation_config(reference: str, **kwargs):
+    """The checkpoint's ``generation_config.json`` from the local cache, the stops a served model halts at."""
+    try:
+        return GenerationConfig.from_pretrained(reference, local_files_only=True, **kwargs)
+    except OSError:
+        skip_uncached(reference, "generation config", kwargs.get("revision"))
+
+
+def resolve_cached_eos_token_ids(reference: str, tokenizer, **kwargs) -> frozenset[int]:
+    """The turn terminators a run of ``reference`` resolves off its cached model and generation configs."""
+    return resolve_eos_token_ids(
+        tokenizer, load_cached_config(reference, **kwargs), load_cached_generation_config(reference, **kwargs)
+    )

@@ -18,7 +18,7 @@ from halo.data.conversation import (
 )
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
-from halo.data.render_columns import reject_missing_render_column
+from halo.data.render_columns import reject_missing_render_column, render_column_checks_across_ranks
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
@@ -145,13 +145,14 @@ def main():
         conversation_field=args.prompt_field,
         conversation_knob="prompt_field",
     )
-    reject_image_columns(ds, "RLVR Online GRPO")
-    # Read with .get, so a mistyped answer_field would yield empty answers: all-zero verifiable rewards, a judge shown
-    # an empty reference, an SDPG hint with no answer. A run none of whose terms reads the answer (a reward model,
-    # White Circle, a judge with include_reference off) needs no answer column.
-    hints_answer = args.use_sdpg and args.sdpg_beta_base != 0.0
-    if args.answer_field and (hints_answer or any(term.reads_answer for term in args.reward_terms)):
-        reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "RLVR Online GRPO")
+        # Read with .get, so a mistyped answer_field would yield empty answers: all-zero verifiable rewards, a judge
+        # shown an empty reference, an SDPG hint with no answer. A run none of whose terms reads the answer (a reward
+        # model, White Circle, a judge with include_reference off) needs no answer column.
+        hints_answer = args.use_sdpg and args.sdpg_beta_base != 0.0
+        if args.answer_field and (hints_answer or any(term.reads_answer for term in args.reward_terms)):
+            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
 
     # Prompts and completions are collated into padded batches.
     requested_attn = grpo_row_attn_implementation(

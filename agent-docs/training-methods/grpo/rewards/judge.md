@@ -32,9 +32,9 @@ The grading prompt wraps each part in its own tag, in this order: `<setting>` (t
 
 - The parts are tagged, not headed, so a task's markdown heading or a program's comment never reads as a section of the prompt.
 - Every part but `<setting>`, the term's own text, is escaped: the `<` of any of these tags or of `<reasoning>` that the quoted text spells, in any case, is written `&lt;`. Policy text, a tool result or a task can neither close its part nor forge a reasoning block.
-- The judge grades the policy's actions, answers and tool results, and reads its reasoning as context only. A view
-  that shows no reasoning (none sampled, `include_reasoning: false`, or `final`) drops the rubric's line on reading it,
-  so the visible message is both the policy's working and the evidence.
+- A veto judge's checks fire only on evidence quoted from the policy's actions (its visible text, a call's arguments,
+  a tool result), never from its reasoning. They carry a line to read the reasoning only where the view shows
+  reasoning; with none sampled, `include_reasoning: false`, or `final`, they ask for quoted actions alone.
 
 ### Views
 

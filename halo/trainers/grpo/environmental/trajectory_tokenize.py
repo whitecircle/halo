@@ -8,6 +8,7 @@ from typing import NamedTuple
 
 import torch
 
+from halo.data.chat_render import resolve_template_conversation
 from halo.environments.episodes.candidate_logprobs import CandidateLogprobs
 from halo.environments.episodes.episode_keys import (
     CONTEXT_OVERFLOW_KEY,
@@ -293,9 +294,13 @@ class TrajectoryTokenizeMixin:
         template_kwargs: dict,
         include_thinking: bool = True,
     ) -> list[int]:
-        """``include_thinking=False`` emits no reasoning, the probe for a template that hides prior-turn CoT."""
+        """``include_thinking=False`` emits no reasoning, the probe for a template that hides prior-turn CoT. A stored
+        call's wire-form arguments reach a template that renders the mapping parsed, as the engine hands them over."""
+        conversation = [m.to_dict(include_thinking=include_thinking) for m in msgs]
         text = self.processing_class.apply_chat_template(
-            [m.to_dict(include_thinking=include_thinking) for m in msgs],
+            resolve_template_conversation(
+                self.processing_class, conversation, with_tools=self._tools_schema is not None
+            ),
             tools=self._tools_schema,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,

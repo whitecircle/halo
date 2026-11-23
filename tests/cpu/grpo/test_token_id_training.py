@@ -16,8 +16,11 @@ from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from tests.common.env_grpo_batch import engine_view_env
-from tests.common.models import GPT_OSS_20B
+from tests.common.models import GPT_OSS_20B, QWEN3_6_MOE_35B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
+
+_WIRE_ARGUMENTS = json.dumps({"code": "print(int(input()) + 1)"})
 
 
 def _choice(tokens):
@@ -364,6 +367,53 @@ def _render_stub(render):
     for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
         setattr(stub, name, types.MethodType(getattr(Trainer, name), stub))
     return stub
+
+
+def _qwen36_render_stub():
+    """The real render under the Qwen3.6 effort template, which writes one block per argument (``arguments|items``)."""
+    tok = load_cached_tokenizer(QWEN3_6_MOE_35B)
+    tok.chat_template = (REPO_ROOT / "jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja").read_text()
+    stub = _render_stub(None)
+    stub.processing_class = stub._tokenizer = tok
+    stub._tools_schema = None
+    stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
+    return stub
+
+
+def _stored_call_episode(arguments) -> RolloutResult:
+    """A tool call stored with ``arguments`` (the engine's wire form is JSON text), then a turn with sampled ids and no
+    engine prompt ids, whose prompt the trainer re-renders."""
+    call = {"id": "c1", "type": "function", "function": {"name": "python_repl", "arguments": arguments}}
+    traj = Trajectory()
+    traj.add_message(Message.user("solve it"))
+    traj.add_message(Message.assistant("", tool_calls=[call], token_ids=[5, 6], prompt_token_ids=[1, 2]))
+    traj.add_message(Message.tool("1", tool_call_id="c1", name="python_repl"))
+    traj.add_message(Message.assistant("done", token_ids=[7, 8]))
+    return RolloutResult(prompt="solve it", trajectory=traj)
+
+
+def test_a_per_turn_render_parses_a_stored_calls_wire_form_arguments():
+    """The engine parses the text before its template iterates the arguments; a re-render handing the template the
+    text raises, and the episode drops as unrenderable."""
+    stub = _qwen36_render_stub()
+    result = _stored_call_episode(_WIRE_ARGUMENTS)
+    rows = stub._tokenize_trajectory_turns(result)
+    assert not result.trajectory.episode_invalid, result.trajectory.info[EPISODE_INVALID_REASON_KEY]
+    assert [row.completion_ids.tolist() for row in rows] == [[5, 6], [7, 8]]
+    history = _stored_call_episode(json.loads(_WIRE_ARGUMENTS)).trajectory.messages[:3]
+    as_mapping = stub.processing_class.apply_chat_template(
+        [m.to_dict(include_thinking=True) for m in history], tokenize=False, add_generation_prompt=True
+    )
+    assert rows[1].prompt_ids.tolist() == stub._tokenizer(as_mapping, add_special_tokens=False)["input_ids"]
+
+
+def test_a_whole_trajectory_render_parses_a_stored_calls_wire_form_arguments():
+    stub = _qwen36_render_stub()
+    wire, mapping = _stored_call_episode(_WIRE_ARGUMENTS), _stored_call_episode(json.loads(_WIRE_ARGUMENTS))
+    rendered = stub._tokenize_trajectory(wire)
+    assert not wire.trajectory.episode_invalid, wire.trajectory.info[EPISODE_INVALID_REASON_KEY]
+    assert int(rendered[2].sum()) > 0
+    assert [t.tolist() for t in rendered] == [t.tolist() for t in stub._tokenize_trajectory(mapping)]
 
 
 def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():

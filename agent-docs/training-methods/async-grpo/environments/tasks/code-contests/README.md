@@ -46,7 +46,7 @@ rewards:
 | `stop_on_first_failure` | `false` | Stop at the first failing test. The grade is unchanged; `outcome/test_pass_frac` becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level, and set here rather than in `tool_budgets`, which raises. The tuning lever; `max_turns` (15) is a backstop |
 | [`eval_protocol`](evaluation.md#evaluation-protocols) | `harness` | `leaderboard` pins both tool budgets |
-| [`notes`](tools.md#notes) | `null` | `{}` or `{max_chars}` (6000, the notes' size cap): the notes harness, for policies that train without a reasoning step |
+| [`notes`](tools.md#notes) | `null` | `{}`, or `{max_chars: <int>}` for the notes' size cap (6000 characters, section names included): the notes harness, for policies that train without a reasoning step |
 
 `timeout_per_test`, `max_time_limit` and `compiled_time_limit_scale` must be finite and > 0; a non-positive
 `max_grading_seconds` raises too, at construction.
@@ -90,11 +90,20 @@ Qwen3.6 vLLM stages, `qwen3.6-35b-a3b-code-contests-full-ep1-stage{1-codeforces,
 The no-thinking curriculum,
 `qwen3.6-35b-a3b-code-contests-notes-no-thinking-full-ep1-stage{1-codeforces,2-hard,3-extra-hard}.yaml`, runs the same
 stages with [`rollout_thinking: false`](../../../reasoning.md#thinking-off) and the [notes harness](tools.md#notes), from
-a notes SFT checkpoint. It has no length terms: the profiles keep only `max_submissions` / `max_test_calls`, and
-there is no floor, price cap or answer room. `rollout_max_tokens` is 16384 and `rollout_max_episode_tokens` 98304, all of
-it visible output; the judge reads the no-thinking [setting](reward.md#audit-judge). Shaping and check prices are the
-curriculum's, except `resubmission_penalty` 0.1: a failure there has no free stop, so each submission left must cost
-less than running out ([Economy invariants](reward.md#economy-invariants)).
+a [notes SFT checkpoint](#notes-sft-checkpoint). It has no length terms: the profiles keep only `max_submissions` /
+`max_test_calls`, and there is no floor, price cap or answer room. `rollout_max_tokens` is 16384 and
+`rollout_max_episode_tokens` 98304, all of it visible output; the [audit judge](reward.md#audit-judge) reads
+`notes-no-thinking.txt` as its context. Shaping and check prices are the thinking curriculum's, except
+`resubmission_penalty` 0.1: a failure there has no free stop, so spending every submission left must cost less than
+running out ([Economy invariants](reward.md#economy-invariants)).
+
+### Notes SFT checkpoint
+
+The model fine-tuned on teacher episodes of the notes harness, rendered with the recipe's chat template, one row per
+assistant turn. Its last checkpoint, a `text_only_model` export, goes through
+`scripts/after_training/reattach_vision_tower.py` ([Post-training scripts](../../../../../reference/scripts-reference.md#post-training-scripts)),
+which restores the composite layout and MTP head the servers load, since the weight sync forwards parameter names
+verbatim. Stage 1's `model_name_or_path` is a placeholder for it.
 
 ## Pages
 

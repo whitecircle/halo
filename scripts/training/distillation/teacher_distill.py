@@ -121,7 +121,7 @@ def _load_teacher_metadata(*, args, model_config) -> tuple[PreTrainedTokenizerBa
     return hub_metadata_main_first("teacher_metadata", fetch)
 
 
-def _text_distill_collator(args, tokenizer, model_config):
+def _text_distill_collator(args, tokenizer, model_config, generation_config):
     """The completions-only collator, else the padded causal-LM one, which restores a turn-ending EOS where pad == eos;
     a plain LM collator masks it, leaving no stop signal to learn."""
     return select_data_collator(
@@ -129,6 +129,7 @@ def _text_distill_collator(args, tokenizer, model_config):
         train_on_completions_only=args.train_on_completions_only,
         assistant_message_template=args.assistant_message_template,
         model_config=model_config,
+        generation_config=generation_config,
     ) or DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False)
 
 
@@ -203,13 +204,20 @@ def main():
             processing_class,
             tokenizer,
             student_model.config,
+            student_model.generation_config,
             desc="Processing VLM distillation dataset",
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, training_config, student_model.config, desc="Processing distillation dataset"
+            ds,
+            tokenizer,
+            args,
+            training_config,
+            student_model.config,
+            student_model.generation_config,
+            desc="Processing distillation dataset",
         )
-        data_collator = _text_distill_collator(args, tokenizer, student_model.config)
+        data_collator = _text_distill_collator(args, tokenizer, student_model.config, student_model.generation_config)
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, training_config)
 

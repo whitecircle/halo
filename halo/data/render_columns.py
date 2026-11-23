@@ -1,11 +1,15 @@
 """The columns a run declares for rendering."""
 
+from collections.abc import Mapping
+from contextlib import AbstractContextManager, nullcontext
+
 from datasets import Dataset, DatasetDict
 
 from halo.data.pipeline.coordinated_map import coordinated_filter
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.sources.paths import TRAIN_TEST_SPLITS, eval_split_name
 from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
+from halo.runtime.consensus import barrier_on_exit
 
 
 def _rendered_splits(dataset: DatasetDict) -> list[str]:
@@ -16,6 +20,20 @@ def _rendered_splits(dataset: DatasetDict) -> list[str]:
 def missing_render_column_splits(dataset: DatasetDict, column: str) -> list[str]:
     """An extra split a source carries is never rendered, so its schema is no contract."""
     return sorted(split for split in _rendered_splits(dataset) if column not in dataset[split].column_names)
+
+
+def has_render_column(dataset: DatasetDict, column: str) -> bool:
+    """Whether any rendered split carries ``column``."""
+    return any(column in dataset[split].column_names for split in _rendered_splits(dataset))
+
+
+def resolve_declared_render_columns(
+    conversation_knob: str, conversation_field: str | None, template_columns: Mapping[str, str | None]
+) -> dict[str, str]:
+    """The column each declared knob names, keyed by the knob; ``conversation_field`` is None when undeclared."""
+    return {
+        knob: column for knob, column in ((conversation_knob, conversation_field), *template_columns.items()) if column
+    }
 
 
 def reject_missing_render_column(dataset: DatasetDict, path: str, knob: str, column: str) -> None:
@@ -29,6 +47,12 @@ def reject_missing_render_column(dataset: DatasetDict, path: str, knob: str, col
         f"{knob}='{column}' names a column the dataset {path} does not carry (missing from split(s) "
         f"{missing}; available columns: {available}). Point {knob} at an existing column."
     )
+
+
+def render_column_checks_across_ranks(path: str, *, sharded: bool) -> AbstractContextManager[None]:
+    """COLLECTIVE when ``sharded``: a refusal raised inside raises on every rank. A sharded rank checks only its own
+    shards, so one refusing alone would strand its peers in their next collective."""
+    return barrier_on_exit(f"The render-column check of dataset {path}") if sharded else nullcontext()
 
 
 def filter_empty_conversations(dataset: Dataset, conversation_field: str, split_name: str) -> Dataset:
@@ -89,14 +113,10 @@ def alias_tools_column(dataset: DatasetDict, tools_field: str | None, path: str)
     return _alias_render_column(dataset, "tools_field", tools_field, "tools", ("tools",), path)
 
 
-def drop_empty_conversation_rows(
-    dataset: DatasetDict, path: str, conversation_field: str | None, *, required: bool, knob: str
-) -> None:
-    """Drop rows with an empty conversation, in place. ``required`` makes a missing column fatal, naming ``knob``."""
+def drop_empty_conversation_rows(dataset: DatasetDict, conversation_field: str | None) -> None:
+    """COLLECTIVE: drop rows with an empty conversation, in place; a split without the column keeps every row."""
     if conversation_field is None:
         return
-    if required:
-        reject_missing_render_column(dataset, path, knob, conversation_field)
     for split in TRAIN_TEST_SPLITS:
         if split in dataset:
             dataset[split] = filter_empty_conversations(dataset[split], conversation_field, split_name=split)

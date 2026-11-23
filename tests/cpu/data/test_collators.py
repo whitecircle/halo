@@ -1447,26 +1447,28 @@ def test_tokenize_response_template_empty_raises():
 
 def test_filter_eos_after_responses_nearest_following():
     """Each response start maps to the nearest EOS strictly after it."""
-    assert filter_eos_after_responses([2, 8], [5, 11]) == [5, 11]
+    assert filter_eos_after_responses([2, 8], [5, 11], [8, 20]) == [5, 11]
 
 
 def test_filter_eos_after_responses_no_following_eos_returns_sentinel():
     """Returns -1 (an empty span) and does not borrow another turn's EOS, which would unmask non-assistant tokens."""
-    assert filter_eos_after_responses([8], [5]) == [-1]
+    assert filter_eos_after_responses([8], [5], [20]) == [-1]
 
 
 def test_filter_eos_does_not_cross_into_next_response():
-    """The search is bounded by the next response start, so an unterminated turn returns -1."""
+    """The search is bounded by each turn's upper bound, so an unterminated turn returns -1."""
     # Turn 1 (start 2) must not bind to turn 2's EOS (12), whose span covers the user message.
-    assert filter_eos_after_responses([2, 8], [12]) == [-1, 12]
-    assert filter_eos_after_responses([2, 8], [6, 12]) == [6, 12]
+    assert filter_eos_after_responses([2, 8], [12], [8, 20]) == [-1, 12]
+    assert filter_eos_after_responses([2, 8], [6, 12], [8, 20]) == [6, 12]
     # A user-turn EOS (8) between the two assistant turns must not be mis-assigned.
-    assert filter_eos_after_responses([2, 9], [6, 8, 13]) == [6, 13]
+    assert filter_eos_after_responses([2, 9], [6, 8, 13], [9, 20]) == [6, 13]
+    # Another role's turn opening at 5 bounds turn 1 before the next response start.
+    assert filter_eos_after_responses([2, 8], [6, 12], [5, 20]) == [-1, 12]
 
 
 def test_filter_eos_after_responses_empty_inputs():
-    assert filter_eos_after_responses([], [5]) == []
-    assert filter_eos_after_responses([2, 8], []) == [-1, -1], "every start pairs with an end"
+    assert filter_eos_after_responses([], [5], []) == []
+    assert filter_eos_after_responses([2, 8], [], [8, 20]) == [-1, -1], "every start pairs with an end"
 
 
 def test_completion_only_unterminated_turn_does_not_leak_into_user_message():
@@ -1545,6 +1547,14 @@ def test_resolve_eos_token_ids_reads_text_config():
     tok = make_tokenizer(pad_token_id=0, eos_token_id=1)
     cfg = _FakeConfig(text_config=_FakeConfig(eos_token_id=[7, 8]))
     assert resolve_eos_token_ids(tok, cfg) == frozenset({1, 7, 8})
+
+
+def test_resolve_eos_token_ids_reads_text_config_only_where_the_config_declares_none():
+    """A text config declaring none falls back to its class default, Inkling's 2, which is ``#``: unioned, a turn
+    holding a markdown heading would end at it."""
+    tok = make_tokenizer(pad_token_id=0, eos_token_id=1)
+    cfg = _FakeConfig(eos_token_id=200006, text_config=_FakeConfig(eos_token_id=2))
+    assert resolve_eos_token_ids(tok, cfg) == frozenset({1, 200006})
 
 
 def test_resolve_eos_token_ids_tokenizer_only():

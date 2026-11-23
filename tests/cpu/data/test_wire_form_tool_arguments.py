@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""A tool call stored in the OpenAI wire form (``arguments`` as JSON text) renders through the text render seam: parsed
-into a mapping under a template that raises on the text or re-encodes it, and left as written under one that writes the
-text."""
+"""A tool call stored in the OpenAI wire form (``arguments`` as JSON text) renders through every text renderer: parsed
+into a mapping under a template that raises on the text, re-encodes it or raises on both probes, and left as written
+under one that writes the text."""
 
 import json
 import zlib
@@ -11,9 +11,11 @@ from transformers.utils.chat_template_utils import _compile_jinja_template
 
 from halo.data.chat_render import render_generation_prompt, resolve_template_conversation, supports_wire_form_arguments
 from halo.data.conversation import has_wire_form_arguments, parse_tool_call_arguments
-from halo.data.pipeline.text_rows import render_row_conversation
+from halo.data.pipeline.preferences import render_preference_row
+from halo.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
+from halo.entrypoints.reward_scoring import encode_for_scoring
 from tests.common.models import QWEN3_0_6B
-from tests.common.repo import REPO_ROOT
+from tests.common.repo import REPO_ROOT, load_script_module
 from tests.common.tokenizers import load_cached_tokenizer
 
 TEMPLATES = REPO_ROOT / "jinja-templates"
@@ -26,14 +28,24 @@ MAPPING_ONLY = (
 )
 # Templates that write wire-form text as it is stored.
 TEXT_WRITING = ("qwen3/qwen3-native.jinja", "gpt-oss/gpt-oss-harmony.jinja")
-# One that drops a call from its render, and one that raises on any multi-turn conversation.
-CALL_BLIND = ("qwen3/qwen3-multiturn.jinja", "qwen3/qwen3-instruct.jinja")
+# One that drops a call from its render.
+CALL_BLIND = ("qwen3/qwen3-multiturn.jinja",)
 # What applying ``tojson`` to a call does to wire-form text: a quoted, escaped string in place of the object.
 RE_ENCODING_TEMPLATE = (
     "{%- for message in messages %}<{{ message.role }}>{{ message.content or '' }}"
     "{%- for call in message.tool_calls or [] %}<call>{{ call.function | tojson }}</call>{%- endfor %}"
     "</{{ message.role }}>{%- endfor %}"
 )
+
+# One that re-encodes and refuses a call id that is not 9 characters long, as Mistral v0.3's and Nemo's do.
+ID_CHECKING_TEMPLATE = (
+    "{%- for message in messages %}<{{ message.role }}>{{ message.content or '' }}"
+    "{%- for call in message.tool_calls or [] %}"
+    "{%- if call.id | length != 9 %}{{ raise_exception('Tool call IDs should be 9 characters long') }}{%- endif %}"
+    "<call>{{ call.function | tojson }}</call>{%- endfor %}</{{ message.role }}>{%- endfor %}"
+)
+# Templates that raise on both probe renders: one on any multi-turn conversation, one on the probe's call id.
+PROBE_REFUSING = ("qwen3/qwen3-instruct.jinja", ID_CHECKING_TEMPLATE)
 
 # One that writes a call's arguments as they are stored.
 TEXT_WRITING_TEMPLATE = (
@@ -45,6 +57,7 @@ TEXT_WRITING_TEMPLATE = (
 ARGUMENTS = {"pattern": "a|b", "ignore_case": True, "context_lines": 2}
 WIRE_ARGUMENTS = json.dumps(ARGUMENTS, separators=(",", ":"))
 TOOLS = [{"type": "function", "function": {"name": "grep", "parameters": {"type": "object", "properties": {}}}}]
+FOUND, LOST = {"role": "assistant", "content": "found"}, {"role": "assistant", "content": "lost"}
 
 
 class TemplateTokenizer:
@@ -71,11 +84,11 @@ class TemplateTokenizer:
 
 def _conversation(arguments, *, flat: bool = False) -> list[dict]:
     function = {"name": "grep", "arguments": arguments}
-    call = function if flat else {"id": "call_1", "type": "function", "function": function}
+    call = function if flat else {"id": "call_0001", "type": "function", "function": function}
     return [
         {"role": "user", "content": "find it"},
         {"role": "assistant", "content": None, "tool_calls": [call]},
-        {"role": "tool", "tool_call_id": "call_1", "content": "2 lines"},
+        {"role": "tool", "tool_call_id": "call_0001", "content": "2 lines"},
         {"role": "assistant", "content": "found"},
     ]
 
@@ -135,6 +148,18 @@ def test_a_template_that_iterates_arguments_does_not_take_wire_form(template):
 @pytest.mark.parametrize("template", [*TEXT_WRITING, *CALL_BLIND])
 def test_a_template_that_writes_the_text_or_no_call_at_all_takes_wire_form(template):
     assert supports_wire_form_arguments(TemplateTokenizer(template), with_tools=True)
+
+
+@pytest.mark.parametrize("template", PROBE_REFUSING, ids=["single-turn", "call-id-checking"])
+def test_a_template_that_refuses_both_probes_takes_the_mapping(template):
+    assert not supports_wire_form_arguments(TemplateTokenizer(template), with_tools=True)
+
+
+def test_a_probe_refusing_re_encoder_renders_a_wire_form_row_as_its_mapping_twin():
+    tokenizer = TemplateTokenizer(ID_CHECKING_TEMPLATE)
+    rendered = _render_row(tokenizer, WIRE_ARGUMENTS)
+    assert rendered == _render_row(tokenizer, ARGUMENTS)
+    assert '"arguments": {"pattern": "a|b"' in rendered
 
 
 def test_a_template_that_re_encodes_the_text_does_not_take_wire_form():
@@ -208,6 +233,18 @@ def test_malformed_wire_form_arguments_raise_under_a_mapping_only_template():
         _render_row(TemplateTokenizer(MAPPING_ONLY[0]), '{"pattern": "a')
 
 
+def test_a_single_turn_template_takes_the_mapping_of_a_call_it_does_not_render():
+    """A single-turn row renders under ``qwen3-instruct``, which drops the call but raises on both multi-turn probes."""
+    call = {"id": "call_0001", "type": "function", "function": {"name": "grep", "arguments": '{"pattern": "a'}}
+    row = {
+        "messages": json.dumps(
+            [{"role": "user", "content": "find it"}, {"role": "assistant", "content": "", "tool_calls": [call]}]
+        )
+    }
+    with pytest.raises(ValueError, match="not a JSON object"):
+        render_row_conversation(row, TemplateTokenizer("qwen3/qwen3-instruct.jinja"), conversation_field="messages")
+
+
 def test_generation_prompts_parse_wire_form_history():
     tokenizer = TemplateTokenizer(MAPPING_ONLY[0])
     history, twin = _conversation(WIRE_ARGUMENTS)[:3], _conversation(ARGUMENTS)[:3]
@@ -216,6 +253,57 @@ def test_generation_prompts_parse_wire_form_history():
     assert "<parameter=pattern>\na|b\n</parameter>" in prompt
     # The length check tokenizes the same parsed render.
     assert render_generation_prompt(tokenizer, history, tools=TOOLS, max_prompt_length=4) is None
+
+
+def _render_preference_row(tokenizer, arguments) -> dict:
+    row = {"prompt": _conversation(arguments)[:3], "chosen": [FOUND], "rejected": [LOST], "tools": json.dumps(TOOLS)}
+    return render_preference_row(row, tokenizer, tools_field="tools")
+
+
+def _prepare_generative_row(tokenizer, arguments) -> dict:
+    row = {"prompt": _conversation(arguments)[:3], "tools": json.dumps(TOOLS)}
+    return prepare_generative_row(row, tokenizer, max_length=None, tools_field="tools")
+
+
+def _tokenize_classification_row(tokenizer, arguments) -> dict:
+    module = load_script_module("scripts/training/classification.py", "halo_wire_form_classification_script")
+    row = {"prompt": _conversation(arguments), "tools": json.dumps(TOOLS), "label": "found"}
+    return module.tokenize_classification_row(
+        row, tokenizer=tokenizer, max_length=512, label_to_id={"found": 0}, is_multi_label=False, tools_field="tools"
+    )
+
+
+def _render_offline_grpo_row(tokenizer, arguments) -> dict:
+    module = load_script_module("scripts/training/grpo/offline.py", "halo_wire_form_offline_grpo_script")
+    row = {"prompt": _conversation(arguments)[:3], "completions": [[FOUND], [LOST]], "tools": json.dumps(TOOLS)}
+    return module.render_offline_grpo_row(row, tokenizer, "tools", None)
+
+
+ROW_RENDERERS = {
+    "preference": _render_preference_row,
+    "generation prompt": _prepare_generative_row,
+    "classification": _tokenize_classification_row,
+    "offline GRPO": _render_offline_grpo_row,
+}
+
+
+@pytest.mark.parametrize("template", [MAPPING_ONLY[0], RE_ENCODING_TEMPLATE], ids=["mapping-only", "re-encoding"])
+@pytest.mark.parametrize("render", ROW_RENDERERS.values(), ids=ROW_RENDERERS.keys())
+def test_every_row_renderer_renders_a_wire_form_row_as_its_mapping_twin(render, template):
+    tokenizer = TemplateTokenizer(template)
+    assert render(tokenizer, WIRE_ARGUMENTS) == render(tokenizer, ARGUMENTS)
+
+
+@pytest.mark.parametrize("template", [MAPPING_ONLY[0], RE_ENCODING_TEMPLATE], ids=["mapping-only", "re-encoding"])
+def test_reward_model_scoring_encodes_a_wire_form_conversation_as_its_mapping_twin(template):
+    """A prompt's wire-form call reaches the generation CLIs' reward model as its training rows rendered the call."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    tokenizer.chat_template = TemplateTokenizer(template).chat_template
+    wire, twin = (
+        encode_for_scoring(tokenizer, [_conversation(arguments)], None)["input_ids"].tolist()
+        for arguments in (WIRE_ARGUMENTS, ARGUMENTS)
+    )
+    assert wire == twin
 
 
 if __name__ == "__main__":

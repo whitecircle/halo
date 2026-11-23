@@ -45,6 +45,10 @@ class _ScoringOps(TorchDispatchMode):
         return result
 
 
+def _pool_key_copies(recorded: _ScoringOps, indexer) -> list[tuple[int, ...]]:
+    return [shape for shape in recorded.copies if shape[-2:] == (indexer.head_dim, SEQ_LEN // indexer.index_kpool)]
+
+
 @pytest.fixture(scope="module")
 def attention():
     torch.manual_seed(0)
@@ -81,8 +85,16 @@ def test_the_chunked_selection_is_upstreams(attention, monkeypatch, name, querie
     assert max(recorded.products) <= budget, "a call scored more than its budget"
     calls = hidden.shape[0] * -(-SEQ_LEN // queries_per_call)
     assert len(recorded.products) == 2 * calls, "the scores and their head sum, per row and chunk"
-    pool_key_copies = [shape for shape in recorded.copies if shape[-2:] == (indexer.head_dim, pools)]
-    assert not pool_key_copies, f"the pool keys were broadcast into copies {pool_key_copies}"
+    assert not _pool_key_copies(recorded, indexer), "the pool keys were broadcast into copies"
+
+
+@pytest.mark.parametrize("name", sorted(name for name, (lengths, _) in BATCHES.items() if len(lengths) > 1))
+def test_the_recorder_catches_upstreams_pool_key_copy(attention, name):
+    """Premise of the no-copy assertion: past one row, upstream's forward broadcasts the pool keys into a copy."""
+    hidden, q_resid, mask = _inputs(attention, name)
+    with _ScoringOps() as recorded:
+        dsa_indexer._stock_forward(attention.indexer, hidden, q_resid, mask, None)
+    assert _pool_key_copies(recorded, attention.indexer)
 
 
 def test_padding_queries_and_keys_select_nothing(attention):

@@ -1,6 +1,6 @@
-"""Fold a saved LoRA adapter (attention and dense, DoRA, native expert) into its base one safetensors tensor at a time and
-write the merged checkpoint through :class:`StreamingShardWriter`, holding the adapter, one tensor, the writer's parts
-and one expert layer's fp32 deltas at a time."""
+"""Fold a saved LoRA adapter (attention and dense, DoRA, native expert) and its run's trained router balancing biases
+into its base one safetensors tensor at a time and write the merged checkpoint through :class:`StreamingShardWriter`,
+holding the adapter, one tensor, the writer's parts and one expert layer's fp32 deltas at a time."""
 
 from __future__ import annotations
 
@@ -10,10 +10,11 @@ import math
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
 
 import torch
+from huggingface_hub.errors import StrictDataclassError
 from peft.tuners.lora.layer import Linear as LoraLinear
 from peft.utils.other import get_pattern_key
 
@@ -31,8 +32,10 @@ from halo.checkpoint.format import (
     ADAPTER_WEIGHT_NAMES,
     DEFAULT_MAX_SHARD_SIZE,
     MERGED_ADAPTER_CONFIG_DIR,
+    ROUTER_BALANCING_BIASES_FILE,
     TRAINING_PROVENANCE_FILE,
 )
+from halo.checkpoint.hub_layout import CheckpointNamespace
 from halo.checkpoint.reading import (
     checkpoint_shard_files,
     detect_model_type,
@@ -49,12 +52,13 @@ from halo.checkpoint.tools.offline_export import (
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter
-from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
+from halo.model_loading.checkpoint_keys import build_key_plan
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, instantiate_on_meta
 from halo.model_loading.model_preparation import resolve_auto_model_class, resolve_build_config
 from halo.model_loading.tokenizer_setup import load_processing_class
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX, plain_module_name
+from halo.models.moe.balancing import BALANCING_BIASES_ATTR
 from halo.models.moe.expert_layout import (
     SEPARATE_GLU_PROJECTIONS,
     SEPARATE_MLP_PROJECTIONS,
@@ -232,8 +236,9 @@ def _linear_folds(config: dict, module: str, adapter: _LinearAdapter) -> dict[st
     return folds
 
 
-def _replacement(saved: torch.Tensor) -> Fold:
-    return lambda base: saved.to(base.dtype)
+def _replacement(saved: torch.Tensor, dtype: torch.dtype | None = None) -> Fold:
+    """``saved`` in place of the base's tensor, at ``dtype``, else at the base's."""
+    return lambda base: saved.to(dtype or base.dtype)
 
 
 @dataclass
@@ -326,32 +331,34 @@ def _base_tensor_shapes(base_dir: str) -> dict[str, tuple[int, ...]]:
 
 
 def _expert_layers(
-    experts: dict[str, dict[str, dict[str, torch.Tensor]]], config: dict, base_dir: str
+    experts: dict[str, dict[str, dict[str, torch.Tensor]]], config: dict, spec: MoEFamilySpec | None, base_dir: str
 ) -> dict[str, _ExpertLayer]:
     """The expert layers by the hub keys they rewrite, under the base's family layout."""
     if not experts:
         return {}
-    model_type = detect_model_type(base_dir)
-    spec = find_moe_family_spec(model_type)
     if spec is None:
         raise ValueError(
-            f"The base at {base_dir} is model_type {model_type!r}, which no MoE family spec claims, so there is no "
-            f"expert layout to fold its expert adapters through. Supported: {', '.join(sorted(moe_model_types()))}."
+            f"The base at {base_dir} is model_type {detect_model_type(base_dir)!r}, which no MoE family spec claims, so "
+            f"there is no expert layout to fold its expert adapters through. Supported: "
+            f"{', '.join(sorted(moe_model_types()))}."
         )
     scaling = _expert_spec(config).scaling
     return {name: _ExpertLayer(name, spec, scaling, attrs) for name, attrs in experts.items()}
 
 
 def _stored_keys_by_live_name(
-    base_dir: str, base_keys: Iterable[str], trust_remote_code: bool, remedy: str
+    base_dir: str, base_keys: Collection[str], required: Collection[str], trust_remote_code: bool, remedy: str
 ) -> dict[str, str]:
     """Each tensor name of the base's module tree → the key ``base_dir`` stores it under, planned as ``from_pretrained``
     renames the checkpoint onto the config's widest class, built without weights. A name the load fuses or splits out
     of other keys, or that no stored key supplies, has no entry. Raises for a remote-code config (an ``auto_map``)
-    under ``trust_remote_code=False``, and, naming ``remedy``, for a class the meta device cannot build."""
+    under ``trust_remote_code=False``. A class the meta device cannot build maps every stored key to itself when the
+    base stores each ``required`` name verbatim, and raises naming ``remedy`` otherwise."""
     try:
         config = resolve_build_config(base_dir, revision=None, trust_remote_code=trust_remote_code)
-    except ValueError as e:
+    except (ValueError, StrictDataclassError) as e:
+        # Untrusted, a registered model_type reads an auto_map config through transformers' own class, whose strict
+        # dataclass may refuse a field the remote class types otherwise.
         if trust_remote_code or "auto_map" not in (read_checkpoint_config(base_dir, missing_ok=True) or {}):
             raise
         raise ValueError(
@@ -363,17 +370,69 @@ def _stored_keys_by_live_name(
             base_dir, resolve_auto_model_class(config), config, trust_remote_code=trust_remote_code, config_only=True
         )
     except MetaShellBuildError as e:
-        raise ValueError(
-            f"{e} The streaming merge reads the base's module names off this shell to find the key each adapter "
-            f"target is stored under; {remedy}."
-        ) from e
-    plan = build_key_plan(
-        base_keys,
-        shell.state_dict(),
-        resolve_model_conversions(shell, add_legacy=True),
-        getattr(shell, "base_model_prefix", None) or None,
-    )
+        if not set(required) <= set(base_keys):
+            raise ValueError(
+                f"{e} The streaming merge reads the base's module names off this shell to find the key each adapter "
+                f"target is stored under; {remedy}."
+            ) from e
+        logger.warning(f"{e} The base stores every tensor the adapter rewrites under its module path; folding there.")
+        return {key: key for key in base_keys}
+    namespace = CheckpointNamespace.of(shell)
+    plan = build_key_plan(base_keys, shell.state_dict(), namespace.conversions, namespace.base_model_prefix)
     return plan.live_renames()
+
+
+def _read_balancing_sidecar(adapter_dir: str) -> dict[str, torch.Tensor]:
+    path = os.path.join(adapter_dir, ROUTER_BALANCING_BIASES_FILE)
+    if not os.path.isfile(path):
+        return {}
+    return torch.load(path, map_location="cpu", weights_only=True)
+
+
+def _balancing_folds(
+    sidecar: dict[str, torch.Tensor],
+    spec: MoEFamilySpec | None,
+    stored: dict[str, str],
+    base_shapes: dict[str, tuple[int, ...]],
+    remedy: str,
+) -> dict[str, Fold]:
+    """``{stored key: fold}`` writing each router's trained balancing bias into its native slot at fp32, the in-memory
+    merge's ``apply_training_sidecars``. A router with no slot in the base trained a transient bias no checkpoint
+    carries, skipped with a warning as that merge does. Raises for a module the base lacks, a reshaped bias, and a
+    config-gated slot the base lacks, which only a merge that rewrites the config adds."""
+    slot = spec.balancing_slot if spec is not None else None
+    attrs = (BALANCING_BIASES_ATTR, *(slot.attrs if slot is not None else ()))
+    folds: dict[str, Fold] = {}
+    transient = []
+    for name, bias in sidecar.items():
+        module = plain_module_name(name)
+        key = next((stored[f"{module}.{attr}"] for attr in attrs if f"{module}.{attr}" in stored), None)
+        if key is None:
+            if not any(live.startswith(f"{module}.") for live in stored):
+                raise ValueError(
+                    f"{ROUTER_BALANCING_BIASES_FILE} names module {name!r}, which the base holds no tensor under: the "
+                    f"sidecar belongs to a different model tree."
+                )
+            if slot is not None and slot.config_flag:
+                raise ValueError(
+                    f"{ROUTER_BALANCING_BIASES_FILE} trained router {module!r}'s balancing bias in the {slot.attrs} "
+                    f"slot, which the base builds only under config {slot.config_flag}: true and the streaming merge "
+                    f"cannot add; {remedy}."
+                )
+            transient.append(module)
+            continue
+        if base_shapes[key] != tuple(bias.shape):
+            raise ValueError(
+                f"{ROUTER_BALANCING_BIASES_FILE} entry {name!r} has shape {tuple(bias.shape)} but the base stores its "
+                f"balancing slot {key} at {base_shapes[key]}: the sidecar belongs to another expert count."
+            )
+        folds[key] = _replacement(bias, torch.float32)
+    if transient:
+        logger.warning(
+            f"{len(transient)} router(s) trained a transient balancing bias the base has no checkpoint slot for, so the "
+            f"merged model routes without it (near-tied top-k picks flip against training): {transient[:4]}"
+        )
+    return folds
 
 
 def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code: bool) -> _MergePlan:
@@ -388,12 +447,18 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
     for module, adapter in linear.items():
         by_live_name.update(_linear_folds(config, module, adapter))
     by_live_name.update({name: _replacement(saved) for name, saved in replacements.items()})
-    layers = _expert_layers(experts, config, base_dir)
+    spec = find_moe_family_spec(detect_model_type(base_dir))
+    layers = _expert_layers(experts, config, spec, base_dir)
     by_key = {key: layer for layer in layers.values() for key in layer.hub_shapes}
+    sidecar = _read_balancing_sidecar(adapter_dir)
 
     base_shapes = _base_tensor_shapes(base_dir)
     remedy = _unmergeable_remedy(bool(experts))
-    stored = _stored_keys_by_live_name(base_dir, base_shapes, trust_remote_code, remedy) if by_live_name else {}
+    stored = (
+        _stored_keys_by_live_name(base_dir, base_shapes, by_live_name, trust_remote_code, remedy)
+        if by_live_name or sidecar
+        else {}
+    )
     absent = sorted((set(by_live_name) - set(stored)) | (set(by_key) - set(base_shapes)))
     if absent:
         raise ValueError(
@@ -405,6 +470,7 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
             f"its layer's module path; {remedy}."
         )
     folds = {stored[name]: fold for name, fold in by_live_name.items()}
+    folds.update(_balancing_folds(sidecar, spec, stored, base_shapes, remedy))
     resized = [
         f"{stored[name]}: base {base_shapes[stored[name]]}, adapter {tuple(saved.shape)}"
         for name, saved in replacements.items()

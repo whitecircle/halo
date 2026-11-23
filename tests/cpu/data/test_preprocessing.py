@@ -531,6 +531,31 @@ def test_text_mode_artifact_skips_the_render_check():
     )
 
 
+def test_a_chat_bake_is_held_to_the_turn_terminators_the_run_resolves():
+    """The bake closed its rows' last assistant turns and ended their completion spans at the recorded ids, so a run
+    resolving other ids trains rows its own raw path would have built differently."""
+    baked = _metadata_with_recorded_config()
+    baked.eos_token_ids = [151643, 151645]
+    verify_preprocessed_dataset(baked, required_max_length=4096, required_eos_token_ids=frozenset({151643, 151645}))
+    with pytest.raises(ValueError, match=r"closed against the turn terminators \[151643, 151645\].*\[151645\]"):
+        verify_preprocessed_dataset(baked, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
+
+
+def test_a_chat_bake_predating_the_terminator_record_is_refused_with_the_rebake_remedy():
+    """Such a bake closed no open last turn, so a GLM row ends without the terminator a raw run appends."""
+    payload = asdict(_metadata_with_recorded_config())
+    del payload["eos_token_ids"]
+    legacy = PreprocessedDatasetMetadata.from_dict(payload)
+    with pytest.raises(IncompatiblePreprocessedDataset, match="eos_token_ids.*prepare_dataset.py"):
+        verify_preprocessed_dataset(legacy, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
+
+
+def test_a_text_bake_closes_no_turn_and_is_held_to_no_terminators():
+    text = _metadata_with_recorded_config(mode="text")
+    assert text.eos_token_ids is None
+    verify_preprocessed_dataset(text, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
+
+
 def test_legacy_metadata_without_recorded_render_knobs_warns_not_raises(caplog):
     metadata = PreprocessedDatasetMetadata(max_length=4096, config={})
     with caplog.at_level(logging.WARNING):

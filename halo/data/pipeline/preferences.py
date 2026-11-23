@@ -7,6 +7,7 @@ from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
+from halo.data.chat_render import render_chat_template
 from halo.data.conversation import as_conversation, chat_template_kwargs, reject_image_content
 from halo.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_map
 from halo.data.pipeline.prompt_completion import (
@@ -191,7 +192,7 @@ def render_preference_row(
         row, interleaved_thinking=False, tools_field=tools_field, reasoning_effort_field=reasoning_effort_field
     )
     row["prompt"], (row["chosen"], row["rejected"]) = render_prompt_completions(
-        partial(tokenizer.apply_chat_template, tokenize=False, **template_kwargs),
+        partial(render_chat_template, tokenizer, **template_kwargs),
         row["prompt"],
         [(field, row[field]) for field in ("chosen", "rejected")],
     )

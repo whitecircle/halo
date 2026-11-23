@@ -443,6 +443,7 @@ def test_chat_text_rows_are_length_filtered_on_the_ids_they_train_on():
         args,
         training_config,
         model_config=None,
+        generation_config=None,
         desc="Processing dataset",
     )
 

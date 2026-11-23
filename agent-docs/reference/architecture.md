@@ -38,7 +38,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | Leaf | Holds |
 |---|---|
 | `halo/data/turn_markers.py` | what delimits an assistant turn: the response marker, the terminator set, and the construction-time marker refusals |
-| `halo/data/completion_spans.py` | the named span policies, the span search, the one span-to-labels rule (`build_span_labels`) and the completion-only label builders over it |
+| `halo/data/completion_spans.py` | the named span policies, the span search, its bounds (`resolve_span_bounds`: the next turn of another role, and the restart after a block the template injects into the model's turn), the one span-to-labels rule (`build_span_labels`) and the completion-only label builders over it |
 | `halo/models/introspection/unwrapping.py` | wrapper peeling (framework, toolkit, PEFT) and the plain hub spelling of a name read off a wrapped tree |
 | `halo/models/introspection/module_tree.py` | module-tree lookups: the decoder-layer list and the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding, the embedding modules, module paths by identity, the attribute probe |
 | `halo/models/introspection/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins |

@@ -131,8 +131,10 @@ Two safe setups:
 Rows train on the engine's prompt ids, so a mismatch shows in no loss. The startup probe asks each server for its render
 of a no-tool prompt under two of the run's contracts: a server whose prompt does not move with the level, where the
 trainer's does, is refused, as the reasoning terms would charge for a contract the model never read. Any other
-difference warns with the first differing token, since an engine also derives a thinking toggle the trainer's render
-lacks; with [thinking off](reasoning.md#thinking-off) the request carries that toggle, so it refuses.
+difference in the first contract warns with the first differing token, since an engine also derives a thinking toggle
+the trainer's render lacks. With [thinking off](reasoning.md#thinking-off) the request carries that toggle, so a
+difference at any probed level refuses, as does a reply without prompt ids. A trainer template that cannot render the
+probe skips it with a warning.
 
 A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
 it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths

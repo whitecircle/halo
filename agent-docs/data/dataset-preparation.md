@@ -40,6 +40,13 @@ training applies `chat_template` over a shipped one only with `force_chat_templa
 one without it, so a `--chat_template` bake trains with the same `chat_template` plus that flag. A stamp without `rendered_chat_template` is held to its
 recorded `--chat_template` outside `--is_vlm`, and to nothing otherwise.
 
+A chat or `--is_vlm` bake also records the turn terminators it closed each row's last assistant turn and
+ended its completion spans against (`eos_token_ids` in `metadata.json`, the set `resolve_label_eos_token_ids`
+resolves). SFT refuses such a bake when the run's own set (`resolve_eos_token_ids` over its tokenizer, model config
+and generation config) differs, and as `IncompatiblePreprocessedDataset` when it records none: such a bake has no
+set to check, and on a template that leaves the last turn open (GLM's) its rows may end where a raw run's would not. Either way,
+re-run `prepare_dataset.py` with the run's model and `eos_token`.
+
 The checked set is every `PreprocessingConfig` field outside `_UNCOMPARED_FIELDS`, so a new knob is
 compared by default, and a knob the metadata does not record warns instead. `--mode text`
 artifacts render no template and skip the render check entirely. A training config setting
@@ -68,9 +75,9 @@ dataset that trains zero tokens.
 
 The same two values are also a **training** config field, `tokenizer_backend` (default `hf`). It resolves in `configure_run_tokenizer`, so every training method that tokenizes rows honors it with no preparation pass; embedding training rejects a non-`hf` value, since SentenceTransformer owns its own tokenization.
 
-With `--train_on_completions_only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start.
+With `--train_on_completions_only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start and the next turn of another role, and a span restarting after a block the template writes into the model's own turn (Gemma 4's tool reply, [Collators](collators.md#eos-pad-and-the-response-template)).
 
-That is `PADDED_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack_sequences`, where a turn with no terminator anywhere ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
+That is `PADDED_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack_sequences`, where a turn with no terminator anywhere, and no other role's turn after it, ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
 
 Baked labels are authoritative at training time. The SFT script disables runtime completion re-masking for preprocessed data: a re-mask would overwrite them, e.g. re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
 
@@ -149,7 +156,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 |-----------|---------|-------------|
 | `--input` | *required* | Input: S3 URI, Hub ID, or local path |
 | `--output` | *required* | Output: S3 URI, `hf://org/name`, or local path |
-| `--model_name_or_path` | *required* | Model name/path for the tokenizer; a chat or VLM bake also reads its `config.json` for the turn-terminator ids, which close a row's last assistant turn ([Collators](collators.md#eos-pad-and-the-response-template)) and end each completion span, so it must be the model checkpoint, not a bare tokenizer |
+| `--model_name_or_path` | *required* | Model name/path for the tokenizer; a chat or VLM bake also reads its `config.json` and `generation_config.json` for the turn-terminator ids, which close a row's last assistant turn ([Collators](collators.md#eos-pad-and-the-response-template)) and end each completion span, so it must be the model checkpoint, not a bare tokenizer |
 | `--max_length` | `8192` | Maximum sequence length |
 | `--trust_remote_code` / `--no-trust_remote_code` | `False` | Execute the checkpoint's own tokenizer/processor and config code when loading them — off, since `--model_name_or_path` may be a Hub repo; pass it for a remote-code family (Bailing/Ling, Laguna) you trust ([Scripts](../reference/scripts-reference.md#input-guards)) |
 | `--mode` | `chat` | `chat` = apply chat template to `--conversation_field` (SFT); `text` = raw-text causal-LM for (continued) pre-training (tokenize `--text_field`, append EOS per document). See [Pre-training](../training-methods/pretraining.md). |

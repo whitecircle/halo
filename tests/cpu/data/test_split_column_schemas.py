@@ -149,6 +149,7 @@ def test_prepare_chat_text_split_takes_a_test_split_lacking_a_train_column():
         args,
         types.SimpleNamespace(max_length=64, dataset_num_proc=None),
         model_config=None,
+        generation_config=None,
         desc=_DESC,
     )
     assert len(train) == 4 and len(test) == 2

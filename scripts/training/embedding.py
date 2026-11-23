@@ -23,6 +23,7 @@ from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.conversation import template_column_kwargs
+from halo.data.render_columns import render_column_checks_across_ranks
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
 from halo.entrypoints.model_setup import load_model_and_tokenizer, plan_row_attention
@@ -444,7 +445,8 @@ def main():
     parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=None)
-    reject_image_columns(ds, "Embedding training")
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "Embedding training")
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
     # Here, ahead of the model load: the trainer would refuse the same run only after it.

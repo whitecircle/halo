@@ -14,7 +14,13 @@ import pyarrow.compute as pc
 from datasets import Dataset, DatasetDict, Features, List, Value
 from transformers import PreTrainedTokenizer
 
-from halo.data.completion_spans import PACKED_SPAN_POLICY, build_span_labels, resolve_spans_or_warn
+from halo.data.completion_spans import (
+    PACKED_SPAN_POLICY,
+    SpanBounds,
+    build_span_labels,
+    resolve_span_bounds,
+    resolve_spans_or_warn,
+)
 from halo.data.conversation import resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import carry_cache_key
@@ -105,6 +111,7 @@ def _trained_tokens(
     eos_token_ids: frozenset[int],
     assistant_message_template: str,
     train_on_last_assistant_only: bool,
+    span_bounds: SpanBounds,
 ) -> list[bool]:
     """Which tokens of a flat example the packing completion collator trains: each span through its closing token, never
     the document's first token."""
@@ -117,6 +124,7 @@ def _trained_tokens(
         response_prompt_template=assistant_message_template,
         tokenizer=tokenizer,
         row_label="tree row",
+        span_bounds=span_bounds,
     )
     trained = [label != LABEL_IGNORE_INDEX for label in build_span_labels(input_ids, input_ids, spans)]
     if trained:
@@ -155,6 +163,7 @@ def build_tree_row_processor(
         eos_token_ids=eos_token_ids,
         assistant_message_template=assistant_message_template,
         train_on_last_assistant_only=train_on_last_assistant_only,
+        span_bounds=resolve_span_bounds(tokenizer, assistant_message_template, eos_token_ids),
     )
 
     def process_batch(batch: dict[str, list]) -> dict[str, list]:

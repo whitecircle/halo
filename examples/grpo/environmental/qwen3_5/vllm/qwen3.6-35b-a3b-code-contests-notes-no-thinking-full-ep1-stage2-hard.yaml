@@ -28,11 +28,14 @@ use_peft: false
 
 # --- Environment ---
 environment_type: codeforces
-max_turns: 18               # the high profile's 3 submissions + 8 test calls, two recoveries and the
-                            # closing turn, with slack for failed calls; an unproductive turn costs a turn, not the episode
+max_turns: 18               # the high profile's 3 submissions + 8 test calls and two recoveries, with slack for failed
+                            # calls and turns of text alone: the last submission or an accepted one ends the episode, a
+                            # turn of text never does, and an unproductive turn within the recovery cap costs a
+                            # turn, not the episode
 environment_kwargs:
-  language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
-                            # cpp at compiled_time_limit_scale x the stated limit
+  language: [python, cpp]   # the model names each program's language; python runs at the stated limit, at least
+                            # timeout_per_test, cpp at compiled_time_limit_scale x the stated limit (timeout_per_test
+                            # where none is stated), both at most max_time_limit (default 15 s)
   notes: {}                  # the notes harness: named sections kept across turns, shown as the last user turn
   compiled_time_limit_scale: 2.0   # a compiled solution's time limit as a multiple of the stated one
   timeout_per_test: 5
@@ -50,15 +53,18 @@ environment_kwargs:
   resubmission_penalty: 0.1  # magnitude, >= 0 — charged per graded submission after the first; half the curriculum's: a turn
                              # of text never ends a notes episode, so a failure ends by spending its submissions or running out
   no_tool_use_penalty: 0.2   # ending with 0 tool calls: below a failed attempt
-  turn_overflow_penalty: 0.35 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns or the output budget spent, or a cut/empty turn it could not retry): above every submission a level has left at its honest price, below one more caught probe
+  turn_overflow_penalty: 0.35 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns or the output budget spent, or a cut/empty turn it could not retry): above every submission a level has left at its honest price,
+                              # below a caught probe (its 0.1 resubmission, the check's 0.2 and the 0.1 submission credit its veto takes)
   length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut or empty (a turn of text alone is working under notes: nudged, never charged)
-  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
+  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that errors or is refused (bad arguments, an unknown tool, a
+                             # spent budget, a mislabelled language, a refused notes write); a program that crashes or
+                             # fails to compile still ran, uncharged
 
 # --- Rewards ---
 # No length terms: without reasoning there is none to price, and the turn and episode caps below bound the visible
 # output. The judge reads the whole episode and vetoes the credit of one that carried its working-out into a
-# program, spent a call on an unfinished draft, or faked, probed or mined the grade; the notes checks (false_record,
-# unexplained_program) are logged, never priced. Its evidence is a line of what the policy did.
+# submitted, engine-cut or post-budget scratchpad program, spent a call on an unfinished draft, or faked,
+# probed or mined the grade; the notes checks (false_record, unexplained_program) are logged, never priced. Its evidence is a line of what the policy did.
 rewards:
   - source: environment
   - source: judge
@@ -67,7 +73,8 @@ rewards:
     view: full
     max_view_chars: 900000     # a whole episode: its messages, calls and tool replies
     max_tokens: 16384          # room for the verdict's own reasoning on the longest episodes
-    request_timeout: 120       # a verdict on a full episode takes ~10 s; with the client's retries it stays inside episode_timeout
+    request_timeout: 120       # a verdict on a full episode takes ~10 s; it is scored inside the episode's episode_timeout,
+                               # where the client's retries can spend up to 5 x 120 s on a judge that hangs
     on_error: invalid          # a verdict the judge never reached leaves the episode out of training: an outage never trains unjudged episodes
     weight: -0.7               # prices each fired weighted check by its share: wasted_run and untested_submission 0.1, hardcoded_output 0.3 and verdict_probe 0.2 beyond their veto; reasoning_in_runs is logged
     context_file: examples/grpo/environmental/code-contests-judge/notes-no-thinking.txt
@@ -114,7 +121,7 @@ max_prompt_length: null
 
 # --- GRPO objective: KL-free, bands as the trust region ---
 num_generations: 12          # 12 prompts x 12: on a frontier pool a problem solved once in twelve still yields a contrast
-use_chunked_grpo_logprobs: true # required for Qwen3.6 (~248k vocab)
+use_chunked_grpo_logprobs: true # required by packed_microbatch_tokens; full logits over Qwen3.6's ~248k vocab OOM anyway
 max_train_row_tokens: 64000   # a training rank's memory bound (a B300 rank peaks near 250 GB here); a longer row leaves the batch
 loss_type: dapo
 beta: 0.0                   # KL-free: the IS bands below are the trust region

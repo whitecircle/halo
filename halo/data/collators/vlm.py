@@ -12,6 +12,7 @@ from halo.data.completion_spans import (
     PADDED_SPAN_POLICY,
     build_training_labels,
     reject_untrainable_completions,
+    resolve_span_bounds,
 )
 from halo.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import (
@@ -62,6 +63,7 @@ class VLMDataCollator:
         train_on_completions_only: bool,
         response_prompt_template=None,
         model_config=None,
+        generation_config=None,
     ):
         reject_missing_response_marker(response_prompt_template, train_on_completions_only, type(self).__name__)
         self.processor = processor
@@ -69,7 +71,12 @@ class VLMDataCollator:
         self.max_length = max_length
         self.response_prompt_template = response_prompt_template
         self.train_on_completions_only = train_on_completions_only
-        self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
+        self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config, generation_config)
+        self.span_bounds = (
+            resolve_span_bounds(tokenizer, response_prompt_template, self.eos_token_ids, template_owner=processor)
+            if train_on_completions_only
+            else None
+        )
         # At construction: the union reads the full vocab dict, too costly per batch for a verdict that cannot change.
         self.image_token_ids = tuple(resolve_image_token_ids(tokenizer, processor))
         # The processor marks no suffix in a rendered conversation (all 0: one bidirectional prefix).
@@ -141,6 +148,7 @@ class VLMDataCollator:
             attention_mask=attention_mask,
             eos_token_ids=self.eos_token_ids,
             span_policy=self._COMPLETION_SPAN_POLICY,
+            span_bounds=self.span_bounds,
         )
 
 
