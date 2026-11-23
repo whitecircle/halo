@@ -22,7 +22,7 @@ from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.adapters import check_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
-from tests.common.distributed import ensure_model_downloaded, shared_output_dir, world_mean
+from tests.common.distributed import ensure_model_downloaded, shared_output_dir, world_any, world_mean
 from tests.common.ep_reference import ep_layers
 from tests.common.memory import cleanup_memory
 from tests.common.on_policy_e2e import (
@@ -484,23 +484,30 @@ def _unchunked_opd_scores(trainer, teacher_hidden, head, student, positions):
     return token_divergence(trainer.sdpg_loss_fn, head.project(student), teacher, trainer.sdpg.sdpg_temperature)
 
 
-class _FirstStepOPD:
-    """Wraps SDPG's ``_compute_loss``: on the first batch it first runs two no-grad references, recording each
-    ``opd_loss`` in place of storing it: the chunked scorer with the term projected unchunked (``same_forward``), and
-    TRL's full-logits path (``full_logits``). Collective, so every rank runs them."""
+class _FirstGatedStepOPD:
+    """Wraps SDPG's ``_compute_loss``: until a batch's OPD term is non-zero on some rank, each batch first runs two
+    no-grad references, recording each ``opd_loss`` in place of storing it: the chunked scorer with the term projected
+    unchunked (``same_forward``), and TRL's full-logits path (``full_logits``). A batch of tied groups gates the term
+    off on every row, so the first batch can carry none. Collective, so every rank runs them."""
 
-    def __init__(self, trainer):
+    def __init__(self, trainer, device):
         self.trainer = trainer
+        self.device = device
         self.compute_loss = trainer._compute_loss
-        self.references: dict[str, float] = {}
+        self.steps_seen = 0
+        self.step: int | None = None
+        self.references: dict[str, float] = {"same_forward": 0.0, "full_logits": 0.0}
 
     def __call__(self, model, inputs):
-        if not self.references:
-            self.references = {
+        if self.step is None:
+            references = {
                 "same_forward": self._reference(model, inputs, chunked=True),
                 "full_logits": self._reference(model, inputs, chunked=False),
             }
+            if world_any(references["full_logits"] > 0, self.device):
+                self.step, self.references = self.steps_seen, references
             torch.manual_seed(0)
+        self.steps_seen += 1
         return self.compute_loss(model, inputs)
 
     def _reference(self, model, inputs, *, chunked: bool) -> float:
@@ -586,9 +593,9 @@ def run_online_grpo_e2e(
 
     trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0, maxrl=maxrl, chunked=chunked)
     ctx.on_teardown(lambda: _release(trainer))
-    first_step = None
+    gated_step = None
     if chunked and trainer_kind == "sdpg":
-        first_step = trainer._compute_loss = _FirstStepOPD(trainer)
+        gated_step = trainer._compute_loss = _FirstGatedStepOPD(trainer, ctx.device)
     record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
     adapters_before, base_before = {}, {}
@@ -634,15 +641,18 @@ def run_online_grpo_e2e(
 
     if trainer_kind == "sdpg":
         _sdpg_checks(trainer, checks)
-    if first_step is not None:
-        chunked_opd = next((float(e["opd_loss"]) for e in trainer.state.log_history if "opd_beta" in e), None)
+    if gated_step is not None:
+        # One loss call per logged step: ``gradient_accumulation_steps`` and ``logging_steps`` are both 1.
+        logged = [float(e["opd_loss"]) for e in trainer.state.log_history if "opd_beta" in e]
+        step = gated_step.step
+        chunked_opd = logged[step] if step is not None and step < len(logged) else None
         for name, rtol in (("same_forward", SAME_FORWARD_OPD_RTOL), ("full_logits", FULL_LOGITS_OPD_RTOL)):
             # The logged metric is the world mean of each rank's value, so the reference is reduced the same way.
-            reference = world_mean(first_step.references[name], ctx.device)
-            checks[f"sdpg_step0_opd_matches_{name}"] = (
+            reference = world_mean(gated_step.references[name], ctx.device)
+            checks[f"sdpg_gated_step_opd_matches_{name}"] = (
                 chunked_opd is not None and reference > 0 and abs(chunked_opd - reference) <= rtol * reference
             )
-            log(f"  step-0 opd_loss: chunked {chunked_opd!r}, {name} {reference!r}")
+            log(f"  step-{step} opd_loss: chunked {chunked_opd!r}, {name} {reference!r}")
     if spec.beta:
         _kl_checks(trainer, checks)
 

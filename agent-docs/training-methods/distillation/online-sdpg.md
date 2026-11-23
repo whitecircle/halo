@@ -49,7 +49,7 @@ trainer = DistributedSDPGTrainer(
 
 ## Testing a setup
 
-Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_divergences.py -m cpu` and, end to end, by the dense and MoE `--trainer sdpg` rows of `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py`, whose `--chunked` rows also check the first step's `opd_loss` against the same forward with the term projected unchunked and against the full-logits path.
+Run a three-step smoke against a live server before the real run: take one of the smoke configs under `examples/grpo/online/` and add `--use_sdpg=true`. The term is covered by `pytest tests/cpu/trainers/test_sdpg_trainer.py tests/cpu/trainers/test_distillation_divergences.py -m cpu` and, end to end, by the dense and MoE `--trainer sdpg` rows of `tests/gpu/trainers/grpo/test_online_grpo_vllm_e2e.py`, whose `--chunked` rows also check the `opd_loss` of the first step whose OPD term is non-zero against the same forward with the term projected unchunked and against the full-logits path.
 
 ## What to watch
 

@@ -41,8 +41,8 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     ``scale_rewards: none`` on a non-negative reward, and checks ``sampling/maxrl_zero_mean_group_frac`` is logged
     beside finite losses
     ``--chunked`` (``--trainer sdpg``, no resume) runs ``use_chunked_grpo_logprobs``, the OPD term included, and checks
-    the first step's ``opd_loss`` on the same batch against the same forward with the term projected unchunked, and
-    against the full-logits path
+    the ``opd_loss`` of the first step whose OPD term is non-zero on the same batch against the same forward with the
+    term projected unchunked, and against the full-logits path
 
 Each row also reads its layout's data-parallel half off the trained policy (``record_dp_layout``): FULL_SHARD
 resharding after a forward, where ep1 experts live, the HSDP mesh, the EP groups' expert replicas in step.
@@ -89,7 +89,7 @@ parser.add_argument("--servers", type=int, default=1, help="environmental: the W
 parser.add_argument("--prefetch-depth", type=int, default=None, help="environmental: prefetch at this depth")
 parser.add_argument("--maxrl", action="store_true", help="online / environmental: train with use_maxrl")
 parser.add_argument(
-    "--chunked", action="store_true", help="sdpg: use_chunked_grpo_logprobs, the first step's OPD against full logits"
+    "--chunked", action="store_true", help="sdpg: use_chunked_grpo_logprobs, the first non-zero OPD step against full logits"
 )
 ARGS = parser.parse_args()
 POLICY = MODES[ARGS.mode].family
