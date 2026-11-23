@@ -118,7 +118,7 @@ def _reads_reasoning(model):
     tok = _load(model)
     if tok is None:
         return False
-    for key in (*REASONING_KEYS, "reasoning"):
+    for key in (*SPELLINGS, "reasoning"):
         rendered = _render(tok, _single_key(key))
         if rendered is not None and COT in rendered:
             return True

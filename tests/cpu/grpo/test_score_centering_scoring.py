@@ -47,9 +47,13 @@ def _batch():
 def test_candidates_are_scored_beside_the_sampled_token_on_every_row_path(attn_impl, batch_size):
     input_ids, attention_mask, candidates, ltk = _batch()
     harness = EmbeddingBackboneHarness(attn_impl)
-    plain, plain_entropy = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, batch_size, True)
+    plain, plain_entropy, _ = harness._chunked_logps_impl(
+        harness.model, input_ids, attention_mask, ltk, batch_size, True
+    )
     with harness._scoring_with_candidates(candidates):
-        logps, entropy = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, batch_size, True)
+        logps, entropy, _ = harness._chunked_logps_impl(
+            harness.model, input_ids, attention_mask, ltk, batch_size, True
+        )
     assert logps.shape == (2, ltk, 1 + CANDIDATES) and entropy.shape == (2, ltk)
 
     real = torch.tensor([[1, 1, 1, 1], [1, 1, 0, 0]], dtype=torch.bool)
@@ -71,7 +75,7 @@ def test_the_gradient_reaches_the_head_and_the_backbone_through_the_candidates()
     input_ids, attention_mask, candidates, ltk = _batch()
     harness = EmbeddingBackboneHarness("sdpa")
     with harness._scoring_with_candidates(candidates):
-        logps, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+        logps, _, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
     logps[..., 1:][candidates >= 0].sum().backward()
     assert harness.model.lm_head.weight.grad.abs().sum() > 0 and harness.embed.weight.grad.abs().sum() > 0
 
@@ -87,7 +91,7 @@ def test_misaligned_candidates_are_refused_naming_both_shapes():
 def test_scoring_without_candidates_is_the_sampled_token_alone():
     input_ids, attention_mask, _, ltk = _batch()
     harness = EmbeddingBackboneHarness("sdpa")
-    logps, entropy = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, True)
+    logps, entropy, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, True)
     assert logps.shape == entropy.shape == (2, ltk)
 
 

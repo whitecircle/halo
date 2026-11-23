@@ -282,8 +282,8 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   routed only to servers that hold the version it leased: one that lacks it is skipped, and one that answers "not
   loaded" is excluded for that version and the episode replayed on another. If the restarted server launched with the
   trainer's base (its `/server_info` `served_model_name` equals the `model_name` its requests name, and its `model_path`
-  names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache, or the same
-  real path; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
+  names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache at the commit
+  the trainer loaded, or the same real path; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
   at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
   the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
   would wait out the broadcast deadline). The old client is dropped without a destroy, probe or request to the vanished

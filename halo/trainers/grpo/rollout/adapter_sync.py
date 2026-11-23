@@ -21,7 +21,7 @@ from transformers.core_model_loading import rename_source_key
 from halo.checkpoint.hub_layout import export_conversions, reversed_export_transforms
 from halo.checkpoint.parallel.adapters import gather_adapter_state
 from halo.checkpoint.reading import find_hub_snapshot
-from halo.checkpoint.weights_source import weights_read_from
+from halo.checkpoint.weights_source import weights_read_at, weights_read_from
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
@@ -81,13 +81,14 @@ class BasePlan(NamedTuple):
 
 def resolve_launch_base(model: torch.nn.Module, async_config: AsyncRolloutConfig) -> ServedBase | None:
     """The base the trainer's frozen weights are, spelled as an engine launched with them reports it: a hub id is
-    resolved to its snapshot directory through the cache the trainer loaded from. ``None`` where they are not a
-    checkpoint an engine could have launched with (a from-scratch init, a grown vocabulary, a hub id the cache lacks)."""
+    resolved to the snapshot of the commit the trainer read, through the cache it loaded from. ``None`` where they are
+    not a checkpoint an engine could have launched with (a from-scratch init, a grown vocabulary, a hub id the cache
+    lacks)."""
     live = unwrap_framework_wrappers(model)
     path = weights_read_from(live)
     if path is None or vocabulary_grown(live):
         return None
-    revision = getattr(getattr(live, "config", None), "_commit_hash", None)
+    revision = weights_read_at(live)
     if not os.path.isdir(path):
         try:
             path = snapshot_download(path, revision=revision, local_files_only=True)
