@@ -81,6 +81,15 @@ The flag works on `halo launch` and `halo run`. It sets `HALO_SANDBOX_BACKEND=mo
 
 On a shared Ray cluster (`ray_address`) the two variables travel to the actors with the job. Credentials do not: put Modal's on every cluster node.
 
+**Credentials in Docker**
+
+Modal reads `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and `~/.modal.toml` when a variable is not set. A container gets them one of two ways:
+
+- Set both variables in `.env`, which the standard launch passes with `--env-file`.
+- Mount the file at the container user's home: `-v ~/.modal.toml:/root/.modal.toml:ro`. The standard launch and the `make` targets do not mount it.
+
+A variable set to an empty value (`MODAL_TOKEN_ID=` in `.env`) takes precedence over the file, and authentication fails. Leave the two lines commented out, as in `.env.example`, to use the file.
+
 **How it runs**
 
 - Each executor (one per environment actor) keeps one sandbox, created on first use.
@@ -149,7 +158,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 - `run()` is a throwaway session: it creates and deletes a sandbox per call.
 - A sandbox answers its first call about 4 s after the session's first use; a later call adds about 0.3 s to the program's own time.
 - Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
-- The Python REPL tools stay in process: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox.
+- The Python REPL tools (`native_coding`, `native_math`, `native_combined`, ReAct `python`) do not run on Baseten: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox, so they run in the environment's process on the training host. Set `HALO_SANDBOX_REPL=1` to run them on Baseten.
 - The API key only mints a 2-hour sandbox access token, renewed after 90 minutes. Sandbox calls carry the token; the key is never logged.
 
 **Sandbox limit**
@@ -195,6 +204,7 @@ A Baseten sandbox keeps its outbound network, so a program can fetch from the in
 | A connection error, 429 or 5xx on a call that runs no program | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
 | 429 or 5xx on the call that runs the program | `error`; the call is not sent again, so a program never runs twice |
 | The service does not answer within the deadline (run timeout + compile timeout + 30 s + `request_overhead`) | `error`; the call is not sent again, so a program never runs twice |
+| A success answer whose body is not the JSON object the API documents | `error`; a sandbox the call created or ran in is deleted |
 | Baseten deleted the sandbox (`idle_ttl`, default 10 minutes idle) | `error` once; the next call creates a new sandbox. A session that only ran programs continues empty; one that had written a file with `write_file` raises `SandboxInfraError` on every later call |
 
 File calls raise `SandboxInfraError` where `run` returns `error`. After an `error` the sandbox is deleted and the next call creates a new one.
@@ -246,9 +256,11 @@ with sandbox.open_session() as session:
 env = SweEnvironment(sandbox=build_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
 ```
 
+When a `swe` or `code_contests` environment closes, it calls `close()` on an executor it built from `environment_kwargs`, which ends a hosted backend's sandboxes. One passed as `sandbox=` stays open for its other users: call its `close()` yourself.
+
 ### Session paths
 
-- A path that leaves the working directory by name (empty, `..`, absolute) or that UTF-8 cannot encode is refused as a bad argument (`ValueError`, `SandboxSession.reject_unsafe_path`). One that is a link, resolves outside through one, or names a FIFO or device is refused on write (`SessionPathError`); `read_file` returns `None` for anything but a regular file.
+- A path that leaves the working directory by name (empty, `..`, absolute), that UTF-8 cannot encode, or that holds a NUL character is refused as a bad argument (`ValueError`, `SandboxSession.reject_unsafe_path`). A `files=` name of that kind makes `run` return an `error` before any program starts. One that is a link, resolves outside through one, or names a FIFO or device is refused on write (`SessionPathError`); `read_file` returns `None` for anything but a regular file.
 - A program that swaps a prepared file for a link gets its own runtime error (`working directory tampered`). A removed working directory is recreated empty.
 - A working directory replaced with a link or a file breaks the session: later runs report `agent_fault` ([Reading a result](#reading-a-result)), file operations raise `SandboxAgentFault`. On `local` another episode's program can cause this.
 
