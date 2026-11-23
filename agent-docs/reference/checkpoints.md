@@ -479,8 +479,9 @@ branch. Resume reads the adapter file present on **every** rank (safetensors or 
 reading different files would order the per-key DTensor loads differently.
 
 A GptOss run also writes `training_provenance.json` (`write_training_provenance`,
-`halo/checkpoint/sidecars.py`) recording whether attention sinks were live or neutralized. The export tools
-re-apply it through `apply_training_sidecars`, because a merge rebuilds the base from the hub, whose sinks
+`halo/checkpoint/sidecars.py`) recording whether attention sinks were live or neutralized, beside a PEFT adapter
+and beside an expert-only one. The export tools re-apply it through `apply_training_sidecars`, and the streaming
+merge by writing the sinks at their dtype minimum, because a merge rebuilds the base from the hub, whose sinks
 are always live. It is a separate sidecar, so stock PEFT keeps loading the adapter unchanged.
 
 ### Merge-on-save checkpoints

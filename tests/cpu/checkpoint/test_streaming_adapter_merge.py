@@ -24,7 +24,7 @@ from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
 from halo.checkpoint.tools.adapter_stream_merge import _FUSED_GATE_UP_KINDS, _required_attrs
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
-from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, is_sink_key, neutralized_sink_value
 from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import safetensors_state_dict, save_context
@@ -137,8 +137,11 @@ def test_a_composite_base_merge_equals_the_in_memory_merge(tmp_path):
     _assert_same_checkpoint(streamed, reference, changed=targets)
 
 
-def _expert_run(tmp_path: Path, family: str, projections) -> tuple[Path, Path, Path]:
-    """``(base, adapter, merged-on-save reference)`` of a tiny EP family with native expert LoRA."""
+def _expert_run(
+    tmp_path: Path, family: str, projections, *, neutralize_sinks: bool = False
+) -> tuple[Path, Path, Path]:
+    """``(base, adapter, merged-on-save reference)`` of a tiny EP family with native expert LoRA. ``neutralize_sinks``
+    applies the policy a ``reset_sinks`` run trains under after the base is saved, so the base keeps live sinks."""
     torch.manual_seed(0)
     rank = EXPERT_LORA_RANK_MULTIPLE
     spec = ExpertLoraSpec(r=rank, alpha=2 * rank, **({} if projections is None else {"projections": projections}))
@@ -150,6 +153,8 @@ def _expert_run(tmp_path: Path, family: str, projections) -> tuple[Path, Path, P
     base, adapter, reference = (tmp_path / name for name in ("base", "adapter", "reference"))
     save_ep_gathered_checkpoint(save_context(model, plain, has_ep_layers=True), str(base))
     model.config._name_or_path = str(base)
+    if neutralize_sinks:
+        apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED)
     save_expert_lora_adapters(save_context(model, plain, has_ep_layers=True, has_expert_lora=True), str(adapter))
     save_ep_gathered_checkpoint(save_context(model, merging, has_ep_layers=True, has_expert_lora=True), str(reference))
     return base, adapter, reference
@@ -254,12 +259,42 @@ def _adapter_recording_sinks(tmp_path: Path, policy: SinksPolicy) -> tuple[Path,
     return adapter, tmp_path / "out"
 
 
-def test_neutralized_sinks_in_the_provenance_refuse_the_merge_before_any_output(tmp_path):
+def test_neutralized_sinks_recorded_for_a_base_without_sinks_refuse_the_merge_before_any_output(tmp_path):
     adapter, out = _adapter_recording_sinks(tmp_path, SinksPolicy.NEUTRALIZED)
 
-    with pytest.raises(ValueError, match="neutralized GptOss attention sinks"):
+    with pytest.raises(ValueError, match="stores no sink tensor"):
         merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
     assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def test_an_expert_only_save_records_the_sink_policy_the_run_trained_under(tmp_path):
+    _base, adapter, _reference = _expert_run(tmp_path, "gpt_oss", None, neutralize_sinks=True)
+
+    recorded = json.loads((adapter / TRAINING_PROVENANCE_FILE).read_text())
+    assert recorded == {PROVENANCE_GPT_OSS_SINKS: SinksPolicy.NEUTRALIZED}
+
+
+def test_an_expert_only_save_without_a_sink_policy_writes_no_provenance(tmp_path):
+    _base, adapter, _reference = _expert_run(tmp_path, "qwen3_moe", None)
+
+    assert not (adapter / TRAINING_PROVENANCE_FILE).exists()
+
+
+def test_a_merge_writes_the_neutralized_sinks_the_run_trained_under(tmp_path):
+    """The base stores live sinks and the merge-on-save of the same run stores neutralized ones, so the streamed merge
+    must write each sink at its dtype minimum to give the trained model."""
+    base, adapter, reference = _expert_run(tmp_path, "gpt_oss", None, neutralize_sinks=True)
+    streamed = tmp_path / "streamed"
+    merge_peft_adapter(str(adapter), str(streamed), verbose=False)
+
+    stored, merged = safetensors_state_dict(base), safetensors_state_dict(streamed)
+    sinks = [key for key in merged if is_sink_key(key)]
+    assert sinks, "premise: the tiny GPT-OSS checkpoint stores sink tensors"
+    for key in sinks:
+        floor = neutralized_sink_value(merged[key].dtype)
+        assert not (stored[key] == floor).all(), f"premise: the base stores {key} live"
+        assert (merged[key] == floor).all(), f"{key} was merged live"
+    _assert_same_checkpoint(streamed, reference)
 
 
 def test_live_sinks_in_the_provenance_do_not_refuse_the_merge(tmp_path):
