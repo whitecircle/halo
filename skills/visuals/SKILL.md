@@ -1,6 +1,6 @@
 ---
-name: socials-posts
-description: Load when making, restyling or reviewing an image, chart or figure for a White Circle social post (X, LinkedIn, Threads), or when asked for the White Circle look on a social graphic. Claude writes the image as an HTML page and renders it to a PNG itself.
+name: visuals
+description: Load when making, restyling or reviewing a figure for a Halo doc page (the HTML figure pages under agent-docs/assets/), or an image, chart or figure for a White Circle social post (X, LinkedIn, Threads), or when asked for the White Circle look on a graphic. Claude writes the image as an HTML page and renders it to a PNG itself.
 ---
 
 # Social graphics
@@ -10,9 +10,9 @@ figure in miniature: a black canvas, a serif title, thin lines, generous space, 
 where it means something. It has to read in a feed at a third of its size, and survive a stranger
 checking its numbers.
 
-The worked example is `benchmark-turnover.html` (rendered as `benchmark-turnover.png`): a heatmap
-of which benchmarks model launches put in their headline tables. Start from it, leaving out its
-logo row, moving its group dots inside the margins, and using the margins and spacing below.
+The worked example is the doc figure `agent-docs/assets/diagrams/pp_bubble.html` (rendered as
+`pp_bubble.png` beside it): two grids of cells under section headings, with a subtitle, a key and
+notes. Start from it, using the margins and spacing below.
 
 ## Authority and how to use this skill
 
@@ -51,7 +51,7 @@ one recommendation and its reason in a sentence or two, then act on it.
   - **Horizontal, 1600×900 CSS px (16:9, a 3200×1800 PNG)**, for content wider than it is tall: a
     line over time, a few rows across many periods, a comparison side by side.
   - **Square, 1200×1200 CSS px (a 2400×2400 PNG)**, for content taller than it is wide: a table of
-    many rows, like the worked example's 17 benchmarks.
+    many rows.
   - A link preview (Open Graph) is 1200×630.
   - **A figure for a doc page has no fixed height.** Its body sets only a width (1600, or 1200 for
     a figure much taller than wide) and the canvas grows as tall as its content, so spacing is
@@ -261,7 +261,10 @@ skill's base directory, the folder this file is in.
 1. Read the source (an image, a table, a draft). Transcribe every value and check the sums.
 2. Write the image as one HTML page at the canvas size, in the user's working folder unless they
    name another, named for its content (`benchmark-turnover.html`). Start from
-   `<skill>/benchmark-turnover.html`. The page links the shared kit by a path relative to the page:
+   `agent-docs/assets/diagrams/pp_bubble.html` in the repo (`<skill>/../../agent-docs/assets/diagrams/`).
+   The page links the shared kit by a path relative to the page, so the example's
+   `../../../skills/visuals/kit/` holds only for a page two folders under `agent-docs/`, and a page
+   elsewhere writes its own relative path to `<skill>/kit/`:
    `<skill>/kit/figure.css` before its own `<style>` (the colour tokens, the fonts, the canvas, title,
    subtitle and notes, and `class="square"` on `body` for the 1200 scale), and `<skill>/kit/figure.js`
    before its own `<script>` (`el`, `svgEl`, `arrow`, `fillValues`, `niceTicks`, `niceAxis`,
