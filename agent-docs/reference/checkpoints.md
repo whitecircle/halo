@@ -114,6 +114,7 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | `optimizer_meta.pt` | Yes | No | Topology fingerprint gating exact resume |
 | `scheduler.pt` | Yes | Yes | LR scheduler state — re-persisted on every mode so resume continues the schedule |
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
+| `moe_expert_token_counts.json` | Yes | Yes | Per-layer, per-expert routed token slots since the run's first step, continued on resume ([Callbacks](../training-methods/callbacks.md#expert-token-counts-over-the-run)) |
 | `reference_logps.pt` | Yes | Yes | Frozen per-split reference scores: DPO/KTO `precompute_ref_log_probs` columns and offline GRPO raw completion-token log-probs. Resume validates token digests, row counts and reference settings before attaching them ([DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run), [Offline GRPO](../training-methods/grpo/offline.md#reference-model)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
 | `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Every async environmental GRPO rank: the layout, the rounds it submitted but had not trained (empty without prefetch or on a TP/ETP follower), submitted again first on a resume under that layout, and the halting counters (zero-gradient, empty-rollout and episode-error rounds, early-stop streaks) ([Multiple servers and prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)) |
@@ -437,6 +438,11 @@ accelerate-managed FSDP (the base Trainer's save owns the flat-param layout) and
 `merge_expert_lora_on_save` (which takes the mode's saver for a merged base). Only adapter weights are
 saved: `adapter_config.json`, `adapter_model.safetensors` (`adapter_model.bin` on a safetensors write
 failure), `tokenizer.*`.
+
+`adapter_config.json` names the base as the run read it: `base_model_name_or_path` and, for a Hub base, `revision`,
+the commit every rank agreed on at load. It is PEFT's own field, so `AutoPeftModel` reads the base there too, and an
+expert-only save writes the same two keys. A local base and an `init_from_scratch` run record no revision. Every tool
+that loads an adapter's base reads it at that commit ([PEFT → Merging adapters](../optimization/peft.md#merging-adapters)).
 
 | Mode | LoRA params | Saving rank | Collective |
 |------|-------------|-------------|:----------:|

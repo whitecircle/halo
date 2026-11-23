@@ -36,7 +36,12 @@ GOLDEN = {
     "PROCESSOR_FILES": ("processor_config.json", "preprocessor_config.json", "video_preprocessor_config.json"),
     "RESUME_ADAPTER_DIR": "resume_adapter",
     "RESUME_ADAPTER_MARKER_FILE": "resume_adapter.json",
-    "UNSUFFIXED_RESUME_ENTRIES": ("trainer_state.json", "resume_adapter", "resume_adapter.json"),
+    "UNSUFFIXED_RESUME_ENTRIES": (
+        "trainer_state.json",
+        "resume_adapter",
+        "resume_adapter.json",
+        "moe_expert_token_counts.json",
+    ),
     "RESUME_SIDECAR_FILES": ("scheduler.pt", "router_balancing_biases.pt", "reference_logps.pt"),
     "RESUME_SIDECAR_PREFIXES": ("rng_state", "prefetch_pending"),
     "WEIGHT_DUMP_DIRS": ("original", "consolidated", "metal"),

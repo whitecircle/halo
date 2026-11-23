@@ -144,6 +144,8 @@ weights:
 - `trainer_state.json` and `scheduler.pt`;
 - `optimizer*` and `rng_state*`, unless the run set `save_only_model: true`;
 - `router_balancing_biases.pt` (bias balancing);
+- `moe_expert_token_counts.json` (MoE runs that log expert load or balance
+  with a bias);
 - `reference_logps.pt` (DPO/KTO `precompute_ref_log_probs`, or offline GRPO full
   fine-tuning at `kl_beta > 0`);
 - `prefetch_pending-*.pt` (async GRPO with prefetch): drawn but untrained
@@ -152,7 +154,9 @@ weights:
   embedding LoRA).
 
 For a LoRA run, upload the adapter directory, or merge it with
-`merge-peft-adapters` for a standalone model. Load an uploaded adapter with
+`merge-peft-adapters` for a standalone model. The adapter records the Hub commit
+of its base, and the merge reads the base at that commit; `--base_revision`
+names it for an adapter that records none. Load an uploaded adapter with
 `PeftModel.from_pretrained`.
 
 The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end. It

@@ -1,6 +1,7 @@
 """On-policy SDPG (arXiv:2606.04036): ``L = L_GRPO + beta(k) * L_OPD``. The same policy, no-grad on a hint revealing
 the gold ``answer``, is the teacher of a reverse KL gated to positive-advantage rollouts. Text-only."""
 
+import functools
 import logging
 
 import torch
@@ -8,10 +9,11 @@ import torch
 from halo.configs.distillation import SDPGArguments
 from halo.data.collators.self_distill import format_field_names, hint_literal_bytes, privileged_hint
 from halo.log import warn_once
+from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.runtime.dtensor import materialize_dtensor
-from halo.trainers.distillation.divergences import pooled_token_mean, projected_token_divergence, token_divergence
+from halo.trainers.distillation.divergences import pooled_token_mean, projected_divergence, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
+from halo.trainers.grpo.logprob_scoring import FULL_LOGITS_BYTES_PER_LOGIT, CompletionTerm, HeadSweep
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rounds.rank_balance import PROMPT_ROWS
 from halo.trainers.loop.evaluation import split_rows_head
@@ -104,6 +106,13 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
                 f"sdpg_beta_base: 0 to drop the term."
             )
 
+    @property
+    def _full_logits_bytes_per_logit(self) -> int:
+        """GRPO's plane and, with the OPD term on, the teacher's in the run's precision."""
+        if self.sdpg.sdpg_beta_base == 0.0:
+            return FULL_LOGITS_BYTES_PER_LOGIT
+        return FULL_LOGITS_BYTES_PER_LOGIT + resolve_training_dtype(self.args).itemsize
+
     def _build_privileged_rows(self, result, inputs):
         if self.sdpg.sdpg_beta_base == 0.0:
             return {}
@@ -155,27 +164,26 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
                 f"buffering, must keep the teacher_prompt_* keys, or set sdpg_beta_base: 0 to drop the term."
             )
 
-        # The GRPO loss forward hands its completion logits back, so the student runs forward and backward once.
-        with self._capturing_completion_logits() as student_logits:
-            loss = super()._compute_loss(model, inputs)
-        completion_ids = inputs["completion_ids"]
-        rows = [part.size(0) for part in student_logits]
-        if sum(rows) != completion_ids.size(0) or any(
-            part.size(1) != completion_ids.size(1) for part in student_logits
-        ):
-            raise RuntimeError(
-                f"The OPD term reads the student's completion logits off the GRPO loss forward, which handed "
-                f"back {[tuple(part.shape[:2]) for part in student_logits]} for a {tuple(completion_ids.shape)} "
-                f"completion batch: TRL's _compute_loss no longer scores the policy through "
-                f"_get_per_token_logps_and_entropies, or an override forwards around it. Keep the loss forward "
-                f"on that scorer, or set sdpg_beta_base: 0 to drop the term."
-            )
-        opd_per_token = self._opd_token_divergence(model, inputs, student_logits)
-
         # The tokens the GRPO loss trains: a tool-output token is attention-valid but never trained.
         gate = positive_advantage_gate(
-            effective_loss_mask(inputs).to(opd_per_token.dtype), inputs["advantages"], self.opd_positive_advantage_only
+            effective_loss_mask(inputs).float(), inputs["advantages"], self.opd_positive_advantage_only
         )
+        prefix = (inputs["teacher_prompt_ids"], inputs["teacher_prompt_mask"])
+        completion = (inputs["completion_ids"], inputs["completion_mask"])
+        teacher_hidden = None
+        if self._use_chunked_grpo_logprobs:
+            unwrapped = self.accelerator.unwrap_model(model)
+            with privileged_teacher_pass(model):
+                teacher_hidden = self._chunked_forward_redirection(
+                    model, unwrapped, self._teacher_hidden_states, unwrapped, *prefix, *completion
+                )
+        # The GRPO loss forward hands the student's completion rows to the term, so the student runs forward and
+        # backward once.
+        term = CompletionTerm(gate, functools.partial(self._opd_scores, teacher_hidden))
+        with self._scoring_with_completion_term(term):
+            loss = super()._compute_loss(model, inputs)
+        opd_per_token = self._opd_token_divergence(model, prefix, completion, term)
+
         # Rows padding an eval split's final round repeat its first rows, so the OPD mean reads the split's own.
         real_rows = self.eval_split_rows(gate.size(0))
         opd = pooled_token_mean(split_rows_head(opd_per_token, real_rows), split_rows_head(gate, real_rows))
@@ -187,51 +195,53 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
             opd = opd / self.current_gradient_accumulation_steps
         return loss + beta * opd
 
-    def _opd_token_divergence(self, model, inputs, student_logits):
-        """``[B, C]`` divergence of each student part from the teacher on the same rows."""
-        rows = [part.size(0) for part in student_logits]
-        loss_fn, temperature = self.sdpg_loss_fn, self.sdpg.sdpg_temperature
-        prefix = (inputs["teacher_prompt_ids"], inputs["teacher_prompt_mask"])
-        completion = (inputs["completion_ids"], inputs["completion_mask"])
-        # The chunked head needs the family's verified head transform, which only the chunked scorer checks at
-        # construction; the full-logits scorer holds the student's [B, C, V] plane anyway.
-        if not self._use_chunked_grpo_logprobs:
-            with privileged_teacher_pass(model):
-                teacher_logits = self._completion_logits(model, *prefix, *completion)
-            return torch.cat(
-                [
-                    token_divergence(loss_fn, student, teacher, temperature)
-                    for student, teacher in zip(student_logits, teacher_logits.split(rows), strict=True)
-                ]
+    def _opd_token_divergence(self, model, prefix, completion, term: CompletionTerm) -> torch.Tensor:
+        """``[B, C]`` divergence of the student from the teacher: the chunked scorer's values, or the full-logits
+        scorer's student logits against the teacher's."""
+        completion_ids = completion[0]
+        parts = term.per_token or term.logits
+        if sum(part.size(0) for part in parts) != completion_ids.size(0) or any(
+            part.size(1) != completion_ids.size(1) for part in parts
+        ):
+            raise RuntimeError(
+                f"The OPD term reads the student's completion rows off the GRPO loss forward, which handed back "
+                f"{[tuple(part.shape[:2]) for part in parts]} for a {tuple(completion_ids.shape)} completion batch: "
+                f"TRL's _compute_loss no longer scores the policy through _get_per_token_logps_and_entropies, or an "
+                f"override forwards around it. Keep the loss forward on that scorer, or set sdpg_beta_base: 0 to drop "
+                f"the term."
             )
-        unwrapped = self.accelerator.unwrap_model(model)
+        if term.per_token:
+            return torch.cat(term.per_token)
         with privileged_teacher_pass(model):
-            teacher_hidden = self._chunked_forward_redirection(
-                model, unwrapped, self._teacher_hidden_states, unwrapped, *prefix, *completion
-            )
-        transform, head = self._head_transform(unwrapped), unwrapped.get_output_embeddings()
-        self._assert_output_embeddings_unadapted(unwrapped, head)
-        # The redirected forward has ended, so under ZeRO-3 the root group is resharded and the module's weight is a
-        # DTensor. The values are gathered once here and held by `project`, which the backward recompute reuses, until
-        # the autograd graph frees it; a plain parameter (ZeRO-2) is used as it is.
-        with torch.no_grad():
-            weight = materialize_dtensor(head.weight).detach()
-            bias = materialize_dtensor(getattr(head, "bias", None))
-
-        def project(hidden: torch.Tensor) -> torch.Tensor:
-            with torch.no_grad():
-                return transform.project(head, hidden, weight=weight, bias=bias)
-
+            teacher_logits = self._completion_logits(model, *prefix, *completion)
+        rows = [part.size(0) for part in term.logits]
         return torch.cat(
             [
-                projected_token_divergence(loss_fn, student, hidden, project, temperature)
-                for student, hidden in zip(student_logits, teacher_hidden.split(rows), strict=True)
+                token_divergence(self.sdpg_loss_fn, student, teacher, self.sdpg.sdpg_temperature)
+                for student, teacher in zip(term.logits, teacher_logits.split(rows), strict=True)
             ]
+        )
+
+    def _opd_scores(
+        self, teacher_hidden: torch.Tensor, head: HeadSweep, student: torch.Tensor, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """The divergence at ``positions`` of the ``[B, C]`` window, both sides projected through the head the GRPO
+        sweep gathered: the student's with a gradient, the teacher's without."""
+        teacher = teacher_hidden.flatten(0, 1).index_select(0, positions)
+        return projected_divergence(
+            self.sdpg_loss_fn,
+            head.project,
+            student,
+            head.project,
+            teacher,
+            self.sdpg.sdpg_temperature,
+            vocab=head.width,
         )
 
     def _teacher_hidden_states(self, unwrapped_model, prefix_ids, prefix_mask, completion_ids, completion_mask):
         """``[B, C, H]`` at the positions predicting the completion, run inside the redirected forward where FSDP2 has
-        gathered the root parameters. The head is applied later, in token chunks, from its gathered values."""
+        gathered the root parameters. The head is applied inside the GRPO loss forward, at the positions the gate
+        keeps."""
         return self._backbone_hidden_state(
             unwrapped_model,
             torch.cat([prefix_ids, completion_ids], dim=1),

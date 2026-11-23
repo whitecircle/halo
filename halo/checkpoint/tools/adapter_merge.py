@@ -7,6 +7,7 @@ import contextlib
 import logging
 import os
 from collections.abc import Callable
+from functools import partial
 from typing import NamedTuple
 
 import torch
@@ -28,6 +29,7 @@ from halo.checkpoint.tools.offline_export import (
     load_task_model,
     preflight_model_load_resources,
     reject_in_place_conversion,
+    resolve_adapter_base_revision,
     save_full_checkpoint,
 )
 from halo.model_loading.tokenizer_setup import (
@@ -184,19 +186,22 @@ def merge_adapter_into_base(
     *,
     load_base_model: Callable[..., PreTrainedModel],
     tool: str,
+    base_revision: str | None = None,
     device_map: str | None = None,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     trust_remote_code: bool = False,
     prepare_for_save: Callable[[PreTrainedModel], None] | None = None,
     verbose: bool = True,
 ) -> PreTrainedModel:
-    """Fold a saved PEFT adapter into its base and write the merged checkpoint. ``load_base_model`` may excuse a
+    """Fold a saved PEFT adapter into its base and write the merged checkpoint. ``load_base_model`` takes the base's
+    path and the Hub revision to read it at (the commit the adapter records, or ``base_revision``), and may excuse a
     missing task head only when ``modules_to_save`` declares one; ``prepare_for_save`` mutates the merged model before
     the save."""
     log = logger.info if verbose else lambda message: None
 
     peft_config = adapter_input_gates(adapter_dir, output_dir)
     base_model_path = peft_config.base_model_name_or_path
+    revision = resolve_adapter_base_revision(base_model_path, peft_config.revision, base_revision)
 
     preflight_model_load_resources(base_model_path, output_dir, tool=tool, device_map=device_map)
 
@@ -204,12 +209,12 @@ def merge_adapter_into_base(
     base = load_base_for_adapter(
         adapter_dir,
         base_model_path,
-        load_base_model,
+        partial(load_base_model, revision=revision),
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
         log=log,
     )
     adapter_processor = load_processing_class(adapter_dir, trust_remote_code=trust_remote_code)
-    base_processor = load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
+    base_processor = load_processing_class(base_model_path, trust_remote_code=trust_remote_code, revision=revision)
     # A text-only merge writes what a text_only_model run exports: no multimodal processor files.
     processing_class = resolve_peft_processing_class(adapter_processor, base_processor, text_only=base.text_only)
     if processing_class is None:
@@ -230,6 +235,7 @@ def merge_adapter_into_base(
         output_dir,
         processing_class=processing_class,
         source_dir=base_model_path,
+        source_revision=revision,
         include_resume_sidecars=False,
         max_shard_size=max_shard_size,
     )
@@ -252,6 +258,7 @@ def load_task_base_model(
     excuse_task_head: bool = False,
     text_only: bool = False,
     trust_remote_code: bool = False,
+    revision: str | None = None,
 ):
     """The base loaded as ``task`` through :func:`load_task_model`'s coverage gate, since a truncated directory would
     random-initialize absent tensors and the merge ship them. A causal-LM base's head is always excused, since its
@@ -259,6 +266,7 @@ def load_task_base_model(
     model_kwargs = {
         "dtype": dtype,
         "trust_remote_code": trust_remote_code,
+        "revision": revision,
     }
     if device_map:
         model_kwargs["device_map"] = device_map
@@ -299,13 +307,15 @@ def merge_peft_adapter(
     trust_remote_code: bool | None = None,
     fp32_norms: bool = False,
     streaming: bool = False,
+    base_revision: str | None = None,
     verbose: bool = True,
 ):
     """Merge a PEFT adapter into its base model and save the result; ``fp32_norms`` writes norm leaves in fp32, and an
-    unset ``trust_remote_code`` follows the base (:func:`adapter_base_trust`). ``streaming``, and any adapter holding
-    native expert LoRA, folds shard by shard with no model loaded (:func:`merge_adapter_streaming`), which keeps the
-    base's stored dtypes and so ignores ``dtype`` and refuses ``device_map``, ``fp32_norms`` and a classification
-    head."""
+    unset ``trust_remote_code`` follows the base (:func:`adapter_base_trust`). A Hub base is read at the commit the
+    adapter records, which ``base_revision`` overrides (:func:`resolve_adapter_base_revision`). ``streaming``, and any
+    adapter holding native expert LoRA, folds shard by shard with no model loaded (:func:`merge_adapter_streaming`),
+    which keeps the base's stored dtypes and so ignores ``dtype`` and refuses ``device_map``, ``fp32_norms`` and a
+    classification head."""
     trust_remote_code = adapter_base_trust(adapter_dir, trust_remote_code)
     if streaming or find_expert_lora_adapter_shape(adapter_dir) is not None:
         reject_in_memory_options(task=task, device_map=device_map, fp32_norms=fp32_norms)
@@ -314,6 +324,7 @@ def merge_peft_adapter(
         merge_adapter_streaming(
             adapter_dir,
             output_dir,
+            base_revision=base_revision,
             max_shard_size=max_shard_size,
             trust_remote_code=trust_remote_code,
             verbose=verbose,
@@ -322,7 +333,9 @@ def merge_peft_adapter(
     if verbose:
         logger.info(f"Task: {task}, dtype: {dtype}")
 
-    def load_base_model(base_model_path: str, *, excuse_task_head: bool, text_only: bool = False):
+    def load_base_model(
+        base_model_path: str, *, excuse_task_head: bool, text_only: bool = False, revision: str | None = None
+    ):
         return load_task_base_model(
             base_model_path,
             task,
@@ -332,6 +345,7 @@ def merge_peft_adapter(
             excuse_task_head=excuse_task_head,
             text_only=text_only,
             trust_remote_code=trust_remote_code,
+            revision=revision,
         )
 
     merged_model = merge_adapter_into_base(
@@ -339,6 +353,7 @@ def merge_peft_adapter(
         output_dir,
         load_base_model=load_base_model,
         tool="merge_peft_adapters",
+        base_revision=base_revision,
         device_map=device_map,
         max_shard_size=max_shard_size,
         trust_remote_code=trust_remote_code,

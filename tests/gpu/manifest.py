@@ -693,6 +693,18 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/cp/test_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), timeout=600
     ),
+    "trainers/sft/test_sft_hybrid_cp.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "cp", "qwen3"),
+        args_matrix=("--batch-size 1", "--batch-size 3 --gc"),
+        timeout=900,
+    ),
+    "parallelism/cp/test_hybrid_cp_sft_equivalence.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "cp", "qwen3"),
+        args_matrix=("--batch-size 1", "--batch-size 1 --gc", "--batch-size 3", "--batch-size 3 --gc"),
+        timeout=900,
+    ),
     "parallelism/cp/test_cp_grpo_scoring.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "cp", "qwen3"), timeout=900
     ),
@@ -1366,6 +1378,27 @@ MANIFEST: dict[str, TestSpec] = {
             ),
         ),
     ),
+    # Every layout whose token count differs: duplicate routing (TP, expert TP), split routing (CP), the stages (PP).
+    "parallelism/test_moe_expert_token_counts.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "moe", "qwen3"),
+        args_matrix=tuple(
+            Row(f"--mode {mode}", nproc=nproc, markers=("gpu", "full", f"{nproc}gpu", *axes, "moe", family))
+            for mode, nproc, axes, family in (
+                ("fsdp", 2, (), "qwen3"),
+                ("tp2", 2, ("tp",), "qwen3"),
+                ("cp2", 2, ("cp",), "qwen3"),
+                ("ep1", 2, ("ep",), "qwen3"),
+                ("ep2", 2, ("ep",), "qwen3"),
+                ("ep2aux", 2, ("ep",), "qwen3"),
+                ("ep2tp2", 2, ("ep", "tp"), "qwen3"),
+                ("ep2cp2", 2, ("ep", "cp"), "qwen3"),
+                ("ep2etp2", 4, ("ep", "etp"), "qwen3"),
+                ("pp2ep2", 4, ("pp", "ep"), "gptoss"),
+            )
+        ),
+        timeout=1200,
+    ),
     # EP+TP needs a single dispatch group: ep4+tp2 on 8 forms two 4-rank groups, which ParallelismConfig rejects.
     # Node-local EP+CP pins ep_size to the 8-GPU domain; Mistral4 runs EP+CP at ep2+cp2 in the merged-resume family
     # rows.
@@ -1710,6 +1743,9 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer online --mode expert_lora_ep2 --resume",
             "--trainer sdpg --mode expert_lora_ep2 --resume",
             "--trainer sdpg --mode full_ep2 --resume",
+            "--trainer sdpg --mode full_ep2 --chunked",
+            "--trainer sdpg --mode lora_ep2 --chunked",
+            "--trainer sdpg --mode lora_etp2 --chunked",
             *(
                 f"--trainer {trainer} --mode {mode}"
                 for mode in ("full_ep1", "full_ep1_unsharded")
@@ -1749,6 +1785,9 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer online --mode full_fsdp_kl",
                     "--trainer online --mode full_fsdp_zero3",
                     "--trainer sdpg --mode full_fsdp_zero3",
+                    "--trainer sdpg --mode full_fsdp_zero3 --chunked",
+                    "--trainer sdpg --mode full_tp2 --chunked",
+                    "--trainer sdpg --mode lora_fsdp --chunked",
                     "--trainer online --mode full_tp2 --resume",
                     "--trainer sdpg --mode full_tp2 --resume",
                     "--trainer online --mode lora_fsdp --resume",
@@ -1761,6 +1800,7 @@ MANIFEST: dict[str, TestSpec] = {
                 (
                     "--trainer online --mode full_world1",
                     "--trainer sdpg --mode full_world1",
+                    "--trainer sdpg --mode full_world1 --chunked",
                     "--trainer online --mode lora_world1",
                     "--trainer environmental --mode full_world1",
                     "--trainer environmental --mode lora_world1",

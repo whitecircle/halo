@@ -3,8 +3,9 @@
 LoRA trains small rank-decomposed adapter matrices while the base model stays frozen, eliminating optimizer
 states for frozen parameters.
 
-It runs under DDP/FSDP, EP, CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
-under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
+It runs under DDP/FSDP, EP, attention-only CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
+under DDP/FSDP and attention-only CP on dense models (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
+Dense Qwen3.5/3.6 hybrid CP2 SFT rejects adapters and quantized weights ([dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft)).
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
 Offline GRPO under CP is full fine-tuning only and rejects every adapter shape; SFT and SMPO keep
@@ -237,7 +238,7 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | DDP / FSDP | Yes | Yes | None | Standard path; QLoRA on a MoE needs `use_grouped_gemm: false` ([QLoRA](#quantized-training-qlora)) |
 | HSDP | Yes | No | None | Pure DP or CP only, so expert adapters train at `ep_size: 1`; every replica starts from the first one's adapters ([HSDP](../parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel)). QLoRA rejected: `use_hsdp` is refused under QLoRA, which skips FSDP2 ([QLoRA](#quantized-training-qlora)) |
 | EP | Yes | No | Attention + experts | Attention via PEFT; expert FFNs via native grouped adapters. QLoRA rejected: EP loaders materialize plain de-quantized weights, losing `Params4bit` |
-| CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
+| CP | Yes* | Yes* | None | *Attention-only CP supports adapters; [dense Qwen3.5/3.6 hybrid CP2 SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) rejects both LoRA and QLoRA. CP shards the sequence, not the weights — supported adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. QLoRA is only for attention-only CP on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
 | TP | **No** | No | — | Rejected — adapters are plain tensors outside the TP graph |
 | EP+CP | Yes | No | Attention + experts | Both active |
 | EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `model_has_expert_lora` arm |
@@ -417,7 +418,7 @@ collective under each mode: [Checkpoints](../reference/checkpoints.md#peft-lora-
 specific to LoRA:
 
 - An **expert-only** run has no PEFT model at all, so `save_expert_lora_adapters` writes the adapter with a
-  synthesized config: `peft_type: EXPERT_LORA`, the base model path, and every field the delta depends on
+  synthesized config: `peft_type: EXPERT_LORA`, the base model path and its Hub commit, and every field the delta depends on
   (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
 - A run that **grew its vocabulary** (`added_special_tokens` past the checkpoint's padded rows) saves the grown
   embedding and an untied head with the adapters, offline included, and resumes them; accelerate-managed FSDP and
@@ -487,6 +488,14 @@ run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the mult
 naming no module of either class are refused — applied to the wrong class, PEFT matches nothing, warns, and
 the tool would write the bare base as a finished model.
 `--fp32_norms` writes every normalization leaf in fp32, the layout `convert_to_bf16.py` writes.
+
+A Hub base is read at the commit `adapter_config.json` records
+([Checkpoints](../reference/checkpoints.md#peft-lora-saving)), by the in-memory merge, the streaming merge and
+`convert_to_bf16.py --check_inference` alike, so a default branch that moved after the run does not change what the
+adapter is folded into, nor the config schema and remote-code modules a source-schema family's merge carries. An
+adapter that records none (stock PEFT writes none unless asked) merges into the default branch with a warning;
+`--base_revision` names the commit for it, and overrides a recorded one with a warning. It takes a commit hash; a
+branch name is resolved again by each read of the base.
 
 A run whose `added_special_tokens` outgrew the checkpoint's embedding trained on rows no base holds. The merge (and
 `convert_to_bf16.py --check_inference`'s adapter load) grows the base to the adapter directory's tokenizer under the

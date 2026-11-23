@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import torch.nn as nn
+
 from halo.config_validation import differs_from_default
 from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
+from halo.distributed.context_parallel.families import ULYSSES_GATED_DELTA_MAP
 from halo.kernels.lowp.spec import LowpSpec
+from halo.model_loading.dtype import has_packed_quantized_params
 from halo.model_loading.parallel.lowp_compute import lowp_computing_modules, lowp_converted_modules
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.external_tables import named_external_tables
 from halo.models.introspection.config_access import get_config_field
+from halo.models.introspection.modality import config_declares_multimodality
 from halo.models.introspection.unwrapping import find_peft_model
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.models.mtp.head import find_mtp_head
+from halo.models.peft_adapters import has_adapter_layers
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, STOCK_ADAMW_OPTIMIZERS, optim_name
 
 # FSDP2 shaping knobs only the trainer's own wrap implements; each one's unrequested value is its ParallelismConfig
@@ -113,6 +119,42 @@ def reject_cp_trainer_args(
             "against the full-length labels, so the two are misaligned. Drop them (eval_loss still "
             "reports), or evaluate from a saved checkpoint without CP."
         )
+
+
+def reject_hybrid_cp_training(model, training_args, config, *, supported: bool, peft_config=None) -> None:
+    """Refuse hybrid CP outside dense, unpacked, adapter-free CP2 SFT; existing attention-only CP is unchanged."""
+    if not config.is_cp_mode or not isinstance(model, nn.Module):
+        return
+    model_config = model.config
+    if not any(
+        type(module).__name__ in ULYSSES_GATED_DELTA_MAP or type(module) in ULYSSES_GATED_DELTA_MAP.values()
+        for module in model.modules()
+    ):
+        return
+    if not supported:
+        raise CPConfigError(
+            "Hybrid GatedDeltaNet CP is supported by SFT only. Use the SFT trainer, or disable context_parallel_size."
+        )
+    if config_declares_multimodality(model_config):
+        raise CPConfigError(
+            "Hybrid CP supports text-only models. Load the text tower with text_only_model: true, or disable context_parallel_size."
+        )
+    if config.cp_size != 2 or has_routed_experts(model_config):
+        raise CPConfigError(
+            "Hybrid CP supports dense models at context_parallel_size: 2 only. Train other hybrid configurations without CP."
+        )
+    if (
+        peft_config is not None
+        or find_peft_model(model) is not None
+        or has_adapter_layers(model)
+        or config.expert_lora
+        or has_packed_quantized_params(model)
+    ):
+        raise CPConfigError(
+            "Hybrid CP supports full fine-tuning only. Disable PEFT/expert LoRA, or train adapters without CP."
+        )
+    if any(getattr(training_args, name, False) for name in ("packing", "padding_free")):
+        raise CPConfigError("Hybrid CP has no document-boundary exchange. Disable packing and padding_free.")
 
 
 def reject_conflicting_optimizer_choice(bf16_optimizer: bool, training_args) -> None:
