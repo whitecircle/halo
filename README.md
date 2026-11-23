@@ -55,7 +55,7 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-19 — Halo 1.3.0rc2.** Environmental GRPO on Inkling-2-Small: LoRA on the attention or on the routed
+- **2026-11-23 — Halo 1.3.0rc2.** Environmental GRPO on Inkling-2-Small: LoRA on the attention or on the routed
   experts over the release's frozen NVFP4/MXFP8 experts, served to vLLM as an adapter
   ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
   - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
@@ -67,10 +67,21 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
     faster LoRA steps at EP8 on 8× B300), and its weights now sync to vLLM and SGLang for RL
     ([Qwen3.8-Flash-Next](agent-docs/models/qwen4_exp.md#kernel-defaults)).
-  - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer; an
-    export layout vLLM serves; and gpt-oss's native MXFP4 release loads through the lazy loaders.
+  - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer and
+    covering ep1 expert weights; an export layout vLLM serves; gpt-oss's native MXFP4 release loads through the lazy
+    loaders; and the trainer checks the converted modules against `lowp_precision`.
+  - **Distillation:** `use_chunked_distillation_loss` trains teacher and self-distillation without the full
+    `[tokens, vocab]` logits, and teacher distillation takes `lowp_precision`, fitting a fake-quant student to a BF16
+    teacher. `bias_update` balancing warns when the teacher is the student's own checkpoint.
+  - **GRPO:** `use_maxrl` for MaxRL's mean-normalized advantages in online and environmental GRPO, White Circle
+    policies as a reward term, and episode code in Modal Sandboxes with `--halo-rollout-backend modal`.
+  - **Context parallelism:** CP2 SFT on dense Qwen3.5/3.6 with their native hybrid layers (text-only full
+    fine-tune).
+  - **MoE metrics:** each checkpoint carries `moe_expert_token_counts.json`, the tokens routed to each expert over
+    the run.
   - **Also:** Transformers 5.23, DPO/KTO reference log-probs swept after the FSDP2 wrap, SGLang turns requeued at a
-    weight push, and Keenable as a web-search backend.
+    weight push, Keenable as a web-search backend, and a fix: fused AdamWBF16 takes `1 - beta` from the float64
+    betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
     Pull or build the 1.3.0rc2 tags.
 - **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
