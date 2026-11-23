@@ -63,7 +63,7 @@ rewards:
   - source: environment    # the env's grade in [0, 1]: a solved problem, an answer match, a passing test
 ```
 
-`judge` and `reward_model` terms take the same options as on the [online arm](online-grpo.md#rewards).
+`judge`, `reward_model` and `whitecircle` terms take the same options as on the [online arm](online-grpo.md#rewards).
 Only this arm also accepts a **veto judge**, a `judge` that lists `checks`: a fired veto check strips the
 episode of its credit
 ([Veto judge](../../agent-docs/training-methods/grpo/rewards/judge.md#veto-judge) ↗).

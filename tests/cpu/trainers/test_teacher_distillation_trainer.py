@@ -76,7 +76,13 @@ class _Tokenizer:
 
 
 TOKENS = {f"t{i}": i for i in range(VOCAB)}
-_LOSS_KNOBS = ("distill_loss", "apply_hard_labels", "distill_jsd_beta", "distill_topk")
+_LOSS_KNOBS = (
+    "distill_loss",
+    "apply_hard_labels",
+    "distill_jsd_beta",
+    "distill_topk",
+    "use_chunked_distillation_loss",
+)
 
 
 def _args(**overrides) -> types.SimpleNamespace:
@@ -95,6 +101,7 @@ def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALP
         distill_alpha=alpha,
         distill_temperature=TEMPERATURE,
         apply_hard_labels=apply_hard_labels,
+        use_chunked_distillation_loss=False,
     )
     trainer.distillation_loss_fn = teacher_distillation.require_distill_loss(
         _args(distill_loss=distill_loss, apply_hard_labels=apply_hard_labels)

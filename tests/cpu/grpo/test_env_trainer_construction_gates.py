@@ -62,6 +62,8 @@ _INIT_GATES = (
     "reject_off_policy_mask_threshold",
     "reject_vespo_loss",
     "reject_inert_std_floor",
+    "reject_conflicting_maxrl",
+    "reject_negative_reward_terms_under_maxrl",
     "resolve_rollout_stop_token_ids",
     "_arm_update_breaker",
     "reject_unread_grpo_knobs",

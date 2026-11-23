@@ -1,12 +1,15 @@
 #!/usr/bin/env python
 """An assistant turn carrying CoT renders its reasoning on every roster family. Harmony reads only ``thinking``,
 most read ``reasoning_content``; handed the wrong spelling a template renders an empty block, training the family
-to skip reasoning. Real tokenizers on purpose, since the spelling lives in the shipped jinja."""
+to skip reasoning. transformers fills both spellings before its own render, a rollout server renders the shipped
+jinja with its own stack, so every family is rendered both ways. Real tokenizers on purpose, since the spelling
+lives in the shipped jinja."""
 
 import functools
 import os
 
 import pytest
+from transformers.utils import chat_template_utils
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 
@@ -43,9 +46,13 @@ ROSTER = (
 )
 # A cache miss must not quietly empty the matrix; below this the file proves nothing.
 MIN_REASONING_FAMILIES = 5
-# The one family whose template reads ``thinking`` and nothing else, so a single-key emission has to
-# keep working for it.
+# The one family whose template reads ``thinking`` and nothing else.
 HARMONY = GPT_OSS_20B_OPENAI
+# ``transformers``: the trainer's render, which fills both spellings. ``template``: the shipped jinja on the message
+# as emitted, which is what a server without the fill renders.
+RENDERS = ("transformers", "template")
+# Held apart from ``REASONING_KEYS`` so the controls read the templates, not the emission.
+SPELLINGS = ("thinking", "reasoning_content")
 
 COT = "Twenty one plus twenty one is forty two."
 ANSWER = "The answer is 42."
@@ -58,12 +65,29 @@ def _load(model):
     return try_cached_tokenizer(model, trust_remote_code=True)
 
 
-def _single_key_to_dict(message):
-    """Assistant CoT under ``thinking`` alone, held verbatim so the assertions reject a real failure."""
-    d = {"role": message.role, "content": message.content}
-    if message.thinking:
-        d["thinking"] = message.thinking
-    return d
+@pytest.fixture
+def template_alone(monkeypatch):
+    """The render reads the message as emitted; a transformers without the fill fails here, not silently."""
+    monkeypatch.setattr(chat_template_utils, "_alias_reasoning_fields", lambda chat: chat)
+
+
+@pytest.fixture(params=RENDERS)
+def render(request):
+    if request.param == "template":
+        request.getfixturevalue("template_alone")
+    return request.param
+
+
+def _single_key(key):
+    return {"role": "assistant", "content": ANSWER, key: COT}
+
+
+def _reasoning_tokenizers():
+    """``{model: tokenizer}`` of the cached reasoning families; skips when none is cached."""
+    cached = {model: _load(model) for model in ROSTER if _reads_reasoning(model)}
+    if not cached:
+        pytest.skip("no reasoning tokenizer in the matrix is cached")
+    return cached
 
 
 def _render(tok, assistant_dict):
@@ -95,7 +119,7 @@ def _reads_reasoning(model):
     if tok is None:
         return False
     for key in (*REASONING_KEYS, "reasoning"):
-        rendered = _render(tok, {"role": "assistant", "content": ANSWER, key: COT})
+        rendered = _render(tok, _single_key(key))
         if rendered is not None and COT in rendered:
             return True
     return False
@@ -113,7 +137,7 @@ def _diff_region(bare, with_cot):
 
 
 @pytest.mark.parametrize("model", ROSTER)
-def test_reasoning_survives_the_render_for_every_reasoning_family(model):
+def test_reasoning_survives_the_render_for_every_reasoning_family(model, render):
     """Exactly once: every template gets both key spellings, so one reading both would duplicate the reasoning."""
     if not _reads_reasoning(model):
         pytest.skip(f"{model}'s template renders no CoT under any spelling")
@@ -124,9 +148,9 @@ def test_reasoning_survives_the_render_for_every_reasoning_family(model):
 
 
 @pytest.mark.parametrize("model", ROSTER)
-def test_no_family_renders_an_empty_reasoning_block(model):
-    """The slot is located by diffing against the no-CoT render. Under a single-key emission the renders are
-    identical for all but gpt-oss."""
+def test_no_family_renders_an_empty_reasoning_block(model, render):
+    """The slot is located by diffing against the no-CoT render. Under a single-key emission the template alone
+    renders the two identically for all but gpt-oss."""
     if not _reads_reasoning(model):
         pytest.skip(f"{model}'s template renders no CoT under any spelling")
     _tok, with_cot, bare = _case(model)
@@ -139,7 +163,7 @@ def test_no_family_renders_an_empty_reasoning_block(model):
 
 
 @pytest.mark.parametrize("model", ROSTER)
-def test_non_reasoning_family_renders_the_same_turn_with_or_without_cot(model):
+def test_non_reasoning_family_renders_the_same_turn_with_or_without_cot(model, render):
     """A template with no reasoning slot must be unaffected: emitting extra keys cannot leak the CoT
     into its rendered turn as stray text."""
     if _reads_reasoning(model):
@@ -155,25 +179,29 @@ def test_matrix_covers_the_reasoning_roster():
     assert len(reasoning) >= MIN_REASONING_FAMILIES, f"only {reasoning} reachable; the matrix proves too little"
 
 
-def test_single_key_emission_loses_reasoning_on_most_of_the_roster():
-    """Its failure on several families is what makes the tests above non-tautological. Only harmony's survival is
-    pinned, since a permissive template (LFM-2) surviving is fine."""
-    message = Message.assistant(ANSWER, thinking=COT)
-    lost, kept = [], []
-    for model in ROSTER:
-        if not _reads_reasoning(model):
-            continue
-        tok = _load(model)
-        rendered = _render(tok, _single_key_to_dict(message))
-        if rendered is None:
-            continue
-        (kept if COT in rendered else lost).append(model)
+def test_template_alone_loses_a_single_key_emission_on_most_of_the_roster(template_alone):
+    """The control for the ``template`` renders above: without both keys they fail on several families. A permissive
+    template (LFM-2) reading either spelling is fine, so only the count and harmony are pinned."""
+    lost = {key: [] for key in SPELLINGS}
+    for model, tok in _reasoning_tokenizers().items():
+        for key in SPELLINGS:
+            rendered = _render(tok, _single_key(key))
+            if rendered is not None and COT not in rendered:
+                lost[key].append(model)
 
-    if not lost and not kept:
-        pytest.skip("no reasoning tokenizer in the matrix is cached")
-    assert len(lost) >= MIN_REASONING_FAMILIES - 1, f"single-key emission no longer loses the CoT on {lost}"
-    if HARMONY in (*lost, *kept):  # skipped entirely when harmony is not cached
-        assert HARMONY in kept, f"{HARMONY} reads 'thinking'; single-key emission must not lose its CoT"
+    assert len(lost["thinking"]) >= MIN_REASONING_FAMILIES - 1, f"'thinking' alone loses the CoT only on {lost}"
+    if _reads_reasoning(HARMONY):
+        assert HARMONY not in lost["thinking"], f"{HARMONY}'s template reads 'thinking'"
+        assert HARMONY in lost["reasoning_content"], f"{HARMONY}'s template reads 'reasoning_content' too"
+
+
+def test_transformers_renders_a_single_key_emission_on_every_reasoning_family():
+    """The fill the ``transformers`` renders above rest on: either spelling alone reaches the slot, once."""
+    for model, tok in _reasoning_tokenizers().items():
+        for key in SPELLINGS:
+            rendered = _render(tok, _single_key(key))
+            assert rendered is not None, f"{model}'s template rejects a turn carrying {key!r}"
+            assert rendered.count(COT) == 1, f"{model} renders {key!r} alone {rendered.count(COT)} times"
 
 
 def test_reasoning_keys_stay_out_of_the_default_dict():
