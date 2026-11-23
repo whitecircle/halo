@@ -664,7 +664,8 @@ load). The shared reference mixin overrides the write for DPO/KTO and offline GR
 DPO/KTO read it back during TRL's `__init__`, and offline GRPO restores it during construction,
 not through the resume hook. The async GRPO rollout mixin overrides both for its pending prefetch
 rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases,
-so the empty defaults do not shadow it.
+and each override calls `super()` first, so the defaults still run: they write and read back
+`moe_expert_token_counts.json` ([Callbacks](../training-methods/callbacks.md#expert-token-counts-over-the-run)).
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP layers (`ep_size: 1`

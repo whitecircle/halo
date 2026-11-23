@@ -1378,6 +1378,27 @@ MANIFEST: dict[str, TestSpec] = {
             ),
         ),
     ),
+    # Every layout whose token count differs: duplicate routing (TP, expert TP), split routing (CP), the stages (PP).
+    "parallelism/test_moe_expert_token_counts.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "moe", "qwen3"),
+        args_matrix=tuple(
+            Row(f"--mode {mode}", nproc=nproc, markers=("gpu", "full", f"{nproc}gpu", *axes, "moe", family))
+            for mode, nproc, axes, family in (
+                ("fsdp", 2, (), "qwen3"),
+                ("tp2", 2, ("tp",), "qwen3"),
+                ("cp2", 2, ("cp",), "qwen3"),
+                ("ep1", 2, ("ep",), "qwen3"),
+                ("ep2", 2, ("ep",), "qwen3"),
+                ("ep2aux", 2, ("ep",), "qwen3"),
+                ("ep2tp2", 2, ("ep", "tp"), "qwen3"),
+                ("ep2cp2", 2, ("ep", "cp"), "qwen3"),
+                ("ep2etp2", 4, ("ep", "etp"), "qwen3"),
+                ("pp2ep2", 4, ("pp", "ep"), "gptoss"),
+            )
+        ),
+        timeout=1200,
+    ),
     # EP+TP needs a single dispatch group: ep4+tp2 on 8 forms two 4-rank groups, which ParallelismConfig rejects.
     # Node-local EP+CP pins ep_size to the 8-GPU domain; Mistral4 runs EP+CP at ep2+cp2 in the merged-resume family
     # rows.
