@@ -81,8 +81,7 @@ print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_t
 
 A LoRA run saves an adapter, not a full checkpoint. Load it with
 `PeftModel.from_pretrained(base, path)` or merge it first (PEFT refuses a directory holding expert
-adapters, so merge that one with `halo run merge-peft-adapters`, which for GPT-OSS needs a BF16 base
-and a run with live sinks);
+adapters, so merge that one with `halo run merge-peft-adapters`, which for GPT-OSS needs a BF16 base);
 `AutoModelForCausalLM.from_pretrained` does not load an adapter directory under
 PEFT 0.18.1. A run with `merge_expert_lora_on_save: true` saves the merged checkpoint instead.
 

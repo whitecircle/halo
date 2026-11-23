@@ -63,8 +63,8 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
 The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which
 `merge_expert_lora_on_save` folds into each save. `halo run merge-peft-adapters` merges a saved adapter
 afterwards only on a BF16 base: it folds by stored key, and the MXFP4 release stores the experts as
-`_blocks` and `_scales`. It also refuses an adapter trained with neutralized sinks, the SFT default
-(`reset_sinks: true`), so keep `merge_expert_lora_on_save` for such a run.
+`_blocks` and `_scales`. An adapter trained with neutralized sinks, the SFT default
+(`reset_sinks: true`), merges with them neutralized.
 
 ### GRPO
 

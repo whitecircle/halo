@@ -23,9 +23,8 @@ Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without it.
 | LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as an adapter, or merge into the base |
 
 EP expert LoRA merges with the same tool, which streams it into the base's shards. On GPT-OSS
-that takes a BF16 base and a run with live sinks (`reset_sinks: false`); a run with neutralized
-sinks, the SFT default, is refused. `merge_expert_lora_on_save: true` saves the merged model
-at each save instead.
+that takes a BF16 base, and a run with neutralized sinks, the SFT default, gets them back in the
+merged checkpoint. `merge_expert_lora_on_save: true` saves the merged model at each save instead.
 
 ## Sharded EP saves
 
