@@ -52,7 +52,7 @@ flaky shared mount (NFS/EFS). Input wants per-node: global rank 0 writing the HF
 remote ranks reading those same inodes is a read-after-cross-node-write that NFS surfaces as
 `OSError: [Errno 116] Stale file handle`.
 
-Output is fine shared — checkpoints have a single writer, per-rank dumps are distinct files, and a
+Output is fine shared — each checkpoint file has one writer, per-rank dumps are distinct files, and a
 shared mount gives one authoritative copy with no post-hoc gather. That combination is
 `DIST_INPUT_SHARED_FILESYSTEM=0` with the umbrella left at its shared default.
 
