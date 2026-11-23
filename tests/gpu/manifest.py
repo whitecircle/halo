@@ -1752,6 +1752,9 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer online --mode expert_lora_ep2 --resume",
             "--trainer sdpg --mode expert_lora_ep2 --resume",
             "--trainer sdpg --mode full_ep2 --resume",
+            "--trainer sdpg --mode full_ep2 --chunked",
+            "--trainer sdpg --mode lora_ep2 --chunked",
+            "--trainer sdpg --mode lora_etp2 --chunked",
             *(
                 f"--trainer {trainer} --mode {mode}"
                 for mode in ("full_ep1", "full_ep1_unsharded")
@@ -1791,6 +1794,9 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer online --mode full_fsdp_kl",
                     "--trainer online --mode full_fsdp_zero3",
                     "--trainer sdpg --mode full_fsdp_zero3",
+                    "--trainer sdpg --mode full_fsdp_zero3 --chunked",
+                    "--trainer sdpg --mode full_tp2 --chunked",
+                    "--trainer sdpg --mode lora_fsdp --chunked",
                     "--trainer online --mode full_tp2 --resume",
                     "--trainer sdpg --mode full_tp2 --resume",
                     "--trainer online --mode lora_fsdp --resume",
@@ -1803,6 +1809,7 @@ MANIFEST: dict[str, TestSpec] = {
                 (
                     "--trainer online --mode full_world1",
                     "--trainer sdpg --mode full_world1",
+                    "--trainer sdpg --mode full_world1 --chunked",
                     "--trainer online --mode lora_world1",
                     "--trainer environmental --mode full_world1",
                     "--trainer environmental --mode lora_world1",

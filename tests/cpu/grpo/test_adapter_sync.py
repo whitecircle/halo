@@ -18,6 +18,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_REVISION_ATTR
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.environments.episodes.messages import Trajectory
 from halo.environments.rollout_config import RolloutConfig
@@ -734,7 +735,7 @@ def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_o
 
 def test_the_launch_base_is_the_weights_the_trainer_read(monkeypatch, tmp_path):
     model = _peft_model()
-    model.config._commit_hash = "abc123"
+    setattr(model, LOADED_WEIGHTS_REVISION_ATTR, "abc123")
     monkeypatch.setattr(adapter_sync, "weights_read_from", lambda _: f"{tmp_path}/")
     config = SimpleNamespace(model_name=_BASE_MODEL)
 

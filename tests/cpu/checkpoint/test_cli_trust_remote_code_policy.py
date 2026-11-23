@@ -395,7 +395,7 @@ def test_every_load_of_a_merge_runs_under_the_trust_its_base_earns(
         seen["base model"] = kwargs["trust_remote_code"]
         return torch.nn.Linear(1, 1)
 
-    def _load_processor(path, *, trust_remote_code):
+    def _load_processor(path, *, trust_remote_code, revision=None):
         seen["base processor" if path != adapter else "adapter processor"] = trust_remote_code
         if path != adapter:
             raise _LoadReached
@@ -424,7 +424,7 @@ def test_a_converted_adapters_inference_check_holds_a_hub_base_to_the_same_rule(
     save_file({"lora_A.weight": torch.zeros(1)}, os.path.join(adapter, ADAPTER_SAFETENSORS_FILE))
     seen: dict[str, object] = {}
 
-    def _load_processor(path, *, trust_remote_code):
+    def _load_processor(path, *, trust_remote_code, revision=None):
         is_base = path == "acme/base-model"
         seen["base processor" if is_base else "adapter processor"] = trust_remote_code
         return object() if is_base else None

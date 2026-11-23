@@ -3,8 +3,11 @@
 Non-reentrant checks recomputed metadata, and a MoE router's near-tie flip on recompute changes a tensor's shape."""
 
 import pytest
-from transformers import Qwen3Config, Qwen3MoeConfig
+from sentence_transformers import SentenceTransformer
+from sentence_transformers.sentence_transformer.modules.pooling import Pooling
+from transformers import Qwen3Config, Qwen3MoeConfig, Qwen3MoeModel
 
+from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from halo.trainers.parallelism.ep_layers import resolve_use_reentrant, uses_reentrant_checkpointing
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
@@ -47,6 +50,21 @@ def test_a_forced_run_resolves_to_reentrant_whatever_is_configured(configured):
 def test_an_unforced_run_keeps_the_configured_value(configured):
     assert resolve_use_reentrant(_config(), DENSE, configured) is configured
     assert resolve_use_reentrant(_config(pp_size=2, gpus_per_node=2), MOE, configured) is configured
+
+
+def test_the_sentence_transformer_hands_the_seam_its_moe_backbone_config():
+    """sentence-transformers delegates ``config`` to the first transformers model in the pipeline, the backbone
+    ``PreloadedTransformer`` holds, so a MoE backbone forces reentrant checkpointing."""
+    backbone = Qwen3MoeModel(Qwen3MoeConfig(**{**TINY_QWEN3_MOE_CONFIG, "num_hidden_layers": 1}))
+    model = SentenceTransformer(
+        modules=[
+            PreloadedTransformer(auto_model=backbone, tokenizer=None),
+            Pooling(word_embedding_dimension=backbone.config.hidden_size),
+        ]
+    )
+
+    assert model.config is backbone.config
+    assert uses_reentrant_checkpointing(_config(), model.config) is True
 
 
 if __name__ == "__main__":
