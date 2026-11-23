@@ -310,7 +310,7 @@ def test_chunked_sweep_reproduces_the_family_forward(family):
     reference_grads = _grads(model)
 
     harness = _ForwardParityHarness()
-    logps, entropy = harness._chunked_logps_impl(model, input_ids, attention_mask, _COMPLETION, _BATCH, True)
+    logps, entropy, _ = harness._chunked_logps_impl(model, input_ids, attention_mask, _COMPLETION, _BATCH, True)
     (logps * upstream).sum().backward()
     grads = _grads(model)
 

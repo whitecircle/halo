@@ -147,9 +147,9 @@ class RunnerSession(SandboxSession):
         except ValueError as error:
             return SandboxResult(error=str(error))
         files = files or {}
-        for name in files:
-            if not self.is_safe_member_name(name):
-                return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
+        refused = self.refused_auxiliary_file(files)
+        if refused is not None:
+            return refused
 
         auxiliary = tuple(SourceFile(name, utf8_encodable(content)) for name, content in sorted(files.items()))
         program = Program(spec.name, code, auxiliary)
@@ -240,7 +240,8 @@ class RunnerSession(SandboxSession):
             self._build = Build(program, build_verdict)
             if build_verdict is not None:
                 return build_verdict
-        self._prepared = ran.entries
+        if ran.build is not None or not spec.is_compiled:
+            self._prepared = ran.entries
         return SandboxResult(
             stdout=ran.run.stdout,
             stderr=ran.run.stderr,

@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from huggingface_hub import constants as hub_constants
 from huggingface_hub.errors import StrictDataclassFieldValidationError
 from transformers import (
     AutoConfig,
@@ -236,14 +237,14 @@ def _exported(tmp_path, cls, mutate=None) -> tuple[dict, str, object]:
 def test_a_source_without_a_named_module_is_refused_by_name(tmp_path, monkeypatch):
     monkeypatch.setattr(config_export, "cached_file", lambda *args, **kwargs: None)
     with pytest.raises(FileNotFoundError, match=r"modeling_x\.py, which it does not carry or which could not be"):
-        config_export._copy_auto_map_modules("source", {"AutoModel": "modeling_x.Model"}, str(tmp_path))
+        config_export._copy_auto_map_modules("source", {"AutoModel": "modeling_x.Model"}, str(tmp_path), None)
 
 
 def test_a_source_without_a_config_keeps_the_native_schema_and_says_why(monkeypatch):
     warned = []
     monkeypatch.setattr(config_export, "cached_file", lambda *args, **kwargs: None)
     monkeypatch.setattr(config_export.logger, "warning", warned.append)
-    assert config_export._source_config_payload("source", None) is None
+    assert config_export._source_config_payload("source", None, None) is None
     assert "'source' holds no config.json" in warned[0]
 
 
@@ -340,6 +341,33 @@ def test_the_standalone_writer_carries_the_schema_too(cls, tmp_path):
     assert all(key in family.spelled(payload) for key in family.source_spellings)
     assert payload[family.text_section]["vocab_size"] == patched
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
+
+
+def test_a_hub_source_is_read_at_the_revision_the_writer_names(tmp_path, monkeypatch):
+    """The repo's default branch dropped its remote code after the run: an export pinned to the commit the weights
+    were read at still carries that commit's schema and modules."""
+    family = FIXTURES[EPStep3p7MoELayer]
+    repo, trained, moved = "halo-test/source-schema", "1" * 40, "2" * 40
+    storage = tmp_path / "hub" / f"models--{repo.replace('/', '--')}"
+    _write_source(storage / "snapshots" / trained, family.source_config, family.modules)
+    _write_source(
+        storage / "snapshots" / moved, {k: v for k, v in family.source_config.items() if k != "auto_map"}, {}
+    )
+    os.makedirs(storage / "refs")
+    (storage / "refs" / "main").write_text(moved)
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    model = _model_from(EPStep3p7MoELayer, str(storage / "snapshots" / trained))
+    export = str(tmp_path / "export")
+
+    save_full_checkpoint(model, export, source_dir=repo, source_revision=trained)
+
+    with open(os.path.join(export, "config.json")) as handle:
+        payload = json.load(handle)
+    assert payload["auto_map"] == family.source_config["auto_map"]
+    assert all(key in family.spelled(payload) for key in family.source_spellings)
+    assert all(os.path.isfile(os.path.join(export, name)) for name in family.modules)
 
 
 def test_a_change_the_source_schema_swallows_is_refused(tmp_path):
