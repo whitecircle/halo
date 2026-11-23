@@ -211,7 +211,8 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
   serialization (`exports_source_config_schema`, Step-3.7 Flash and Nemotron-H):
   `export_source_config_schema` writes the run's changed values back under the source's spellings and
   copies the `auto_map` modules in transitively. The source is the checkpoint the model was loaded from,
-  so a resume or a `patch_vocab.py` output carries the schema on. A change lands under the spelling the source
+  so a resume or a `patch_vocab.py` output carries the schema on, and a Hub source is read at the commit the weights
+  were read at. A change lands under the spelling the source
   already uses: the key itself, its `attribute_map` alias or its `_legacy_field_names` alias. The rewritten config
   is re-parsed against the live one, so a change the source schema swallows raises, while a field the class holds none for, the Trainer's `use_cache` on Nemotron-H's composite, is no change. A source of the same `model_type`
   in transformers' causal mapping needs no `auto_map` (Nemotron 3.5 Lightning), as stock `from_pretrained` and vLLM
