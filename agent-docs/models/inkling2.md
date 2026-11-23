@@ -110,14 +110,16 @@ The four LoRA grouped GEMMs take most of the added time (0.19 ms at 8 tokens, 1.
 
 ## Measured
 
+The two environmental GRPO runs below ran without gradient checkpointing on the decoder layers. With checkpointing on, the backward recomputes each layer, so step time and peak memory differ from these figures; no checkpointed run has been timed.
+
 Each frozen bank dequantizes in one [fused Triton kernel](../optimization/low-precision-moe-kernels.md#frozen-expert-banks), bit-identical to the eager block-scale path: a 16-expert `[4608, 4608]` NVFP4 bank takes 0.69 ms against 11.2 ms eager on one B300.
 
 One full-attention layer at Inkling-2-Small's shape (48 query and 8 KV heads of 128, relative extent 1024), 8,192 tokens in bf16, forward and backward on one B300: `inkling2_relative_flex` takes 41 ms at a 2.6 GiB peak, eager 166 ms at 61 GiB (`tests/gpu/models/test_inkling2_relative_flex.py`). A padded batch makes one kernel call per row: 4 rows of 2,048 tokens take 18 ms and 8 rows of 1,024 tokens 18 ms at a 2.0 GiB peak.
 
-Environmental GRPO on DAPO-Math-17k, expert LoRA r8, 8× B300 (two vLLM TP2 engines, EP4 trainer), 32 prompts × 8 samples of up to 4,096 tokens, `packed_microbatch_tokens: 8192`: a step takes 322 s on-policy (rollout 125 s, adapter sync 15 s, forward and backward about 200 s) and 194 s with `enable_prefetch: true`, whose rollout overlaps the previous step's training, so its samples come from the policy one step back. Both are measured on steps 2–4 of a run whose decoder layers were not gradient-checkpointed; a checkpointed run, which recomputes each layer in the backward, has not been timed.
+Environmental GRPO on DAPO-Math-17k, expert LoRA r8, 8× B300 (two vLLM TP2 engines, EP4 trainer), 32 prompts × 8 samples of up to 4,096 tokens, `packed_microbatch_tokens: 8192`: a step takes 322 s on-policy (rollout 125 s, adapter sync 15 s, forward and backward about 200 s) and 194 s with `enable_prefetch: true`, whose rollout overlaps the previous step's training, so its samples come from the policy one step back. Both are measured on steps 2–4.
 
 Inkling-2-Small, LoRA r16 on attention q/k/v/o and the experts, 4× B300 at EP4 with `frozen_quantized_experts`: the load takes ~17 s per rank from local disk. Over 150 steps GSM8K held-out loss goes 0.549 → 0.136, ARC-Challenge `acc_norm` 0.777 → 0.779 and HellaSwag (1k) `acc_norm` 0.752 → 0.756.
 
-Environmental GRPO with the expert example's settings and `attn_implementation: eager` (LoRA r8 on `o_proj` and the routed experts, EP2 on two B300s beside a two-B300 server, one micro-batch per pass, importance weights from the loss forward): a step takes 14–26 s at 8 rollouts of about 300 tokens. The forward and backward take 2.3–4.3 s of it, and the adapter sync, which publishes the 4.8 GB adapter and loads it on the server, 8–18 s. The decoder layers were not gradient-checkpointed in this run either.
+Environmental GRPO with the expert example's settings and `attn_implementation: eager` (LoRA r8 on `o_proj` and the routed experts, EP2 on two B300s beside a two-B300 server, one micro-batch per pass, importance weights from the loss forward): a step takes 14–26 s at 8 rollouts of about 300 tokens. The forward and backward take 2.3–4.3 s of it, and the adapter sync, which publishes the 4.8 GB adapter and loads it on the server, 8–18 s.
 
 CPU coverage: `tests/cpu/models/test_inkling2_frozen_experts.py`, `tests/cpu/kernels/test_frozen_bank.py`. GPU gates: `test_ep_family_vs_reference.py --family inkling2_text` (with and without `--expert-tp-size 2`), `test_lazy_load_inkling2_frozen.py`, `test_lora_merged_save_resume.py --family inkling2_text`, `test_frozen_bank_fused_dequant.py`.
