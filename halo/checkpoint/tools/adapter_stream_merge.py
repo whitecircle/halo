@@ -46,6 +46,7 @@ from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
+    resolve_adapter_base_revision,
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter
@@ -444,14 +445,16 @@ def merge_adapter_streaming(
     adapter_dir: str,
     output_dir: str,
     *,
+    base_revision: str | None = None,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     trust_remote_code: bool = False,
     verbose: bool = True,
 ) -> None:
     """Fold ``adapter_dir`` into its base and write ``output_dir``: tensors keep the base's stored dtype and key
     spelling, the base's config and tokenizer files are copied (the adapter's tokenizer replaces them), and the
-    adapter config lands in ``original_adapter_config/``. A rewrite of a tensor the base stores packed is refused, and
-    every key the adapter rewrites is resolved against the base before the first write, so a refusal leaves no output."""
+    adapter config lands in ``original_adapter_config/``. A Hub base is read at the commit the adapter records, or at
+    ``base_revision``. A rewrite of a tensor the base stores packed is refused, and every key the adapter rewrites is
+    resolved against the base before the first write, so a refusal leaves no output."""
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
     _reject_unreplayable_sidecars(adapter_dir)
@@ -459,7 +462,9 @@ def merge_adapter_streaming(
     base_path = config.get("base_model_name_or_path")
     if not base_path:
         raise ValueError(f"{os.path.join(adapter_dir, ADAPTER_CONFIG_FILE)} names no base_model_name_or_path.")
-    base_dir = resolve_checkpoint_source(base_path)
+    base_dir = resolve_checkpoint_source(
+        base_path, resolve_adapter_base_revision(base_path, config.get("revision"), base_revision)
+    )
     reject_partial_checkpoint(base_dir)
     reject_in_place_conversion(base_dir, output_dir)
     plan = _plan_merge(adapter_dir, config, base_dir)

@@ -18,6 +18,7 @@ from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import (
     ChunkedGRPOLogprobsMixin,
+    CompletionTerm,
     LogprobScoringMixin,
     rows_forward_densely,
 )
@@ -190,11 +191,11 @@ def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
     # At batch size 1 the SDPA path forwards each row trimmed and mask-free.
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     padded = EmbeddingBackboneHarness("sdpa")
-    logps_pad, ent_pad = padded._chunked_logps_impl(padded.model, input_ids, attention_mask, ltk, 2, True)
+    logps_pad, ent_pad, _ = padded._chunked_logps_impl(padded.model, input_ids, attention_mask, ltk, 2, True)
     assert padded.forward_calls == [((2, 7), False)]
 
     dense = EmbeddingBackboneHarness("sdpa")
-    logps_dense, ent_dense = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 1, True)
+    logps_dense, ent_dense, _ = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 1, True)
     assert dense.forward_calls == [((1, 7), True), ((1, 4), True)]
 
     torch.testing.assert_close(logps_dense[completion_mask], logps_pad[completion_mask])
@@ -219,7 +220,7 @@ def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch)
     monkeypatch.setattr(logprob_scoring, "chunked_head_logprobs", counting_sweep)
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     dense = EmbeddingBackboneHarness("flash_attention_4")
-    logps, entropies = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 2, True)
+    logps, entropies, _ = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 2, True)
     assert dense.forward_calls == [((1, 7), True), ((1, 4), True)], "one dense backbone call per row"
     assert sweeps == [(6, 8)], f"one head sweep over 4 + 2 real completion tokens, got {sweeps}"
 
@@ -241,34 +242,82 @@ def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch)
     torch.testing.assert_close(dense.embed.weight.grad, reference.embed.weight.grad)
 
 
-@pytest.mark.parametrize("attn_impl", ["sdpa", "flash_attention_4"], ids=["padded", "dense"])
-def test_an_armed_sweep_hands_back_the_heads_completion_logits(attn_impl):
-    """SDPG's OPD term reads these logits; they come from the hidden states the sweep scored and carry their graph."""
-    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
-    harness = EmbeddingBackboneHarness(attn_impl)
-    harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
-    assert harness._completion_logits_sink is None
+def _logsumexp_term(mask: torch.Tensor) -> tuple[CompletionTerm, list[torch.Tensor]]:
+    """A term scoring each kept position's ``logsumexp`` over the head's logits, recording the positions it saw."""
+    seen = []
 
-    with harness._capturing_completion_logits() as captured:
-        harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
-    assert harness._completion_logits_sink is None, "the sink must disarm on exit"
-    assert len(captured) == 1 and captured[0].shape == (2, ltk, harness.model.lm_head.out_features)
-    want = harness.model.lm_head(harness.embed(input_ids)[:, :-1][:, -ltk:])
-    torch.testing.assert_close(captured[0][completion_mask], want[completion_mask])
-    captured[0][completion_mask].sum().backward()
+    def score(head, student, positions):
+        seen.append(positions)
+        return head.project(student).logsumexp(-1)
+
+    return CompletionTerm(mask, score), seen
+
+
+@pytest.mark.parametrize("attn_impl", ["sdpa", "flash_attention_4"], ids=["padded", "dense"])
+def test_an_armed_sweep_scores_the_term_at_the_kept_positions_only(attn_impl):
+    """The term reads the hidden states the sweep scored, at the positions its mask keeps, with their graph. The short
+    row goes first, so a dense row's positions sit past the shorter row's, not at its window offset."""
+    *rows, ltk = _ragged_batch()
+    input_ids, attention_mask, completion_mask = (tensor.flip(0) for tensor in rows)
+    mask = completion_mask.clone()
+    mask[1, 1] = False
+    harness = EmbeddingBackboneHarness(attn_impl)
+    term, seen = _logsumexp_term(mask.float())
+    _, _, unarmed = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+    assert unarmed is None and not seen, "an unarmed sweep scores no term"
+
+    with harness._scoring_with_completion_term(term):
+        _, _, values = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+    assert harness._armed_completion_term is None, "the term must disarm on exit"
+    torch.testing.assert_close(torch.cat(seen), mask.flatten().nonzero().squeeze(1))
+    want = harness.model.lm_head(harness.embed(input_ids)[:, :-1][:, -ltk:]).logsumexp(-1)
+    torch.testing.assert_close(values[mask], want[mask])
+    assert torch.count_nonzero(values[~mask]) == 0
+    values.sum().backward()
     assert harness.embed.weight.grad is not None and harness.model.lm_head.weight.grad is not None
+
+
+def test_a_term_that_keeps_no_position_projects_nothing():
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    harness = EmbeddingBackboneHarness("sdpa")
+    term, seen = _logsumexp_term(torch.zeros(completion_mask.shape))
+    with harness._scoring_with_completion_term(term):
+        _, _, values = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+    assert not seen
+    assert values.shape == completion_mask.shape and not values.any()
+
+
+def test_a_dense_row_refuses_a_mask_past_its_completion():
+    """A kept position past a row's trimmed completion would read the next row's hidden state."""
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    mask = completion_mask.clone()
+    mask[1, 3] = True
+    harness = EmbeddingBackboneHarness("flash_attention_4")
+    term, _ = _logsumexp_term(mask.float())
+    with harness._scoring_with_completion_term(term), pytest.raises(RuntimeError, match="past its row's scored"):
+        harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+
+
+def test_packed_micro_batches_refuse_an_armed_term():
+    """A packed slot's flattened rows and filler rows give the term no completion window to read."""
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
+    harness = EmbeddingBackboneHarness("sdpa")
+    term, _ = _logsumexp_term(completion_mask.float())
+    with harness._scoring_with_completion_term(term), pytest.raises(RuntimeError, match="Packed micro-batches"):
+        harness._packed_logps(harness.model, input_ids, attention_mask, ltk, False, None)
 
 
 def test_an_armed_full_logits_forward_hands_back_its_completion_logits():
     """The capture reads the model's own output, sliced as TRL slices it."""
-    input_ids, attention_mask, _, ltk = _ragged_batch()
+    input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     harness = _RealBackboneHarness("eager")
-    with harness._capturing_completion_logits() as captured, harness._capturing_forward_logits(harness.model, ltk):
+    term, _ = _logsumexp_term(completion_mask.float())
+    with harness._scoring_with_completion_term(term), harness._capturing_forward_logits(harness.model, ltk):
         logits = harness.model(input_ids=input_ids, attention_mask=attention_mask).logits
     with harness._capturing_forward_logits(harness.model, ltk):
         harness.model(input_ids=input_ids, attention_mask=attention_mask)
-    assert len(captured) == 1, "an unarmed forward appends nothing"
-    torch.testing.assert_close(captured[0], logits[:, :-1][:, -ltk:])
+    assert len(term.logits) == 1, "an unarmed forward appends nothing"
+    torch.testing.assert_close(term.logits[0], logits[:, :-1][:, -ltk:])
 
 
 class _ModeResolutionHarness(ChunkedGRPOLogprobsMixin):
@@ -441,8 +490,8 @@ def test_dense_rows_match_the_padded_batch_on_a_real_attention_stack(attn_implem
     harness = _RealBackboneHarness(attn_implementation)
 
     with torch.no_grad():
-        padded, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
-        dense, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 1, False)
+        padded, _, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+        dense, _, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 1, False)
 
     torch.testing.assert_close(dense[completion_mask], padded[completion_mask], atol=1e-5, rtol=1e-5)
     assert torch.count_nonzero(dense[~completion_mask]) == 0
@@ -626,7 +675,7 @@ def test_the_sweep_reads_the_heads_softcap_off_the_model_config():
     with torch.no_grad():
         logits = harness.model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
         ref = selective_log_softmax(logits[:, :-1][:, -ltk:] / harness.temperature, input_ids[:, -ltk:])
-        got, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
+        got, _, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
     torch.testing.assert_close(got, ref, atol=1e-5, rtol=1e-5)
 
 

@@ -363,6 +363,7 @@ def test_a_null_test_input_reaches_a_checker_as_an_empty_input():
 @pytest.mark.parametrize(
     ("path", "reason"),
     [("a\ud83d.py", "not valid UTF-8"), ("", "unsafe"), (".", "unsafe"), ("..", "unsafe"), ("/abs", "unsafe")]
+    + [("a\0.py", "unsafe")]
     + [("../up.py", "unsafe"), ("sub/../../up.py", "unsafe")],
 )
 @pytest.mark.parametrize("backend", ["local", "remote"])

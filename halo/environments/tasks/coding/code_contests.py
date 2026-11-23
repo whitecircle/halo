@@ -201,6 +201,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
         self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url, **(sandbox_options or {}))
+        # An executor passed in may serve other environments; one built here is closed with this one.
+        self._owns_sandbox = sandbox is None
         warn_if_unisolated(self.sandbox, type(self).__name__)
         # The one reader of these knobs, so every submission and the offline re-grade (``to_meta``) share it.
         self.grading_spec = GradingSpec(
@@ -566,3 +568,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             metrics["episode/tests_graded_frac"] = info.get("tests_graded", 0) / tests_total
             metrics["episode/grading_budget_hit"] = 1.0 if info.get("grading_budget_hit") else 0.0
         return metrics
+
+    def close(self) -> None:
+        if self._owns_sandbox:
+            self.sandbox.close()
+        super().close()
