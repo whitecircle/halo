@@ -89,7 +89,9 @@ parser.add_argument("--servers", type=int, default=1, help="environmental: the W
 parser.add_argument("--prefetch-depth", type=int, default=None, help="environmental: prefetch at this depth")
 parser.add_argument("--maxrl", action="store_true", help="online / environmental: train with use_maxrl")
 parser.add_argument(
-    "--chunked", action="store_true", help="sdpg: use_chunked_grpo_logprobs, the first non-zero OPD step against full logits"
+    "--chunked",
+    action="store_true",
+    help="sdpg: use_chunked_grpo_logprobs, the first non-zero OPD step against full logits",
 )
 ARGS = parser.parse_args()
 POLICY = MODES[ARGS.mode].family
