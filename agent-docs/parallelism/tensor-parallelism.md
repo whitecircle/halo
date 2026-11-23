@@ -29,7 +29,7 @@ rather than through DTensor dispatch: [Local-shard linears](#local-shard-linears
 ## Supported models
 
 **Native HF TP** (dense models with `base_model_tp_plan`, via `tp_plan="auto"` — shards attention,
-MLP, and the vocab dim of a [tied embedding/head pair](#tied-embeddings-under-hf-native-tp)): Llama,
+MLP, and the head's vocab dim, with the embedding's when the [pair is tied](#tied-embeddings-under-hf-native-tp)): Llama,
 Mistral, Qwen3, Qwen3.5/3.6 dense, any dense HF model declaring the plan.
 
 **Selective TP** (attention only, `apply_tp_to_attention_only()`; MoE handled by EP,

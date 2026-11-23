@@ -534,13 +534,13 @@ On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all val
 | 16,384 | 1,638 | 301 | 68.5 GiB | 1.25s |
 | 32,768 | 1,780 | 345 | 118.7 GiB | 2.30s |
 
-Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 6,013 (Halo 1.2.0), `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU (1.1.0 or earlier); at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
+Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 4,749 (6,013 on Halo 1.2.0), `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU (1.1.0 or earlier); at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
 
 ### Why MoE utilization reads low
 
 Sparsity first: gpt-oss-20b fires top-4 of 32 experts (3.5B active of 20.7B), so a sparse MoE cannot
 approach a dense model's plain MFU. Higher EP also shrinks `N_local` far faster than throughput (ep2 = 11.36B
-→ ep8 = 4.19B, −63%, against −12% tok/s/GPU at b1): ep8 trades per-GPU utilization for memory. Part of the gap is
+→ ep8 = 4.19B, −63%, against −15% tok/s/GPU at b1): ep8 trades per-GPU utilization for memory. Part of the gap is
 idle hardware too: at ep8 ranks wait for the busiest one ([where the time goes](#where-the-ep-steps-time-goes)).
 
 Levers to raise it: lower EP (more local params), longer sequence (the EP-independent attention-score
@@ -575,7 +575,7 @@ for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 3
 
 Throughput is dominated by the effective per-GPU token count `M = per_device_train_batch_size × max_length` —
 bigger `M` amortizes fixed per-step costs (kernel launches, dispatch latency, optimizer step) until a
-memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b, 49% and 0.4% on Qwen3.5-35B-A3B (Halo 1.1.0, SDPA).
+memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b; Qwen3.5-35B-A3B is flat from s8192 to s16384 (11,726 to 11,618, Halo 1.1.0, SDPA).
 Cross-node EP is pinned to `M ≤ 8192` by the Gin dispatch ceiling
 ([DeepEP → EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) — the floor of this range by
 construction.

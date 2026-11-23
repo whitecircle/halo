@@ -10,7 +10,7 @@ of them are MoE.
 
 | Family | Hub example | Kind | What to know |
 | --- | --- | --- | --- |
-| [Qwen3 MoE](cookbooks/halo-qwen3-moe-cookbook.md) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | MoE | the reference MoE |
+| [Qwen3 MoE](cookbooks/halo-qwen3-moe-cookbook.md) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | MoE | the reference MoE; no recipe ships, the cookbook carries the config |
 | [Qwen3.5 / Qwen3.6 MoE](cookbooks/halo-qwen3.5-qwen3.6-moe-cookbook.md) | `Qwen/Qwen3.5-35B-A3B` | MoE | hybrid linear attention; [`Qwen/Qwen3.8-2.4T-A95B`](../agent-docs/models/qwen3_5.md#qwen38-24t-a95b) ↗ takes the same path, with no recipe and no GPU run |
 | [GPT-OSS](cookbooks/halo-gpt-oss-cookbook.md) | `unsloth/gpt-oss-20b-BF16` | MoE | attention sinks; FA2 refused for on-policy RL |
 | [GLM-4 MoE Lite](cookbooks/halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | MoE | compressed (MLA) attention |
