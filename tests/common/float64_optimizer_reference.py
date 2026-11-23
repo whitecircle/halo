@@ -11,9 +11,9 @@ import torch
 import triton
 from torch import Tensor
 
-from halo.optimizers.adamw_bf16 import AdamWBF16, _fused_update, _launch_fused, _launch_tables
 from halo.optimizers.muon import _momentum_nesterov_kernel, _weight_decay_update_kernel
 from halo.optimizers.stochastic_rounding import SR_BLOCK_SIZE
+from tests.common.adamw_bf16_reference import adamw_bf16_step
 
 # fp32 unit roundoff; a slack of k * U32 * (sum of |terms|) covers k roundings of the terms' fp32 arithmetic.
 U32 = 2.0**-24
@@ -92,22 +92,14 @@ def _adamw_state(n: int, step: int, seed: int) -> dict:
     return state
 
 
-def _adamw_step(state: dict, *, fused: bool, step: int, lr: float, eps: float, weight_decay: float, name: str) -> dict:
-    """One step from ``state`` through the fused kernel or the eager bf16 step; returns the stepped bf16 tensors."""
+def _stepped(state: dict, *, fused: bool, step: int, lr: float, eps: float, weight_decay: float, name: str) -> dict:
+    """Copies of ``state``'s bf16 tensors after one :func:`adamw_bf16_step` at ``step``."""
     p = torch.nn.Parameter(state["p"].clone())
     p.grad = state["grad"].clone()
-    moments = {"exp_avg": state["exp_avg"].clone(), "exp_avg_sq": state["exp_avg_sq"].clone()}
+    moments = {"step": step, "exp_avg": state["exp_avg"].clone(), "exp_avg_sq": state["exp_avg_sq"].clone()}
     group = {"betas": BETAS, "lr": lr, "eps": eps, "weight_decay": weight_decay}
-    if fused:
-        update = _fused_update(p, name, {"step": step, **moments}, group)
-        _launch_fused([update], *_launch_tables([update]), None, None, 1)
-    else:
-        optimizer = AdamWBF16(
-            [{"params": [p], "param_names": [name]}], lr=lr, betas=BETAS, eps=eps, weight_decay=weight_decay
-        )
-        optimizer.state[p] = {"step": step - 1, **moments}
-        optimizer.step()
-    return {"p": p.detach(), **moments}
+    adamw_bf16_step(p, name, moments, group, fused=fused)
+    return {"p": p.detach(), "exp_avg": moments["exp_avg"], "exp_avg_sq": moments["exp_avg_sq"]}
 
 
 def adamw_float64_mismatches() -> list[str]:
@@ -125,7 +117,7 @@ def adamw_float64_mismatches() -> list[str]:
         state = _adamw_state(n, step, seed=n * 7 + step)
         reference = adamw_float64(state, step=step, lr=lr, eps=eps, weight_decay=weight_decay)
         for fused in (True, False):
-            out = _adamw_step(state, fused=fused, step=step, lr=lr, eps=eps, weight_decay=weight_decay, name="w")
+            out = _stepped(state, fused=fused, step=step, lr=lr, eps=eps, weight_decay=weight_decay, name="w")
             case = f"{'fused' if fused else 'eager'} n={n} step={step} lr={lr} wd={weight_decay} eps={eps}"
             for key, (value, slack) in reference.items():
                 nearest = key == "exp_avg"
@@ -145,7 +137,7 @@ def adamw_rounding_bias_mismatches() -> list[str]:
     reference = adamw_float64(state, **hyper)
     findings = []
     for fused in (True, False):
-        draws = [_adamw_step(state, fused=fused, name=f"w{k}", **hyper) for k in range(SEEDS)]
+        draws = [_stepped(state, fused=fused, name=f"w{k}", **hyper) for k in range(SEEDS)]
         for key in ("p", "exp_avg_sq"):
             z = _pooled_z(torch.stack([d[key] for d in draws]), reference[key][0])
             if not math.isfinite(z) or abs(z) > Z_LIMIT:
