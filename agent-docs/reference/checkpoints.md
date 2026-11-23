@@ -439,6 +439,11 @@ accelerate-managed FSDP (the base Trainer's save owns the flat-param layout) and
 saved: `adapter_config.json`, `adapter_model.safetensors` (`adapter_model.bin` on a safetensors write
 failure), `tokenizer.*`.
 
+`adapter_config.json` names the base as the run read it: `base_model_name_or_path` and, for a Hub base, `revision`,
+the commit every rank agreed on at load. It is PEFT's own field, so `AutoPeftModel` reads the base there too, and an
+expert-only save writes the same two keys. A local base and an `init_from_scratch` run record no revision. Every tool
+that loads an adapter's base reads it at that commit ([PEFT → Merging adapters](../optimization/peft.md#merging-adapters)).
+
 | Mode | LoRA params | Saving rank | Collective |
 |------|-------------|-------------|:----------:|
 | **EP** | Attention adapters + native grouped expert adapters | Save rank | Yes (expert gather) |
