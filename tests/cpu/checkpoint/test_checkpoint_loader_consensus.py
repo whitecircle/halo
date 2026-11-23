@@ -14,7 +14,7 @@ from peft.utils import SAFETENSORS_WEIGHTS_NAME as ADAPTER_WEIGHTS_NAME
 from safetensors.torch import load_file, save_file
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import Shard, distribute_tensor
-from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
+from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
 import halo.checkpoint.parallel.adapters as peft_mod
 import halo.checkpoint.parallel.optimizer as optimizer_mod
@@ -24,10 +24,14 @@ from halo.checkpoint.parallel.adapters import restore_adapters
 from halo.checkpoint.parallel.optimizer import OptimizerShardStore
 from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.parallel.sidecars import restore_lr_scheduler
-from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, weights_read_from
+from halo.distributed.context_parallel.config import CPConfig
+from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
+from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.distributed.tensor_parallel.plain_params import register_hand_sliced
 from tests.common.checkpoint_io import load_context
-from tests.common.models import TINY_QWEN3_MOE_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.parallelism import make_parallelism_config
 
 
 class _Recorder:
@@ -515,6 +519,52 @@ def test_ep_base_weight_checkpoint_demands_construction_from_it(tmp_path):
     ctx = _ctx(model, has_ep_layers=True)
     with pytest.raises(ValueError, match="constructed FROM the checkpoint"):
         load_resume_weights(ctx, str(tmp_path), model)
+
+
+def _cp_policy(checkpoint: str, *, read_from: str | None) -> UlyssesModel:
+    """A CP-wrapped policy as ``load_model_and_tokenizer`` leaves it on a resume that read ``checkpoint``: the loader's
+    stamp on the wrapper it returned, and ``_name_or_path`` back on the run's base."""
+    inner = Qwen3ForCausalLM(
+        Qwen3Config(**{**TINY_QWEN3_CONFIG, "num_hidden_layers": 2}, pad_token_id=0, eos_token_id=1)
+    )
+    inner.save_pretrained(checkpoint)
+    # Built eager (flash-attn cannot instantiate on CPU) but declaring what the CP validator reads.
+    inner.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
+    model = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, read_from)
+    model.config._name_or_path = "org/base-model"
+    return model
+
+
+def test_a_cp_policy_read_from_the_checkpoint_resumes_from_it(tmp_path):
+    """The stamp sits on the CP wrapper; read from inside it, the resume sees the base's name and refuses."""
+    checkpoint = str(tmp_path / "checkpoint")
+    model = _cp_policy(checkpoint, read_from=checkpoint)
+    ctx = load_context(
+        model,
+        make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2),
+        super_load_optimizer_and_scheduler=_Recorder(),
+    )
+
+    assert weights_read_from(model) == checkpoint
+    assert load_resume_weights(ctx, checkpoint, model) is True
+
+
+def test_a_cp_policy_drawn_at_random_was_read_from_nowhere(tmp_path):
+    assert weights_read_from(_cp_policy(str(tmp_path / "checkpoint"), read_from=None)) is None
+
+
+def test_a_cp_policy_built_from_the_base_is_still_refused_a_base_weight_checkpoint(tmp_path):
+    checkpoint = str(tmp_path / "checkpoint")
+    model = _cp_policy(checkpoint, read_from="org/base-model")
+    ctx = load_context(
+        model,
+        make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2),
+        super_load_optimizer_and_scheduler=_Recorder(),
+    )
+
+    with pytest.raises(ValueError, match="constructed FROM the checkpoint"):
+        load_resume_weights(ctx, checkpoint, model)
 
 
 # The resume skip is keyed on where the weights were read, not on config._name_or_path.

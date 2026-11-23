@@ -59,9 +59,9 @@ Set these per run:
   fill the global batch with `gradient_accumulation_steps`, not more
   parallelism. It is the largest effect on MoE.
 - **`gradient_checkpointing: false`** when the activations fit, at much higher
-  peak memory. On packed SFT rows `gradient_checkpointing_plan: auto` finds that
-  out itself: it measures step 2 and checkpoints only the layers the memory
-  needs ([Callbacks](../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback) ↗).
+  peak memory. On packed SFT rows keep it on and set
+  `gradient_checkpointing_plan: auto` instead: it measures step 2 and
+  checkpoints only the layers the memory needs ([Callbacks](../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback) ↗).
 - **`packing: true`** on a corpus of short rows; `padding_free: true` gains
   less. Where SFT rows share long prefixes (GPT-OSS, Qwen3, Qwen3.5/3.6,
   GLM-5 Next), `tree_packing: true` stores each prefix once, at some extra
