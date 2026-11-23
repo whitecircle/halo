@@ -508,7 +508,7 @@ the `DIST_SHARED_FILESYSTEM` umbrella):
 |---|---|---|
 | Stage parts `model-ppSSSSS-of-PPPPP-*.safetensors`, with the stage's [external tables](../reference/checkpoints.md#external-tables) as `model-ppSSSSS-of-PPPPP-tableNN-*` | one rank per stage (`stage_local_rank == 0`) | one rank per stage per **node** (`is_pp_shard_writer`) |
 | Index, `config.json`, tokenizer, a text-only run's untouched vision tower (`model-wrapper-*`) | global rank 0 | one rank per node; the index is the full one |
-| `optimizer_meta.pt`, `scheduler.pt`, `trainer_state.json`, `router_balancing_biases.pt`, offline GRPO's `reference_logps.pt` | global rank 0 | one rank per node, whole |
+| `optimizer_meta.pt`, `scheduler.pt`, `trainer_state.json`, `router_balancing_biases.pt`, `moe_expert_token_counts.json` (every stage's layers), offline GRPO's `reference_logps.pt` | global rank 0 | one rank per node, whole |
 | `optimizer_shard_<rank>.pt`, `rng_state_<rank>.pth` | every rank | every rank, on its own node |
 
 Because the parts carry the unsplit model's names, the **weights are topology-independent**: a

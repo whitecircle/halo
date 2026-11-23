@@ -42,7 +42,7 @@ from halo.optimizers.stochastic_rounding import SR_BLOCK_SIZE, sr_param_index, s
 from tests.common.adamw_bf16_reference import _per_parameter_kernel
 from tests.common.repo import probe_findings
 
-_HPARAMS = (0.9, 0.999, 1.0 / 3.0, 0.1, 1e-8, 1.0 - 1e-3)
+_HPARAMS = (0.9, 0.999, 1.0 / 3.0, 0.1, 1e-8, 1.0 - 1e-3, 1.0 - 0.9, 1.0 - 0.999)
 _MARKER = "FUSED_ADAMW_MISMATCHES:"
 _PROBE = f"""
 import os
@@ -59,6 +59,19 @@ import os
 os.environ["TRITON_INTERPRET"] = "1"
 from tests.common.adamw_bf16_reference import lookup_mismatches
 print({_LOOKUP_MARKER!r} + "|".join(lookup_mismatches()))
+"""
+_FIRST_STEP_MARKER = "ADAMW_FIRST_STEP_MISMATCHES:"
+_CANCELLATION_PROBE = f"""
+import os
+os.environ["TRITON_INTERPRET"] = "1"
+from tests.common.adamw_bf16_reference import first_step_cancellation_mismatches
+print({_FIRST_STEP_MARKER!r} + "|".join(first_step_cancellation_mismatches()))
+"""
+_FUSED_VS_EAGER_PROBE = f"""
+import os
+os.environ["TRITON_INTERPRET"] = "1"
+from tests.common.adamw_bf16_reference import first_step_eager_mismatches
+print({_FIRST_STEP_MARKER!r} + "|".join(first_step_eager_mismatches()))
 """
 _TARGETS = tuple(GPUTarget("cuda", arch, 32) for arch in (90, 100, 103))
 # Hopper, the two Blackwell capabilities the multi-tensor launch is gated to, and two Blackwell ones outside it.
@@ -203,8 +216,8 @@ def test_tables_address_every_tensor_and_count_its_programs():
 
 def test_tables_keep_per_tensor_scalars_and_seeds():
     """Params at different steps (a resumed run) share a launch."""
-    first = _update(torch.zeros(4, dtype=torch.bfloat16), 5, hparams=(0.9, 0.999, 0.5, 0.25, 1e-8, 1.0))
-    second = _update(torch.zeros(4, dtype=torch.bfloat16), 6, hparams=(0.8, 0.99, 0.125, 0.75, 1e-6, 0.9))
+    first = _update(torch.zeros(4, dtype=torch.bfloat16), 5, hparams=(0.9, 0.999, 0.5, 0.25, 1e-8, 1.0, 0.1, 0.001))
+    second = _update(torch.zeros(4, dtype=torch.bfloat16), 6, hparams=(0.8, 0.99, 0.125, 0.75, 1e-6, 0.9, 0.2, 0.01))
 
     index, hparams, _ = _launch_tables([first, second])
 
@@ -313,6 +326,8 @@ def test_fused_update_carries_its_param_step_scalars_and_seed():
                 math.sqrt(1.0 - beta2**step),
                 eps,
                 1.0 - lr * wd,
+                1.0 - beta1,
+                1.0 - beta2,
             ), name
             assert update.seed == sr_seed_pair(_SR_KEY, step, sr_param_index(name))[0], name
             checked += 1
@@ -472,7 +487,10 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
         "p_ptr": "*bf16",
         "grad_ptr": f"*{grad_dtype}",
         **dict.fromkeys(("ea_ptr", "easq_ptr"), "*bf16"),
-        **dict.fromkeys(("beta1", "beta2", "step_size", "bc2_sqrt", "eps", "wd_factor"), "fp32"),
+        **dict.fromkeys(
+            ("beta1", "beta2", "step_size", "bc2_sqrt", "eps", "wd_factor", "one_minus_beta1", "one_minus_beta2"),
+            "fp32",
+        ),
         "n_elements": "i32",
         "seed": "i32",
         "grad_scale_ptr": scale_ptr,
@@ -545,6 +563,16 @@ def test_lookup_matches_the_block_scan_interpreted():
 
 def test_fused_kernel_matches_per_parameter_kernel_interpreted():
     assert probe_findings(_PROBE, _MARKER) == []
+
+
+def test_fused_first_step_lands_where_float64_adamw_does_interpreted():
+    """At beta2 0.999 and 0.9999: ``p = -lr`` under a negative gradient lands on 0 after step 1."""
+    assert probe_findings(_CANCELLATION_PROBE, _FIRST_STEP_MARKER) == []
+
+
+def test_fused_first_step_matches_the_eager_step_interpreted():
+    """At beta2 0.99999, against the eager step, which takes 1 - beta from the float64 betas."""
+    assert probe_findings(_FUSED_VS_EAGER_PROBE, _FIRST_STEP_MARKER) == []
 
 
 if __name__ == "__main__":

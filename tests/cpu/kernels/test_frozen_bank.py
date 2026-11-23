@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from halo.kernels.lowp import frozen_bank
+from halo.kernels.lowp import dequant_triton, frozen_bank
 from halo.kernels.lowp.dequant_triton import FUSED_DEQUANT_BLOCK, dequantize_bank_triton, supports_fused_dequant
 from halo.kernels.lowp.frozen_bank import FrozenExpertBank, frozen_bank_grouped_mm, warm_fused_dequant_kernels
 
@@ -211,6 +211,22 @@ def test_the_warm_up_launches_one_expert_per_format_and_width(fused_launches):
         for data, _scales, _global_scale, quant_format in fused_launches
     ]
     assert launched == [("nvfp4", 1, wide), ("nvfp4", 1, narrow), ("mxfp8", 1, narrow)]
+
+
+@pytest.mark.parametrize(
+    ("kernel", "argument", "setting"),
+    (
+        (dequant_triton._mxfp8_bank_kernel, "scales_ptr", "do_not_specialize_on_alignment"),
+        (dequant_triton._nvfp4_bank_kernel, "global_ptr", "do_not_specialize_on_alignment"),
+        (dequant_triton._nvfp4_bank_kernel, "rows_per_expert", "do_not_specialize"),
+    ),
+)
+def test_a_one_expert_slice_runs_the_binary_its_bank_warmed(kernel, argument, setting):
+    """Triton compiles per 16-byte alignment of a pointer and per class of an integer (1, a multiple of 16, neither).
+    A slice's MXFP8 scales start a multiple of 8 bytes into the bank and its NVFP4 global scale a multiple of 4, and
+    a one-row expert hands in a count of 1; unspecialized, each runs the binary the warm-up compiled."""
+    params = {param.name: param for param in kernel.params}
+    assert getattr(params[argument], setting)
 
 
 def _grouped_inputs(bank: FrozenExpertBank, rows_per_expert: tuple[int, ...]):

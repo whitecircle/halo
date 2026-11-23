@@ -9,6 +9,7 @@ from halo.rewards.samples import ScoringSample
 from halo.rewards.scorers.base import Scorer, ScoreResult
 from halo.rewards.scorers.judge import GenerativeJudge
 from halo.rewards.scorers.reward_model import ServedRewardModel
+from halo.rewards.scorers.whitecircle import WhiteCircleScorer
 from halo.rewards.terms import (
     ENVIRONMENT_CHECKS,
     EnvironmentTerm,
@@ -23,7 +24,7 @@ from halo.rewards.terms import (
 )
 
 SCORERS: dict[type[ScoredTerm], type[Scorer]] = {
-    scorer.term_type: scorer for scorer in (GenerativeJudge, ServedRewardModel)
+    scorer.term_type: scorer for scorer in (GenerativeJudge, ServedRewardModel, WhiteCircleScorer)
 }
 
 

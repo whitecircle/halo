@@ -25,8 +25,8 @@ longer than `max_prompt_length` is dropped, not truncated.
 
 The reward is a list of terms, each scoring a completion in `[0, 1]` and logged as
 `rewards/<name>/mean`. The default is one `accuracy` term: 1.0 when the last `\boxed{...}` equals
-`answer`. `format`, `judge` and `reward_model` terms add a regex check, a generative judge graded
-against your rubric, and a served scorer:
+`answer`. `format`, `judge`, `reward_model` and `whitecircle` terms add a regex check, a generative
+judge graded against your rubric, a served scorer, and a check against your White Circle policies:
 
 ```yaml
 rewards:
@@ -35,7 +35,14 @@ rewards:
     weight: 0.5
 ```
 
-Every judge and reward model is probed at launch, so a bad URL, key or model name fails the launch, not
+One line trains against your White Circle policies once the recipe names your environment
+([White Circle](../../agent-docs/training-methods/grpo/rewards/whitecircle.md) ↗):
+
+```bash
+WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+```
+
+Every judge, reward model and White Circle term is probed at launch, so a bad URL, key or model name fails the launch, not
 every step ([Reward Terms](../../agent-docs/training-methods/grpo/rewards/README.md) ↗).
 
 ## Run

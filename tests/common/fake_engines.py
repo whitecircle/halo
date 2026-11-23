@@ -226,8 +226,9 @@ class FakeVLLMServer(FakeEngineServer):
         # Set to launch with --enable-lora (its lora_config); the adapters it then holds, name -> directory.
         self.lora: dict | None = None
         self.adapters: dict[str, str] = {}
-        # VLLM_ALLOW_RUNTIME_LORA_UPDATING, which registers the adapter routes; None leaves it out of the report.
-        self.runtime_lora_updating: bool | None = True
+        # VLLM_ALLOW_RUNTIME_LORA_UPDATING, which registers the adapter routes, as the parsed bool or the string it was
+        # set to; None leaves it out of the report.
+        self.runtime_lora_updating: bool | str | None = True
         # The launch's --model and --revision, as /server_info reports them.
         self.model_path = "/models/policy"
         self.revision: str | None = None
