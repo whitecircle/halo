@@ -61,6 +61,7 @@ def _host(
     model = types.SimpleNamespace(get_output_embeddings=lambda: head)
     return types.SimpleNamespace(
         _use_chunked_grpo_logprobs=chunked_on,
+        _full_logits_bytes_per_logit=LogprobScoringMixin._full_logits_bytes_per_logit,
         args=types.SimpleNamespace(
             per_device_train_batch_size=rows,
             per_device_eval_batch_size=eval_rows,

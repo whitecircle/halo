@@ -11,7 +11,7 @@ Neither EP nor TP shrinks the logits: EP and MoE TP leave `lm_head` whole, and d
 - [Chunked log-probs](#chunked-log-probs).
 - `per_device_train_batch_size: 1`. Both forwards chunk to this many rows, so peak follows the longest single row.
 
-With chunked log-probs off, every GRPO trainer weighs the logits plane against free device memory at construction: `rows × (completion width + 1) × vocab × 4 B`.
+With chunked log-probs off, every GRPO trainer weighs the logits plane against free device memory at construction: `rows × (completion width + 1) × vocab × 4 B`. Online SDPG adds the teacher's plane while its OPD term is on, 2 B a logit in bf16 and 4 B in fp32 ([Online SDPG](../distillation/online-sdpg.md#what-to-watch)).
 
 - **Rows**: `per_device_train_batch_size`, or `per_device_eval_batch_size` when evaluation runs and it is larger.
 - **Width**: `rollout_max_tokens`, or `max_train_row_tokens` under `train_on_sampled_tokens: false` (the context window when unset). Online and offline GRPO read `max_completion_length` ([`use_chunked_grpo_logprobs`](../../reference/configuration-reference.md#offlinegrpoconfig)).
