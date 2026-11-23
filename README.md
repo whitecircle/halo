@@ -85,8 +85,10 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     the run.
   - **Adapters:** an adapter save records the Hub commit of its base model, and `merge_peft_adapters.py` and
     `convert_to_bf16.py --check_inference` read the base at that commit (`--base_revision` names one for an adapter
-    that records none). A PEFT wrap that leaves an adapter with no trainable parameter is refused when the trainer
-    is built.
+    that records none). A checkpoint saved in its source config schema reads that schema at the same commit. An
+    expert-only GPT-OSS adapter records whether its run neutralized the attention sinks, and the streaming merge
+    writes them neutralized again. A PEFT wrap that leaves an adapter with no trainable parameter is refused when
+    the trainer is built.
   - **Also:** Transformers 5.23, DPO/KTO reference log-probs swept after the FSDP2 wrap, SGLang turns requeued at a
     weight push, Keenable as a web-search backend, and a fix: fused AdamWBF16 takes `1 - beta` from the float64
     betas.
