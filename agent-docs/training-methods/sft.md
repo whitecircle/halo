@@ -4,6 +4,8 @@ Cross-entropy on conversation data — the step before preference optimization (
 
 ## Dataset
 
+Dense hybrid Qwen3.5/3.6 text towers have a restricted [CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft).
+
 Conversations under `conversation_field` (default `prompt`):
 
 ```jsonl

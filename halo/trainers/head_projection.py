@@ -51,6 +51,11 @@ class HeadProjector:
             dropped.append(adapter.dropout(x))
         return scaled, *dropped
 
+    def head_inputs_at(self, hidden: torch.Tensor, positions: torch.Tensor) -> list[torch.Tensor]:
+        """:meth:`head_inputs` of ``[B, T, H]`` ``hidden``, kept at flat ``positions`` over ``B * T``. The dropout draws
+        over the whole input first, as PEFT's forward does; the selection's backward needs no host read."""
+        return [inputs.flatten(0, 1).index_select(0, positions) for inputs in self.head_inputs(hidden)]
+
     def project(self, scaled: torch.Tensor, *dropped: torch.Tensor) -> torch.Tensor:
         """Logits ``[rows, width]`` of rows taken from :meth:`head_inputs`, in PEFT's order of operations."""
         logits = F.linear(scaled, self.weight, self.bias)

@@ -125,13 +125,15 @@ and self-distillation under EP only. A **No** PP trainer is refused at config ti
 `DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
 
 A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
-`SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,
+`SUPPORTS_CP` and `PP_REFUSAL` are read by `reject_undeclared_axes(cp_size=,
 pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
-`_init_distributed_config` runs again at construction:
+`_init_distributed_config` runs again at construction. `SUPPORTS_HYBRID_CP` is read by
+`reject_hybrid_cp_training` on the concrete trainer class:
 
 | ClassVar | Default | Meaning |
 |---|---|---|
 | `SUPPORTS_CP` | `False` | CP admitted |
+| `SUPPORTS_HYBRID_CP` | `False` | dense hybrid CP admitted only when declared on the concrete SFT trainer; subclasses must opt in separately ([restrictions](../parallelism/context-parallelism.md#dense-hybrid-sft)) |
 | `PP_REFUSAL` | a generic refusal | the mechanism the PP refusal names; `None` where PP is supported |
 | `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
 | `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT, and teacher distillation on the student) |

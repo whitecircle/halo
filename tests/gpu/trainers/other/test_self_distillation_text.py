@@ -5,6 +5,8 @@ No loss term is compared here; alignment and objective are pinned by tests/cpu/d
 tests/cpu/trainers/test_self_distillation_trainer.py.
 """
 
+import argparse
+
 import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -18,6 +20,10 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
 from tests.common.training_checks import step_losses
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
+ARGS = parser.parse_args()
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", QWEN3_0_6B)
 NUM_TRAIN_SAMPLES = 16
@@ -98,6 +104,7 @@ def run(ctx) -> dict:
         reference_kl_loss="unnormalized_kl",
         confidence_weight_opd=True,
         opd_exclude_eos=True,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
 
     trainer.train()

@@ -2,6 +2,7 @@
 """Distributed off-policy distillation (text or VLM): the student is fit to a frozen teacher's token distribution."""
 
 import logging
+import os
 
 from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 
@@ -132,6 +133,12 @@ def _text_distill_collator(args, tokenizer, model_config):
     ) or DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False)
 
 
+def _teacher_is_student_checkpoint(args, model_config) -> bool:
+    """The same path once both resolve against the working directory, so ``ckpt`` and its absolute spelling match. Two
+    hub ids resolve alike only when spelled alike."""
+    return os.path.abspath(args.teacher_model) == os.path.abspath(model_config.model_name_or_path)
+
+
 def main():
     args, training_config, model_config, dist_args = parse_script_args(
         TeacherDistillScriptArguments, TeacherDistillationConfig, ModelArguments, ParallelismArguments
@@ -213,7 +220,13 @@ def main():
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, training_config)
 
-    callbacks = configure_balancing_and_build_callbacks(args, training_config, student_model, context)
+    callbacks = configure_balancing_and_build_callbacks(
+        args,
+        training_config,
+        student_model,
+        context,
+        teacher_is_student_checkpoint=_teacher_is_student_checkpoint(args, model_config),
+    )
 
     barrier()
 
