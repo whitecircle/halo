@@ -57,6 +57,7 @@ def run(ctx):
         for j in range(i + 1, NUM_EXPERTS)
     )
 
+    # The push assembles each layer on the forwarding rank alone, the one rank that holds an engine client.
     recorder = RecordingSender(keep_values=True) if ctx.rank == FORWARDING_RANK else None
     try:
         gather_and_send_weights(model, recorder)
@@ -66,23 +67,24 @@ def run(ctx):
         checks["sync_completed_under_expert_tp"] = False
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
-    if recorder is None:
-        return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
+    if recorder is not None:
+        gathered = {p.name: p.value.float().cpu() for p in recorder.params if p.name.endswith(EXPERT_KEYS)}
+        checks["gathered_all_expert_tensors"] = len(gathered) == N_LAYERS * len(EXPERT_KEYS)
+        checks["dense_params_forwarded"] = any("lm_head" in name or "embed" in name for name in recorder.names)
 
-    gathered = {p.name: p.value.float().cpu() for p in recorder.params if p.name.endswith(EXPERT_KEYS)}
-    checks["gathered_all_expert_tensors"] = len(gathered) == N_LAYERS * len(EXPERT_KEYS)
-    checks["dense_params_forwarded"] = any("lm_head" in name or "embed" in name for name in recorder.names)
+        mismatched = [
+            name
+            for name, tensor in gathered.items()
+            if name not in reference or not torch.equal(tensor, reference[name])
+        ]
+        if mismatched:
+            log(f"ETP gather mismatched the unsharded reference for {len(mismatched)}: {mismatched[:4]}")
+            for name in mismatched[:2]:
+                log(f"  {name}: got {tuple(gathered[name].shape)}, want {tuple(reference[name].shape)}")
+        checks["etp_gather_matches_unsharded_reference"] = bool(gathered) and not mismatched
+        metrics["forwarded_params"] = len(recorder.params)
 
-    mismatched = [
-        name for name, tensor in gathered.items() if name not in reference or not torch.equal(tensor, reference[name])
-    ]
-    if mismatched:
-        log(f"ETP gather mismatched the unsharded reference for {len(mismatched)}: {mismatched[:4]}")
-        for name in mismatched[:2]:
-            log(f"  {name}: got {tuple(gathered[name].shape)}, want {tuple(reference[name].shape)}")
-    checks["etp_gather_matches_unsharded_reference"] = bool(gathered) and not mismatched
-
-    metrics["forwarded_params"] = len(recorder.params)
+    # The sync checks exist on the forwarding rank alone, so its verdict is what every rank reports.
     return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
 

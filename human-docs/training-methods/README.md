@@ -34,8 +34,8 @@ have to the trainer that reads it.
 - **Checkpoints.** They load with `from_pretrained` and upload to the Hub
   without their training state ([Uploading](../checkpoints.md#uploading-to-the-huggingface-hub)).
   Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
-  writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save
-  time instead (`merge_expert_lora_on_save: true`). See [Checkpoints & Export](../checkpoints.md).
+  writes an adapter you merge with one command, expert LoRA under EP included;
+  `merge_expert_lora_on_save: true` folds it into the weights at save time instead. See [Checkpoints & Export](../checkpoints.md).
 
 Every hyperparameter and refusal per method is in the
 [training-methods reference](../../agent-docs/training-methods/README.md) ↗.

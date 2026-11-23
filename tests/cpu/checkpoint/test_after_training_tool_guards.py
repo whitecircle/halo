@@ -127,6 +127,7 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
     class _FakePeftConfig:
         base_model_name_or_path = str(base)
         peft_type = "LORA"
+        revision = None
 
         @classmethod
         def from_pretrained(cls, _path):
@@ -248,6 +249,17 @@ def _merge_labels(monkeypatch, *flags: str) -> list[int]:
     monkeypatch.setattr(sys, "argv", [*_MERGE_ARGV, *flags])
     module.main()
     return seen
+
+
+@pytest.mark.parametrize(("flags", "revision"), [((), None), (("--base_revision", "c0ffee"), "c0ffee")])
+def test_merge_hands_on_the_base_revision_it_was_given(monkeypatch, flags, revision):
+    seen: list[str | None] = []
+    module = load_script_module("scripts/after_training/merge_peft_adapters.py", "halo_test_merge_base_revision")
+    monkeypatch.setattr(module, "merge_peft_adapter", lambda **kwargs: seen.append(kwargs["base_revision"]))
+    monkeypatch.setattr(sys, "argv", [*_MERGE_ARGV, *flags])
+    module.main()
+
+    assert seen == [revision]
 
 
 def test_merge_refuses_a_label_count_without_a_classification_head(monkeypatch, capsys):

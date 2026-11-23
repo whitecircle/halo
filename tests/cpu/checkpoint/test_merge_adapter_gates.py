@@ -93,7 +93,7 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -
 
 
 def _load_base_model(calls: list[tuple[str, str]]):
-    def load(base_model_path, *, excuse_task_head):
+    def load(base_model_path, *, excuse_task_head, revision):
         calls.append(("load_base_model", str(base_model_path)))
         return _Merged()
 

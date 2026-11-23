@@ -21,7 +21,7 @@ halo launch <method> <config.yaml> [launcher flags] [field overrides]
 | `--accelerate <yaml>` | `-a` | launch with `accelerate launch` and this config (plain FSDP) |
 | `--port P` | `-p` | rendezvous port for a multi-process launch; set it when two jobs share a host |
 | `--numa-binding <mode>` | | `torchrun`'s NUMA binding (`node` runs each rank on its GPU's NUMA node); `torchrun` launches only, refused with `--accelerate` or one process ([NUMA binding](../agent-docs/optimization/throughput-benchmarks.md#numa-binding) ↗) |
-| `--halo-rollout-backend <name>` | | run the RL environments' code execution on a hosted sandbox (`modal`) ([Code Execution Sandboxes](../agent-docs/training-methods/async-grpo/environments/sandbox.md#modal) ↗) |
+| `--halo-rollout-backend <name>` | | run the RL environments' code execution on a hosted sandbox (`modal`, `baseten`). With `baseten` the Python REPL tools still run on the training host, in the environment's process, unless `HALO_SANDBOX_REPL=1` is set ([Modal](../agent-docs/training-methods/async-grpo/environments/sandbox.md#modal) ↗, [Baseten](../agent-docs/training-methods/async-grpo/environments/sandbox.md#baseten-sandboxes) ↗) |
 | `--list` | | print every method and its script |
 | `--dry_run` | | print the command instead of running it |
 | `--root <dir>` | | repository root (defaults to the checkout the CLI lives in); the script imports `halo` and `scripts` from it |
@@ -77,16 +77,19 @@ tool's help, not the launcher's.
 | `merge-peft-adapters` / `merge-models` | fold an adapter into its base, or merge several checkpoints in weight space |
 | `convert-to-bf16` / `quantize-to-lowp` / `unfuse-moe-experts` / `reset-sinks` / `reattach-vision-tower` | checkpoint post-processing: bf16 export, low-precision export, per-expert layout, GPT-OSS sink reset, the vision tower back on a text-only export |
 | `patch-vocab` | add tokens to a model's vocabulary before training |
+| `export-block-fp8` | write the block-FP8 checkpoint a rollout server boots from under `rollout_weight_precision: fp8_block`; see [Rollout Servers](rollout-servers.md) |
 | `convert-glm5-bf16` / `convert-mistral4-bf16` / `convert-deepseek-v4-bf16` | convert that family's low-precision Hub release to bf16, required before training it |
 | `prepare-dataset` / `s3` | tokenize SFT or pretraining data offline, optionally packed and sharded; move datasets to and from S3 |
 | `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then build prompts, pack tests and checker, and publish rating bands |
 | `deduplicate-dataset` | deduplicate generated or collected data |
+| `score-offline-grpo` / `create-whitecircle-policies` / `prepare-baxbench-prompts` | write an offline-GRPO dataset's `rewards` with a training YAML's reward terms; create a policy file's sets in a White Circle environment and print the matching `rewards:` block; write BaxBench's backend tasks as GRPO prompts; see the [White Circle cookbook](cookbooks/halo-whitecircle-cookbook.md) |
 | `openai-batched-generation` | batched generation against a vLLM or OpenAI-compatible endpoint |
 | `inference/reward-model/score` | generate one response per prompt against an endpoint and score it with a reward model |
 | `inference/reward-model/rejection-sample` | generate N responses per prompt, score them, and keep the best and worst as preference pairs or offline GRPO data |
 | `eval-env` / `eval-code-contests` / `regrade-trajectories` | evaluate a model on an RL environment through an OpenAI-compatible endpoint; re-grade recorded code-contest trajectories |
 | `gradio-openai-chatbot` / `gradio-environment-playground` | chat with a served model, or play an environment against it, in the browser |
 | `nvlink-health` / `py-spy-diag` / `trace-report` | preflight and debugging; see [Troubleshooting](troubleshooting.md) |
+| `benchmark-dsa-attention` | time GLM-5 Next's DSA attention kernel against SDPA on one GPU |
 | `weight-sync-transport` | check which transport the trainer-to-rollout-server weight sync uses |
 | `check-links` | check every link, anchor and code reference in the docs |
 

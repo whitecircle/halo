@@ -245,9 +245,10 @@ def test_local_writes_auxiliary_files():
     assert res.stdout.strip() == "hello-aux"
 
 
-def test_local_rejects_unsafe_aux_path():
+@pytest.mark.parametrize("name", ["../escape.txt", "bad\ud800.py", "bad\0.txt"])
+def test_local_rejects_unsafe_aux_path(name):
     sb = LocalSubprocessSandbox()
-    res = sb.run("print(1)", files={"../escape.txt": "x"})
+    res = sb.run("print(1)", files={name: "x"})
     assert res.error is not None
     assert "unsafe" in res.error.lower()
 

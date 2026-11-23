@@ -420,7 +420,7 @@ toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covere
 | Liger + FusedLinearCE | 17,927 | 139.5 GiB | +31%, −29 GiB |
 
 At this shape (Halo 1.1.0 or earlier) FLCE saves only 1.5 GiB more than CE and costs 5% throughput; at 16k on EP1 in 1.2.0 the two are within 0.2%. FLCE's saving is the logits
-plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~2.5 GB at 8k. Reach for plain CE when a model's FLCE patch is unavailable.
+plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), and it scales with the tokens in the batch. Reach for plain CE when a model's FLCE patch is unavailable.
 
 **Host time per launch.** Liger 0.8.4 adds host time around each RMSNorm and SwiGLU launch: at most ~1.5%
 per step on the most host-bound row measured (dense Qwen3-8B at CP2 on 8× B300, 4,096-token rows), and GPU

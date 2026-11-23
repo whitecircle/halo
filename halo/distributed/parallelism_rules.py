@@ -432,8 +432,9 @@ def _reject_hsdp(pc: ParallelismConfig) -> None:
     if pc.tp_size > 1 or pc.expert_tp_size > 1:
         raise ValueError(
             f"use_hsdp=True is not supported with TP (tensor_parallel_size={pc.tp_size}) or Expert-TP "
-            f"(expert_tensor_parallel_size={pc.expert_tp_size}); those modes build their own (dp, tp) "
-            f"device mesh. Use HSDP on the standard DP path (pure DP or CP)."
+            f"(expert_tensor_parallel_size={pc.expert_tp_size}): TP shards on its own (dp, tp) device mesh, and an "
+            f"Expert-TP run keeps its non-expert parameters on the EP path's 1-D FSDP. Use HSDP on the standard DP "
+            f"path (pure DP or CP)."
         )
     if pc.ep_size > 1:
         raise ValueError(

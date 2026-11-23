@@ -31,7 +31,7 @@ from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.parallel.save import save_checkpoint
 from halo.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases, save_lr_scheduler
 from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
-from halo.checkpoint.weights_source import config_schema_source
+from halo.checkpoint.weights_source import config_schema_source, weights_read_at
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.dtype import resolve_training_dtype
@@ -324,7 +324,12 @@ class CheckpointingMixin:
                 # The base save wrote ``processing_class``.
                 if self.export_processing_class is not None:
                     self.export_processing_class.save_pretrained(output_dir)
-                finalize_exported_config(ctx.model.config, output_dir, source=config_schema_source(ctx.model))
+                finalize_exported_config(
+                    ctx.model.config,
+                    output_dir,
+                    source=config_schema_source(ctx.model),
+                    revision=weights_read_at(ctx.model),
+                )
                 apply_umask_mode(output_dir)
 
     def _mark_model_save_collectives_done(self) -> None:

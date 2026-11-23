@@ -186,7 +186,7 @@ The EP lazy loader slices by **`ep_size`, not `X`** — ETP partners share `disp
 the same experts at full intermediate width. The intermediate dim is split later, at EP patching
 (`_init_fused_glu_params` / `_store_separate_glu_params`,
 `halo/distributed/expert_parallel/moe_layer/compute.py`), which also holds one layer's transposed full-width
-copy alongside the new shard. So `ep2 + etp8` has the same steady state as `ep16` and a **407 GB**
+copy alongside the new shard. So `ep2 + etp8` holds `ep16`'s expert and non-expert shares and a **407 GB**
 load peak.
 
 ## Scenario matrix
@@ -208,15 +208,15 @@ NVLink.
 | **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **263** | 383 | 69 | ✗ the replay cache takes full fine-tuning past the budget; frozen layers or `s4096` (244, ⚠) fit |
 | 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **288** | 407 | 69 | ✗ TP collapses `F` to 2 |
 | 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 240 | 291 | **407** | ✗ load peak |
-| 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
+| 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386–1,544 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | 2 | `pp2` × `ep8` node | 8 per stage | 8 | 206 | 27 | 268 | 373 | 66 | ✗ stage 0 holds 32 of the 60 layers and two microbatches' replay caches ([PP cells](#pipeline-parallel-cells)) |
 | **3** (24) | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load ([The 3-node case](#the-3-node-case)) |
-| 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
+| 3 | `ep2/4/8` node | ≤8 | 24 | 386–1,544 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 29 | 178 | 240 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
 | 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_reject_ep_group`) |
 | 3 | `pp3` × `ep8` node | 8 per stage | 8 | 155 | 22 | 216 | 334 | 51 | ✓ at 8k, the one legal 3-node layout, at the [PP costs](#pipeline-parallel-cells); ✗ at 32k |
 | **4** (32) | **`ep32` global** | 32 | 32 | 97 | 28 | **169** | 303 | 45 | ✓ |
-| 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 149 | 221 | **214** | ⚠ load peak, experimental axis |
+| 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 149 | 221 | 214 | ✓ experimental axis |
 | 4 | `ep32` global + `tp8` | 32 | 4 | 97 | 39 | 180 | 314 | 45 | ✓ but strictly worse than `ep32` |
 | 4 | `ep16` global × 2 replicas | 16 | 32 | 193 | 31 | 263 | 383 | 69 | ✗ as `ep16` at 2 nodes; both groups still span all 4 domains (4 contiguous ranks per domain — column-block layout), so dispatch stays on RDMA. The win is the narrower 16-rank dispatch group, not domain locality |
 | 4 | `pp4` × `ep8` node | 8 per stage | 8 | 103 | 16 | 154 | 258 | 36 | ✓ EP on NVLink and no 8192 tokens/rank cap, at the [PP costs](#pipeline-parallel-cells); ⚠ at 32k |
@@ -449,7 +449,7 @@ a measurement, except the three GLM-5.3-Flash rows marked measured ([rates](../m
 | **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | Measured, GC on: 68.8 GiB after load, 212.7–214.1 GiB peak, 1,504 tok/s/GPU | the 8192 tokens/rank cross-node dispatch ceiling. Needs the bf16 conversion (~650 GB) |
 | GLM-5.3-Flash | 304 B | 2 × 8, `pp2 × ep8` | 19.0 B → 152 GB | Measured, GC on: 57.1 / 54.0 GiB after load, 218.0–218.7 / 197.5–197.9 GiB peak, 2,423 tok/s/GPU | padded rows only, as packing is refused; 1.61× `ep16` |
 | GLM-5.3-Flash | 304 B | 2 × 8, `ep8` with DP | 38.0 B → 304 GB | Measured: out of memory in the first optimizer step, 243–250 GiB allocated of 267.7 | optimizer state on 40.2B trainable per rank: weights and gradients fit, AdamWBF16's moments do not |
-| GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | ~200 GB by arithmetic | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
+| GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | ~200 GB steady by arithmetic; the ~338 GB load peak (`2·(P_ne + P_e/ep_size)`) is over the device | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
 | **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~75 GB left on the 288 GB device for activations and the allocator's reserve at `max_length: 8192` with checkpointing — marginal, unmeasured |
 | Step-3.7-Flash | 190 B | 2 × 8, `ep16 --ep_scope=global` | 11.9 B → 95 GB | ~115 GB | the 8192 tokens/rank dispatch ceiling |
 | **DeepSeek-V4-Flash** (284B; 43 MoE layers × 256 × `M=2048, H=4096`, 3 of them hash-routed) | 277 B | 2 × 8, `ep16 --ep_scope=global` | 17.3 B → 138 GB | ~155 GB | the 8192 tokens/rank dispatch ceiling. Needs the bf16 conversion (~580 GB output) |

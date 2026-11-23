@@ -22,7 +22,7 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
 from tests.common.rank_log import log
-from tests.common.weight_sync import ForwardedParam, RecordingSender
+from tests.common.weight_sync import RecordingSender
 
 EP_SIZE = 2
 SEQ_LEN = 64
@@ -89,26 +89,11 @@ def local_expert_weights(model) -> dict[str, torch.Tensor]:
     return shards
 
 
-def gather_on_all_ranks(model) -> RecordingSender:
-    """COLLECTIVE. Record the forwarding rank's push and share its tiny expert oracle for rank-offset checks."""
-    recorder = RecordingSender(keep_values=True)
-    forwarding = dist.get_rank() == FORWARDING_RANK
-    gather_and_send_weights(model, recorder if forwarding else None)
-    payload = [
-        [
-            ForwardedParam(
-                param.name,
-                param.shape,
-                param.is_dtensor,
-                param.value.cpu() if param.name.endswith(EXPERT_KEYS) else None,
-            )
-            for param in recorder.params
-        ]
-        if forwarding
-        else None
-    ]
-    dist.broadcast_object_list(payload, src=FORWARDING_RANK)
-    recorder.params = payload[0]
+def gather_on_forwarding_rank(model) -> RecordingSender | None:
+    """COLLECTIVE. The push assembles each layer on the forwarding rank alone, the one rank that holds an engine
+    client, so only that rank records; the others return ``None``."""
+    recorder = RecordingSender(keep_values=True) if dist.get_rank() == FORWARDING_RANK else None
+    gather_and_send_weights(model, recorder)
     return recorder
 
 
@@ -135,25 +120,26 @@ def run(ctx):
     )
     checks["reference_experts_pairwise_distinct"] = distinct
 
-    recorder = gather_on_all_ranks(model)
-    gathered = {p.name: p.value.float().cpu() for p in recorder.params if p.name.endswith(EXPERT_KEYS)}
-    checks["gathered_all_expert_tensors"] = len(gathered) == N_LAYERS * len(EXPERT_KEYS)
-    checks["gathered_experts_are_global_count"] = bool(gathered) and all(
-        tensor.shape[0] == NUM_EXPERTS for tensor in gathered.values()
-    )
-    checks["no_internal_gmm_leak"] = not any(
-        sub in name for name in recorder.names for sub in FORBIDDEN_NAME_SUBSTRINGS
-    )
-    checks["dense_params_forwarded"] = any("lm_head" in name or "embed" in name for name in recorder.names)
+    recorder = gather_on_forwarding_rank(model)
+    if recorder is not None:
+        gathered = {p.name: p.value.float().cpu() for p in recorder.params if p.name.endswith(EXPERT_KEYS)}
+        checks["gathered_all_expert_tensors"] = len(gathered) == N_LAYERS * len(EXPERT_KEYS)
+        checks["gathered_experts_are_global_count"] = bool(gathered) and all(
+            tensor.shape[0] == NUM_EXPERTS for tensor in gathered.values()
+        )
+        checks["no_internal_gmm_leak"] = not any(
+            sub in name for name in recorder.names for sub in FORBIDDEN_NAME_SUBSTRINGS
+        )
+        checks["dense_params_forwarded"] = any("lm_head" in name or "embed" in name for name in recorder.names)
 
-    mismatched = [
-        name
-        for name, tensor in gathered.items()
-        if name not in dense_reference or not torch.equal(tensor, dense_reference[name])
-    ]
-    if mismatched:
-        log(f"expert gather mismatched the dense reference for {len(mismatched)} tensors: {mismatched[:4]}")
-    checks["init_gather_matches_dense_reference"] = not mismatched
+        mismatched = [
+            name
+            for name, tensor in gathered.items()
+            if name not in dense_reference or not torch.equal(tensor, dense_reference[name])
+        ]
+        if mismatched:
+            log(f"expert gather mismatched the dense reference for {len(mismatched)} tensors: {mismatched[:4]}")
+        checks["init_gather_matches_dense_reference"] = not mismatched
 
     # Only trained weights can tell "concatenated in rank order" from "rank 0's shard twice".
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -186,15 +172,24 @@ def run(ctx):
     ctx.on_teardown(trainer.cleanup_ep)
     trainer.train()
 
-    trained_recorder = gather_on_all_ranks(trainer.model)
-    trained_gathered = {p.name: p.value.float().cpu() for p in trained_recorder.params if p.name.endswith(EXPERT_KEYS)}
-    checks["trained_gather_differs_from_init"] = any(
-        not torch.equal(tensor, dense_reference[name]) for name, tensor in trained_gathered.items()
-    )
-    # Only meaningful after fully_shard, since nothing can be a DTensor before the trainer exists.
-    checks["nothing_forwarded_as_dtensor"] = not any(p.is_dtensor for p in trained_recorder.params)
+    trained_recorder = gather_on_forwarding_rank(trainer.model)
+    trained_gathered = None
+    if trained_recorder is not None:
+        trained_gathered = {
+            p.name: p.value.float().cpu() for p in trained_recorder.params if p.name.endswith(EXPERT_KEYS)
+        }
+        checks["trained_gather_differs_from_init"] = any(
+            not torch.equal(tensor, dense_reference[name]) for name, tensor in trained_gathered.items()
+        )
+        # Only meaningful after fully_shard, since nothing can be a DTensor before the trainer exists.
+        checks["nothing_forwarded_as_dtensor"] = not any(p.is_dtensor for p in trained_recorder.params)
+        metrics["forwarded_params"] = len(trained_recorder.names)
+        metrics["gathered_expert_tensors"] = len(trained_gathered)
 
-    # This rank's own shard must sit at [rank * local, (rank + 1) * local).
+    # This rank's own shard must sit at [rank * local, (rank + 1) * local) of the forwarding rank's assembly.
+    payload = [trained_gathered]
+    dist.broadcast_object_list(payload, src=FORWARDING_RANK)
+    trained_gathered = payload[0]
     shards = local_expert_weights(trainer.model)
     start = ctx.rank * LOCAL_EXPERTS
     misplaced = [
@@ -215,9 +210,8 @@ def run(ctx):
     # down_proj.
     checks["local_shards_cover_all_expert_keys"] = len(shards) == N_LAYERS * len(EXPERT_KEYS)
 
-    metrics["forwarded_params"] = len(trained_recorder.names)
-    metrics["gathered_expert_tensors"] = len(trained_gathered)
-    return {"checks": checks, "metrics": metrics}
+    # The gather checks exist on the forwarding rank alone, so its verdict is what every rank reports.
+    return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
 
 if __name__ == "__main__":

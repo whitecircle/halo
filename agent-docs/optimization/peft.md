@@ -111,7 +111,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
   runs on GPT-OSS, Qwen3 MoE, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. Every other EP
   family refuses it, as it would put PEFT layers inside the EP layer. There, name attention and expert projections
   explicitly (see [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
-- **Learning rate:** higher than the same run's full fine-tune. The shipped SFT recipes start at `1e-4`, and the
+- **Learning rate:** higher than the same run's full fine-tune on SFT and GRPO. The shipped SFT recipes start at `1e-4`, and the
   code-contests recipes run `3e-6` against `2e-7`.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
@@ -122,7 +122,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
 | Trainer | Full-FT band | LoRA start |
 |---|---|---|
 | SFT | `2e-6` – `2e-5` | `1e-4` |
-| SMPO / DPO | `5e-7` – `5e-6` | `5e-5` |
+| SMPO / DPO | `5e-7` – `5e-6` | `5e-7` (the two shipped DPO LoRA recipes) |
 | GRPO | `1e-6` – `5e-6` | `3e-6` (every shipped LoRA async GRPO recipe under `examples/grpo/environmental/`) |
 
 The effective-batch formula is unchanged by LoRA — see
@@ -298,8 +298,8 @@ fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchm
 | LoRA r=64, attn + experts | 457M (3.86%) | 14,316 | 32.0 GiB |
 
 **LoRA under EP is far leaner than full fine-tuning.** The frozen base carries no gradients or optimizer
-state, so every variant peaks at 30–32 GiB against full fine-tuning's 78.9 GiB at this shape (batch 1), and
-every variant runs faster than its 12,432 tok/s/GPU. Experts-only is 5% faster than attention-only, since
+state, so every variant peaks at 30–32 GiB against full fine-tuning's 79.0 GiB at this shape (batch 1), and
+every variant runs faster than its 12,121 tok/s/GPU. Experts-only is 5% faster than attention-only, since
 the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either alone.
 
 On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
@@ -418,7 +418,7 @@ collective under each mode: [Checkpoints](../reference/checkpoints.md#peft-lora-
 specific to LoRA:
 
 - An **expert-only** run has no PEFT model at all, so `save_expert_lora_adapters` writes the adapter with a
-  synthesized config: `peft_type: EXPERT_LORA`, the base model path, and every field the delta depends on
+  synthesized config: `peft_type: EXPERT_LORA`, the base model path and its Hub commit, and every field the delta depends on
   (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
 - A run that **grew its vocabulary** (`added_special_tokens` past the checkpoint's padded rows) saves the grown
   embedding and an untied head with the adapters, offline included, and resumes them; accelerate-managed FSDP and
@@ -489,6 +489,14 @@ naming no module of either class are refused — applied to the wrong class, PEF
 the tool would write the bare base as a finished model.
 `--fp32_norms` writes every normalization leaf in fp32, the layout `convert_to_bf16.py` writes.
 
+A Hub base is read at the commit `adapter_config.json` records
+([Checkpoints](../reference/checkpoints.md#peft-lora-saving)), by the in-memory merge, the streaming merge and
+`convert_to_bf16.py --check_inference` alike, so a default branch that moved after the run does not change what the
+adapter is folded into, nor the config schema and remote-code modules a source-schema family's merge carries. An
+adapter that records none (stock PEFT writes none unless asked) merges into the default branch with a warning;
+`--base_revision` names the commit for it, and overrides a recorded one with a warning. It takes a commit hash; a
+branch name is resolved again by each read of the base.
+
 A run whose `added_special_tokens` outgrew the checkpoint's embedding trained on rows no base holds. The merge (and
 `convert_to_bf16.py --check_inference`'s adapter load) grows the base to the adapter directory's tokenizer under the
 run's own rule before PEFT loads the adapter, which carries those rows ([Checkpoint saving](#checkpoint-saving)): only
@@ -540,9 +548,10 @@ the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` 
 `--fp32_norms` and `--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
 first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
 a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
-grown vocabulary), on embedding LoRA, and on a `training_provenance.json` recording neutralized GptOss sinks; merge
-those in memory. An adapter that rewrites a tensor the base stores packed (a non-float stored dtype, such as NVFP4
-nibbles or MXFP8 bytes) is refused: a delta folded into the stored values gives no weight
+grown vocabulary) and on embedding LoRA; merge those in memory. A `training_provenance.json` recording neutralized
+GptOss sinks is re-applied: the merge writes every sink tensor at its dtype minimum, as `reset_sinks.py` does, and
+refuses a base that stores none. An adapter that rewrites a tensor the base stores packed (a non-float stored dtype,
+such as NVFP4 nibbles or MXFP8 bytes) is refused: a delta folded into the stored values gives no weight
 ([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). An adapter over a quantized base merges when every
 tensor it rewrites is stored as a float, as an attention adapter over gpt-oss's MXFP4 release is. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
 the adapter config lands in `original_adapter_config/`.

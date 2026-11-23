@@ -22,8 +22,9 @@ Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without it.
 | PP | one part set per stage plus the full index | yes; on per-node storage, merge the nodes' directories first |
 | LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as an adapter, or merge into the base |
 
-EP expert LoRA cannot be merged afterwards: train it with
-`merge_expert_lora_on_save: true` to save the merged model.
+EP expert LoRA merges with the same tool, which streams it into the base's shards. On GPT-OSS
+that takes a BF16 base, and a run with neutralized sinks, the SFT default, gets them back in the
+merged checkpoint. `merge_expert_lora_on_save: true` saves the merged model at each save instead.
 
 ## Sharded EP saves
 
@@ -154,7 +155,9 @@ weights:
   embedding LoRA).
 
 For a LoRA run, upload the adapter directory, or merge it with
-`merge-peft-adapters` for a standalone model. Load an uploaded adapter with
+`merge-peft-adapters` for a standalone model. The adapter records the Hub commit
+of its base, and the merge reads the base at that commit; `--base_revision`
+names it for an adapter that records none. Load an uploaded adapter with
 `PeftModel.from_pretrained`.
 
 The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end. It
