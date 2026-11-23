@@ -97,11 +97,13 @@ source carries its column in either split and otherwise warns, naming each sourc
 a tool-use or effort-labeled corpus concatenated with plain chat is a legitimate shape, and only the rows
 of the splits without the column render toolless or with no level. Pre-processed datasets skip these
 checks; their rows are already tokenized. `reasoning_effort_field` is also refused at setup under a chat
-template that renders a conversation alike at no level, `none`, `low` and `high`, whether closed by an assistant
-turn or open on its generation prompt (`reject_unrendered_reasoning_effort`, `halo/model_loading/tokenizer_setup.py`),
-as the hub Qwen3, Qwen3.5/3.6, GLM-4.7 and Gemma 4 templates do: the run's tokenizer is probed, and a VLM run's
-processor again on its own template. A template refusing a level it does not take (Mistral 4 `low`, Qwen3.8 `high`)
-reads the level and passes, as does one reading it in one form only (Command A reads `none` in its generation
+template that renders a conversation alike at no level, `none`, `low`, `medium` and `high`, whether closed by an
+assistant turn or open on its generation prompt (`reject_unrendered_reasoning_effort`,
+`halo/model_loading/tokenizer_setup.py`), as the hub Qwen3, Qwen3.5/3.6, GLM-4.7 and Gemma 4 templates do. The
+template that renders the rows is probed: the run's tokenizer on the text path, a VLM run's processor on its own
+template (not the tokenizer it holds), and the tokenizer of an offline text bake
+([Pre-Processing](dataset-preparation.md)). A template refusing a level it does not take (Mistral 4 `low`, Qwen3.8
+`high`) reads the level and passes, as does one reading it in one form only (Command A reads `none` in its generation
 prompt alone).
 
 ## SFT

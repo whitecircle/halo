@@ -104,6 +104,7 @@ notes' size ([default](README.md#configuration)).
   replies, never inside a tool's output; notes calls stay in the history as written. The replay pairs each call with
   its reply by position, replays only a call whose reply opens `Notes saved`, and reads it through the parsing and
   binding it ran under; a `max_observation_chars` that would cut that prefix (1 to 10) is refused at construction.
+  A prompt carrying earlier turns starts the episode's notes, and its size cap, from the saved calls it holds.
 - The system prompt's brief-summary rule gives way to working in the message and keeping `problem`, `idea`, `tests` and
   `next` sections current.
 - A turn of text alone does not end the episode: it is nudged to act. A text turn at `max_turns`, or when the

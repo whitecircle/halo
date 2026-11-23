@@ -37,7 +37,11 @@ from halo.data.vlm_render import (
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.model_preparation import find_generation_config
 from halo.model_loading.tokenizer_backend import install_processor_backend, resolve_tokenizer_backend
-from halo.model_loading.tokenizer_setup import record_special_token_id, resolve_tokenizer
+from halo.model_loading.tokenizer_setup import (
+    record_special_token_id,
+    reject_unrendered_reasoning_effort,
+    resolve_tokenizer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -218,7 +222,10 @@ def tokenize_dataset(
     *,
     eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Input_ids and attention_mask, plus labels under ``train_on_completions_only``; resolves unset terminators."""
+    """Input_ids and attention_mask, plus labels under ``train_on_completions_only``; resolves unset terminators.
+    Refuses ``reasoning_effort_field`` under a template that renders no level, as run setup does, since a run training
+    the baked rows renders none of them."""
+    reject_unrendered_reasoning_effort(tokenizer, config.reasoning_effort_field)
     tokenizer = resolve_tokenizer_backend(tokenizer, config.tokenizer_backend)
     if config.mode != "text" and eos_token_ids is None:
         eos_token_ids = resolve_label_eos_token_ids(config, tokenizer)

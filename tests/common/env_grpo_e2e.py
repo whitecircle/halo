@@ -101,7 +101,7 @@ DRAW_PREAMBLES = (
     "The miller's grandfather built the wheel from oak felled on the north ridge, hauled it down in winter on "
     "sledges, and set it turning the spring the stone bridge was finished. ",
 )
-# gpt-oss's tool-call terminator, which harmony-disabled serving does not stop on since it is no eos.
+# gpt-oss's tool-call terminator: serving stops on it only where the checkpoint's generation config lists it.
 HARMONY_CALL_TOKEN = "<|call|>"
 # The flip-rate bar's two ends, measured on this row: the policy against itself with every MoE input moved by 2**-7 of
 # its magnitude (one to two bf16 ulps), and against its own routing one token over (a misplaced mask).

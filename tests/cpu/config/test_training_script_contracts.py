@@ -17,6 +17,7 @@ from halo.cli import training_methods
 from halo.configs.script_arguments import VisionTrainingArguments
 from halo.data.collators import padded
 from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, verify_preprocessed_dataset
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -511,6 +512,24 @@ def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
         assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
     else:
         assert seen, f"{script}: calls no tokenizer length seam ({', '.join(_TOKENIZER_SEAMS)})."
+
+
+def test_a_script_rendering_rows_through_its_processor_marks_its_tokenizer_before_the_length_seam():
+    """The length seam probes the tokenizer's template for a row's level, a template that renders no row of an image
+    run: unmarked, one blind to the level would refuse a run whose processor states it, before the row pipeline probes
+    the processor's own."""
+    rendering, unmarked = [], []
+    for script in _TRAINING_SCRIPTS:
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+        if not any(_named_calls(tree, pipeline) for pipeline in ("prepare_vlm_dataset", "prepare_raw_vlm_split")):
+            continue
+        rendering.append(script)
+        marks = [call.lineno for call in _named_calls(tree, mark_processor_rendered_rows.__name__)]
+        seams = [call.lineno for seam in _TOKENIZER_SEAMS for call in _named_calls(tree, seam)]
+        if not marks or min(marks) > min(seams):
+            unmarked.append(str(script.relative_to(_TRAINING_DIR)))
+    assert rendering, "the sweep found no script rendering rows through a processor"
+    assert not unmarked, f"these scripts probe the tokenizer's template for an image run's rows: {unmarked}"
 
 
 @pytest.mark.parametrize(

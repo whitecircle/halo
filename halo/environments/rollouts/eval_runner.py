@@ -161,8 +161,8 @@ def _bind_eval_effort(
     env: EnvironmentBase, prompt: str | list[dict[str, Any]], context: dict[str, Any], rollout: RolloutConfig
 ) -> tuple[dict[str, Any], EpisodeEffort]:
     """Bound as the training rollout binds it; a ``random`` level is drawn from the problem, so every checkpoint scores
-    a problem at the same level."""
-    if env.reasoning_effort == RANDOM_REASONING_EFFORT and not (context or {}).get("reasoning_effort"):
+    a problem at the same level. Only a missing or null cell is drawn: any other reaches the binding's check."""
+    if env.reasoning_effort == RANDOM_REASONING_EFFORT and (context or {}).get("reasoning_effort") is None:
         context = {**(context or {}), "reasoning_effort": stable_reasoning_effort(prompt)}
     effort = bind_episode_effort(
         context,

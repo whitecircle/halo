@@ -422,6 +422,31 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
     assert levels == stable * 2
 
 
+@pytest.mark.parametrize("cell", ["", 0, "extreme"])
+async def test_a_random_level_is_drawn_only_for_a_null_cell_and_a_bad_one_is_refused(cell, monkeypatch):
+    """Training's binding refuses any cell outside the levels, so the eval draws in place of a null or missing cell
+    alone and refuses the rest instead of scoring the row at a level of its own choosing."""
+    env = _tooled_env()
+    env.reasoning_effort = RANDOM_REASONING_EFFORT
+    drawn: list[str] = []
+    real_reset = env.reset
+
+    def _reset(prompts, contexts):
+        drawn.append(contexts[0]["reasoning_effort"])
+        return real_reset(prompts, contexts)
+
+    async def _generate(client, **request):
+        return chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
+
+    monkeypatch.setattr(env, "reset", _reset)
+    monkeypatch.setattr(eval_runner, "chat_completion", _generate)
+    rollout = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+    with pytest.raises(ValueError, match=f"reasoning_effort cell reads {cell!r}"):
+        await run_episode(env, "problem", {"reasoning_effort": cell}, client=object(), rollout=rollout, extra_body={})
+    await run_episode(env, "problem", {"reasoning_effort": None}, client=object(), rollout=rollout, extra_body={})
+    assert drawn == [stable_reasoning_effort("problem")]
+
+
 def test_a_conversation_with_no_user_turn_has_no_level_to_draw():
     """The draw is keyed by the task; drawn as an empty task, every such problem would share one level."""
     with pytest.raises(ValueError, match="no 'user' message"):

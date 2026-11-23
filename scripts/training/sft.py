@@ -62,6 +62,7 @@ from halo.model_loading.parallel.loader import resolve_policy_attn_implementatio
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.tree import (
     install_tree_attention,
@@ -396,6 +397,8 @@ def main():
         mtp_head=args.mtp_head_request,
     )
     model = policy.model
+    if is_vlm:
+        mark_processor_rendered_rows(policy.tokenizer)
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)

@@ -299,8 +299,13 @@ A family outside the table above and the family specs gets a warning on every ba
 **The turn terminator is the resolved terminator set, the ids a served model stops at.** A turn ends at
 the first token in the union of the tokenizer's EOS, the model config's `eos_token_id` (scalar or list;
 `text_config.eos_token_id` only where the top level declares none) and the generation config's
-`eos_token_id` (`resolve_eos_token_ids`, `halo/data/turn_markers.py`). vLLM adds `generation_config.json`'s
-list to every request's stops, so a turn the template ends at one of those ids ends there when served.
+`eos_token_id` (`resolve_eos_token_ids`, `halo/data/turn_markers.py`). The resolver reads the checkpoint's files,
+not a server: a generation-config id ends a served turn only where the server applies that list. vLLM 0.32 adds the
+`eos_token_id` list of the `generation_config.json` it loads (the model's own unless `--generation-config` names
+another directory; `--override-generation-config` does not reach it) to every request's stop ids unless the request
+sets `ignore_eos`. Serving gpt-oss with harmony off, as the toolkit image does, changes none of this, so a stock gpt-oss
+turn stops at `<|call|>`. A stop that file does not list reaches a rollout only through `rollout_stop_tokens`
+([Tool calls](../training-methods/async-grpo/episodes.md#tool-calls)).
 Role-marker templates need the model config's list: GLM-4 ends an assistant turn with `<|user|>` or
 `<|observation|>` and lists both in `config.eos_token_id`. Tool calls need the generation config's:
 gpt-oss ends a call with `<|call|>` and Gemma 4 with `<|tool_response>`, which no model config lists.

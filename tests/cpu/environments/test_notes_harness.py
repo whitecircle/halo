@@ -294,6 +294,31 @@ def test_every_turn_prompt_is_rebuilt_from_the_history_alone():
         assert [m.to_dict(include_thinking=True) for m in env.observation_view(messages[:idx])] == observation
 
 
+def test_a_prompt_holding_saved_notes_calls_starts_the_episodes_notes_from_them():
+    """The view replays the prompt's saved calls, so the notes every later call applies to, and the cap checks, start
+    there too: the stored notes stay the notes the model is shown."""
+    env = _env(notes={"max_chars": 30})
+    saved = {
+        "id": "p0",
+        "type": "function",
+        "function": {"name": "notes", "arguments": json.dumps({"text": "## idea\nn + 1"})},
+    }
+    prompt = [
+        {"role": "user", "content": "Add one to n."},
+        {"role": "assistant", "content": "", "tool_calls": [saved]},
+        {"role": "tool", "tool_call_id": "p0", "name": "notes", "content": "Notes saved; sections: idea."},
+        {"role": "user", "content": "Go on."},
+    ]
+    ids, steps = env.reset([prompt], [{"answer": json.dumps({"tests": [{"input": "1\n", "output": "2\n"}]})}])
+    assert steps[0].trajectory.info[NOTES_KEY] == {"idea": "n + 1"}
+    step = _turn(env, ids, "", ("notes", {"text": "## idea\nchecked", "mode": "append"}))
+    assert step.trajectory.info[NOTES_KEY] == {"idea": "n + 1\nchecked"}
+    assert _notes_block(step.observation) == "<notes>\n## idea\nn + 1\nchecked\n</notes>"
+    step = _turn(env, ids, "", ("notes", {"text": "## tests\n" + "x" * 12}))
+    assert step.observation[-2]["content"].startswith("Error: Not saved")
+    assert step.trajectory.info[NOTES_KEY] == {"idea": "n + 1\nchecked"}
+
+
 def test_the_trainer_refuses_one_render_of_a_rewritten_history():
     with pytest.raises(ValueError, match="train_on_sampled_tokens"):
         reject_whole_trajectory_render_of_rewritten_view(_env(notes={}), train_on_sampled_tokens=False)

@@ -424,8 +424,9 @@ class AsyncRolloutConfig(
         default_factory=list,
         metadata={
             "help": "Special-token strings that end a turn, sent as the engine's stop_token_ids; list the model's "
-            "tool-call terminator when it is no eos (gpt-oss <|call|> under harmony-disabled serving, refused without "
-            "it on a tool environment). Empty = only eos stops a turn. "
+            "tool-call terminator when the served generation config lists no such eos (gpt-oss <|call|> under "
+            "harmony-disabled serving, refused without it on a tool environment whose checkpoint omits it). Empty = "
+            "only the eos ids stop a turn. "
             "See agent-docs/training-methods/async-grpo/episodes.md#tool-calls."
         },
     )

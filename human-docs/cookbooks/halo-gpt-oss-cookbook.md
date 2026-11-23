@@ -109,8 +109,9 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - **Router aux-loss coefficient.** The hub config ships `router_aux_loss_coef: 0.9`, which swamps the SFT
   loss. The shipped SFT recipes set it to `0.001` in `model_init_kwargs`. Do the same on any other run
   that balances with `aux_loss`, which is what `auto` picks for GPT-OSS.
-- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`, without which
-  the model writes past its tool call and invents the result. They also set
+- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`. Without it, on a
+  checkpoint whose `generation_config.json` does not list `<|call|>`, the model writes past its tool call and
+  invents the result. They also set
   `use_chunked_grpo_logprobs: true`, because the ~201k-token vocabulary makes the full logits plane too
   large.
 

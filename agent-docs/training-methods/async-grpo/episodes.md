@@ -69,9 +69,11 @@ Native-tool environments send their `tools` schema, so the server needs the matc
 - [ReAct](environments/protocols/react.md) environments send no `tools` and are served without a parser.
 
 `rollout_stop_tokens` (default empty) lists special-token strings sent as `stop_token_ids`. Use it for a tool-call
-terminator the model's `eos_token_id` omits: gpt-oss with harmony disabled ends a call with `<|call|>` and otherwise
-hallucinates the result (the gpt-oss recipes set `["<|call|>"]`), so gpt-oss on a tool environment without it is
-refused at trainer construction. An unknown name raises there too.
+terminator that the served `generation_config.json`, the server's only other source of stop ids, may not list
+([Collators](../../data/collators.md#eos-pad-and-the-response-template)): gpt-oss with harmony disabled ends a call
+with `<|call|>` and, stopped on neither, hallucinates the result (the gpt-oss recipes set `["<|call|>"]`). A family
+whose terminator is no eos, on a tool environment whose checkpoint's generation config omits it and with no such
+entry, is refused at trainer construction. An unknown name raises there too.
 
 ## Unproductive turns
 
@@ -133,8 +135,9 @@ of a no-tool prompt under two of the run's contracts: a server whose prompt does
 trainer's does, is refused, as the reasoning terms would charge for a contract the model never read. Any other
 difference in the first contract warns with the first differing token, since an engine also derives a thinking toggle
 the trainer's render lacks. With [thinking off](reasoning.md#thinking-off) the request carries that toggle, so a
-difference at any probed level refuses, as does a reply without prompt ids. A trainer template that cannot render the
-probe skips it with a warning.
+difference at any probed level refuses, as do a probe the server does not answer and a reply without prompt ids;
+with thinking on, an unanswered probe is skipped with a warning. A trainer template that cannot render the probe skips
+it with a warning.
 
 A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
 it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths

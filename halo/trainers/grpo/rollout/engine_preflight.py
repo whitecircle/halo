@@ -1,8 +1,8 @@
 """COLLECTIVE preflights of each rollout server: its context window, its launch flags, and whether its log-probs are the
-reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass unread; its
-refusal raises everywhere, while a server that is up and then cannot answer a probe only warns. Rank 0 probes the servers
-concurrently and the verdict reaches the peers over the c10d store, so a slow startup is never bounded by the NCCL
-watchdog."""
+reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass
+unread; its refusal raises everywhere, while a server that is up and then cannot answer a probe only warns, except the
+chat-template probe of a run with thinking off. Rank 0 probes the servers concurrently and the verdict reaches the peers
+over the c10d store, so a slow startup is never bounded by the NCCL watchdog."""
 
 import logging
 import math
@@ -274,6 +274,12 @@ def _verify_server_chat_template_on_rank0(
     compared = range(len(efforts)) if not rollout.thinking else range(1)
     for url, engine in zip(urls, engines, strict=True):
         if engine is None:
+            if not rollout.thinking:
+                raise ValueError(
+                    f"Rollout server {url} did not answer the chat-template probe (the warning before this names "
+                    f"why), {unchecked} Start the trainer once the server answers a chat completion within "
+                    f"{_PROBE_TIMEOUT_S:g}s, or set rollout_thinking: true."
+                )
             continue
         if None in engine:
             if not rollout.thinking:
@@ -789,11 +795,11 @@ def verify_server_chat_template(
     connection_timeout: float,
 ) -> None:
     """COLLECTIVE. Refuses a server whose chat template ignores the level the run draws, which rows on the engine's
-    prompt ids would never show. With thinking off it also refuses a server whose render differs at any contract or
-    whose reply carries no prompt ids; with it on, a differing first render only warns. A trainer template that cannot
-    render the probe warns and skips it either way. ``messages`` carry no tools, as a client-side schema render drifts
-    on correct setups, and with thinking on an engine derives toggles the trainer's render lacks. ``efforts`` are the
-    two contracts compared, ``None`` for no level."""
+    prompt ids would never show. With thinking off it also refuses a server whose render differs at any contract, that
+    does not answer the probe, or whose reply carries no prompt ids; with it on, a differing first render only warns
+    and an unanswered probe is skipped. A trainer template that cannot render the probe warns and skips it either way.
+    ``messages`` carry no tools, as a client-side schema render drifts on correct setups, and with thinking on an engine
+    derives toggles the trainer's render lacks. ``efforts`` are the two contracts compared, ``None`` for no level."""
     probe_config = replace(
         rollout, capture_token_ids=True, capture_routed_experts=False, max_tokens=1, max_thinking_tokens=None
     )

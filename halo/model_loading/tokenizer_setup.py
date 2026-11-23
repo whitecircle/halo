@@ -32,6 +32,9 @@ _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
 # Marks a chat template the run chose, which its processor then adopts; a checkpoint's template stays each one's.
 _RUN_CHAT_TEMPLATE_ATTR = "_halo_run_chat_template"
 
+# Marks the tokenizer of a run whose rows render through the processor holding it, with that processor's template.
+_PROCESSOR_RENDERS_ROWS_ATTR = "_halo_processor_renders_rows"
+
 # Marks a model grown past its checkpoint's rows; those rows exist in no base, so every adapter save carries them.
 _GROWN_VOCABULARY_ATTR = "_halo_grown_vocabulary"
 
@@ -148,9 +151,9 @@ def _render_reasoning_effort_probe(processing_class, level: str | None, *, open_
 
 def reject_unrendered_reasoning_effort(processing_class, reasoning_effort_field: str | None) -> None:
     """Refuse ``reasoning_effort_field`` under a chat template rendering a conversation alike at no level, ``none``,
-    ``low`` and ``high``, both closed by an assistant turn and open on the generation prompt, which would drop every
-    row's level from its render. A form raising at some level reads it; one raising at every level leaves the template
-    to the row render."""
+    ``low``, ``medium`` and ``high``, both closed by an assistant turn and open on the generation prompt, which would
+    drop every row's level from its render. A form raising at some level reads it; one raising at every level leaves
+    the template to the row render."""
     if not reasoning_effort_field:
         return
     # A template may read the level in one form alone (Cohere Command A, only 'none' and only in its generation
@@ -158,7 +161,7 @@ def reject_unrendered_reasoning_effort(processing_class, reasoning_effort_field:
     for open_turn in (False, True):
         renders = {
             _render_reasoning_effort_probe(processing_class, level, open_turn=open_turn)
-            for level in (None, "none", "low", "high")
+            for level in (None, "none", "low", "medium", "high")
         }
         if len(renders) > 1 or None in renders:
             return
@@ -170,9 +173,9 @@ def reject_unrendered_reasoning_effort(processing_class, reasoning_effort_field:
     )
     raise ValueError(
         f"reasoning_effort_field='{reasoning_effort_field}' hands each row's level to the chat template as "
-        f"reasoning_effort, but {template} renders a conversation alike at no level, 'none', 'low' and 'high', "
-        f"whether closed by an assistant turn or open on its generation prompt, so no row's level would reach its "
-        f"render. Set chat_template to a template that states the level, such as "
+        f"reasoning_effort, but {template} renders a conversation alike at no level, 'none', 'low', 'medium' and "
+        f"'high', whether closed by an assistant turn or open on its generation prompt, so no row's level would reach "
+        f"its render. Set chat_template to a template that states the level, such as "
         f"jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja or jinja-templates/gemma4/gemma4-reasoning-effort.jinja "
         f"(with force_chat_template: true over a shipped template), or drop reasoning_effort_field."
     )
@@ -311,7 +314,9 @@ def configure_run_tokenizer(
     reject_dropped_chat_template(args, tokenizer)
     if tokenizer.chat_template is None or (args.chat_template is not None and args.force_chat_template):
         set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
-    reject_unrendered_reasoning_effort(tokenizer, args.reasoning_effort_field)
+    # A VLM run's rows render through its processor, whose own template the row pipeline probes.
+    if not getattr(tokenizer, _PROCESSOR_RENDERS_ROWS_ATTR, False):
+        reject_unrendered_reasoning_effort(tokenizer, args.reasoning_effort_field)
 
     return resolve_tokenizer_backend(tokenizer, args.tokenizer_backend)
 
@@ -359,6 +364,12 @@ def set_run_chat_template(tokenizer: PreTrainedTokenizerBase, template: str | No
     """Set the chat template the run chose on ``tokenizer``, marked for its processor to adopt."""
     tokenizer.chat_template = template
     setattr(tokenizer, _RUN_CHAT_TEMPLATE_ATTR, True)
+
+
+def mark_processor_rendered_rows(tokenizer: PreTrainedTokenizerBase) -> None:
+    """Mark ``tokenizer`` as held by the processor a VLM run renders its rows through, so its own template, which
+    renders none of them, is not probed for the level in that processor's stead."""
+    setattr(tokenizer, _PROCESSOR_RENDERS_ROWS_ATTR, True)
 
 
 def adopt_tokenizer_chat_template(processing_class) -> None:

@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Rows train on the engine's prompt ids, so a server left on the checkpoint's template fails nothing, and the reasoning
 terms then charge for a contract the model never read. With thinking on, byte-comparing renders cannot refuse, as an
-engine derives toggles the trainer's render lacks; a prompt that ignores the level can be read off the server alone."""
+engine derives toggles the trainer's render lacks; a prompt that ignores the level can be read off the server alone.
+With thinking off, a probe the server does not answer refuses like a render that differs."""
 
 import logging
 from types import SimpleNamespace
@@ -136,6 +137,19 @@ def test_with_thinking_off_a_reply_without_prompt_ids_is_refused(engine):
     with pytest.raises(ValueError, match="returned no prompt ids.*rollout_thinking: true") as refused:
         _verify(server, client_cls, template_kwargs=_THINKING_OFF)
     assert client_cls.CHAT_TEMPLATE_FLAG in str(refused.value)
+
+
+def test_with_thinking_off_a_server_that_does_not_answer_the_probe_is_refused(engine, caplog):
+    """A busy server timing the probe out leaves its template as unchecked as a reply without prompt ids; with thinking
+    on the probe is skipped with a warning."""
+    server, client_cls = engine
+    server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2]
+    server.status["/v1/chat/completions"] = 400
+    with pytest.raises(ValueError, match="did not answer the chat-template probe.*rollout_thinking: true"):
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls)
+    assert "Could not read the prompt ids of" in caplog.text
 
 
 def test_with_thinking_off_a_trainer_render_that_raises_still_passes_with_a_warning(engine, caplog):

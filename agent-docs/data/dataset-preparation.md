@@ -165,7 +165,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--conversation_field` | `prompt` | Conversation field name (mode=chat). Matches the training-side default |
 | `--system_prompt` | `None` | System prompt to prepend |
 | `--tools_field` | `None` | Dataset field holding a tool list (list of dicts or JSON string), forwarded into `apply_chat_template` — must match the `tools_field` used at training time. Rejected with `--is_vlm` |
-| `--reasoning_effort_field` | `None` | Dataset field holding each row's reasoning-effort level, forwarded into `apply_chat_template` as `reasoning_effort` — must match the `reasoning_effort_field` used at training time. Rejected with `--is_vlm` |
+| `--reasoning_effort_field` | `None` | Dataset field holding each row's reasoning-effort level, forwarded into `apply_chat_template` as `reasoning_effort` — must match the `reasoning_effort_field` used at training time. Refused before tokenizing under a template that renders no level, as at training ([Dataset Formats](dataset-formats.md#required-columns-by-method)). Rejected with `--is_vlm` |
 | `--interleaved_thinking` | off | Keep thinking blocks in non-final assistant turns (`clear_thinking=False`), matching the live path's `interleaved_thinking`. Rejected with `--is_vlm` |
 | `--model_supports_system_role` | `True` | `false` merges the system prompt into the first user message (models without a system role) |
 | `--train_on_completions_only` | `True` in `--mode chat`, `False` in `--mode text` | Mask user turns; train only on assistant responses. The chat default matches the training side and requires `--assistant_message_template`; asking for masking under `--mode text` is rejected (raw documents have no assistant turns) |

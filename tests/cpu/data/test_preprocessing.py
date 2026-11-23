@@ -17,7 +17,7 @@ from halo.data.preprocessed.metadata import (
     PreprocessingConfig,
     verify_preprocessed_dataset,
 )
-from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, shard_dataset
+from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, preprocess_dataset, shard_dataset
 from halo.data.preprocessed.shard_index import (
     SHARD_INDEX_FILE,
     IncompatiblePreprocessedDataset,
@@ -124,6 +124,18 @@ def test_the_bake_renders_each_rows_level():
     assert LEVEL_LINES["high"] in high
     assert "Reasoning effort" not in null
     assert all("Reasoning effort" not in text for text in baked())
+
+
+def test_the_bake_refuses_a_level_column_under_a_template_rendering_no_level():
+    """A run training the baked rows renders none of them, so the bake probes its template as run setup would: under
+    Qwen3's stock template both levels would bake alike, the stamp still recording the column."""
+    turns = [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4."}]
+    dataset = Dataset.from_dict({"prompt": [turns, turns], "effort": ["low", "high"]})
+    config = PreprocessingConfig(model_name_or_path="Qwen/Qwen3-0.6B", max_length=512, reasoning_effort_field="effort")
+    with pytest.raises(
+        ValueError, match="reasoning_effort_field='effort' .* renders a conversation alike at no level"
+    ):
+        preprocess_dataset(dataset, load_cached_tokenizer("Qwen/Qwen3-0.6B"), config)
 
 
 def test_tokenize_dataset_completion_only():

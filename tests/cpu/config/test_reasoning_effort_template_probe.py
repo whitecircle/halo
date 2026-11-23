@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """``reasoning_effort_field`` is refused at setup under a chat template that renders no level, in a closed conversation
 or on its generation prompt, where every row's level would vanish from its render, and accepted under one that states
-the level in either or refuses one it does not take. A VLM run is probed again on its processor's own template, which
-renders its rows."""
+the level in either or refuses one it does not take. A VLM run is probed on its processor's own template, which renders
+its rows, and not on the template of the tokenizer the processor holds."""
 
 import types
 
@@ -12,7 +12,7 @@ from datasets import Dataset, DatasetDict
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from halo.model_loading.tokenizer_setup import configure_run_tokenizer
+from halo.model_loading.tokenizer_setup import configure_run_tokenizer, mark_processor_rendered_rows
 from tests.common.models import (
     COMMAND_A_PLUS,
     GLM5_3_FLASH,
@@ -38,6 +38,7 @@ GENERATION_PROMPT_READER = (
     "{%- endif %}"
 )
 GENERATION_PROMPT_BLIND = _TURNS + "{%- if add_generation_prompt %}<|assistant|><|no_think|>{%- endif %}"
+MEDIUM_READER = _TURNS + "{%- if reasoning_effort is defined and reasoning_effort == 'medium' %}<|medium|>{%- endif %}"
 
 
 def _configure(tokenizer, template: str | None = None):
@@ -57,7 +58,7 @@ def _shipping(template: str):
 def test_a_stock_template_rendering_no_level_is_refused():
     with pytest.raises(
         ValueError,
-        match=rf"{QWEN3_0_6B} ships renders .* no level, 'none', 'low' and 'high', whether closed .*qwen3\.6-reason",
+        match=rf"{QWEN3_0_6B} ships renders .* no level, 'none', 'low', 'medium' and 'high', whether .*qwen3\.6-",
     ):
         _configure(load_cached_tokenizer(QWEN3_0_6B))
 
@@ -67,10 +68,15 @@ def test_a_template_reading_the_level_only_on_its_generation_prompt_is_accepted(
     _configure(_shipping(GENERATION_PROMPT_READER))
 
 
+def test_a_template_reading_only_the_medium_level_is_accepted():
+    """``medium`` is a row's commonest level, so a template stating that one alone still reads rows' levels."""
+    _configure(_shipping(MEDIUM_READER))
+
+
 def test_a_template_blind_to_the_level_on_its_generation_prompt_is_refused():
     """Its open render differs from its closed one at every level, which says nothing of the level."""
     with pytest.raises(
-        ValueError, match="'none', 'low' and 'high', whether closed by an assistant turn or open on its generation"
+        ValueError, match="'none', 'low', 'medium' and 'high', whether closed by an assistant turn or open on its"
     ):
         _configure(_shipping(GENERATION_PROMPT_BLIND))
 
@@ -126,6 +132,20 @@ def test_a_vlm_run_is_probed_on_its_processors_own_template(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="renders a conversation alike at no level"):
         _prepare(processor)
     _prepare(load_cached_processor(GLM5_3_FLASH, revision=PINNED_REVISIONS[GLM5_3_FLASH]))
+
+
+def test_a_vlm_runs_tokenizer_template_leaves_the_verdict_to_its_processors(tmp_path, monkeypatch):
+    """Rows its processor renders never meet a level-blind template on the tokenizer it holds, so the run's setup
+    refuses nothing there once marked, and the processor's own template, which states the level, takes the rows."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets"))
+    processor = load_cached_processor(GLM5_3_FLASH, revision=PINNED_REVISIONS[GLM5_3_FLASH])
+    processor.tokenizer.chat_template = (TEMPLATES / "glm/glm-native.jinja").read_text()
+    with pytest.raises(ValueError, match="renders a conversation alike at no level"):
+        _configure(processor.tokenizer)
+
+    mark_processor_rendered_rows(processor.tokenizer)
+    _configure(processor.tokenizer)
+    assert _prepare(processor)["train"].num_rows == 1
 
 
 if __name__ == "__main__":

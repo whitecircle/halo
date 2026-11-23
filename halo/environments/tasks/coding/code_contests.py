@@ -70,6 +70,7 @@ from halo.environments.tools.notes import (
     NotesConfig,
     build_notes_tool,
     notes_after_call,
+    notes_from_messages,
     notes_saved_reply,
     notes_size,
     notes_view,
@@ -328,8 +329,13 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         prompt: str | list[dict[str, str]],
         context: dict[str, Any] | None = None,
     ) -> Trajectory:
-        """A payload with no time limit gets the one each test runs under stated in the task message."""
+        """A payload with no time limit gets the one each test runs under stated in the task message. A prompt carrying
+        earlier turns may hold saved notes calls, which the view replays, so the episode's notes start from them."""
         traj = super()._reset_single(prompt, context)
+        if self.notes is not None:
+            traj.info[NOTES_KEY] = notes_from_messages(
+                traj.messages, self.registry.get(NOTES_TOOL), self.notes.max_chars
+            )
         self._store_problem_data(traj, context or {})
         statement = prompt if isinstance(prompt, str) else "\n".join(str(m.get("content") or "") for m in prompt)
         traj.info["_stated_tolerance"] = find_stated_float_tolerance(statement)

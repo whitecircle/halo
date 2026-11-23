@@ -41,6 +41,7 @@ from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from halo.models.attention.gpt_oss_sinks import (
     NEUTRALIZED_TEACHER_SINKS_COST,
     SINK_CARRYING_ATTN_HINT,
@@ -179,6 +180,8 @@ def main():
     )
     policy = load_policy_model(context, training_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
     student_model = policy.model
+    if is_vlm:
+        mark_processor_rendered_rows(policy.tokenizer)
     tokenizer = apply_max_length(training_config, args, student_model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)

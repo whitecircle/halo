@@ -18,7 +18,7 @@ per-turn reasoning cap is run-wide and the same at every level. No budget, price
   level of `random`, the trainer stamps the group's draw over every row's level, in training and in its eval rounds;
   otherwise, and in the standalone eval, a row's cell is read, and one other than `low`, `medium`, `high` or null
   raises (a row's own `random` would draw differently across its group). The standalone eval draws from the problem's
-  text only for a row with no level. The
+  text only for a missing or null cell. The
   [reasoning length terms](#reasoning-length-reward) switch on from the levels the environment draws alone
   ([Construction checks](#construction-checks)), so a row's other level is priced only while one of those is.
 - A profile takes `reasoning_budget` (int ≥ 0) and `reasoning_price` (≥ 0), the
@@ -66,7 +66,7 @@ budgets) still bind.
   `qwen3/qwen3.6-reasoning-effort.jinja` reads it; the Gemma 4 file does not, so it is refused.
 - Serve the same file, the server's other flags unchanged (`--reasoning-parser` included). The
   [startup probe](episodes.md#chat-template) refuses a server whose generation prompt differs from the trainer's at
-  all: the request carries the switch, so no derived toggle explains a difference.
+  all, or that does not answer it: the request carries the switch, so no derived toggle explains a difference.
 
 Refused when the config is parsed, each reading reasoning no turn has:
 
