@@ -19,6 +19,7 @@ from urllib.parse import unquote
 
 import pytest
 
+from halo.environments.registry import build_environment
 from halo.environments.rollouts.ray_actors import ray_init_kwargs
 from halo.environments.sandbox import baseten, runner_session
 from halo.environments.sandbox.baseten import (
@@ -44,11 +45,13 @@ UNKNOWN_IMAGE = "sandbox/never-pushed:latest"
 class FakeBaseten:
     """Management API under /v1; sandbox ``sbx-N``'s runtime API under /sbx-N, its ``/tmp`` and session directory
     mapped into a private host directory. ``faults`` maps a path prefix to statuses returned once each before the real
-    handler runs; ``runner_requests`` are the requests the backend handed the runner."""
+    handler runs; ``bodies`` maps a path prefix to bodies that each replace one 2xx answer after the real handler ran;
+    ``runner_requests`` are the requests the backend handed the runner."""
 
     def __init__(self):
         self.requests: list[dict] = []
         self.faults: dict[str, list[int]] = {}
+        self.bodies: dict[str, list[bytes]] = {}
         self.delay: dict[str, float] = {}
         self.roots: dict[str, str] = {}
         self.deleted: list[str] = []
@@ -63,6 +66,9 @@ class FakeBaseten:
         class Handler(BaseHTTPRequestHandler):
             def _reply(self, status, payload=None, raw=None, ctype="application/json"):
                 data = raw if raw is not None else json.dumps(payload or {}).encode()
+                for prefix, bodies in fake.bodies.items():
+                    if status < 300 and self.path.startswith(prefix) and bodies:
+                        data = bodies.pop(0)
                 self.send_response(status)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(data)))
@@ -419,6 +425,23 @@ def test_error_status_on_the_program_call_is_never_sent_again(fake, status):
     assert len(fake.calls("/sbx-1/process", "POST")) == 2  # one runner call for the file, one for the program
 
 
+@pytest.mark.parametrize("body", [b"<html>bad gateway</html>", b"[]", b"{}"])
+@pytest.mark.parametrize("path", ["/v1/token", "/v1/sandboxes/instances", "/sbx-1/process"])
+def test_success_answer_with_a_malformed_body_is_an_error_and_leaves_no_sandbox(fake, path, body):
+    fake.bodies[path] = [body]
+    sandbox = _sandbox(fake)
+    with sandbox.open_session() as session:
+        first = session.run("print(1)")
+        second = session.run("print(2)")
+
+    if path.endswith("/process") and body == b"{}":
+        assert "runner unknown" in first.error
+    else:
+        assert "baseten sandbox answered" in first.error
+    assert second.stdout == "2\n"
+    assert sorted(fake.deleted) == sorted(fake.roots)
+
+
 def test_failed_call_deletes_the_sandbox_that_may_hold_the_program(fake):
     sandbox = _sandbox(fake)
     with sandbox.open_session() as session:
@@ -548,6 +571,28 @@ def test_unsafe_path_refused(fake):
         session.write_file("../escape.py", "x")
 
 
+@pytest.mark.parametrize("name", ["bad\ud800.py", "bad\0.txt"])
+def test_name_no_filesystem_takes_is_refused_before_a_sandbox_exists(fake, name):
+    with _sandbox(fake).open_session() as session:
+        assert "unsafe auxiliary file path" in session.run("print(1)", files={name: "x"}).error
+        with pytest.raises(ValueError):
+            session.write_file(name, "x")
+        with pytest.raises(ValueError):
+            session.read_file(name)
+    assert fake.roots == {}
+
+
+@pytest.mark.skipif(shutil.which("gcc") is None, reason="needs gcc in the image")
+def test_reset_after_two_runs_of_one_build_drops_what_both_wrote(fake):
+    code = '#include <stdio.h>\nint main(){fclose(fopen("artifact.txt", "w")); return 0;}'
+    with _sandbox(fake).open_session() as session:
+        assert session.run(code, language="c").ok
+        assert session.run(code, language="c").ok
+        session.reset_to_prepared()
+        assert session.read_file("artifact.txt") is None
+        assert session.read_file("main.c") == code
+
+
 def test_missing_api_key_refused_at_construction(monkeypatch):
     monkeypatch.delenv("BASETEN_API_KEY", raising=False)
 
@@ -600,6 +645,43 @@ def test_backend_selection_reaches_ray_actors_on_a_shared_cluster(monkeypatch):
     assert "runtime_env" not in ray_init_kwargs()
     monkeypatch.setenv("HALO_SANDBOX_BACKEND", "baseten")
     assert ray_init_kwargs()["runtime_env"] == {"env_vars": {"HALO_SANDBOX_BACKEND": "baseten"}}
+
+
+def test_key_in_a_variable_named_like_a_sandbox_setting_stays_out_of_the_ray_job(monkeypatch):
+    for name in [name for name in os.environ if name.startswith("HALO_SANDBOX_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HALO_SANDBOX_API_KEY", API_KEY)
+    BasetenSandbox(api_key_env="HALO_SANDBOX_API_KEY").close()
+    assert "runtime_env" not in ray_init_kwargs()
+    monkeypatch.setenv("HALO_SANDBOX_BACKEND", "baseten")
+    monkeypatch.setenv("HALO_SANDBOX_MAX_CONCURRENCY", "4")
+    assert ray_init_kwargs()["runtime_env"] == {
+        "env_vars": {"HALO_SANDBOX_BACKEND": "baseten", "HALO_SANDBOX_MAX_CONCURRENCY": "4"}
+    }
+
+
+@pytest.mark.parametrize("env_type", ["code_contests", "swe"])
+def test_closing_an_environment_closes_the_executor_it_built(fake, env_type):
+    kwargs = {"sandbox_backend": "baseten", "sandbox_options": {"api_url": fake.api_url}}
+    env = build_environment(env_type, kwargs)
+    with contextlib.ExitStack() as stack:
+        stack.callback(env.sandbox.close)
+        session = env.sandbox.open_session()
+        assert session.run("print(1)").ok
+        env.close()
+        assert fake.deleted == ["sbx-1"] and env.sandbox not in baseten.live_executors
+
+
+@pytest.mark.parametrize("env_type", ["code_contests", "swe"])
+def test_closing_an_environment_leaves_an_executor_it_was_given(fake, env_type):
+    sandbox = _sandbox(fake)
+    with contextlib.ExitStack() as stack:
+        stack.callback(sandbox.close)
+        env = build_environment(env_type, {"sandbox": sandbox})
+        session = sandbox.open_session()
+        assert session.run("print(1)").ok
+        env.close()
+        assert fake.deleted == [] and sandbox in baseten.live_executors
 
 
 def test_factory_refuses_a_sandbox_url_for_baseten(fake, monkeypatch):

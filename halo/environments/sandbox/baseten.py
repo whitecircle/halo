@@ -99,6 +99,21 @@ def service_message(response: requests.Response) -> str:
     return message or response.text[:200]
 
 
+def json_object(response: requests.Response, *fields: str) -> dict:
+    """The JSON object a 2xx answer carries, with each of ``fields`` a string. Any other body is the service's
+    failure."""
+    try:
+        body = response.json()
+    except ValueError as error:
+        raise SandboxInfraError("baseten sandbox answered with a body that is not JSON") from error
+    if not isinstance(body, dict):
+        raise SandboxInfraError("baseten sandbox answered with a body that is not a JSON object")
+    missing = [field for field in fields if not isinstance(body.get(field), str)]
+    if missing:
+        raise SandboxInfraError(f"baseten sandbox answered without {', '.join(missing)}")
+    return body
+
+
 def is_registry_reference(image: str) -> bool:
     """``docker.io/library/python:3.12`` names a registry host; ``baseten/base-image:latest`` and
     ``sandbox/my-image:tag`` name images Baseten already holds."""
@@ -162,7 +177,8 @@ class BasetenApi:
             "lifecycle": {"expiration_policies": [{"type": "TTL_IDLE", "value": idle_ttl, "action": "DELETE"}]},
         }
         try:
-            record = self._send("POST", f"{self.api_url}/sandboxes/instances", json=body, timeout=timeout).json()
+            response = self._send("POST", f"{self.api_url}/sandboxes/instances", json=body, timeout=timeout)
+            record = json_object(response, "name", "url")
             if record.get("status") != "DEPLOYED":
                 raise SandboxInfraError(f"baseten sandbox {name!r} is {record.get('status')}, not DEPLOYED")
         except SandboxInfraError:
@@ -189,7 +205,7 @@ class BasetenApi:
 
     def run(self, sandbox: Sandbox, command: str, *, deadline: float, timeout: float) -> Process:
         body = {"command": command, "workingDir": "/", "timeout": math.ceil(deadline), "waitForCompletion": True}
-        record = self._send("POST", f"{sandbox.url}/process", json=body, timeout=timeout).json()
+        record = json_object(self._send("POST", f"{sandbox.url}/process", json=body, timeout=timeout))
         return Process(
             status=record.get("status") or "unknown",
             exit_code=record.get("exitCode"),
@@ -227,7 +243,7 @@ class BasetenApi:
                     timeout=self.request_timeout,
                 )
                 response.raise_for_status()
-                self._token = response.json()["token"]
+                self._token = json_object(response, "token")["token"]
                 self._token_refresh_at = time.monotonic() + TOKEN_REFRESH_SECONDS
             return self._token
 

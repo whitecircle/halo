@@ -262,9 +262,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
         runtime-error verdict when the program replaced or locked a prepared entry (its own fault, never an infra
         error that could void its episode). A write refused after the restore means an escaped child locked it."""
         files = files or {}
-        for name in files:
-            if not SandboxSession.is_safe_member_name(name):
-                return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
+        refused = SandboxSession.refused_auxiliary_file(files)
+        if refused is not None:
+            return refused
         try:
             for name, content in files.items():
                 workspace.write(name, utf8_encodable(content))

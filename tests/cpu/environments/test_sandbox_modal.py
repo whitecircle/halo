@@ -317,6 +317,12 @@ def test_unknown_language_and_unsafe_paths_never_reach_modal(modal, executor):
     assert "unsafe auxiliary file path" in executor.run("x", files={"../evil": "1"}).error
     with pytest.raises(ValueError):
         executor.open_session().write_file("/etc/passwd", "x")
+    for name in ("bad\ud800.py", "bad\0.txt"):
+        assert "unsafe auxiliary file path" in executor.run("x", files={name: "1"}).error
+        with pytest.raises(ValueError):
+            executor.open_session().write_file(name, "x")
+        with pytest.raises(ValueError):
+            executor.open_session().read_file(name)
     assert modal.sandboxes == []
 
 
