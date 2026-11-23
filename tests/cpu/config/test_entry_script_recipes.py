@@ -42,13 +42,13 @@ _GROUP_PORT = 29517
 _CPU_ONLY = ["--use_cpu=true", "--bf16=false"]
 
 
-def _rows() -> list[tuple[str, str, bool, tuple]]:
-    """Each entry-script row's method, attention setting, whether it trains the default tiny family, and markers,
-    read through the row's own parser."""
+def _rows() -> list[tuple[str, str, bool, int, tuple]]:
+    """Each entry-script row's method, attention setting, whether it trains the default tiny family, CP size and
+    markers, read through the row's own parser."""
     rows = []
     for args, spec in MANIFEST[_ENTRY_SCRIPT_ROWS].launches():
         parsed = row_parser().parse_args(shlex.split(args))
-        rows.append((parsed.method, parsed.attn, parsed.family == DEFAULT_FAMILY, spec.markers))
+        rows.append((parsed.method, parsed.attn, parsed.family == DEFAULT_FAMILY, parsed.cp_size, spec.markers))
     return rows
 
 
@@ -57,13 +57,14 @@ def test_every_training_method_has_a_case_a_recipe_and_a_gpu_row():
     assert methods, "the method index came back empty, so nothing below would be checked"
     assert set(CASES) == methods
     assert set(RECIPES_DIR.rglob("*.yaml")) == {recipe_path(method) for method in methods}
-    assert sorted(method for method, attn, default, _ in _rows() if attn == "recipe" and default) == sorted(methods)
+    plain = [method for method, attn, default, cp_size, _ in _rows() if attn == "recipe" and default and cp_size == 1]
+    assert sorted(plain) == sorted(methods)
 
 
 def test_the_engine_driven_rows_need_the_live_server_and_the_rest_gate_merges():
     """A row with its attention unset trains on the GPU's own pick, which only Blackwell resolves to FA4, so it
     gates no merge; nor does a row on a tiny family past the default."""
-    for method, attn, default, markers in _rows():
+    for method, attn, default, _cp_size, markers in _rows():
         served = CASES[method].server_fields is not None
         assert ("vllm_server" in markers) is served, method
         assert ("full" if served or attn == "unset" or not default else "core") in markers, (method, attn)
@@ -131,6 +132,16 @@ def test_a_run_config_with_its_attention_unset_parses_no_attention(tmp_path, met
     assert kept["attn_implementation"] == pinned
     assert {key: value for key, value in kept.items() if key != "attn_implementation"} == unset
     assert _parse_launch(method, unset_path, first_launch_overrides())[1]["attn_implementation"] is None
+
+
+@pytest.mark.parametrize("overrides", [first_launch_overrides, resume_overrides], ids=["first-launch", "resume"])
+def test_a_cp_rows_launches_set_the_context_parallel_size(tmp_path, overrides):
+    cp_sizes = {cp_size for _, _, _, cp_size, _ in _rows()}
+    assert cp_sizes > {1}, "no entry-script row runs under CP, where a resume reads the policy from the checkpoint"
+    config = write_run_config("sft", tmp_path, model=_MODEL, dataset_dir="data")
+
+    for cp_size in cp_sizes:
+        assert _parse_launch("sft", config, overrides(cp_size=cp_size))[1]["context_parallel_size"] == cp_size
 
 
 if __name__ == "__main__":

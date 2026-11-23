@@ -60,7 +60,7 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 4. **Pick the environment** (env GRPO only) by registry name in `environment_type`; per-env knobs go in
    `environment_kwargs`; reward shaping is the `rewards:` term list; `max_turns: null` keeps the class
    default. Registry and knobs: `agent-docs/training-methods/async-grpo/environments/README.md#registry`.
-   Custom envs: pass `environment_cls` (an `EnvironmentBase` subclass) instead.
+   Custom envs: register a factory in `halo/environments/registry.py` and name it in `environment_type`; `environment_cls` is the trainer's Python argument, not a YAML field (`agent-docs/training-methods/async-grpo/environments/custom.md`).
 
 5. **Key GRPO hyperparameters** (both flavors): `num_generations` (group size), `beta` (KL to ref;
    `0.0` disables the ref model), `epsilon` (clip), `scale_rewards`, `temperature`, `loss_type`. Env GRPO

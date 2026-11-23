@@ -51,7 +51,7 @@ from halo.checkpoint.tools.offline_export import (
 )
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.model_loading.tokenizer_setup import load_processing_class
-from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, is_sink_key, neutralized_sink_value
 from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_layout import (
     SEPARATE_GLU_PROJECTIONS,
@@ -243,8 +243,12 @@ class _MergePlan:
     folds: dict[str, Fold]
     expert_layer_of: dict[str, _ExpertLayer]
     delta_bytes: int
+    # The run trained with neutralized GptOss sinks, and the base stores them live.
+    neutralizes_sinks: bool = False
 
     def fold(self, key: str, tensor: torch.Tensor) -> torch.Tensor:
+        if self.neutralizes_sinks and is_sink_key(key):
+            return torch.full_like(tensor, neutralized_sink_value(tensor.dtype))
         layer = self.expert_layer_of.get(key)
         if layer is not None:
             return layer.fold(tensor, key)
@@ -348,6 +352,15 @@ def _release_slot_dtypes(layers: dict[str, _ExpertLayer], base: dict[str, _Store
     return {key: stored.dtype for key, stored in base.items() if key.rpartition(".")[2] in stems}
 
 
+def _has_neutralized_sinks(adapter_dir: str) -> bool:
+    """Whether the adapter's training provenance records neutralized GptOss sinks."""
+    path = os.path.join(adapter_dir, TRAINING_PROVENANCE_FILE)
+    if not os.path.isfile(path):
+        return False
+    with open(path) as fh:
+        return json.load(fh).get(PROVENANCE_GPT_OSS_SINKS) == SinksPolicy.NEUTRALIZED
+
+
 def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
     path = find_adapter_weight_file(adapter_dir)
     if path is None:
@@ -365,8 +378,10 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
 
     base = _base_tensors(base_dir)
     rewritten = set(folds) | set(by_key)
-    stored_dtypes = {key: base[key].dtype for key in rewritten & set(base)} | _release_slot_dtypes(layers, base)
-    _reject_packed_tensors(base_dir, adapter_dir, stored_dtypes)
+    neutralizes_sinks = _has_neutralized_sinks(adapter_dir)
+    sinks = {key for key in base if is_sink_key(key)} if neutralizes_sinks else set()
+    stored_dtypes = {key: base[key].dtype for key in (rewritten | sinks) & set(base)}
+    _reject_packed_tensors(base_dir, adapter_dir, stored_dtypes | _release_slot_dtypes(layers, base))
     base_shapes = {key: stored.shape for key, stored in base.items()}
     absent = sorted(rewritten - set(base_shapes))
     if absent:
@@ -397,6 +412,11 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
             f"The base's expert tensors are not in the family's export layout, so the adapter's deltas cannot be "
             f"folded by key: {mismatched[:3]}."
         )
+    if neutralizes_sinks and not sinks:
+        raise ValueError(
+            f"{os.path.join(adapter_dir, TRAINING_PROVENANCE_FILE)} records neutralized GptOss attention sinks, and "
+            f"the base at {base_dir} stores no sink tensor to neutralize: the adapter belongs to another base."
+        )
     delta_bytes = max(
         (
             _DELTA_BYTES_PER_ELEMENT * sum(math.prod(shape) for shape in layer.hub_shapes.values())
@@ -404,26 +424,12 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str) -> _MergePlan:
         ),
         default=0,
     )
-    return _MergePlan(folds, by_key, delta_bytes)
+    return _MergePlan(folds, by_key, delta_bytes, neutralizes_sinks)
 
 
 def _merged_tensors(base_dir: str, plan: _MergePlan) -> Iterator[tuple[str, torch.Tensor]]:
     for key, tensor in iter_checkpoint_tensors(base_dir):
         yield key, plan.fold(key, tensor)
-
-
-def _reject_unreplayable_sidecars(adapter_dir: str) -> None:
-    """The one training sidecar that rewrites model state the stream has no module tree to apply."""
-    path = os.path.join(adapter_dir, TRAINING_PROVENANCE_FILE)
-    if not os.path.isfile(path):
-        return
-    with open(path) as fh:
-        provenance = json.load(fh)
-    if provenance.get(PROVENANCE_GPT_OSS_SINKS) == SinksPolicy.NEUTRALIZED:
-        raise ValueError(
-            f"{path} records neutralized GptOss attention sinks, which the streaming merge cannot re-apply (it holds "
-            f"no model). Merge in memory, or run reset_sinks.py on the merged checkpoint."
-        )
 
 
 def _reject_packed_tensors(base_dir: str, adapter_dir: str, rewritten: dict[str, str]) -> None:
@@ -454,10 +460,11 @@ def merge_adapter_streaming(
     spelling, the base's config and tokenizer files are copied (the adapter's tokenizer replaces them), and the
     adapter config lands in ``original_adapter_config/``. A Hub base is read at the commit the adapter records, or at
     ``base_revision``. A rewrite of a tensor the base stores packed is refused, and every key the adapter rewrites is
-    resolved against the base before the first write, so a refusal leaves no output."""
+    resolved against the base before the first write, so a refusal leaves no output. A run that trained with
+    neutralized GptOss sinks gets them back: the base stores them live, and the merge writes each at its dtype
+    minimum."""
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
-    _reject_unreplayable_sidecars(adapter_dir)
     config = read_adapter_config(adapter_dir)
     base_path = config.get("base_model_name_or_path")
     if not base_path:
