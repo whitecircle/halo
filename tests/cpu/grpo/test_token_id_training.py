@@ -1,18 +1,110 @@
 """Env-GRPO ``train_on_sampled_tokens``: parsing ``token_id:N`` logprobs and the per-turn row assembly. A row's
 completion is that turn's captured ids verbatim, its prompt the serving-template render of the prior history."""
 
+import asyncio
+import json
 import types
+from unittest import mock
 
 import pytest
 import torch
 
+import halo.environments.protocols.mcp as mcp_module
 from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.rollouts.engine_wire import _extract_token_ids, _extract_token_logprobs
 from halo.environments.rollouts.episode_loop import RolloutResult
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
+from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.models import GPT_OSS_20B
 from tests.common.tokenizers import load_cached_tokenizer
+from tests.cpu.environments.test_mcp_lifecycle import _StubMCPEnv
+
+
+class _ToolAwareTokenizer:
+    model_max_length = 4096
+
+    def apply_chat_template(self, messages, *, tools, tokenize, add_generation_prompt):
+        schema = json.dumps(tools) if tools else ""
+        text = schema + "".join(f"<{m['role']}>{m['content']}" for m in messages)
+        return text + ("<assistant>" if add_generation_prompt else "")
+
+    def __call__(self, text, *, add_special_tokens):
+        return {"input_ids": list(text.encode())}
+
+
+class _DiscoveryRenderHost(AsyncRolloutMixin, TrajectoryTokenizeMixin):
+    """Run the real startup and row builders without a model, Ray workers or an engine."""
+
+    _rollout_start_callback = None
+    _rollout_backend = None
+    _rollout_routing_replay = False
+
+    def __init__(self, env, loop, tokenizer, train_on_sampled_tokens):
+        self._rollout_env = env
+        self._loop = loop
+        self._tokenizer = self.processing_class = tokenizer
+        self._warned_once = set()
+        self._world_metrics = WorldMetrics()
+        self.async_config = types.SimpleNamespace(
+            isr_engine_reference=False,
+            train_on_sampled_tokens=train_on_sampled_tokens,
+            rollout_chat_template_kwargs={},
+            max_train_row_tokens=None,
+        )
+        self._start_rollout_pool = mock.Mock()
+        self._form_weight_sync_group = mock.Mock()
+        self.add_callback = mock.Mock()
+        self._is_tp_follower = lambda: False
+        self._broadcast_object_from_tp_leader = lambda schema: schema
+
+
+@pytest.mark.parametrize("episode_scratch", [False, True])
+@pytest.mark.parametrize(
+    ("train_on_sampled_tokens", "sampled_ids"),
+    [(False, [1]), (True, None), (True, [1])],
+    ids=["trajectory", "missing-sampled-ids", "missing-prompt-ids"],
+)
+def test_all_mcp_rerenders_match_the_connected_prompt(
+    monkeypatch, episode_scratch, train_on_sampled_tokens, sampled_ids
+):
+    """A nested MCP schema discovered at startup is present in every re-rendered training prompt."""
+
+    async def list_tools():
+        schema = {"type": "object", "properties": {"values": {"type": "array", "items": {"type": "integer"}}}}
+        tool = types.SimpleNamespace(name="stub_tool", description="a stub", inputSchema=schema)
+        return types.SimpleNamespace(tools=[tool])
+
+    monkeypatch.setattr(mcp_module, "ClientSession", lambda read, write, **kwargs: read.session)
+    reference, env = (_StubMCPEnv(scratch_allowlist=True, episode_scratch=episode_scratch) for _ in range(2))
+    reference.stub_session.list_tools = env.stub_session.list_tools = list_tools
+    tokenizer = _ToolAwareTokenizer()
+    user = Message.user("task")
+    trajectory = Trajectory()
+    trajectory.add_message(user)
+    trajectory.add_message(Message.assistant("done", token_ids=sampled_ids))
+    rollout = RolloutResult(prompt="task", trajectory=trajectory)
+
+    def render_reference():
+        text = tokenizer.apply_chat_template(
+            [user.to_dict()], tools=reference.get_tools_schema(), tokenize=False, add_generation_prompt=True
+        )
+        return tokenizer(text, add_special_tokens=False)["input_ids"]
+
+    before_discovery = render_reference()
+    with asyncio.Runner() as runner:
+        runner.run(reference.connect())
+        expected = render_reference()
+        runner.run(reference.disconnect())
+        host = _DiscoveryRenderHost(env, runner.get_loop(), tokenizer, train_on_sampled_tokens)
+        host._init_async_components()
+        assert expected != before_discovery
+        for _ in range(2):
+            ((row,),) = host._tokenize_step_rows([rollout])
+            assert row.prompt_ids.tolist() == expected
+    assert len(env.transports) == 1 and env.stub_transport.exited
 
 
 def _choice(tokens):

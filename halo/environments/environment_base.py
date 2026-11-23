@@ -7,7 +7,7 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, final
 
 from halo.config_validation import present, require_bool, require_int
 from halo.environments.episodes.episode_keys import (
@@ -47,7 +47,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
     # Whether the reward grades only against ``context["answer"]``, so the trainer refuses an answerless dataset.
     requires_answer: bool = False
 
-    # Whether the tools arrive on the first reset (an MCP server's, when it connects).
+    # Environments whose tools arrive on reset implement _discover_tools_schema for startup probes.
     TOOLS_ARRIVE_ON_RESET: bool = False
 
     # Set by the protocol layers; the eval records it. ``None`` = no system turn.
@@ -155,6 +155,14 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         """Passed to the rollout engine as ``tools=``; overridden by the tool-use envs."""
         return None
 
+    @final
+    async def discover_tools_schema(self) -> list[dict[str, Any]]:
+        """On an unused environment, return a nonempty snapshot of its dynamic tools and release discovery resources."""
+        tools = await self._discover_tools_schema()
+        if not tools:
+            raise ValueError(f"{type(self).__name__} advertised no tools. Configure it to expose at least one tool.")
+        return tools
+
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
         """Per-episode metrics the trainer means, by full path: ``outcome/*`` (added by task envs), ``episode/*``,
         ``reward/*`` (sum to the reward) and the scorers' keys."""
@@ -186,6 +194,10 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         )
         metrics.update(self._reward_metrics(trajectory))
         return metrics
+
+    async def _discover_tools_schema(self) -> list[dict[str, Any]]:
+        """Snapshot the tool schema and release all resources opened for discovery before returning."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement dynamic tool schema discovery")
 
     @abstractmethod
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
