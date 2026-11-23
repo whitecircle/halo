@@ -89,7 +89,7 @@ and the toolkit and cache variables are cataloged in
 |---|---|---|---|
 | `WANDB_API_KEY` | Weights & Biases logging | `.env` | — |
 | `HF_TOKEN` | Gated HuggingFace model/dataset access | `.env` | — |
-| `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` | [AWS Auth](../infrastructure/aws-auth.md) |
+| `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` (commented out in the template: set it only with a value) | [AWS Auth](../infrastructure/aws-auth.md) |
 | `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY`, `KEENABLE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
 | `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | Modal Sandboxes code-execution backend. `~/.modal.toml` holds the same credentials, and a container reads it only when the launch mounts it ([Modal credentials in Docker](../training-methods/async-grpo/environments/sandbox.md#modal)) | `.env` | [Code Execution Sandboxes](../training-methods/async-grpo/environments/sandbox.md#modal) |
 | `BASETEN_API_KEY` | Baseten Sandboxes code-execution backend | `.env` | [Code Execution Sandboxes](../training-methods/async-grpo/environments/sandbox.md#baseten-sandboxes) |
