@@ -147,6 +147,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         sandbox: SandboxExecutor | None = None,
         sandbox_backend: str | None = None,
         sandbox_url: str | None = None,
+        sandbox_options: dict | None = None,
         language: str | Sequence[str] = "python",
         output_comparison: str = "exact",
         verdict_detail: str = VERDICT_DETAIL_OUTCOME,
@@ -199,7 +200,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self.resubmission_penalty = resubmission_penalty
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
-        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
+        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url, **(sandbox_options or {}))
         warn_if_unisolated(self.sandbox, type(self).__name__)
         # The one reader of these knobs, so every submission and the offline re-grade (``to_meta``) share it.
         self.grading_spec = GradingSpec(

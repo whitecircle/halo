@@ -77,7 +77,9 @@ _EXPANDABLE_SEGMENTS_PREFIX = re.compile(
     r"PYTORCH_(?:CUDA_)?ALLOC_CONF=\S*expandable_segments:True\s+(?:\w+=\S*\s+)*(?:python|torchrun|accelerate|halo)\s"
 )
 _HALO_LAUNCH = re.compile(r"\bhalo launch\s")
-_HALO_LAUNCH_METHOD = re.compile(r"\bhalo launch\s+(\S+)")
+# A halo launch names its method, resolved through the CLI's own index, and its width as -n / --nproc.
+_HALO_METHOD = re.compile(r"\bhalo launch\s+(\S+)")
+_HALO_NPROC = re.compile(r"\s(?:-n|--nproc)[= ](\d+)")
 _COMMENT_CONTINUATION = re.compile(r"\\\n\s*#\s*")
 _EXPORT_LINE = re.compile(r"\s*#\s*export\s")
 _ALLOCATOR_DOC = "agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments"
@@ -103,13 +105,6 @@ def raw_config(config: Path) -> dict:
 
 def comment_block(config: Path) -> str:
     return "\n".join(line for line in config.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("#"))
-
-
-def halo_launch_script(line: str) -> str | None:
-    """The entry script (relative to ``scripts/training``) a ``halo launch METHOD`` line runs, or None."""
-    match = _HALO_LAUNCH_METHOD.search(line)
-    script = training_methods(REPO_ROOT).get(match[1]) if match else None
-    return script.relative_to(REPO_ROOT / "scripts" / "training").as_posix() if script else None
 
 
 def launch_commands(config: Path) -> list[str]:
@@ -440,13 +435,16 @@ def test_example_launch_lines_fit_the_config(config):
     commands = launch_commands(config)
     assert commands, "no comment line launches this config"
     for line in commands:
-        script = script_for(config)
-        assert f"scripts/training/{script}" in line or halo_launch_script(line) == script, (
-            f"names another entry script: {line}"
-        )
-        nproc = _NPROC.search(line)
+        if method := _HALO_METHOD.search(line):
+            script = training_methods().get(method[1])
+            assert script is not None, f"halo launch names no training method: {line}"
+            assert script == REPO_ROOT / "scripts/training" / script_for(config), f"launches another script: {line}"
+            nproc = _HALO_NPROC.search(line)
+        else:
+            assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
+            nproc = _NPROC.search(line)
         if uses_expert_parallelism(raw):
-            assert nproc, f"expert parallelism needs torchrun's width: {line}"
+            assert nproc, f"expert parallelism needs a multi-process width: {line}"
         devices = _VISIBLE_DEVICES.search(line)
         if devices and nproc:
             assert len(devices[1].split(",")) == int(nproc[1]), f"exposes another GPU count than it launches: {line}"

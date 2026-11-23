@@ -11,6 +11,7 @@ from halo.distributed.group_layout import NodeLocalLayout
 from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
@@ -696,6 +697,30 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
     with simulated_world(world_size=8, gpus_per_node=8):
         cfg = parallelism_config_from_args(args, trainer_cls=DistributedSFTTrainer)
         assert cfg.lowp.precision == "fp8"
+
+
+@pytest.mark.parametrize("precision", ["fp8", "fp4", "mxfp4"])
+def test_parallelism_config_from_args_lowp_allowed_for_teacher_distillation(precision):
+    """Quantization-aware distillation: the student takes every format and the shape knobs, as under SFT."""
+    args = _DistArgs()
+    args.lowp_precision = precision
+    args.lowp_keep_last_blocks = 2
+    with simulated_world(world_size=8, gpus_per_node=8):
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedTeacherDistillationTrainer)
+    assert cfg.lowp.precision == precision and cfg.lowp.keep_last_blocks == 2
+
+
+@pytest.mark.parametrize(
+    ("knob", "value", "named"), [("lowp_precision", "mxfp4", "lowp_precision"), ("lowp_keep_first_blocks", 1, None)]
+)
+def test_parallelism_config_from_args_rejects_lowp_for_self_distillation(knob, value, named):
+    """Self-distillation inherits SFT's True and opts back out; the refusal names the trainer that rejects it."""
+    args = _DistArgs()
+    setattr(args, knob, value)
+    with simulated_world(world_size=8, gpus_per_node=8):
+        with pytest.raises(ValueError, match="DistributedSelfDistillationTrainer") as err:
+            parallelism_config_from_args(args, trainer_cls=DistributedSelfDistillationTrainer)
+    assert knob in str(err.value) and (named is None or f"{named}={value!r}" in str(err.value))
 
 
 def _ep_coords(cfg) -> tuple[int, int]:
