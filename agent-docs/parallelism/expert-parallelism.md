@@ -596,7 +596,7 @@ each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix
 restrictions. A `ep_group_size > 1` run on a dense model or a MoE with no family spec is refused at load,
 before the process groups (`reject_ep_without_family`), and one that still patches **zero** MoE layers raises.
 
-**Axis combinations.** EP composes with one of TP, CP or ETP; the allowlist and the topology rules
+**Axis combinations.** EP composes with one of TP, CP, ETP or PP; the allowlist and the topology rules
 on top of it: [Supported combinations](README.md#supported-combinations).
 
 **Kernel warm-up.** GptOss's expert-bias gradient is one cuBLAS GEMM contracting over the receive, whose kernel cuBLAS

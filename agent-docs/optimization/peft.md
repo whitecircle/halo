@@ -111,7 +111,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
   runs on GPT-OSS, Qwen3 MoE, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. Every other EP
   family refuses it, as it would put PEFT layers inside the EP layer. There, name attention and expert projections
   explicitly (see [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
-- **Learning rate:** higher than the same run's full fine-tune. The shipped SFT recipes start at `1e-4`, and the
+- **Learning rate:** higher than the same run's full fine-tune on SFT and GRPO. The shipped SFT recipes start at `1e-4`, and the
   code-contests recipes run `3e-6` against `2e-7`.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
@@ -122,7 +122,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
 | Trainer | Full-FT band | LoRA start |
 |---|---|---|
 | SFT | `2e-6` – `2e-5` | `1e-4` |
-| SMPO / DPO | `5e-7` – `5e-6` | `5e-5` |
+| SMPO / DPO | `5e-7` – `5e-6` | `5e-7` (the two shipped DPO LoRA recipes) |
 | GRPO | `1e-6` – `5e-6` | `3e-6` (every shipped LoRA async GRPO recipe under `examples/grpo/environmental/`) |
 
 The effective-batch formula is unchanged by LoRA — see
@@ -298,8 +298,8 @@ fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchm
 | LoRA r=64, attn + experts | 457M (3.86%) | 14,316 | 32.0 GiB |
 
 **LoRA under EP is far leaner than full fine-tuning.** The frozen base carries no gradients or optimizer
-state, so every variant peaks at 30–32 GiB against full fine-tuning's 78.9 GiB at this shape (batch 1), and
-every variant runs faster than its 12,432 tok/s/GPU. Experts-only is 5% faster than attention-only, since
+state, so every variant peaks at 30–32 GiB against full fine-tuning's 79.0 GiB at this shape (batch 1), and
+every variant runs faster than its 12,121 tok/s/GPU. Experts-only is 5% faster than attention-only, since
 the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either alone.
 
 On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and

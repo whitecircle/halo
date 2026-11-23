@@ -62,8 +62,8 @@ batch — stage 0 reads `input_ids`, the last stage reads `labels`. The trainer'
 the stage-local DP rank, never the global rank.
 
 **Stage boundaries fall on NVLink-domain boundaries** (`stage_world_size % nvlink_domain_size == 0`,
-enforced at config time). Every EP/TP/ETP/CP group is a domain-local rank block, so this keeps them
-strictly inside one stage. `pp_size` must therefore divide the domain count: `pp2` on one 8-GPU node
+enforced at config time). TP, ETP, CP and node-scope EP groups are domain-local rank blocks, and a
+global-scope EP group fits inside its stage's ranks, so every group stays strictly inside one stage. `pp_size` must therefore divide the domain count: `pp2` on one 8-GPU node
 leaves `stage_world_size = 4` and is rejected at the default domain sizing. Single-rank stages are
 rejected too (the stage FSDP wrap assumes DP ≥ 2).
 
@@ -208,12 +208,12 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
   stage runs a different collective program than its MoE peers and deadlocks at the gradient norm,
   so such a partition raises at setup. Choose a `pipeline_parallel_size` or `pipeline_split` that
   reaches the MoE layers on every stage.
-- The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_size>1`) or sharded as
-  stage-mesh DTensors (`ep_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
-  rejected under PP.
+- The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_group_size>1`) or sharded as
+  stage-mesh DTensors (`ep_group_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
+  rejected under PP at `ep_group_size==1`.
 - EP gradient sync runs in one deferred post-backward sweep (`EPConfig.sweep_reduces_across_replicas`), since
   per-backward hooks would fire on every microbatch and re-scale grads already synced. The sweep is
-  off at `ep_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
+  off at `ep_group_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
   syncs the experts. Router and replicated averages reduce over the stage's rank block, never the
   world.
 - The gradient norm is exact and rank-uniform: one world all-reduce of each rank's local squared
@@ -359,7 +359,7 @@ Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per a
 | | `ep16` global | 4,115 | 60.9 | 3,806 | 31.1 |
 
 - Against DP, with any experts local, PP runs 4.0% and 1.3% below `dp16`, GC off then on, and 15.9% and 14.3% below `ep8` with DP.
-- Against the layouts that cross the link it leads: 1.63× and 2.22× over `dp8 × tp2`, 3.82× and 3.36× over `ep16`, whose dispatch crosses it in every MoE layer. Both PP rates repeat within 0.4%.
+- It leads the TP and cross-node EP layouts: 1.63× and 2.22× over `dp8 × tp2`, 3.82× and 3.36× over `ep16`, whose dispatch crosses it in every MoE layer. Both PP rates repeat within 0.4%.
 - PP's memory saving falls on its last stage: 0.68× the DP row's peak on Qwen3-8B and 0.45× on gpt-oss-20b, GC off. The first stage holds 0.98× and 0.84×.
 - GC off raises PP's own rate 18.9% on Qwen3-8B and 22.8% on gpt-oss-20b, for 1.9× and 2.1× the allocated peak. The whole-device peaks are 49.2 GiB on stage 0 and 35.7 GiB on stage 1 for Qwen3-8B, 70.4 and 40.8 GiB for gpt-oss-20b.
 
