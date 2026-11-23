@@ -16,12 +16,13 @@
 | `bubblewrap` | `local` inside a `bwrap` jail: own user, mount, PID, IPC, UTS and cgroup namespaces and, without `allow_network`, network; read-only system, only the working dir writable, no capabilities, jail root a subordinate uid | python, bash, cpp, c | What `local` needs, plus root, `bwrap`, util-linux `unshare`, `uidmap` and namespace rights ([Bubblewrap setup](#bubblewrap-setup)) |
 | `remote` | In the service, behind a SandboxFusion-compatible `/run_code` endpoint | Whatever it exposes | Network to it |
 | `modal` | In a [Modal Sandbox](https://modal.com/docs/guide/sandbox) (gVisor, network blocked) under `local`'s rlimits, each session as its own user | python, bash, cpp, c (default image) | The `modal` extra (`pip install 'halo[modal]'`) and Modal credentials ([Modal](#modal)) |
+| `baseten` | A Baseten Sandboxes microVM per session, created on first use and deleted on close, under `local`'s rlimits | python, bash, plus cpp and c when the image has `gcc` / `g++` | `BASETEN_API_KEY`, network to `api.baseten.co` ([Baseten Sandboxes](#baseten-sandboxes)) |
 
 Coding environments select it in `environment_kwargs`:
 
 ```yaml
 environment_kwargs:
-  sandbox_backend: remote                 # local (default) | bubblewrap | remote | modal
+  sandbox_backend: remote                 # local (default) | bubblewrap | remote | modal | baseten
   sandbox_url: http://sandbox-host:8080   # remote only
   # sandbox_options: {cpu: 8, memory_mb: 16384}   # the backend's constructor arguments
 ```
@@ -32,7 +33,7 @@ Precedence is explicit argument, then `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL
 
 A confined program cannot write the host filesystem or reach the network, but can read what the backend exposes (`bubblewrap`'s read-only system paths and `extra_ro_binds`).
 
-- `remote` and `modal` confine; `bubblewrap` confines unless `allow_network`; `local` does not (`SandboxExecutor.isolated`).
+- `remote` and `modal` confine; `bubblewrap` confines unless `allow_network`; `local` and `baseten` do not (`SandboxExecutor.isolated`).
 - On `local` the program can rewrite what grades it, fetch a solution, and read the trainer's `--env-file` secrets from `/proc/<pid>/environ`.
 - `swe` and `code_contests` log a warning when built on an executor that does not confine.
 
@@ -79,6 +80,15 @@ halo launch grpo/environmental <config> --nproc 4 --halo-rollout-backend modal
 The flag works on `halo launch` and `halo run`. It sets `HALO_SANDBOX_BACKEND=modal` and `HALO_SANDBOX_REPL=1`, so code-contests grading and its test tool, the `swe` tools and the Python REPL tools all run in Modal. An explicit `sandbox_backend` in `environment_kwargs` takes precedence over the flag: remove it, or set it to `modal`, before running untrusted code.
 
 On a shared Ray cluster (`ray_address`) the two variables travel to the actors with the job. Credentials do not: put Modal's on every cluster node.
+
+**Credentials in Docker**
+
+Modal reads `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, and `~/.modal.toml` when a variable is not set. A container gets them one of two ways:
+
+- Set both variables in `.env`, which the standard launch passes with `--env-file`.
+- Mount the file at the container user's home: `-v ~/.modal.toml:/root/.modal.toml:ro`. The standard launch and the `make` targets do not mount it.
+
+A variable set to an empty value (`MODAL_TOKEN_ID=` in `.env`) takes precedence over the file, and authentication fails. Leave the two lines commented out, as in `.env.example`, to use the file.
 
 **How it runs**
 
@@ -127,6 +137,98 @@ A new sandbox starts without the open sessions' directories. A session that had 
 
 The code is in `halo/environments/sandbox/modal_sandbox.py`. What runs inside the sandbox is `halo/environments/sandbox/program_runner.py` on the working-directory code `local` uses, `halo/environments/sandbox/workspace.py`.
 
+### Baseten Sandboxes
+
+One flag sends code-contests grading, its test tool and the `swe` tools to Baseten:
+
+```bash
+BASETEN_API_KEY=... halo launch grpo/environmental <config>.yaml -n 4 --halo-rollout-backend baseten
+```
+
+The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=baseten`. An explicit `sandbox_backend` in `environment_kwargs` takes precedence.
+
+- `BASETEN_API_KEY` is the only credential: a personal or full-access team key. A missing key raises at construction.
+- `HALO_SANDBOX_URL` must be unset: a URL belongs to `remote` only.
+- On a shared Ray cluster (`ray_address`) the backend selection travels to the actors with the job. The key does not: put it on every cluster node.
+
+**How it runs**
+
+- Each session gets its own microVM, created on first use and deleted on close. Concurrent episodes never share one.
+- A sandbox is created under a name the backend chooses, so a create that is retried returns the same sandbox, and a create that fails or is not `DEPLOYED` is deleted by that name.
+- `run()` is a throwaway session: it creates and deletes a sandbox per call.
+- A sandbox answers its first call about 4 s after the session's first use; a later call adds about 0.3 s to the program's own time.
+- Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
+- The Python REPL tools (`native_coding`, `native_math`, `native_combined`, ReAct `python`) do not run on Baseten: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox, so they run in the environment's process on the training host. Set `HALO_SANDBOX_REPL=1` to run them on Baseten.
+- The API key only mints a 2-hour sandbox access token, renewed after 90 minutes. Sandbox calls carry the token; the key is never logged.
+
+**Sandbox limit**
+
+Baseten runs at most 10 sandboxes per organization. `max_concurrency` (default and maximum 10) caps live sandboxes per process; a session past it waits for a slot, and after `slot_timeout` (default 600 s) its call is an `error` naming the cap. Across Ray actors, keep the sum of `max_concurrency` at or below 10.
+
+**What a program cannot do**
+
+The program runs as a different user from the process that supervises it.
+
+- It cannot signal that process or replace its files.
+- It cannot leave a process behind: every process of its user is killed when the run ends.
+- It cannot make the backend write or read through a link, directory or FIFO it put in a file's place. The next run reports a runtime error (`working directory tampered`), a file write raises `ValueError`, and a read returns `None`.
+
+**Images**
+
+`image` names an image Baseten holds: a built-in one (`baseten/<name>:latest`) or one stored in your team (`sandbox/<name>:<tag>`). It must run as root and have `python3`.
+
+- The default, `baseten/base-image:latest`, is Alpine with Python 3.12 and no compiler, so it runs python and bash. A built-in image has no tag but `latest`, which moves.
+- For C and C++, or for an image that stays the same across runs, import a registry image once and name the tag Baseten gave it:
+
+    ```bash
+    api=https://api.baseten.co/v1
+    token=$(curl -s -X POST $api/token -H "Authorization: Bearer $BASETEN_API_KEY" \
+        -H 'Content-Type: application/json' -d '{"scopes": ["sandboxes"]}' | python3 -c 'import json, sys; print(json.load(sys.stdin)["token"])')
+    curl -s -X POST $api/sandboxes/images -H "Authorization: Bearer $token" \
+        -H 'Content-Type: application/json' -d '{"name": "halo-cpp", "image": "docker.io/library/python:3.12"}'
+    curl -s $api/sandboxes/images/halo-cpp -H "Authorization: Bearer $token"       # repeat until "status": "BUILT"
+    curl -s $api/sandboxes/images/halo-cpp/tags -H "Authorization: Bearer $token"  # the tag to pin
+    ```
+
+    Then set `image: sandbox/halo-cpp:<tag>` in `sandbox_options`. Baseten's own `baseten` CLI, which the Halo images do not ship, makes the same calls (`baseten sandbox image push`, `list-tags`).
+- A registry reference (`docker.io/...`) as `image` raises at construction: Baseten would import it again for every sandbox and keep one stored image per sandbox.
+
+**Network**
+
+A Baseten sandbox keeps its outbound network, so a program can fetch from the internet. The backend therefore does not count as confining (`isolated` is false) and coding environments log the warning.
+
+**When something fails**
+
+| What happened | What the caller sees |
+|---|---|
+| A connection error, 429 or 5xx on a call that runs no program | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
+| 429 or 5xx on the call that runs the program | `error`; the call is not sent again, so a program never runs twice |
+| The service does not answer within the deadline (run timeout + compile timeout + 30 s + `request_overhead`) | `error`; the call is not sent again, so a program never runs twice |
+| A success answer whose body is not the JSON object the API documents | `error`; a sandbox the call created or ran in is deleted |
+| Baseten deleted the sandbox (`idle_ttl`, default 10 minutes idle) | `error` once; the next call creates a new sandbox. A session that only ran programs continues empty; one that had written a file with `write_file` raises `SandboxInfraError` on every later call |
+
+File calls raise `SandboxInfraError` where `run` returns `error`. After an `error` the sandbox is deleted and the next call creates a new one.
+
+**Cleanup**
+
+Closing a session deletes its sandbox, and an `atexit` hook deletes the ones still open, each with one request that waits at most 5 s. If the process is killed, Baseten deletes them after `idle_ttl`.
+
+**Options** (`sandbox_options`)
+
+| Option | Default | Meaning |
+|---|---|---|
+| `image` | `baseten/base-image:latest` | The sandbox's [image](#baseten-sandboxes) |
+| `cpu` | 2 | vCPUs of each sandbox; Baseten gives it 8 GiB of memory per vCPU |
+| `idle_ttl` | `10m` | Idle time after which Baseten deletes a sandbox |
+| `interpreter` | `python3` | The Python the sandbox runs programs with |
+| `max_concurrency` | 10 | Live sandboxes in this process |
+| `slot_timeout` | 600 s | How long a session waits for a free sandbox |
+| `request_timeout`, `request_overhead`, `create_timeout` | 60 s, 30 s, 600 s | HTTP timeouts |
+| `max_retries`, `backoff_factor` | 4, 1.0 | Retry policy |
+| `memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb` | `local`'s | [Limits](#limits) |
+
+The code is in `halo/environments/sandbox/baseten.py`; what runs inside the sandbox is the runner `modal` uses. `HALO_BASETEN_LIVE=1 pytest tests/cpu/environments/test_sandbox_baseten.py -k live` runs a create, run and delete against the service with your `BASETEN_API_KEY`; the other tests use a local fake of Baseten's API.
+
 ## Using it from Python
 
 ```python
@@ -148,15 +250,17 @@ with sandbox.open_session() as session:
 
 `close()` deletes the working directory (`remote`: drops the written files), is idempotent and never raises; the context manager calls it.
 
-`environment_kwargs` carries `sandbox_backend`, `sandbox_url` and `sandbox_options`, the executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`, Modal's options). From Python they also go through `sandbox=`:
+`environment_kwargs` carries `sandbox_backend`, `sandbox_url` and `sandbox_options`, the executor's constructor arguments (`memory_limit_mb`, `compile_timeout`, `compile_memory_limit_mb`, bubblewrap's `allow_network` / `extra_ro_binds`, Modal's and Baseten's options). From Python they also go through `sandbox=`:
 
 ```python
 env = SweEnvironment(sandbox=build_sandbox("bubblewrap", memory_limit_mb=2048, allow_network=True))
 ```
 
+When a `swe` or `code_contests` environment closes, it calls `close()` on an executor it built from `environment_kwargs`, which ends a hosted backend's sandboxes. One passed as `sandbox=` stays open for its other users: call its `close()` yourself.
+
 ### Session paths
 
-- A path that leaves the working directory by name (empty, `..`, absolute) or that UTF-8 cannot encode is refused as a bad argument (`ValueError`, `SandboxSession.reject_unsafe_path`). One that is a link, resolves outside through one, or names a FIFO or device is refused on write (`SessionPathError`); `read_file` returns `None` for anything but a regular file.
+- A path that leaves the working directory by name (empty, `..`, absolute), that UTF-8 cannot encode, or that holds a NUL character is refused as a bad argument (`ValueError`, `SandboxSession.reject_unsafe_path`). A `files=` name of that kind makes `run` return an `error` before any program starts. One that is a link, resolves outside through one, or names a FIFO or device is refused on write (`SessionPathError`); `read_file` returns `None` for anything but a regular file.
 - A program that swaps a prepared file for a link gets its own runtime error (`working directory tampered`). A removed working directory is recreated empty.
 - A working directory replaced with a link or a file breaks the session: later runs report `agent_fault` ([Reading a result](#reading-a-result)), file operations raise `SandboxAgentFault`. On `local` another episode's program can cause this.
 
@@ -196,7 +300,7 @@ A grader of your own that calls `sandbox.run()` must handle its host-side except
 A program that drives its own run into an `error` voids its episode. The routes left:
 
 - `remote`: a response the service fails to produce (huge output, service OOM), or one past the client deadline (run timeout + 30 s).
-- `modal`: output too large to return before the call's deadline.
+- `modal` / `baseten`: output too large to return before the call's deadline.
 - `local` / `bubblewrap` grading: a host-side exception during a test, such as a `TMPDIR` the program filled.
 - `local` only: a `setsid()` child that outlives the run fills the process table, or, under a root grader, the program deletes the compiler (`compiler not found` for every later build on that host).
 
@@ -206,7 +310,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Languages
 
-`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local`, `bubblewrap` and `modal` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
+`LANGUAGES` (`halo/environments/sandbox/languages.py`) is the registry `local`, `bubblewrap`, `modal` and `baseten` run and constructors validate against; an unknown name returns an `error` result. `remote` forwards the name to the service.
 
 | Language | Aliases | Compile | Run |
 |---|---|---|---|
@@ -219,7 +323,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 
 ## Limits
 
-Rlimits bound each `local` / `bubblewrap` / `modal` run; `remote` enforces its own.
+Rlimits bound each `local` / `bubblewrap` / `modal` / `baseten` run; `remote` enforces its own.
 
 | Resource | Run step | Compile step | Set by |
 |---|---|---|---|

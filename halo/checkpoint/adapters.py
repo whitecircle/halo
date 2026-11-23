@@ -61,11 +61,15 @@ def expert_lora_config_fields(spec: ExpertLoraSpec) -> dict:
     }
 
 
-def expert_lora_adapter_config(spec: ExpertLoraSpec, base_model_name_or_path: str | None) -> dict:
-    """The PEFT-style ``adapter_config.json`` of an expert-only adapter save."""
+def expert_lora_adapter_config(
+    spec: ExpertLoraSpec, base_model_name_or_path: str | None, revision: str | None
+) -> dict:
+    """The PEFT-style ``adapter_config.json`` of an expert-only adapter save; ``revision`` is the Hub commit of the
+    base, under PEFT's own key."""
     return {
         "peft_type": EXPERT_LORA_PEFT_TYPE,
         "base_model_name_or_path": base_model_name_or_path,
+        "revision": revision,
         **expert_lora_config_fields(spec),
     }
 

@@ -35,6 +35,7 @@ from halo.checkpoint.parallel.completeness import mark_resume_adapter_complete
 from halo.checkpoint.parallel.context import CheckpointContext
 from halo.checkpoint.parallel.reading import consensus_read
 from halo.checkpoint.sidecars import write_training_provenance
+from halo.checkpoint.weights_source import weights_read_at
 from halo.checkpoint.writing import adapter_save_dtype_caster
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     expert_lora_checkpoint_shapes,
@@ -123,15 +124,17 @@ def _cp_normalized_config(peft_config):
     return config or peft_config
 
 
-def _backfill_base_model_name(peft_model: PeftModel) -> None:
-    """Recover ``base_model_name_or_path``, which ``get_peft_model`` reads off the wrapped module's ``__dict__``; under
-    CP that is the wrapper's and has none."""
+def _record_base(peft_model: PeftModel) -> None:
+    """Complete what each adapter config says of its base: ``base_model_name_or_path``, which ``get_peft_model`` reads
+    off the wrapped module's ``__dict__`` (under CP that is the wrapper's and has none), and ``revision``, the Hub
+    commit the weights were read at, without which a later load of the base takes the repo's default branch."""
     name_or_path = getattr(base_transformers_model(peft_model), "name_or_path", None)
-    if not name_or_path:
-        return
+    revision = weights_read_at(peft_model)
     for peft_config in peft_model.peft_config.values():
-        if peft_config.base_model_name_or_path is None:
+        if peft_config.base_model_name_or_path is None and name_or_path:
             peft_config.base_model_name_or_path = name_or_path
+        if revision is not None:
+            peft_config.revision = revision
 
 
 def _adapter_file_state(ctx: CheckpointContext, state: dict) -> dict:
@@ -148,7 +151,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     ``save_pretrained`` does it unless DTensor adapters need resolving, a CP run's keys need respelling for a non-CP
     reload, or a mixed run's expert adapters join the attention ones in one file stock PEFT refuses."""
     peft_model = find_peft_model(ctx.model)
-    _backfill_base_model_name(peft_model)
+    _record_base(peft_model)
     peft_config = peft_model.peft_config["default"]
     is_cp_mode = ctx.parallelism_config.is_cp_mode
     mixed = ctx.has_expert_lora
@@ -212,7 +215,10 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
             save_safetensors_file(
                 _adapter_file_state(ctx, adapters), os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE)
             )
-            write_adapter_config(expert_lora_adapter_config(ctx.parallelism_config.expert_lora, base_name), output_dir)
+            write_adapter_config(
+                expert_lora_adapter_config(ctx.parallelism_config.expert_lora, base_name, weights_read_at(ctx.model)),
+                output_dir,
+            )
             tag_model_card(output_dir)
             logger.info(f"✓ EP LoRA adapters saved to {output_dir} ({len(adapters)} tensors)")
 

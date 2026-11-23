@@ -45,8 +45,13 @@ class SandboxSession(ABC):
 
     @staticmethod
     def is_safe_member_name(name: str) -> bool:
-        """Relative, naming an entry, never ``..``."""
-        return name not in ("", ".", "..") and not name.startswith(("/", "\\")) and ".." not in name.split("/")
+        """Relative, naming an entry, never ``..``, and free of NUL, which no filesystem call takes."""
+        return (
+            name not in ("", ".", "..")
+            and not name.startswith(("/", "\\"))
+            and ".." not in name.split("/")
+            and "\0" not in name
+        )
 
     @staticmethod
     def reject_unsafe_path(path: str) -> None:
@@ -58,6 +63,16 @@ class SandboxSession(ABC):
             raise ValueError(f"session file path {path!r} is not valid UTF-8") from None
         if not SandboxSession.is_safe_member_name(path):
             raise ValueError(f"unsafe session file path: {path!r}")
+
+    @staticmethod
+    def refused_auxiliary_file(files: dict[str, str]) -> SandboxResult | None:
+        """The ``error`` result naming the first of ``files`` that :meth:`reject_unsafe_path` refuses."""
+        for name in files:
+            try:
+                SandboxSession.reject_unsafe_path(name)
+            except ValueError:
+                return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
+        return None
 
     def __enter__(self) -> "SandboxSession":
         return self
@@ -80,6 +95,9 @@ class SandboxExecutor(ABC):
     @abstractmethod
     def open_session(self) -> SandboxSession:
         """One per episode for multi-turn rollouts."""
+
+    def close(self) -> None:  # noqa: B027 — optional hook; a backend that holds nothing remote has nothing to free
+        """Release what the executor holds outside its sessions. Idempotent; never raises."""
 
     def toolchain(self, language: str) -> str | None:
         """The predicate a tool description states (``runs on CPython 3.12``, ``is compiled with g++ -O2 ...``);

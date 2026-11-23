@@ -41,32 +41,37 @@ _GROWN_VOCABULARY_ATTR = "_halo_grown_vocabulary"
 _TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "tokenizer.model")
 
 
-def _holds_no_tokenizer(processing_class, path: str) -> bool:
+def _holds_no_tokenizer(processing_class, path: str, revision: str | None) -> bool:
     """transformers 5 builds a ``model_type``'s tokenizer class with no file behind it, a vocabulary of its special
     tokens alone."""
     tokenizer = resolve_tokenizer(processing_class)
     if not isinstance(tokenizer, PreTrainedTokenizerBase) or len(tokenizer) > len(set(tokenizer.all_special_tokens)):
         return False
     lookup = {"_raise_exceptions_for_missing_entries": False, "_raise_exceptions_for_connection_errors": False}
-    return not any(cached_file(path, name, **lookup) for name in _TOKENIZER_FILES)
+    return not any(cached_file(path, name, revision=revision, **lookup) for name in _TOKENIZER_FILES)
 
 
-def load_processing_class(path: str, *, trust_remote_code: bool = False):
-    """``AutoProcessor`` for multimodal, else ``AutoTokenizer``, else ``None`` when the directory holds no tokenizer.
+def load_processing_class(path: str, *, trust_remote_code: bool = False, revision: str | None = None):
+    """``AutoProcessor`` for multimodal, else ``AutoTokenizer``, else ``None`` when the directory holds no tokenizer;
+    ``revision`` pins a Hub ``path``.
     Re-save utilities must persist this, as a tokenizer-only VLM save is unloadable; any other failure must propagate
     rather than ship a resized model beside the checkpoint's stale tokenizer."""
     try:
         try:
-            processing_class = AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code)
+            processing_class = AutoProcessor.from_pretrained(
+                path, trust_remote_code=trust_remote_code, revision=revision
+            )
         except (OSError, ValueError) as e:
             # The two ways a repo reports no processor, the ordinary text-only path, hence info.
             if is_global_main_process():
                 logger.info(f"No processor at {path} ({type(e).__name__}: {e}); falling back to the tokenizer.")
-            processing_class = AutoTokenizer.from_pretrained(path, trust_remote_code=trust_remote_code)
+            processing_class = AutoTokenizer.from_pretrained(
+                path, trust_remote_code=trust_remote_code, revision=revision
+            )
     except (OSError, ValueError) as e:
         reason = f"{type(e).__name__}: {e}"
     else:
-        if not _holds_no_tokenizer(processing_class, path):
+        if not _holds_no_tokenizer(processing_class, path, revision):
             return processing_class
         reason = "it holds no tokenizer file"
     if is_global_main_process():
