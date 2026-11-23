@@ -69,16 +69,24 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     ([Qwen3.8-Flash-Next](agent-docs/models/qwen4_exp.md#kernel-defaults)).
   - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer and
     covering ep1 expert weights; an export layout vLLM serves; gpt-oss's native MXFP4 release loads through the lazy
-    loaders; and the trainer checks the converted modules against `lowp_precision`.
+    loaders; and the trainer checks the converted modules against `lowp_precision`. Two fixes: MXFP8 quantizes with
+    a multiply, so an all-zero block does not become NaN where subnormals flush to zero, and eager MXFP4 and MXFP8
+    scale every block by an exact power of two, as the fused kernels do.
   - **Distillation:** `use_chunked_distillation_loss` trains teacher and self-distillation without the full
-    `[tokens, vocab]` logits, and teacher distillation takes `lowp_precision`, fitting a fake-quant student to a BF16
-    teacher. `bias_update` balancing warns when the teacher is the student's own checkpoint.
+    `[tokens, vocab]` logits, and online SDPG computes its OPD term the same way under `use_chunked_grpo_logprobs`.
+    Teacher distillation takes `lowp_precision`, fitting a fake-quant student to a BF16 teacher. `bias_update`
+    balancing warns when the teacher is the student's own checkpoint.
   - **GRPO:** `use_maxrl` for MaxRL's mean-normalized advantages in online and environmental GRPO, White Circle
-    policies as a reward term, and episode code in Modal Sandboxes with `--halo-rollout-backend modal`.
+    policies as a reward term, and episode code in Modal or Baseten Sandboxes with `--halo-rollout-backend modal`
+    or `baseten`.
   - **Context parallelism:** CP2 SFT on dense Qwen3.5/3.6 with their native hybrid layers (text-only full
     fine-tune).
   - **MoE metrics:** each checkpoint carries `moe_expert_token_counts.json`, the tokens routed to each expert over
     the run.
+  - **Adapters:** an adapter save records the Hub commit of its base model, and `merge_peft_adapters.py` and
+    `convert_to_bf16.py --check_inference` read the base at that commit (`--base_revision` names one for an adapter
+    that records none). A PEFT wrap that leaves an adapter with no trainable parameter is refused when the trainer
+    is built.
   - **Also:** Transformers 5.23, DPO/KTO reference log-probs swept after the FSDP2 wrap, SGLang turns requeued at a
     weight push, Keenable as a web-search backend, and a fix: fused AdamWBF16 takes `1 - beta` from the float64
     betas.
