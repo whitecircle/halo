@@ -79,6 +79,7 @@ class StubEPLayerBase(EPMoELayerBase):
     def __init__(self):
         nn.Module.__init__(self)  # EPMoELayerBase.__init__ needs live EP groups.
         self._expert_lora_attrs = frozenset()
+        self._lowp_quant_format = None  # As EPMoELayerBase.__init__ sets it: no lowp conversion.
 
     def forward(self, hidden_states, **kwargs):
         raise NotImplementedError(f"{type(self).__name__} is a state/export stub — its forward is never exercised")

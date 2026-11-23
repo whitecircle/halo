@@ -24,6 +24,11 @@ _CONV_LORA_LAYERS = (Conv1d, Conv2d, Conv3d)
 LoraFolds = dict[int, list[LoraLayer]]
 
 
+def has_adapter_layers(model: torch.nn.Module) -> bool:
+    """Detect injected PEFT layers without mistaking a backbone's own ``lora_`` weights for adapters."""
+    return any(isinstance(module, BaseTunerLayer) for module in model.modules())
+
+
 def tuner_adapter_param_ids(model: torch.nn.Module) -> set[int]:
     """Structural, so a backbone's own ``lora_A`` stays base."""
     adapters: set[int] = set()

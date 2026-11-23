@@ -1,7 +1,9 @@
 """Group-relative advantages for GRPO. Pure functions over a rank-local reward tensor (``RepeatSampler`` keeps a
-prompt's completions on one rank); only ``scale_rewards="batch"`` and the non-finite check agree across ranks."""
+prompt's completions on one rank); only ``scale_rewards="batch"``, the non-finite check and MaxRL's non-negative check
+agree across ranks."""
 
 from collections.abc import Callable
+from typing import Literal
 
 import numpy as np
 import torch
@@ -144,6 +146,26 @@ def _verify_finite(rewards: torch.Tensor, advantages: torch.Tensor) -> None:
     )
 
 
+def _verify_non_negative(rewards: torch.Tensor, valid_mask: torch.Tensor | None) -> None:
+    """COLLECTIVE: raise on every rank when any rank holds a negative reward among its valid members, which MaxRL's
+    mean divisor assumes away; a rank raising alone would leave its peers in the next collective."""
+    checked = rewards if valid_mask is None else rewards[valid_mask.to(torch.bool)]
+    negative = int((checked < 0).sum())
+    if rank_consensus(negative == 0).all_ok:
+        return
+    raise ValueError(
+        f"use_maxrl needs non-negative rewards, but at least one rank holds a negative one (this rank: {negative} of "
+        f"{checked.numel()}). MaxRL divides by the group mean, so a negative reward can make the mean small or "
+        f"negative and flip or blow up a whole group's advantages. Shift the reward to start at 0, or turn MaxRL off."
+    )
+
+
+def maxrl_zero_mean_groups(rewards: torch.Tensor, num_generations: int, valid_mask: torch.Tensor) -> torch.Tensor:
+    """``[groups]``, True where the valid members' mean reward is not positive: under MaxRL such a group (no success
+    on a pass/fail reward) gets advantage 0 and so no gradient."""
+    return valid_group_stats(rewards, num_generations, valid_mask)[0].squeeze(1) <= 0
+
+
 def group_relative_advantages(
     rewards: torch.Tensor,
     num_generations: int,
@@ -151,17 +173,27 @@ def group_relative_advantages(
     valid_mask: torch.Tensor | None = None,
     already_gathered: bool = False,
     std_floor: float = 0.0,
+    normalizer: Literal["std", "mean"] = "std",
 ) -> torch.Tensor:
-    """Reward minus its group mean, optionally rescaled. The divisor is ``max(std, std_floor)``, so a near-degenerate
-    group's shaping noise is not inflated to full-scale advantages."""
+    """Reward minus its group mean, optionally rescaled. Under ``normalizer="std"`` the divisor is
+    ``max(std, std_floor)``, so a near-degenerate group's shaping noise is not inflated to full-scale advantages.
+    ``normalizer="mean"`` is MaxRL's (arXiv:2602.02710): the divisor is the valid members' mean, and a group whose mean
+    is not positive gets 0. It needs non-negative rewards, checked on every rank together, and no ``scale_rewards``."""
+    if normalizer == "mean" and scales_rewards(scale_rewards):
+        raise ValueError(f"MaxRL's mean divisor replaces scale_rewards={scale_rewards!r}; set scale_rewards: none")
     grouped = _grouped(rewards, num_generations)
     if valid_mask is not None:
         group_mean, valid_std = valid_group_stats(rewards, num_generations, valid_mask)
     else:
         group_mean = grouped.mean(dim=1, keepdim=True)
-    advantages = rewards - group_mean.expand_as(grouped).flatten()
+    mean = group_mean.expand_as(grouped).flatten()
+    advantages = rewards - mean
 
-    if scales_rewards(scale_rewards):
+    if normalizer == "mean":
+        _verify_non_negative(rewards, valid_mask)
+        positive = mean > 0
+        advantages = torch.where(positive, advantages / torch.where(positive, mean, 1.0), 0.0)
+    elif scales_rewards(scale_rewards):
         # The std divisor honors ``valid_mask`` like the baseline: a placeholder would bias every valid row.
         if scale_rewards == "batch":
             # Global std: a rank-local one would scale each DP rank's advantages differently.

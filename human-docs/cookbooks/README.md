@@ -17,6 +17,8 @@ Each cookbook takes one MoE family from an empty host to a trained, served check
 | [Command A+](halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | 8 | No |
 | [Nemotron 3.5 Super VL](halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | 8 | No |
 
+Rewards: [White Circle policy rewards](halo-whitecircle-cookbook.md) trains `Qwen/Qwen3-4B-Instruct-2507` (two GPUs) and `google/gemma-4-26B-A4B-it` (three GPUs) with online GRPO to write BaxBench backend apps, rewarded by three terms of your own White Circle policies.
+
 Every cookbook has the same sections: Support, Recipes, Settings that matter, Limits, Export and serve,
 and Reference. The GPU counts are the ones the recipes are written for, B300s unless a page says otherwise. On
 H100 or H200, use the Hopper image. Those GPUs have far less memory than a B300, so a recipe may need
