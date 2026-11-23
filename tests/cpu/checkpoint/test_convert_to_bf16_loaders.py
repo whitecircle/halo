@@ -154,7 +154,11 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
     monkeypatch.setattr(
         convert_module.PeftConfig,
         "from_pretrained",
-        classmethod(lambda cls, path: types.SimpleNamespace(base_model_name_or_path="/base", modules_to_save=None)),
+        classmethod(
+            lambda cls, path: types.SimpleNamespace(
+                base_model_name_or_path="/base", revision=None, modules_to_save=None
+            )
+        ),
     )
     base_model = object()
 
@@ -166,7 +170,7 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
     monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: (base, path))
 
     assert load_model("/adapter", "causal_lm", is_peft=True) == (base_model, "/adapter")
-    assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False})
+    assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False, "revision": None})
     assert finalized == [base_model], "the base the adapter names is the one that must be finalized"
 
 
@@ -177,7 +181,9 @@ def test_the_task_head_excuse_follows_the_adapters_declaration(monkeypatch, fina
         convert_module.PeftConfig,
         "from_pretrained",
         classmethod(
-            lambda cls, path: types.SimpleNamespace(base_model_name_or_path="/base", modules_to_save=["score"])
+            lambda cls, path: types.SimpleNamespace(
+                base_model_name_or_path="/base", revision=None, modules_to_save=["score"]
+            )
         ),
     )
     monkeypatch.setattr(

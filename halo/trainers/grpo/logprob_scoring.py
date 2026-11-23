@@ -5,6 +5,7 @@ import inspect
 import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import ClassVar
 
@@ -23,6 +24,7 @@ from halo.kernels.head_logprobs import chunked_head_logprobs
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.forward_capture import capturing_forward_outputs
+from halo.models.head_transform import HeadTransform
 from halo.models.introspection.modality import config_declares_multimodality
 from halo.models.introspection.module_tree import embedding_module, find_module_path, hidden_state_backbone
 from halo.models.moe.balancing import iter_balancing_routers
@@ -40,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 # Bytes per logit the full-logits loss forward holds at its peak: an fp32 plane, or the bf16 logits
 # plus the bf16 log-softmax TRL's selective_log_softmax saves for backward.
-_FULL_LOGITS_BYTES_PER_LOGIT = 4
+FULL_LOGITS_BYTES_PER_LOGIT = 4
 
 
 class RowSpan(IntEnum):
@@ -53,6 +55,57 @@ class RowSpan(IntEnum):
 
 
 STASHED_COLUMNS = slice(RowSpan.MALFORMED)
+
+
+@dataclass(frozen=True, eq=False)
+class HeadSweep:
+    """The output embedding as the chunked scorer reads it inside the redirected forward, where FSDP2 has gathered
+    it: the weight and bias cut to the verified head transform's vocabulary. Called as ``sweep(hidden, targets,
+    compute_entropy=False) -> (logps, entropy)``, where ``targets`` is one id per position or ``(..., m)`` ids (a
+    sampled token and its candidates, negatives masked), scored under the position's one ``log Z``
+    (``chunked_head_logprobs``)."""
+
+    weight: torch.Tensor
+    bias: torch.Tensor | None
+    transform: HeadTransform
+    temperature: float
+
+    def __call__(
+        self, hidden: torch.Tensor, targets: torch.Tensor, compute_entropy: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return chunked_head_logprobs(
+            self.transform.scale_hidden(hidden),
+            self.weight,
+            targets,
+            self.bias,
+            self.temperature,
+            logit_scale=self.transform.logit_scale,
+            softcap=self.transform.softcap,
+            compute_entropy=compute_entropy,
+        )
+
+    @property
+    def width(self) -> int:
+        return self.weight.size(0)
+
+    def project(self, hidden: torch.Tensor) -> torch.Tensor:
+        """``[rows, width]`` pre-temperature logits of ``hidden`` rows, with a gradient to the head."""
+        logits = F.linear(self.transform.scale_hidden(hidden), self.weight, self.bias)
+        return self.transform.scale_logits(logits)
+
+
+@dataclass(frozen=True, eq=False)
+class CompletionTerm:
+    """A per-token term a host's loss reads off the policy's completion rows in its own loss forward, so the policy
+    runs forward and backward once. The full-logits scorer appends each forward's ``[rows, C, V]`` completion logits,
+    pre-temperature and carrying the graph, to ``logits``. The chunked scorer calls ``score(head, hidden, positions)``
+    on the policy's hidden-state rows at the positions ``mask`` (``[B, C]``) keeps, ``positions`` indexing the flattened
+    ``[B, C]`` window, and appends the ``[B, C]`` result, zero off the mask, to ``per_token``."""
+
+    mask: torch.Tensor
+    score: Callable[[HeadSweep, torch.Tensor, torch.Tensor], torch.Tensor]
+    logits: list[torch.Tensor] = field(default_factory=list)
+    per_token: list[torch.Tensor] = field(default_factory=list)
 
 
 def row_spans_on_device(attention_mask: torch.Tensor, completion_width: int = 0) -> torch.Tensor:
@@ -125,6 +178,33 @@ def rows_forward_densely(model, batch_size: int) -> bool:
     )
 
 
+def _completion_term_rows(
+    term: CompletionTerm, head: HeadSweep, hidden: torch.Tensor, rows: slice, widths: list[int] | None
+) -> torch.Tensor:
+    """``[rows, C]``: ``term.score`` at the positions its mask keeps in ``rows``, zero elsewhere. ``hidden`` is
+    ``[rows, C, H]``, or with ``widths`` each row's first ``widths[i]`` completion positions concatenated."""
+    mask = term.mask[rows]
+    width = mask.size(1)
+    kept = mask.flatten().nonzero().squeeze(1)
+    out = torch.zeros(mask.numel(), dtype=torch.float32, device=mask.device)
+    if not kept.numel():
+        return out.view(mask.shape)
+    if widths is None:
+        student = hidden.flatten(0, 1).index_select(0, kept)
+    else:
+        row, column = kept // width, kept % width
+        lengths = torch.tensor(widths, device=kept.device)
+        if bool((column >= lengths[row]).any()):
+            raise RuntimeError(
+                "The completion term's mask keeps a position past its row's scored completion tokens: the mask and "
+                "the attention mask the rows were trimmed by disagree. Build the term's mask from the same "
+                "completion_mask the loss forward reads."
+            )
+        student = hidden.index_select(0, (lengths.cumsum(0) - lengths)[row] + column)
+    values = term.score(head, student, kept + rows.start * width)
+    return out.to(values.dtype).index_put((kept,), values).view(mask.shape)
+
+
 class LogprobScoringMixin(HiddenStateForwardMixin):
     """Hosts provide ``temperature``, ``accelerator``, ``args``, ``model``, ``ref_model`` and
     ``_use_chunked_grpo_logprobs``."""
@@ -132,8 +212,9 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
     # Set by a trainer whose train-mode rows reach the backbone as flattened micro-batches (a packed varlen call per
     # call of the scorer) instead of one call per row.
     _packs_microbatches = False
-    # Armed by :meth:`_capturing_completion_logits`: where the scoring forward also leaves its logits.
-    _completion_logits_sink: list[torch.Tensor] | None = None
+    _full_logits_bytes_per_logit = FULL_LOGITS_BYTES_PER_LOGIT
+    # Armed by :meth:`_scoring_with_completion_term` around one loss forward.
+    _armed_completion_term: CompletionTerm | None = None
     # Armed for one loss forward: the ``[rows, 3]`` host table of ``lo, hi, completion`` its masks were built with.
     _armed_row_spans: torch.Tensor | None = None
     # Rows whose armed span disagreed with the mask the forward read, summed on the device.
@@ -145,15 +226,14 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
     _armed_candidate_ids: torch.Tensor | None = None
 
     @contextmanager
-    def _capturing_completion_logits(self) -> Iterator[list[torch.Tensor]]:
-        """Yield a list the block's scoring forwards append ``(rows, logits_to_keep, V)`` logits to, pre-temperature
-        and carrying the graph, so a host whose loss needs them need not forward the policy twice."""
-        sink: list[torch.Tensor] = []
-        self._completion_logits_sink = sink
+    def _scoring_with_completion_term(self, term: CompletionTerm) -> Iterator[None]:
+        """The block's scoring forwards also hand ``term`` the policy's completion rows. Arm it around the loss forward
+        alone: TRL scores the old and reference policies through the same scorer."""
+        self._armed_completion_term = term
         try:
-            yield sink
+            yield
         finally:
-            self._completion_logits_sink = None
+            self._armed_completion_term = None
 
     @property
     def _trains_rows_densely(self) -> bool:
@@ -185,7 +265,7 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
             width,
             head.weight.shape[0],
             self.accelerator.device,
-            bytes_per_logit=_FULL_LOGITS_BYTES_PER_LOGIT,
+            bytes_per_logit=self._full_logits_bytes_per_logit,
             loss="GRPO loss",
             remedy="Set use_chunked_grpo_logprobs: true to compute the log-probs in vocab chunks instead",
         )
@@ -257,9 +337,10 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
         self, model, input_ids, attention_mask, logits_to_keep, batch_size=None, compute_entropy=False
     ):
         """Redirects through the wrapper so its pre-forward hooks fire (FSDP2 unshards root params, ``lm_head``
-        included) before the sweep runs on the unwrapped module."""
+        included) before the sweep runs on the unwrapped module. An armed completion term's values come back as an
+        output of that forward, so FSDP2 gathers the head again before the backward recomputes them."""
         unwrapped = self.accelerator.unwrap_model(model)
-        return self._chunked_forward_redirection(
+        logps, entropies, term_values = self._chunked_forward_redirection(
             model,
             unwrapped,
             self._chunked_logps_impl,
@@ -270,6 +351,9 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
             batch_size,
             compute_entropy,
         )
+        if term_values is not None:
+            self._armed_completion_term.per_token.append(term_values)
+        return logps, entropies
 
     def _cp_chunked_logps(self, model, input_ids, attention_mask, labels):
         """Score CP-owned next-token targets without vocabulary-wide logits. ``labels`` describes the full right-padded
@@ -285,15 +369,19 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
     def _chunked_logps_impl(
         self, unwrapped_model, input_ids, attention_mask, logits_to_keep, batch_size, compute_entropy
     ):
+        """``(logps, entropies, term_values)``, the last the armed completion term's ``[rows, C]`` values, else
+        ``None``."""
         batch_size = batch_size or input_ids.size(0)
         sweep = self._head_sweep(unwrapped_model)
         if self._packs_microbatches and self.model.training:
-            return self._packed_logps(
+            logps, entropies = self._packed_logps(
                 unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, sweep
             )
+            return logps, entropies, None
         dense = rows_forward_densely(unwrapped_model, batch_size)
         spans, completions = self._row_spans_for(attention_mask, logits_to_keep) if dense else ([], [])
-        all_logps, all_entropies = [], []
+        term = self._armed_completion_term
+        all_logps, all_entropies, term_values = [], [], []
         for start in range(0, input_ids.size(0), batch_size):
             ids = input_ids[start : start + batch_size]
             mask = attention_mask[start : start + batch_size]
@@ -305,8 +393,8 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
                 logps, entropies = sweep(hidden, targets, compute_entropy)
                 all_logps.append(logps)
                 all_entropies.append(entropies)
-                if self._completion_logits_sink is not None:
-                    self._completion_logits_sink.append(self._head_logits(unwrapped_model, hidden))
+                if term is not None:
+                    term_values.append(_completion_term_rows(term, sweep, hidden, rows, None))
                 continue
             # Dense rows: one sweep over every row's real completion tokens, the window's zero tail masked
             # downstream, so the head pays the rows' lengths, not the padded width, and runs once.
@@ -319,19 +407,18 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
             all_entropies.append(
                 _completion_window(entropies.split(widths), logits_to_keep) if compute_entropy else None
             )
-            if self._completion_logits_sink is not None:
-                window = _completion_window(hidden.split(widths), logits_to_keep)
-                self._completion_logits_sink.append(self._head_logits(unwrapped_model, window))
+            if term is not None:
+                term_values.append(_completion_term_rows(term, sweep, hidden, rows, widths))
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
-        return logps, entropies
+        return logps, entropies, torch.cat(term_values) if term is not None else None
 
     def _packed_logps(self, unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, sweep):
         """All rows handed in as one flattened varlen backbone call (their ``batch_size`` chunking ignored: the caller
         picked the micro-batch). Each row's positions restart at 0, so it scores as it does alone."""
-        if self._completion_logits_sink is not None:
-            raise RuntimeError("Packed micro-batches score no completion logits for a loss that needs them.")
+        if self._armed_completion_term is not None:
+            raise RuntimeError("Packed micro-batches score no completion term for a loss that needs one.")
         spans, n_comps = self._row_spans_for(attention_mask, logits_to_keep)
         widths = [max(n_comp, 1) for n_comp in n_comps]
         rows = build_packed_rows(input_ids, spans, widths, segment_markers_for(unwrapped_model.config))
@@ -356,10 +443,6 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
             **rows.kwargs,
         ).last_hidden_state
         return hidden[0, rows.hidden_index]
-
-    def _head_logits(self, unwrapped_model, hidden: torch.Tensor) -> torch.Tensor:
-        """Called inside the redirected forward, where FSDP2 has gathered the head."""
-        return self._head_transform(unwrapped_model).project(unwrapped_model.get_output_embeddings(), hidden)
 
     def _row_spans_for(self, attention_mask, logits_to_keep) -> tuple[list[tuple[int, int]], list[int]]:
         """:func:`dense_row_spans` of the whole batch, the spans a caller gave (:meth:`_scoring_with_row_spans`), or the
@@ -421,30 +504,15 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
         logps, _ = sweep(shifted_hidden, shifted_labels)
         return logps, shifted_labels
 
-    def _head_sweep(self, unwrapped_model) -> Callable[..., tuple[torch.Tensor, torch.Tensor | None]]:
-        """``sweep(hidden, targets, compute_entropy=False) -> (logps, entropy)`` under the verified head transform.
-        ``targets`` is one id per position or ``(..., m)`` ids (a sampled token and its candidates, negatives masked),
-        scored under the position's one ``log Z`` (``chunked_head_logprobs``)."""
+    def _head_sweep(self, unwrapped_model) -> HeadSweep:
+        """COLLECTIVE where the head's tensors are DTensors (one gather each). Called inside the redirected forward."""
         lm_head = unwrapped_model.get_output_embeddings()
         self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
-        weight = materialize_dtensor(lm_head.weight)
-        bias = materialize_dtensor(getattr(lm_head, "bias", None))
         transform = self._head_transform(unwrapped_model)
-        weight, bias = transform.kept_rows(weight, bias)
-
-        def sweep(hidden, targets, compute_entropy=False):
-            return chunked_head_logprobs(
-                transform.scale_hidden(hidden),
-                weight,
-                targets,
-                bias,
-                self.temperature,
-                logit_scale=transform.logit_scale,
-                softcap=transform.softcap,
-                compute_entropy=compute_entropy,
-            )
-
-        return sweep
+        weight, bias = transform.kept_rows(
+            materialize_dtensor(lm_head.weight), materialize_dtensor(getattr(lm_head, "bias", None))
+        )
+        return HeadSweep(weight, bias, transform, self.temperature)
 
     def _assert_output_embeddings_unadapted(self, unwrapped_model, lm_head) -> None:
         """``get_output_embeddings()`` resolves to the tuner wrapper or the base linear, and both hand the chunked
@@ -565,14 +633,15 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
 
     @contextmanager
     def _capturing_forward_logits(self, model, logits_to_keep: int) -> Iterator[None]:
-        """While a sink is armed, append the completion logits of every forward of ``model`` in the block."""
-        sink = self._completion_logits_sink
-        if sink is None:
+        """While a completion term is armed, hand it the completion logits of every forward of ``model`` in the
+        block."""
+        term = self._armed_completion_term
+        if term is None:
             yield
             return
         with capturing_forward_outputs(model, lambda output: output.logits[:, :-1][:, -logits_to_keep:]) as logits:
             yield
-        sink.extend(logits)
+        term.logits.extend(logits)
 
     @contextmanager
     def _writable_logits(self, model):

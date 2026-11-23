@@ -136,11 +136,12 @@ def test_the_expert_config_records_every_field_a_resume_holds_to_the_live_run():
 
 
 def test_an_expert_only_adapter_config_round_trips_through_the_resume_and_merge_readers(tmp_path):
-    write_adapter_config(expert_lora_adapter_config(SPEC, "org/base"), str(tmp_path))
+    write_adapter_config(expert_lora_adapter_config(SPEC, "org/base", "c0ffee"), str(tmp_path))
 
     assert read_adapter_config(str(tmp_path)) == {
         "peft_type": EXPERT_LORA_PEFT_TYPE,
         "base_model_name_or_path": "org/base",
+        "revision": "c0ffee",
         **expert_lora_config_fields(SPEC),
     }
     live = {"lora_alpha": SPEC.alpha, "use_rslora": SPEC.use_rslora}

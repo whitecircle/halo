@@ -72,11 +72,11 @@ def _read_without_remote_code(config, payload: dict) -> bool:
     return payload.get("model_type") == config.model_type and config.model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
 
 
-def _source_config_payload(source: str, config) -> dict | None:
+def _source_config_payload(source: str, config, revision: str | None) -> dict | None:
     """The source's ``config.json`` if servable, else None with a warning (unreadable, or an ``auto_map`` its class
     needs and lacks)."""
     try:
-        config_file = cached_file(source, CONFIG_NAME)
+        config_file = cached_file(source, CONFIG_NAME, revision=revision)
         if config_file is None:
             raise FileNotFoundError(f"{source!r} holds no {CONFIG_NAME}")
         with open(config_file, encoding="utf-8") as handle:
@@ -116,7 +116,7 @@ def _lacks_module(entry: str | list | tuple | dict, output_dir: str) -> bool:
     return any(not os.path.isfile(os.path.join(output_dir, f"{module}.py")) for module in _local_modules(entry))
 
 
-def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None:
+def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str, revision: str | None) -> None:
     """Copy the remote-code modules ``auto_map`` names, with their sibling imports (Step-3.7's ``vision_encoder``)."""
     pending = {module for entry in auto_map.values() for module in _local_modules(entry)}
     copied: set[str] = set()
@@ -125,7 +125,9 @@ def _copy_auto_map_modules(source: str, auto_map: dict, output_dir: str) -> None
         if module in copied:
             continue
         copied.add(module)
-        module_file = cached_file(source, f"{module}.py", _raise_exceptions_for_missing_entries=False)
+        module_file = cached_file(
+            source, f"{module}.py", revision=revision, _raise_exceptions_for_missing_entries=False
+        )
         if module_file is None:
             raise FileNotFoundError(
                 f"export_source_config_schema: source {source!r} names remote-code module "
@@ -198,7 +200,7 @@ def _apply_config_changes(source_section: dict, before: dict, after: dict, confi
         source_section[spellings[0] if spellings else key] = new
 
 
-def export_source_config_schema(config, output_dir: str, *, source: str | None) -> None:
+def export_source_config_schema(config, output_dir: str, *, source: str | None, revision: str | None = None) -> None:
     """Rewrite ``config.json`` into the source checkpoint's schema for families with ``exports_source_config_schema``.
     transformers 5.23 absorbs the vendor spellings at load and never re-emits them, so the source config is carried
     over with this run's changes applied, plus the modules its ``auto_map`` names."""
@@ -215,7 +217,7 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
             "cannot parse for this family. Export from a checkpoint loaded off the release."
         )
         return
-    payload = _source_config_payload(source, config)
+    payload = _source_config_payload(source, config, revision)
     if payload is None:
         return
     source_type = payload.get("model_type")
@@ -240,7 +242,7 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
             f"source checkpoint's own config.json and re-export."
         )
     write_config_json(output_dir, payload)
-    _copy_auto_map_modules(source, payload.get("auto_map", {}), output_dir)
+    _copy_auto_map_modules(source, payload.get("auto_map", {}), output_dir, revision)
 
 
 def drop_unshipped_auto_map(output_dir: str) -> None:
@@ -267,7 +269,7 @@ def drop_unshipped_auto_map(output_dir: str) -> None:
     write_config_json(output_dir, payload)
 
 
-def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
+def carry_aux_auto_map_modules(output_dir: str, *, source: str | None, revision: str | None = None) -> None:
     """Copy the remote-code modules a processor or tokenizer config in ``output_dir`` names, as a trusted load of the
     export reads them there. Warns on what ``source`` lacks, since a trainer's save ends here and the served load
     raises by itself."""
@@ -287,7 +289,7 @@ def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
         try:
             if not source:
                 raise FileNotFoundError("this export records no source checkpoint")
-            _copy_auto_map_modules(source, absent, output_dir)
+            _copy_auto_map_modules(source, absent, output_dir, revision)
         except OSError as error:
             logger.warning(
                 f"carry_aux_auto_map_modules: {path} names remote code this export does not carry for "
@@ -295,13 +297,14 @@ def carry_aux_auto_map_modules(output_dir: str, *, source: str | None) -> None:
             )
 
 
-def finalize_exported_config(config, output_dir: str, *, source: str | None) -> None:
+def finalize_exported_config(config, output_dir: str, *, source: str | None, revision: str | None = None) -> None:
     """Bring a just-written ``config.json`` up to the artifact contract and tag the model card; every writer's last
-    step. A checkpoint missing a rewrite trains normally and fails only in the merge tools or the rollout server."""
+    step. A checkpoint missing a rewrite trains normally and fails only in the merge tools or the rollout server.
+    ``revision`` pins a Hub ``source``."""
     restore_model_type(config, output_dir)
-    export_source_config_schema(config, output_dir, source=source)
+    export_source_config_schema(config, output_dir, source=source, revision=revision)
     drop_unshipped_auto_map(output_dir)
-    carry_aux_auto_map_modules(output_dir, source=source)
+    carry_aux_auto_map_modules(output_dir, source=source, revision=revision)
     tag_exported_model_card(output_dir)
 
 

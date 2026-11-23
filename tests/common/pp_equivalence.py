@@ -168,12 +168,22 @@ def token_ce_sums(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     return ce.view(shift_labels.shape).sum(dim=1)
 
 
-def baseline_grads(model, input_ids: torch.Tensor, labels: torch.Tensor):
-    logits = model(input_ids=input_ids).logits
-    loss = causal_lm_loss(logits, labels)
-    loss.backward()
+def baseline_grads(model, input_ids: torch.Tensor, labels: torch.Tensor, microbatch_rows: int | None = None):
+    """The batch's mean loss, logits and grads. ``microbatch_rows`` accumulates them over row slices of that size, the
+    shapes a pipeline schedule runs, for a kernel whose rounding follows the batch shape; the mean is unchanged when
+    every slice holds the same number of loss tokens."""
+    rows = input_ids.shape[0]
+    step = rows if microbatch_rows is None else microbatch_rows
+    assert rows % step == 0, (rows, step)
+    losses, logits = [], []
+    for start in range(0, rows, step):
+        out = model(input_ids=input_ids[start : start + step]).logits
+        loss = causal_lm_loss(out, labels[start : start + step])
+        (loss / (rows // step)).backward()
+        losses.append(loss.detach())
+        logits.append(out.detach())
     grads = {n: p.grad.detach().clone() for n, p in model.named_parameters() if p.grad is not None}
-    return loss.detach(), logits.detach(), grads
+    return torch.stack(losses).mean(), torch.cat(logits), grads
 
 
 def gather_stage_grads(stage, *, to_cpu: bool = False) -> dict[str, torch.Tensor]:
