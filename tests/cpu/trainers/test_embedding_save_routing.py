@@ -21,8 +21,8 @@ from halo.checkpoint.parallel.writing import conversion_chunk_key
 from halo.checkpoint.reading import load_full_state_dict
 from halo.checkpoint.writing import cast_to_save_dtype, normalize_gathered_state_dict
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.models.peft_adapters import has_adapter_layers
 from halo.trainers.embedding import trainer as embedding_module
-from halo.trainers.embedding.injected_lora import has_injected_lora
 from halo.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.adapters import randomize_adapters
 from tests.common.ep_stubs import StubEPLayerBase
@@ -249,7 +249,7 @@ def test_injected_lora_on_a_module_an_ep_layer_adopted_still_counts():
     inject_adapter_in_model(LoraConfig(r=2, lora_alpha=4, target_modules=["shared_experts"]), backbone)
     assert named_ep_layers(backbone) == [("moe", layer)], "premise: the adapters sit inside an EP layer"
 
-    assert has_injected_lora(backbone)
+    assert has_adapter_layers(backbone)
 
 
 def test_save_model_runs_every_writer_under_pristine_model_max_length(monkeypatch, tmp_path):
