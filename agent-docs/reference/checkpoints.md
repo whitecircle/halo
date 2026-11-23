@@ -354,7 +354,7 @@ live names differ from its hub's declares the pairs in its spec's `export_key_re
 gather and `merge_ep_shards.py` apply; the lazy loader reads the hub spelling through transformers' own
 Laguna renamings. Every lazy build plans its keys with the family's whole transformers conversion mapping,
 as `from_pretrained` does (`halo/model_loading/checkpoint_keys.py`), a SigLIP tower's `vision_model` level
-included. Four families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling,
+included. Five families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling, Inkling 2,
 DeepSeek-V4, GLM-5 Next, Step-3.7 Flash); each declared key must resolve in the installed transformers, and
 a text-only class with no mapping of its own (Inkling's text artifact) plans with those entries. A key stays
 unconverted when its rename target misses the live names while the key itself is live, the retry

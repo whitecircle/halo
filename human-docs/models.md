@@ -5,7 +5,7 @@ no extra work: point `model_name_or_path` at it and launch.
 
 The families below also have expert, context, tensor or pipeline-parallel
 support ([which, per family](supported-matrix.md#model-families)), a tuned
-recipe and GPU-validated coverage, except where a row says otherwise. Eighteen
+recipe and GPU-validated coverage, except where a row says otherwise. Nineteen
 of them are MoE.
 
 | Family | Hub example | Kind | What to know |
