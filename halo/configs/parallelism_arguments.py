@@ -102,8 +102,8 @@ class ParallelismArguments(ValidatedConfig):
         default=LowpSpec.precision,
         metadata={
             "help": "Low-precision GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
-            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only; "
-            "Halo's paths measured slower than bf16. "
+            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT and "
+            "teacher distillation (on the student) only; Halo's paths measured slower than bf16. "
             "See agent-docs/optimization/low-precision-moe-kernels.md#usage."
         },
     )
@@ -317,18 +317,18 @@ class ParallelismArguments(ValidatedConfig):
             require_int(type(self).__name__, pipeline_split=layers)
 
 
-def _reject_lowp_outside_sft(lowp: LowpSpec) -> None:
+def _reject_unsupported_lowp(lowp: LowpSpec, trainer_cls) -> None:
     """Refuse a low-precision setting a trainer without ``SUPPORTS_LOWP_PRECISION`` would parse and ignore."""
     if lowp.precision != "bf16":
         raise ValueError(
-            f"lowp_precision={lowp.precision!r} is only validated for SFT training; this "
-            "trainer runs in bf16. Remove lowp_precision from the config (or use the SFT script)."
+            f"lowp_precision={lowp.precision!r} is not supported by {trainer_cls.__name__}, which would train in "
+            f"bf16. Remove lowp_precision from the config, or use a trainer that sets SUPPORTS_LOWP_PRECISION."
         )
     ignored = lowp.non_default_shape_fields()
     if ignored:
         raise ValueError(
-            f"{', '.join(ignored)} apply only to SFT training and would be silently dropped here. "
-            "Remove them from the config, or run the SFT script."
+            f"{', '.join(ignored)} are not supported by {trainer_cls.__name__} and would be silently dropped. "
+            "Remove them from the config, or use a trainer that sets SUPPORTS_LOWP_PRECISION."
         )
 
 
@@ -378,7 +378,7 @@ def parallelism_config_from_args(
     ``ep_config()`` caches the ``EPConfig``."""
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not trainer_cls.SUPPORTS_LOWP_PRECISION:
-        _reject_lowp_outside_sft(lowp)
+        _reject_unsupported_lowp(lowp, trainer_cls)
 
     # Only SFT threads init_from_scratch into the loader; elsewhere the run would fine-tune pretrained weights.
     if not supports_init_from_scratch and dist_args.init_from_scratch:

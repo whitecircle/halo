@@ -734,5 +734,34 @@ def test_a_launch_without_numa_binding_is_unchanged(tmp_path, launcher, expected
     ]
 
 
+@pytest.mark.parametrize("command", ["launch", "run"])
+def test_rollout_backend_modal_reaches_the_exec_environment(tmp_path, monkeypatch, command):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+    write_config(tmp_path / "config.yaml")
+    envs: list[dict[str, str]] = []
+    _, argvs = stub_exec(monkeypatch, envs)
+    target = ["grpo/environmental", "config.yaml"] if command == "launch" else ["merge-ep-shards"]
+
+    result = runner.invoke(app, [command, *target, "--halo-rollout-backend", "modal", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert envs[0]["HALO_SANDBOX_BACKEND"] == "modal" and envs[0]["HALO_SANDBOX_REPL"] == "1"
+    assert "--halo-rollout-backend" not in argvs[0]
+
+
+def test_unknown_rollout_backend_is_refused_before_exec(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_config(tmp_path / "config.yaml")
+    _, argvs = stub_exec(monkeypatch)
+
+    result = runner.invoke(
+        app, ["launch", "grpo/environmental", "config.yaml", "--halo-rollout-backend", "nope", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 2 and argvs == []
+    assert "unknown --halo-rollout-backend 'nope'" in " ".join(result.output.split())
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

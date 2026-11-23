@@ -49,6 +49,10 @@ class HeadTransform:
         logits = head(scaled) if weight is None else F.linear(scaled, weight, bias)
         if self.vocab_size is not None:
             logits = logits[..., : self.vocab_size]
+        return self.scale_logits(logits)
+
+    def scale_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """The output embedding's ``logits`` through the logit scale, then the softcap."""
         if self.logit_scale is not None:
             logits = logits * self.logit_scale
         if self.softcap is not None:
@@ -219,8 +223,8 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
     except Exception as e:
         raise ValueError(
             f"Could not verify the head path of {model_class.__name__} ({type(e).__name__}: {e}). The "
-            f"hidden-state head paths (use_chunked_grpo_logprobs, the last pipeline stage) need that "
-            f"verdict; run without them."
+            f"hidden-state head paths (use_chunked_grpo_logprobs, use_chunked_distillation_loss, the last pipeline "
+            f"stage) need that verdict; run without them."
         ) from e
     if probe is None:
         return IDENTITY_HEAD_TRANSFORM
@@ -241,8 +245,8 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
         raise ValueError(
             f"{model_class.__name__}'s forward transforms its head path beyond what is declared for it "
             f"({declared}; {deviation} on the head-path probe). The hidden-state head paths "
-            f"(use_chunked_grpo_logprobs, the last pipeline stage) would score a different "
-            f"distribution than the model's own forward. Declare the family's transform on a "
+            f"(use_chunked_grpo_logprobs, use_chunked_distillation_loss, the last pipeline stage) would score a "
+            f"different distribution than the model's own forward. Declare the family's transform on a "
             f"HeadTransformSpec, or run without those paths."
         )
     return declared

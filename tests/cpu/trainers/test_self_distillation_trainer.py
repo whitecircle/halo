@@ -69,6 +69,7 @@ def _trainer(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_c
     trainer._reference_vocab_width = None
     trainer.confidence_weight_opd = confidence_weight_opd
     trainer.opd_exclude_eos = opd_exclude_eos
+    trainer.use_chunked_distillation_loss = False
     trainer._stop_token_ids, trainer._stop_ids_tensor = {EOS}, None
     trainer.state = types.SimpleNamespace(global_step=4, max_steps=10)
     trainer._warned_empty_labels = True

@@ -37,6 +37,9 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
                         deep (``enable_prefetch: true``, on any server count): the run must open with N
                         cold rounds, pop a prefetched round on every later step, and score the IS
                         log-ratio on every step
+    ``--maxrl`` (``--trainer online`` or ``environmental``, a ``*_world1`` mode) trains with ``use_maxrl`` and
+    ``scale_rewards: none`` on a non-negative reward, and checks ``sampling/maxrl_zero_mean_group_frac`` is logged
+    beside finite losses
 
 Each row also reads its layout's data-parallel half off the trained policy (``record_dp_layout``): FULL_SHARD
 resharding after a forward, where ep1 experts live, the HSDP mesh, the EP groups' expert replicas in step.
@@ -81,6 +84,7 @@ parser.add_argument("--mode", choices=sorted(MODES), required=True)
 parser.add_argument("--resume", action="store_true", help="drive the two-phase resume invariant")
 parser.add_argument("--servers", type=int, default=1, help="environmental: the WeightSyncPool's server count")
 parser.add_argument("--prefetch-depth", type=int, default=None, help="environmental: prefetch at this depth")
+parser.add_argument("--maxrl", action="store_true", help="online / environmental: train with use_maxrl")
 ARGS = parser.parse_args()
 POLICY = MODES[ARGS.mode].family
 if POLICY != "world1" and (ARGS.trainer == "environmental" or ARGS.servers != 1):
@@ -89,6 +93,8 @@ if POLICY == "world1" and ARGS.resume:
     parser.error("--resume drives a two-rank mode; the one-process body has no resume row")
 if ARGS.prefetch_depth is not None and ARGS.trainer != "environmental":
     parser.error("--prefetch-depth drives the environmental trainer's prefetch")
+if ARGS.maxrl and (ARGS.trainer == "sdpg" or POLICY != "world1"):
+    parser.error("--maxrl runs the online or environmental trainer in one process: a *_world1 mode")
 
 
 def _row_index() -> int:
@@ -130,6 +136,7 @@ def _run_one_process(ctx) -> dict:
             environment_type="react_math",
             pool_urls=tuple(servers),
             prefetch_depth=ARGS.prefetch_depth,
+            maxrl=ARGS.maxrl,
         )
     else:
         result = run_online_grpo_e2e(
@@ -140,6 +147,7 @@ def _run_one_process(ctx) -> dict:
             server_url=servers[0],
             group_port=free_port(),
             model_name=DENSE_MODEL,
+            maxrl=ARGS.maxrl,
         )
     return {**result, "checks": checks | result["checks"]}
 

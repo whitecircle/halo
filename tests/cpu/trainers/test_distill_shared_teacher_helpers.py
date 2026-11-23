@@ -41,6 +41,7 @@ def _build(
         mock.patch.object(SFTTrainer, "__init__", _sft_init),
         mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes", return_value=None),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", return_value=None),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_warn_if_full_logits_large", return_value=None),
         mock.patch.object(self_distillation, "place_frozen_scorer", _place),
     ):
         return DistributedSelfDistillationTrainer(
@@ -49,6 +50,7 @@ def _build(
             reference_kl_loss="unnormalized_kl",
             confidence_weight_opd=True,
             opd_exclude_eos=True,
+            use_chunked_distillation_loss=False,
             sdpg_beta_base=sdpg_beta_base,
         )
 
