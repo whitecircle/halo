@@ -306,7 +306,7 @@ reshape, after the whole checkpoint has been pulled and placed on every rank.
 | `fsdp_defer_grad_sync` | rejected at `data_parallel_size == 1` — no FSDP2 wrap, so no reduce to defer | same |
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
-| `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
+| `init_from_scratch` | rejected for dense TP, whose `tp_plan` load reads its shard from a checkpoint; attention-only TP on a MoE draws the whole model on every rank, then shards it | `model_loading/parallel/load_rules.py` |
 | `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_custom_parallelism_under_accelerate` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP layers | `reject_unreloadable_best_model` |

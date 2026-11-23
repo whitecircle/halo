@@ -237,6 +237,7 @@ def trace_rank(
                 config,
                 attn_implementation=ATTN_IMPLEMENTATION,
                 init_from_scratch=case.init_from_scratch,
+                init_seed=0,
                 trust_remote_code=True,
             )
     return trace

@@ -334,6 +334,10 @@ def load_model_and_tokenizer(
             f"This resume loads the base and restores {context.resume_checkpoint} over it after the wrap, so the MTP "
             "head read now is overwritten by the head that checkpoint trained."
         )
+    # A Path-B resume reads the policy from its checkpoint and the trainer skips its weight reload, so a draw there
+    # would train on fresh random weights. A Path-A resume draws, and the trainer restores the checkpoint over it.
+    # Either way the run stays a from-scratch run for its GptOss sinks.
+    draw_from_scratch = init_from_scratch and not context.policy_from_checkpoint
     model, tokenizer = load_distributed_model(
         model_name_or_path=context.model_source,
         parallelism_config=context.parallelism_config,
@@ -347,7 +351,9 @@ def load_model_and_tokenizer(
         quantization_config=resolve_quantization_config(model_config, training_config),
         reset_sinks=args.reset_sinks,
         train_sinks=args.train_sinks,
-        init_from_scratch=init_from_scratch,
+        init_from_scratch=draw_from_scratch,
+        init_seed=training_config.seed if draw_from_scratch else None,
+        resumed_from_scratch=init_from_scratch and not draw_from_scratch,
         revision=model_config.model_revision,
         text_only_model=args.text_only_model,
         preserve_checkpoint_precision=context.policy_from_checkpoint,

@@ -20,6 +20,7 @@ from halo.model_loading.lazy_safetensors.materialization import WeightAction, We
 from halo.model_loading.liger.cross_entropy import head_token_ce_sum
 from halo.model_loading.liger.dispatch import fused_loss_applied
 from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask
+from halo.model_loading.parallel.keyed_init import draw_from_scratch_
 from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, LazyLoadPlan, WeightPlanner
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
@@ -185,12 +186,20 @@ def _stream_tail(
     )
 
 
-def _draw_random_head(model: nn.Module, spec: MtpHeadSpec, *, dtype: torch.dtype, pc: ParallelismConfig, ep_config):
-    """A from-scratch run's head: the full expert bank drawn on CPU from the trunk's stream, which every rank shares, so
-    the EP patch slices each rank's range out of one bank. The family's own init, as a directly built head leaves the
-    gate and both expert tensors at a zero gradient."""
+def _draw_random_head(
+    model: nn.Module, spec: MtpHeadSpec, *, seed: int, path: str, dtype: torch.dtype, pc: ParallelismConfig, ep_config
+):
+    """A from-scratch run's head, built on CPU and drawn with the trunk's keyed init under its ``path`` in the model,
+    so every rank and every layout draws the same head and the EP patch slices each rank's range out of one bank. The
+    family's own init, as a directly built head leaves the gate and both expert tensors at a zero gradient."""
     head = build_mtp_head(model, spec, device="cpu")
-    head.apply(backbone_with_layers(model)._init_weights)
+    draw_from_scratch_(
+        head,
+        seed,
+        what=f"{type(model).__name__}'s MTP head",
+        init_weights=backbone_with_layers(model)._init_weights,
+        prefix=path,
+    )
     cast_loaded_parameters(head, dtype, keep_fp32=pc.fp32_non_ep_params, ep_wrapped=ep_config is not None)
     return head
 
@@ -226,7 +235,13 @@ def attach_mtp_head(
     ep_config = pc.ep_config() if wraps_experts else None
     path = mtp_head_path(model, spec)
     if init_from_scratch:
-        head = _draw_random_head(model, spec, dtype=dtype, pc=pc, ep_config=ep_config)
+        if source.random_init_seed is None:
+            raise ValueError(
+                "init_from_scratch draws the MTP head under the trunk's seed, but its source carries none."
+            )
+        head = _draw_random_head(
+            model, spec, seed=source.random_init_seed, path=path, dtype=dtype, pc=pc, ep_config=ep_config
+        )
         shell = _HeadShell(model.config, head, path)
         weights_already_sharded = False
     else:

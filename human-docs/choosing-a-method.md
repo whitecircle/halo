@@ -53,9 +53,10 @@ Pretraining runs `sft` on raw text that you tokenize offline first
 (`halo run prepare-dataset --mode text`). To train from random weights, set
 `init_from_scratch: true`.
 
-From-scratch runs support data parallelism only (one GPU, DDP or FSDP2) and
-reject EP, CP, TP, ETP and PP. To use those, create the random-init checkpoint in a
-separate step and train from it. See
+From-scratch runs support data parallelism, EP, CP and TP on MoE attention, and
+start from the same weights on every layout for one `seed`. They reject PP, ETP and
+dense TP, and every rank builds the whole model in host memory first. Past either
+limit, create the random-init checkpoint in a separate step and train from it. See
 [Pretraining](../agent-docs/training-methods/pretraining.md) ↗.
 
 ## Extra infrastructure

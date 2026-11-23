@@ -647,6 +647,25 @@ MANIFEST: dict[str, TestSpec] = {
     "optimizers/test_muon.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "optimizers/test_muon_fsdp.py": TestSpec(nproc=2, markers=("gpu", "full", "2gpu"), timeout=1000),
     "optimizers/test_muon_fsdp_qwen35.py": TestSpec(nproc=2, markers=("gpu", "full", "2gpu", "qwen3"), timeout=1000),
+    # init_from_scratch on every route that holds the whole model on a rank: each saves the keyed CPU draw bit for bit.
+    "parallelism/test_init_from_scratch_layouts.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "moe", "qwen3"),
+        args_matrix=tuple(
+            Row(f"--mode {mode}", nproc=2, markers=("gpu", "full", "2gpu", *axes, "moe", "qwen3"))
+            for mode, axes in (
+                ("fsdp", ()),
+                ("ep1", ("ep",)),
+                ("ep1_unsharded", ("ep",)),
+                ("ep2", ("ep",)),
+                ("tp2", ("tp",)),
+                ("cp2", ("cp",)),
+                ("ep2cp2", ("ep", "cp")),
+                ("ep2tp2", ("ep", "tp")),
+            )
+        ),
+        timeout=1200,
+    ),
     "parallelism/combined/test_ep_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "cp", "moe", "gptoss"), timeout=600
     ),

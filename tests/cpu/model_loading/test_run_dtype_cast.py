@@ -57,7 +57,6 @@ EAGER_LOADERS = frozenset(
     {
         ("scripts/training/embedding.py", "_load_sentence_transformer"),
         ("halo/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
-        ("halo/model_loading/parallel/loader.py", "_build_random_init"),
         ("halo/model_loading/parallel/whole_model.py", "load_whole_model"),
         ("halo/model_loading/parallel/whole_model.py", "resolve_trainer_model"),
     }

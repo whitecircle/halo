@@ -19,12 +19,12 @@ REQUESTS = ("sdpa", "flash_attention_2", "flex_attention", "eager")
 CONTRADICTION = "refused: train_sinks contradicts reset_sinks"
 CP_LIVE_SINKS = "refused: CP with live sinks"
 DROPS_SINKS = "refused: backend drops live sinks"
-SCRATCH_UNDER_CP = "refused: from-scratch build under CP"
+SCRATCH_SINKS_UNDER_CP = "refused: from-scratch sinks under CP"
 REFUSALS = {
     "contradicts reset_sinks": CONTRADICTION,
     "requires reset_sinks: true": CP_LIVE_SINKS,
     "silently drops the learnable attention sinks": DROPS_SINKS,
-    "init_from_scratch is currently supported only": SCRATCH_UNDER_CP,
+    "reset_sinks cannot neutralize them": SCRATCH_SINKS_UNDER_CP,
 }
 NEUTRALIZED_FLASH = ("flash_attention_2", True)
 LIVE_FLEX = ("flex_attention", False)
@@ -32,13 +32,13 @@ LIVE_EAGER = ("eager", False)
 
 # (reset_sinks, train_sinks, init_from_scratch, context_parallel) -> per REQUESTS entry, (backend, verdict) or refusal.
 # A from-scratch build has no pretrained sinks to neutralize, so it resolves as live.
-# CP refuses live sinks and a from-scratch build, and runs flex requests on flash.
+# CP refuses live sinks, and so a from-scratch build even under reset_sinks, and runs flex requests on flash.
 EXPECTED = {
     (True, True, True, True): (CONTRADICTION,) * 4,
     (True, True, True, False): (CONTRADICTION,) * 4,
     (True, True, False, True): (CONTRADICTION,) * 4,
     (True, True, False, False): (CONTRADICTION,) * 4,
-    (True, False, True, True): (SCRATCH_UNDER_CP,) * 4,
+    (True, False, True, True): (SCRATCH_SINKS_UNDER_CP,) * 4,
     (True, False, True, False): (DROPS_SINKS, DROPS_SINKS, LIVE_FLEX, LIVE_EAGER),
     (True, False, False, True): (("sdpa", True), NEUTRALIZED_FLASH, NEUTRALIZED_FLASH, ("eager", True)),
     (True, False, False, False): (("sdpa", True), NEUTRALIZED_FLASH, ("flex_attention", True), ("eager", True)),
@@ -111,6 +111,7 @@ def _resolve(requested, reset_sinks, train_sinks, init_from_scratch, context_par
                 reset_sinks=reset_sinks,
                 train_sinks=train_sinks,
                 init_from_scratch=init_from_scratch,
+                init_seed=0,
                 trust_remote_code=True,
             )
         except _Built:

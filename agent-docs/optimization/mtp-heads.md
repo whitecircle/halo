@@ -84,7 +84,7 @@ The row's bars hold on these arms: `joint` at most 1.30x, `soft` within 2% of `h
 
 ## Loading
 
-`halo/model_loading/parallel/mtp_head.py` runs once after the per-mode load. It builds the head on meta in a head-only shell and streams the tail through the lazy planner, so a per-expert or a fused tail both load, each rank reads its expert slice, and fp32 masters apply as they do on the trunk. The tail comes from a resumed checkpoint, then `mtp_head_source`, then the model's own. A missing, partial or extra tail and a quantized source are refused. `init_from_scratch` draws the head with the family's own init.
+`halo/model_loading/parallel/mtp_head.py` runs once after the per-mode load. It builds the head on meta in a head-only shell and streams the tail through the lazy planner, so a per-expert or a fused tail both load, each rank reads its expert slice, and fp32 masters apply as they do on the trunk. The tail comes from a resumed checkpoint, then `mtp_head_source`, then the model's own. A missing, partial or extra tail and a quantized source are refused. `init_from_scratch` draws the head with the family's own init, keyed under the trunk's seed and the head's path in the model, so every rank and layout draws the same head.
 
 ## Checkpoints
 

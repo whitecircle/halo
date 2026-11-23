@@ -58,11 +58,14 @@ _name_heuristic_warned: set[str] = set()
 @dataclass(frozen=True)
 class ModelSource:
     """A checkpoint as every rank loads it: ``name`` as the run names it, at the agreed ``revision``,
-    read from ``local_dir`` on this rank (the directory, or this rank's verified Hub snapshot)."""
+    read from ``local_dir`` on this rank (the directory, or this rank's verified Hub snapshot). ``random_init_seed``
+    is set for ``init_from_scratch``: the loaders then build from the config and draw the weights
+    (:func:`~halo.model_loading.parallel.keyed_init.build_keyed_model`) instead of reading any."""
 
     name: str
     revision: str | None
     local_dir: str
+    random_init_seed: int | None = None
 
 
 class _SourceView(NamedTuple):

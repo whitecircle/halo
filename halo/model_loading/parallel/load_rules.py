@@ -217,7 +217,13 @@ def reject_remote_composite(model_config) -> None:
 
 
 def reject_unsupported_load(
-    pc: ParallelismConfig, dtype: torch.dtype, *, quantization_config, init_from_scratch: bool, wraps_experts: bool
+    pc: ParallelismConfig,
+    dtype: torch.dtype,
+    *,
+    quantization_config,
+    init_from_scratch: bool,
+    wraps_experts: bool,
+    dense_tp: bool = False,
 ) -> None:
     """Refuse a QLoRA, from-scratch or low-precision load ``pc`` and ``dtype`` cannot take, before any weight read."""
     if quantization_config is not None and (pc.has_ep_group or pc.is_tp_mode or pc.is_pp_mode or wraps_experts):
@@ -232,16 +238,19 @@ def reject_unsupported_load(
             "quantization)."
         )
     if init_from_scratch:
-        # Identical per-rank seeds give consistent FSDP2 shards; EP/TP/CP would need a sharded random-init.
-        if pc.has_ep_group or pc.is_tp_mode or pc.is_cp_mode or pc.is_expert_tp_mode or pc.is_pp_mode:
+        # The keyed draw runs on every route that holds the whole model on a rank. A PP stage, an ETP slice and HF's
+        # dense tp_plan load each read a part of a checkpoint, and have no random-init route yet.
+        unsupported = [
+            axis for axis, on in (("PP", pc.is_pp_mode), ("ETP", pc.is_expert_tp_mode), ("dense TP", dense_tp)) if on
+        ]
+        if unsupported:
             raise NotImplementedError(
-                "init_from_scratch is currently supported only for dense data-parallel / "
-                "FSDP2 training (no EP/TP/CP/ETP/PP). PP additionally has nothing to be "
-                "stage-aware about without a checkpoint, so every rank would build the whole "
-                "model. To train from scratch WITH parallelism, materialize the random-init "
-                "checkpoint once outside the distributed job (AutoModelForCausalLM.from_config "
-                "+ save_pretrained), point model_name_or_path at it, and drop init_from_scratch "
-                "— see 'Large or MoE models' in agent-docs/training-methods/pretraining.md."
+                f"init_from_scratch is not supported under {', '.join(unsupported)} yet: those loaders read only "
+                "their own part of a checkpoint and have no random-init route. Data parallelism, EP, CP and "
+                "attention-only TP on a MoE are supported. To train from scratch under these axes, build the "
+                "model once outside the job (AutoModelForCausalLM.from_config + save_pretrained), point "
+                "model_name_or_path at it and drop init_from_scratch — see 'Large models, PP, ETP or dense TP' in "
+                "agent-docs/training-methods/pretraining.md."
             )
         if quantization_config is not None:
             raise ValueError("init_from_scratch is incompatible with quantization (QLoRA loads pretrained weights).")

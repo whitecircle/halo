@@ -168,7 +168,13 @@ def load_ep_model(
     # First: ep_config() builds the EP groups on every rank, which no per-rank filesystem probe may precede.
     ep_config = pc.ep_config()
     main = is_global_main_process()
-    if not pc.ep_lazy_loading:
+    if source.random_init_seed is not None:
+        # The lazy path reads a checkpoint's index, and a random init has none: every rank draws the whole model on
+        # CPU, as ep_lazy_loading: false loads one, and apply_ep_layers keeps its experts.
+        if main:
+            logger.info("[Rank 0] init_from_scratch: keyed random init of the whole model, then the EP patch")
+        method = "random_init_whole_model"
+    elif not pc.ep_lazy_loading:
         reject_ep_sharded_checkpoint(source)
         if main:
             logger.info(

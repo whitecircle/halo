@@ -15,11 +15,15 @@ init_from_scratch: true             # random weights — no checkpoint read
 torchrun --nproc_per_node=8 scripts/training/sft.py my-pretrain.yaml --init_from_scratch=true
 ```
 
-The model is built with the resolved auto class's `from_config(config)`, so weights come from `_init_weights`. The run's `seed` is set first, making init identical on every rank so FSDP2 shards and DP replicas agree.
+The model is built from the config on the meta device and drawn on CPU by the family's own `_init_weights`, one module at a time, under a seed hashed from the run's `seed` and the module's name; a fused expert bank is drawn one expert at a time, with the expert's index in the key (`halo/model_loading/parallel/keyed_init.py`). The weights depend only on the seed and the config: every rank, every supported layout and every GPU type starts from the same ones, and the run's global random state is left untouched. They match `from_config`'s distribution, not its values, so a seed draws different weights than it did before this scheme. A parameter the family's `_init_weights` leaves undrawn takes what `from_config` gives it, under the same key: its module's own `reset_parameters` (a remote-code router) or else transformers' default `_init_weights` (a remote-code norm whose constructor writes ones). A tensor none of them draws is refused by name.
+
+Data parallelism (DDP, FSDP2, `ep1`), EP, CP, EP+CP, attention-only TP on a MoE and EP+TP are supported: each holds the whole model on a rank, so every rank draws it on CPU, a node's ranks at a time, and the loader shards it as it shards a checkpoint. Under EP that is the host memory `ep_lazy_loading: false` costs, a full model per rank.
+
+A resumed run restores its checkpoint and draws nothing: under EP, CP and TP the policy loads from the checkpoint, and under data parallelism the trainer restores the checkpoint over the build. A GptOss run's sinks keep the from-scratch handling they started with, so `reset_sinks` never neutralizes the trained ones.
 
 Four refusals:
 
-- **EP, TP, CP, ETP or PP** raise `NotImplementedError`: distributed random-init of sharded parameters is not implemented, and a pipeline stage has no checkpoint to stream. The gate reads `ep_group_size > 1`, so an MoE without EP or ETP random-inits fine.
+- **PP, ETP or dense TP** raise `NotImplementedError`: those loaders read only their own part of a checkpoint and have no random-init route yet.
 - **Quantization** raises — QLoRA loads pretrained weights.
 - **A multimodal checkpoint** raises at the VLM load; `text_only_model: true` routes it to the text-only sibling, which does random-init.
 - **A model with external tables** raises `ValueError` (`reject_random_init_tables`): Qwen3.8-Flash-Next's n-gram table is frozen and comes only from the checkpoint, so random weights would train against a pretrained table.
@@ -35,9 +39,9 @@ model_init_kwargs:
   num_attention_heads: 16
 ```
 
-### Large or MoE models
+### Large models, PP, ETP or dense TP
 
-Materialize the random-init checkpoint once outside the distributed job, then train with any parallelism:
+Where a whole model per rank does not fit in host memory, or under PP, ETP or dense TP, materialize the random-init checkpoint once outside the distributed job, then train with any parallelism:
 
 ```python
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer

@@ -3,6 +3,7 @@ the run's attention through the per-mode loader to the post-load policies."""
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 from collections.abc import Callable
@@ -15,7 +16,6 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.rank_uniform_env import agree_rank_uniform_env
 from halo.model_loading.dtype import configure_float32_matmul_precision
-from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.model_loading.model_preparation import (
     apply_family_patches,
@@ -45,7 +45,7 @@ from halo.model_loading.parallel.tp import (
     load_tp_moe_model,
     uses_attention_only_tp,
 )
-from halo.model_loading.parallel.whole_model import cast_loaded_parameters, load_whole_model, warm_attention_kernels
+from halo.model_loading.parallel.whole_model import load_whole_model, warm_attention_kernels
 from halo.models.attention.backend_setup import patch_flex_attention_compile
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.attention.selection import (
@@ -58,7 +58,6 @@ from halo.models.attention.selection import (
 from halo.models.introspection.config_access import apply_config_overrides, text_config
 from halo.models.moe import family_specs
 from halo.models.mtp.spec import MtpHeadRequest
-from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_local_rank, is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -150,24 +149,6 @@ def _resolve_run_attention(
     return apply_family_patches(model_config, attn_implementation)
 
 
-def _build_random_init(model_class, pc: ParallelismConfig, from_pretrained_kwargs: dict, *, wraps_experts: bool):
-    """COLLECTIVE: a random-weight model built from the config onto this rank's GPU, a node's ranks at a time."""
-    # from_config materializes on CPU before .to(cuda), so it needs the same concurrency gate.
-    with joined_node_load(f"Model build from {model_class.__name__} config", pc.max_concurrent_loading):
-        model = model_class.from_config(
-            from_pretrained_kwargs["config"],
-            dtype=from_pretrained_kwargs.get("dtype"),
-            attn_implementation=from_pretrained_kwargs.get("attn_implementation"),
-            trust_remote_code=from_pretrained_kwargs.get("trust_remote_code", True),
-        )
-        model = model.to(f"cuda:{get_local_rank()}")
-        cast_loaded_parameters(
-            model, from_pretrained_kwargs.get("dtype"), keep_fp32=pc.fp32_non_ep_params, ep_wrapped=wraps_experts
-        )
-    finalize_loaded_model(model)
-    return model
-
-
 def _load_undistributed_model(
     source: ModelSource,
     pc: ParallelismConfig,
@@ -176,27 +157,28 @@ def _load_undistributed_model(
     *,
     preserve_checkpoint_precision: bool,
     wraps_experts: bool,
-    init_from_scratch: bool,
 ) -> PreTrainedModel:
     """COLLECTIVE: load a whole model for plain DDP/FSDP. ``wraps_experts`` adds the EP layers anyway: at
     ``ep_group_size == 1`` they distribute nothing and exist for the grouped-GEMM compute and the FSDP-managed ep1
     expert shard."""
     # Creating the groups must precede the node-serialized rank-local checkpoint replay.
     ep_config = pc.ep_config() if wraps_experts else None
-    if init_from_scratch:
-        model = _build_random_init(model_class, pc, from_pretrained_kwargs, wraps_experts=wraps_experts)
-    else:
-        model = load_whole_model(
-            model_class,
-            source,
-            pc,
-            load_phase="Model load",
-            ep_config=ep_config,
-            preserve_checkpoint_precision=preserve_checkpoint_precision,
-            place_on_device=False,
-            device_map={"": get_local_rank()},
-            **from_pretrained_kwargs,
-        )
+    # A checkpoint streams straight onto the GPU. A random init is drawn on CPU, then moved.
+    placement = (
+        {"place_on_device": True}
+        if source.random_init_seed is not None
+        else {"place_on_device": False, "device_map": {"": get_local_rank()}}
+    )
+    model = load_whole_model(
+        model_class,
+        source,
+        pc,
+        load_phase="Model load",
+        ep_config=ep_config,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
+        **placement,
+        **from_pretrained_kwargs,
+    )
     if wraps_experts:
         model = apply_ep_layers(model, ep_config)
     mode = "Grouped GEMM EP layers (no EP distribution)" if wraps_experts else "standard DDP"
@@ -276,10 +258,7 @@ def _dispatch_model_loading(
             logger.info(f"Model loaded with CP (cp_size={pc.cp_size}, grouped_gemm_experts={wraps_experts})")
         return model
     return _load_undistributed_model(
-        *rung,
-        preserve_checkpoint_precision=preserve_checkpoint_precision,
-        wraps_experts=wraps_experts,
-        init_from_scratch=init_from_scratch,
+        *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts
     )
 
 
@@ -296,6 +275,7 @@ def _resolve_run_config(
     init_from_scratch: bool,
     model_class,
     text_only_model: bool,
+    init_seed: int | None = None,
 ) -> tuple[ModelSource, AutoConfig, type, bool]:
     """COLLECTIVE: the agreed source, the config, its model class and whether EP layers apply, with every refusal
     config.json answers raised before the process groups and the meta shell."""
@@ -314,7 +294,19 @@ def _resolve_run_config(
         quantization_config=quantization_config,
         init_from_scratch=init_from_scratch,
         wraps_experts=wraps_experts,
+        dense_tp=pc.is_tp_mode and not uses_attention_only_tp(pc, model_config),
     )
+    if init_from_scratch:
+        if pc.is_cp_mode and uses_gpt_oss_sinks(model_config):
+            # Reached only with reset_sinks: true, as live sinks under CP are refused above.
+            raise ValueError(
+                "init_from_scratch draws GptOss's attention sinks at random and trains them, so reset_sinks cannot "
+                "neutralize them, and the Ulysses attention kernels under Context Parallelism never receive the sink "
+                "column. Train a from-scratch GptOss without CP, or from a checkpoint with reset_sinks: true."
+            )
+        if init_seed is None:
+            raise ValueError("init_from_scratch needs the run's seed (init_seed) to key its random init.")
+        source = dataclasses.replace(source, random_init_seed=init_seed)
     reject_ep_without_family(pc, model_config, wraps_experts=wraps_experts)
 
     # Multimodal wrappers need AutoModelForImageTextToText (CausalLM drops the vision tower);
@@ -353,6 +345,8 @@ def load_distributed_model(
     reset_sinks: bool = True,
     train_sinks: bool = False,
     init_from_scratch: bool = False,
+    init_seed: int | None = None,
+    resumed_from_scratch: bool = False,
     revision: str | None = None,
     text_only_model: bool = False,
     preserve_checkpoint_precision: bool = False,
@@ -363,11 +357,15 @@ def load_distributed_model(
     """COLLECTIVE: load the policy and its tokenizer under ``parallelism_config``. ``text_only_model`` picks a
     multimodal checkpoint's text-only class; ``preserve_checkpoint_precision`` marks a full-finetune resume and
     requires complete fp32-master coverage; ``check_tokenizer`` refuses the tokenizer before any weight is read;
-    ``mtp_head`` attaches the family's released MTP head to the loaded trunk."""
+    ``mtp_head`` attaches the family's released MTP head to the loaded trunk. ``init_from_scratch`` draws the weights
+    instead, keyed on ``init_seed`` (the run's seed), so every layout starts from the same ones.
+    ``resumed_from_scratch`` reads a from-scratch run's resume checkpoint: its GptOss sinks were drawn, not pretrained,
+    so they keep the handling the run started with."""
     # Latched: free after the entry script's own pre-load call, a backstop for a caller without it.
     agree_rank_uniform_env()
     reject_unsupported_run(parallelism_config, dtype)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks, train_sinks=train_sinks)
+    scratch_sinks = init_from_scratch or resumed_from_scratch
 
     # True fp32 matmuls before any forward, as the image's TF32 default corrupts long-context RoPE.
     configure_float32_matmul_precision()
@@ -382,6 +380,7 @@ def load_distributed_model(
         sinks_policy=sinks_policy,
         quantization_config=quantization_config,
         init_from_scratch=init_from_scratch,
+        init_seed=init_seed,
         model_class=model_class,
         text_only_model=text_only_model,
     )
@@ -392,7 +391,7 @@ def load_distributed_model(
         attn_implementation,
         dtype,
         sinks_policy=sinks_policy,
-        init_from_scratch=init_from_scratch,
+        init_from_scratch=scratch_sinks,
     )
     # After the family patches, which stamp the config of a model that builds an external table.
     reject_random_init_tables(model_config, init_from_scratch=init_from_scratch)
@@ -463,7 +462,7 @@ def load_distributed_model(
         model_config,
         sinks_policy=sinks_policy,
         attn_implementation=attn_implementation,
-        sinks_pretrained=not init_from_scratch,
+        sinks_pretrained=not scratch_sinks,
     )
     if parallelism_config.lowp.enabled:
         apply_lowp_compute(
