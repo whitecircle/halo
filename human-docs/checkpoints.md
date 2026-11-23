@@ -144,6 +144,8 @@ weights:
 - `trainer_state.json` and `scheduler.pt`;
 - `optimizer*` and `rng_state*`, unless the run set `save_only_model: true`;
 - `router_balancing_biases.pt` (bias balancing);
+- `moe_expert_token_counts.json` (MoE runs that log expert load or balance
+  with a bias);
 - `reference_logps.pt` (DPO/KTO `precompute_ref_log_probs`, or offline GRPO full
   fine-tuning at `kl_beta > 0`);
 - `prefetch_pending-*.pt` (async GRPO with prefetch): drawn but untrained

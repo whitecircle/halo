@@ -29,7 +29,7 @@ Three conversational columns. A group is one **row**: put every completion of a 
 - A `tools_field` column is passed as `tools=`.
 - Every split, one passed to `evaluate()` included, must be a map-style `datasets.Dataset`: the sampler cuts rows by group, and anything else raises.
 
-`scripts/inference/reward_model/rejection_sample.py` emits this shape with `--output_format offline_grpo`.
+`scripts/inference/reward_model/rejection_sample.py` emits this shape with `--output_format offline_grpo`. `scripts/before_training/score_offline_grpo.py` writes the `rewards` of rows that carry only `prompt` and `completions` with any reward terms, a `whitecircle` term included ([Offline GRPO](rewards/whitecircle.md#offline-grpo)).
 
 ## Configuration
 

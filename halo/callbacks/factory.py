@@ -84,6 +84,7 @@ def build_run_callbacks(
             BalancingBiasCallback(
                 update_rate=args.router_balancing_rate,
                 exclude_last_slot=routing.exclude_last_slot,
+                top_k=routing.top_k,
                 log_every_n_steps=_metric_log_period(training_config),
             )
         )

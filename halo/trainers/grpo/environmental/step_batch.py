@@ -22,7 +22,12 @@ from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
 from halo.trainers.grpo.environmental.rollout_routing import RolloutRouting, RowsReplay
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow, single_trajectory_row
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
-from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages, valid_group_stats
+from halo.trainers.grpo.objective.advantages import (
+    degenerate_group_mask,
+    group_relative_advantages,
+    maxrl_zero_mean_groups,
+    valid_group_stats,
+)
 from halo.trainers.grpo.objective.logratio import (
     KL_CLAMP_FRAC_KEY,
     UPDATE_SKIPPED_KEY,
@@ -33,6 +38,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
     IMPORTANCE_RATIO_KEY,
     IS_SAMPLING_LOGPS_KEY,
+    MAXRL_ZERO_MEAN_GROUP_FRAC_KEY,
     REF_LOGPS_KEY,
     expand_traj_to_rows,
     gathered_num_items,
@@ -209,7 +215,7 @@ class StepBatchMixin:
 
         num_generations = self.num_generations if mode == "train" else self.num_generations_eval
         episode_state, traj_advantages, local_advantages = self._step_advantages(
-            rewards, batch_rows, num_padding, num_generations
+            rewards, batch_rows, num_padding, num_generations, mode
         )
         scores = self._apply_opsm_stage(scores, local_advantages)
         gathered_rewards, gathered_state = gather(rewards), gather(episode_state)
@@ -514,19 +520,26 @@ class StepBatchMixin:
         return logps if order is None else logps[torch.argsort(order)]
 
     def _step_advantages(
-        self, rewards: torch.Tensor, rows: TrajectoryRowMap, num_padding: int, num_generations: int
+        self, rewards: torch.Tensor, rows: TrajectoryRowMap, num_padding: int, num_generations: int, mode: str
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """The state is 1 valid, 0 invalid, -1 an eval round's padding."""
+        """The state is 1 valid, 0 invalid, -1 an eval round's padding. Under ``use_maxrl`` the divisor is the
+        valid members' mean (``normalizer="mean"``), and its non-negative check runs on every rank together."""
         episode_state = F.pad(
             rollout_valid_mask(rows.rollout_results, rewards.device).to(torch.int8), (0, num_padding), value=-1
         )
+        valid = episode_state == 1
+        maxrl = self.async_config.use_maxrl
         traj_advantages = group_relative_advantages(
             rewards,
             num_generations,
             self.args.scale_rewards,
-            valid_mask=episode_state == 1,
+            valid_mask=valid,
             std_floor=self.async_config.scale_rewards_std_floor,
+            normalizer="mean" if maxrl else "std",
         )
+        if maxrl and mode == "train":
+            zero_mean = maxrl_zero_mean_groups(rewards, num_generations, valid_mask=valid)
+            self._world_metrics.fraction(MAXRL_ZERO_MEAN_GROUP_FRAC_KEY, zero_mean.sum(), zero_mean.numel())
         return episode_state, traj_advantages, rows.to_rows(traj_advantages)
 
     def _track_empty_rollout_step(self, rollout_results: list[RolloutResult], gathered_valid: torch.Tensor) -> None:

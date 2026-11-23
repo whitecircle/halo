@@ -8,6 +8,8 @@ from dataclasses import dataclass
 import torch
 
 DEGENERATE_GROUP_FRAC_KEY = "sampling/degenerate_group_frac"
+# The share of groups MaxRL gives no gradient, their mean reward 0 (no success on a pass/fail reward).
+MAXRL_ZERO_MEAN_GROUP_FRAC_KEY = "sampling/maxrl_zero_mean_group_frac"
 NET_TOKEN_MASS_KEY = "advantage/net_token_mass"
 TOKEN_MASS_SCALE_KEY = "advantage/token_mass_scale"
 NEGATIVE_ONLY_MASS_KEY = "advantage/negative_only_mass"

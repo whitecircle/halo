@@ -65,6 +65,17 @@ The data path follows the run, so a multimodal student trained on text-only rows
 
 A VLM run drops at prep the rows whose hinted teacher text alone is over `max_length`, and its audit refuses a misaligned row there, world-uniform; image tokens, which neither counts, still raise at collation when they push a branch over. Keep `max_length` headroom for the hint. The hint is text-only and does not change the image grid, so the student's image features are shared with the teacher forward — cached and replayed for `lfm2_vl` to skip a vision-tower re-encode.
 
+## Chunked loss
+
+`use_chunked_distillation_loss: true` (default off) computes every term without a `[tokens, vocab]` logits plane, by the mechanism of [teacher distillation's chunked loss](teacher-distillation.md#chunked-loss): the same LoRA delta on `lm_head`, head transform, refusals and TP handling. What differs here:
+
+- One forward call of the student runs its backbone, then the privileged teacher pass through the same backbone, in eval mode and with no gradient. The student pass comes first, so the [image-feature reuse](#vision-language) still works: the teacher pass replays the features the student pass cached. One read of the output embedding projects both, the teacher's rows with the adapter dropout off.
+- The k-th supervised position of the student branch pairs with the k-th of the teacher's, the pairing of the full-logits path; a row whose branches supervise different counts raises the same error. `opd_exclude_eos` masks the EOS and stop positions out of the OPD mean, not the cross-entropy's.
+- The reference runs no-grad before that call and is projected at the student's positions at its compared width.
+- Each term keeps its per-sample token mean. SFT keeps its confidence weight, and OPD keeps it when `confidence_weight_opd` is set. The reference term takes no confidence weight.
+
+With the flag off, construction weighs `rows × max_length × vocab` against the device memory free once the reference is placed, at one plane for the student's logits, one for their gradient, one for the teacher's while `sdpg_beta_base > 0` and one for the reference's while `reference_kl_coef > 0`, each in the run's precision, and warns past half of it. `max_length` bounds the teacher branch too, as no branch is truncated.
+
 ## Testing a setup
 
 ```bash
@@ -72,7 +83,7 @@ torchrun --nproc_per_node=2 scripts/training/distillation/self_distill.py <confi
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers tests/cpu/data/test_self_distill_collator.py -m cpu`, `tests/gpu/trainers/other/test_self_distillation_text.py`, `test_self_distillation_vlm.py` and `tests/gpu/trainers/lora/test_lora_self_distill.py`.
+Covering tests: `pytest tests/cpu/trainers tests/cpu/data/test_self_distill_collator.py -m cpu`, and the GPU scripts `tests/gpu/trainers/other/test_self_distillation_text.py`, `test_self_distillation_vlm.py` and `tests/gpu/trainers/lora/test_lora_self_distill.py`, each also run with `--chunked` for the chunked loss; under `--chunked` the last one also checks that the first step's loss equals the full-logits loss of the same batch.
 
 ## What to watch
 
