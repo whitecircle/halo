@@ -1,6 +1,6 @@
-"""The per-parameter AdamWBF16 step the fused launch replaced, taking 1 - beta as arguments as the fused kernel does
-(#153): the bit-for-bit oracle both test tiers hold it to. Runs on CUDA and, with ``TRITON_INTERPRET=1`` set before
-Triton is imported, on CPU. Float arguments round to fp32 first, as the CUDA launcher does."""
+"""The per-parameter AdamWBF16 step the fused launch replaced, taking 1 - beta as arguments as the fused kernel does:
+the bit-for-bit oracle both test tiers hold it to. Runs on CUDA and, with ``TRITON_INTERPRET=1`` set before Triton is
+imported, on CPU. Float arguments round to fp32 first, as the CUDA launcher does."""
 
 import math
 import struct
@@ -272,20 +272,26 @@ FIRST_STEP_GRAD = -(2.0**-12)
 FIRST_STEP_TOLERANCE = 8 * 2.0**-24
 
 
+def adamw_bf16_step(p: Tensor, name: str, state: dict, group: dict, *, fused: bool) -> None:
+    """Step ``p`` (its ``.grad`` set) and ``state``'s moments in place at ``state["step"]``, through the fused kernel or
+    the eager step, as ``AdamWBF16.step`` takes either without a grad scale or a skip flag."""
+    if fused:
+        update = _fused_update(p, name, state, group)
+        _launch_fused([update], *_launch_tables([update]), None, None, 1)
+    else:
+        beta1, beta2, step_size, bc2_sqrt, eps, wd_factor = _step_hparams(group, state["step"])
+        seeds = sr_seed_pair(_SR_KEY, state["step"], sr_param_index(name))
+        args = (p, p.grad, state["exp_avg"], state["exp_avg_sq"], step_size, bc2_sqrt, eps, wd_factor)
+        _eager_adam_bf16_step(*args, beta1, beta2, seeds)
+
+
 def _first_step(beta2: float, *, fused: bool) -> Tensor:
     """``p / lr`` after step 1 from ``p = -lr``, through the fused kernel or the eager step."""
     group = {"betas": (BETAS[0], beta2), "lr": FIRST_STEP_LR, "eps": 0.0, "weight_decay": 0.0}
     p = torch.nn.Parameter(torch.full((SR_BLOCK_SIZE,), -FIRST_STEP_LR, dtype=torch.bfloat16))
     p.grad = torch.full_like(p, FIRST_STEP_GRAD)
     state = {"step": 1, "exp_avg": torch.zeros_like(p), "exp_avg_sq": torch.zeros_like(p)}
-    if fused:
-        update = _fused_update(p, "w", state, group)
-        _launch_fused([update], *_launch_tables([update]), None, None, 1)
-    else:
-        beta1, beta2, step_size, bc2_sqrt, eps, wd_factor = _step_hparams(group, 1)
-        seeds = sr_seed_pair(_SR_KEY, 1, sr_param_index("w"))
-        args = (p, p.grad, state["exp_avg"], state["exp_avg_sq"], step_size, bc2_sqrt, eps, wd_factor)
-        _eager_adam_bf16_step(*args, beta1, beta2, seeds)
+    adamw_bf16_step(p, "w", state, group, fused=fused)
     return p.detach().double() / FIRST_STEP_LR
 
 

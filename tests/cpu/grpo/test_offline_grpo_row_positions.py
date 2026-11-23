@@ -81,7 +81,7 @@ def test_a_left_padded_row_scores_as_it_does_alone(name):
     ids, mask, keep = OfflineGRPOTrainer._joined_rows(batch)
     assert rows_forward_densely(model, batch_size=2), "the premise: batch 2 alone takes the padded path"
     with torch.no_grad():
-        logps, _ = _Scorer()._chunked_logps_impl(model, ids, mask, keep, 2, False)
+        logps, _, _ = _Scorer()._chunked_logps_impl(model, ids, mask, keep, 2, False)
         for row, (document, completion) in enumerate(zip(documents, _COMPLETIONS, strict=True)):
             worst = (logps[row, :completion] - _alone(model, document, completion)).abs().max()
             assert worst < 1e-4, f"row {row} moved by {worst} against itself alone"
