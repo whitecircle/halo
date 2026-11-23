@@ -376,6 +376,7 @@ def _anchor_trainer(*, checkpoint=None, trained=False, output_dir=None, chunked=
         disable_dropout=True, resume_from_checkpoint=checkpoint, output_dir=output_dir or checkpoint, bf16=bf16
     )
     trainer._dataset_presharded = False
+    trainer.callback_handler = types.SimpleNamespace(callbacks=())
     trainer._init_reference_logps(resume_checkpoint=checkpoint)
     trainer.sweep_count = 0
 

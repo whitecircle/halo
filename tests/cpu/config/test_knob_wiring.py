@@ -682,6 +682,7 @@ _SELF_DISTILL_TRAINER_KNOBS = {
     "reference_kl_loss": "unnormalized_kl",
     "confidence_weight_opd": True,
     "opd_exclude_eos": True,
+    "use_chunked_distillation_loss": False,
 }
 
 
@@ -697,6 +698,7 @@ def _construct_self_distill_shell(**kwargs) -> tuple[DistributedSelfDistillation
     with (
         mock.patch.object(DistributedSFTTrainer, "__init__", parent_init),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", lambda self: None),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_warn_if_full_logits_large", lambda self: None),
     ):
         return DistributedSelfDistillationTrainer(**_SELF_DISTILL_TRAINER_KNOBS, **kwargs), leaked
 

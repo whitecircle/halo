@@ -718,6 +718,7 @@ The conversation-rendering and vision fields of [SFTScriptArguments](#sftscripta
 | `reference_model_name_or_path` | `str \| None` | `None` | The anchor model; `None` = the student's init weights. |
 | `confidence_field` / `confidence_power` | `str \| None` / `float` | `None` / `4.0` | Per-sample weight `conf**p` from this column, each confidence in `[0, 1]`; `p` finite, `> 0`. |
 | `confidence_weight_opd` | `bool` | `True` | Apply that weight to OPD as well as SFT. |
+| `use_chunked_distillation_loss` | `bool` | `False` | Compute every term from the last hidden states, a chunk of supervised positions at a time, with no `[tokens, vocab]` logits ([Chunked loss](../training-methods/distillation/self-distillation.md#chunked-loss)). Refused at trainer construction in the same cases as for teacher distillation (see the `use_chunked_distillation_loss` row of [TeacherDistillationConfig](#teacherdistillationconfig)). Off, construction warns when the full-logits planes would take more than half of the device's free memory. |
 
 ### EnvironmentalGRPOScriptArguments
 

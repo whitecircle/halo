@@ -395,6 +395,7 @@ def main():
         reference_kl_loss=args.reference_kl_loss,
         confidence_weight_opd=args.confidence_weight_opd,
         opd_exclude_eos=args.opd_exclude_eos,
+        use_chunked_distillation_loss=args.use_chunked_distillation_loss,
     )
     run_trainer(
         trainer,
