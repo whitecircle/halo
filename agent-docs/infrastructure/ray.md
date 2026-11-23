@@ -76,7 +76,7 @@ context, the truncated close, the effort stamp and the cleanup. Both read replie
 (backoff, engine-abort re-issue). The actor keeps its own aiohttp transport and retryable-4xx rule, and
 turns a fault anywhere in the episode into a masked row.
 
-A turn the engine **aborts** (SGLang's sync pause drops every in-flight request) is re-issued for the
+A turn the engine **aborts** is re-issued for the
 same observation, up to `max_retries` times (default `3`), rather than stepped as a length cut; past
 that the episode errors into a masked row.
 
@@ -185,9 +185,9 @@ The toolkit configures no other Ray ports; upstream defaults apply. What must ho
   [Environments](../training-methods/async-grpo/environments/README.md).
 
 - **Actor processes inherit the `ray start` daemon's environment, not the trainer's.** Export
-  `HALO_SANDBOX_*`, `TMPDIR`, search/MCP keys (`SERPER_API_KEY` / `BRAVE_API_KEY` /
-  `TAVILY_API_KEY` / `KEENABLE_API_KEY`), and any HF/proxy vars *before* `ray start` on each node;
-  nothing forwards the trainer's env to remote actors.
+  `TMPDIR`, search/MCP keys (`SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` /
+  `KEENABLE_API_KEY`), a hosted sandbox's credentials, and any HF/proxy vars *before* `ray start` on
+  each node. Only the trainer's `HALO_SANDBOX_*` variables travel with the job to remote actors.
 
 ## Data through the object store
 

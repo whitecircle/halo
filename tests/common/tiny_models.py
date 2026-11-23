@@ -558,7 +558,13 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
     "qwen4_exp": TinyFamily(
         lambda overrides: _with_live_ple_convs(
             _composite(
-                Qwen4ExpConfig, Qwen4ExpForConditionalGeneration, TINY_QWEN4_EXP_CONFIG, TINY_QWEN4_EXP_VISION_CONFIG
+                Qwen4ExpConfig,
+                Qwen4ExpForConditionalGeneration,
+                TINY_QWEN4_EXP_CONFIG,
+                {
+                    **TINY_QWEN4_EXP_VISION_CONFIG,
+                    "out_hidden_size": overrides.get("hidden_size", TINY_QWEN4_EXP_CONFIG["hidden_size"]),
+                },
             )(overrides)
         ),
         load_class=AutoModelForImageTextToText,
@@ -592,7 +598,9 @@ TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {
 }
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG), ulysses_cp=True)
 # Gated DeltaNet and attention layers, which the MoE roster does not carry.
-TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
+TINY_QWEN35_DENSE_FAMILY = TinyFamily(
+    _causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG), ulysses_cp=True
+)
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 # Ring-mini-linear-2.0: the Bailing family's other attention layout (Lightning Attention-2 beside softmax).
 TINY_BAILING_RING_FAMILY = TinyFamily(

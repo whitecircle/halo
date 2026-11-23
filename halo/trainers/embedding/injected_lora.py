@@ -9,7 +9,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 from peft import LoraConfig
-from peft.tuners.tuners_utils import BaseTunerLayer
 
 from halo.checkpoint.adapters import (
     adapter_layout_mismatch,
@@ -30,12 +29,6 @@ from halo.runtime.dtensor import copy_full_tensor
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-
-def has_injected_lora(backbone: nn.Module) -> bool:
-    """Structural: a remote-code backbone's own ``lora_``-named parameters (jina's LoRA parametrizations) are base
-    weights."""
-    return any(isinstance(module, BaseTunerLayer) for module in backbone.modules())
 
 
 def require_injected_lora_config(model: nn.Module) -> LoraConfig:

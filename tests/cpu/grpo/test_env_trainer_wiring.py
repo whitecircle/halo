@@ -17,7 +17,6 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfi
 from halo.environments.environment_base import EnvironmentBase
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.environmental import async_rollouts
-from halo.trainers.grpo.environmental import trainer as env_trainer
 from halo.trainers.grpo.environmental.loss import importance_sampling
 from halo.trainers.grpo.environmental.loss.importance_sampling import _BreakerOptimizerSkipCallback
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
@@ -26,7 +25,6 @@ from halo.trainers.grpo.environmental.trainer import (
     _resolve_environment_spec,
 )
 from halo.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY
-from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.tiny_models import word_level_tokenizer
 
 _STOP = "<stop>"
@@ -54,6 +52,30 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     trainer.parallelism_config = SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     trainer.callback_handler = CallbackHandler([], trainer.model, trainer._tokenizer, None, None)
     return trainer
+
+
+@pytest.mark.parametrize(
+    ("grpo", "config", "price", "match"),
+    [
+        ({"scale_rewards": "group"}, {}, 0.0, r"use_maxrl with scale_rewards='group'"),
+        ({"scale_rewards": "none"}, {"scale_rewards_std_floor": 0.05}, 0.0, r"use_maxrl with scale_rewards_std_floor"),
+        ({"scale_rewards": "none"}, {}, 0.5, "use_maxrl with reasoning_price on"),
+        ({"scale_rewards": "none"}, {"reasoning_floor": 0.2}, 0.0, "use_maxrl with reasoning_floor on"),
+    ],
+    ids=["std-scaling", "std-floor", "reasoning-price", "reasoning-floor"],
+)
+def test_each_maxrl_refusal_fires_when_the_rollout_state_is_configured(tmp_path, grpo, config, price, match):
+    """Every refusal from the config alone, so a run that would divide by a mean it cannot trust never starts."""
+    trainer = _trainer(tmp_path, grpo=grpo, use_maxrl=True, rollout_stop_tokens=[_STOP], **config)
+    trainer._rollout_env.reasoning_terms_for_effort = lambda level: (256, price)
+    with pytest.raises(ValueError, match=match):
+        trainer._configure_rollout_state()
+
+
+def test_maxrl_without_a_conflict_configures(tmp_path):
+    trainer = _trainer(tmp_path, grpo={"scale_rewards": "none"}, use_maxrl=True, rollout_stop_tokens=[_STOP])
+    trainer._configure_rollout_state()
+    assert trainer.async_config.use_maxrl
 
 
 def _callbacks(trainer, cls) -> list:
@@ -105,16 +127,6 @@ def test_the_default_config_arms_no_breaker_and_no_stage(tmp_path):
         ),
         ({"loss_type": "grpo"}, {"balance_token_mass": True}, r"balance_token_mass needs a loss whose loss tokens"),
         ({}, {"rollout_stop_tokens": ["<absent>"]}, r"rollout_stop_tokens \['<absent>'\] are not tokens"),
-        (
-            {},
-            {
-                "rollout_backend": "sglang",
-                "rollout_server_configs": _TWO_SERVERS,
-                "prefetch_depth": 2,
-                "max_retries": 1,
-            },
-            r"a prefetched round stays in flight across up to 2 syncs",
-        ),
     ],
     ids=[
         "off-policy-mask",
@@ -122,7 +134,6 @@ def test_the_default_config_arms_no_breaker_and_no_stage(tmp_path):
         "std-floor-without-scaling",
         "unbalanceable-loss",
         "unknown-stop-token",
-        "sglang-prefetch-past-retries",
     ],
 )
 def test_the_rollout_state_reaches_each_refusal(tmp_path, grpo, config, match):
@@ -130,26 +141,14 @@ def test_the_rollout_state_reaches_each_refusal(tmp_path, grpo, config, match):
         _trainer(tmp_path, grpo=grpo, **config)._configure_rollout_state()
 
 
-def test_a_vllm_prefetch_past_one_retry_passes_the_rollout_state(tmp_path):
-    """vLLM's pause keeps the turns in flight, so the round the SGLang case refuses passes here."""
-    trainer = _trainer(tmp_path, rollout_server_configs=_TWO_SERVERS, prefetch_depth=2, max_retries=1)
-    assert trainer.async_config.rollout_backend == "vllm"
+@pytest.mark.parametrize("backend", ["vllm", "sglang"])
+def test_a_prefetch_spanning_several_syncs_passes_the_rollout_state_at_one_retry(tmp_path, backend):
+    """Neither engine's pause drops the turns in flight, so no prefetch depth is bounded by max_retries."""
+    trainer = _trainer(
+        tmp_path, rollout_backend=backend, rollout_server_configs=_TWO_SERVERS, prefetch_depth=2, max_retries=1
+    )
+    assert trainer.async_config.rollout_backend == backend
     trainer._configure_rollout_state()
-
-
-def test_the_retry_budget_is_checked_against_the_configured_backends_client(tmp_path, monkeypatch):
-    """The verdict is the resolved client's, so a vLLM config resolved to a client whose pause aborts is refused."""
-    resolved = []
-
-    def resolve(backend):
-        resolved.append(backend)
-        return SGLangWeightSyncClient
-
-    monkeypatch.setattr(env_trainer, "resolve_weight_sync_client", resolve)
-    trainer = _trainer(tmp_path, rollout_server_configs=_TWO_SERVERS, prefetch_depth=2, max_retries=1)
-    with pytest.raises(ValueError, match="Every SGLang weight sync aborts the turns in flight"):
-        trainer._configure_rollout_state()
-    assert resolved == ["vllm"]
 
 
 def _configured(tmp_path, *, grpo: dict | None = None, **config):

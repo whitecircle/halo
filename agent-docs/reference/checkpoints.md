@@ -280,7 +280,11 @@ converted. transformers reads several hubs through renames its module tree drops
 `hc_attn_*`, Step-3.7's `moe.*`, DeepSeek-V4's `attn`/`ffn` names), Mistral 3's legacy llava prefixes.
 Each writer reverts the conversions the load recorded (`conversions_to_revert`,
 `halo/checkpoint/hub_layout.py`); a model with no record (built from its config, or by the lazy loader), or
-whose load dequantized fp8/MXFP4 weights, reverts the family's registered mapping. The EP-gathered save
+whose load dequantized fp8/MXFP4 weights, reverts the family's registered mapping. The lazy loaders' decode
+of a native MXFP4 gpt-oss release is no part of that mapping and is never reverted: the load drops
+`quantization_config`, so a save writes each expert projection as one bf16 `<proj>` tensor, not
+`<proj>_blocks` / `<proj>_scales`, and stock `from_pretrained` reads it with no quantizer
+([GPT-OSS](../models/gpt-oss.md#configs)). The EP-gathered save
 and the RL weight sync leave out only the per-expert merges (`export_conversions`), since the gather owns
 the expert layout. A revert that fails fails the save on every rank: a chunk written under module names
 would leave two layouts in one checkpoint. vLLM 0.32.0 raises on a SigLIP tower key that lacks its

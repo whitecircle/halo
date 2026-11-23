@@ -3,8 +3,9 @@
 LoRA trains small rank-decomposed adapter matrices while the base model stays frozen, eliminating optimizer
 states for frozen parameters.
 
-It runs under DDP/FSDP, EP, CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
-under DDP/FSDP and CP-on-dense (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
+It runs under DDP/FSDP, EP, attention-only CP and pure ETP; **TP**, **EP+TP** and **PP** reject it, and QLoRA runs only
+under DDP/FSDP and attention-only CP on dense models (full matrix and reasons: [Parallelism compatibility](#parallelism-compatibility)).
+Dense Qwen3.5/3.6 hybrid CP2 SFT rejects adapters and quantized weights ([dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft)).
 Under EP, LoRA targets both attention (via PEFT) and the MoE experts (via native grouped adapters).
 
 Offline GRPO under CP is full fine-tuning only and rejects every adapter shape; SFT and SMPO keep
@@ -237,7 +238,7 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | DDP / FSDP | Yes | Yes | None | Standard path; QLoRA on a MoE needs `use_grouped_gemm: false` ([QLoRA](#quantized-training-qlora)) |
 | HSDP | Yes | No | None | Pure DP or CP only, so expert adapters train at `ep_size: 1`; every replica starts from the first one's adapters ([HSDP](../parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel)). QLoRA rejected: `use_hsdp` is refused under QLoRA, which skips FSDP2 ([QLoRA](#quantized-training-qlora)) |
 | EP | Yes | No | Attention + experts | Attention via PEFT; expert FFNs via native grouped adapters. QLoRA rejected: EP loaders materialize plain de-quantized weights, losing `Params4bit` |
-| CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
+| CP | Yes* | Yes* | None | *Attention-only CP supports adapters; [dense Qwen3.5/3.6 hybrid CP2 SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) rejects both LoRA and QLoRA. CP shards the sequence, not the weights — supported adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. QLoRA is only for attention-only CP on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
 | TP | **No** | No | — | Rejected — adapters are plain tensors outside the TP graph |
 | EP+CP | Yes | No | Attention + experts | Both active |
 | EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `model_has_expert_lora` arm |
@@ -543,11 +544,22 @@ grown vocabulary), on embedding LoRA, and on a `training_provenance.json` record
 those in memory. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
 the adapter config lands in `original_adapter_config/`.
 
+**Adapters must train.** Trainer construction runs `verify_adapters_trainable` (`halo/model_loading/parallel/peft_setup.py`)
+on the PEFT wrap before any mode wraps the model, so the check covers every mode alike. It raises when a tuner layer
+holds no trainable parameter for an adapter meant to train: an active adapter whose config is not `inference_mode`,
+counting every tensor in the layer's `adapter_layer_names` (`lora_A`/`lora_B`, `lora_embedding_*`,
+`lora_magnitude_vector`, other tuners' own). It reads live `requires_grad` and holds no collective; every rank builds
+the same wrap and raises alike. PEFT 0.21 and later re-enable adapters by matching `named_parameters()` names against
+`named_modules()` prefixes, so `UlyssesModel` (its names omit the `original_attention` level) would leave every CP
+adapter frozen; the pin `peft<0.19` keeps that path unreachable, and a bump needs a release that fixes
+[peft#4181](https://github.com/huggingface/peft/issues/4181).
+
 ## Tests and benchmarks
 
 ```bash
 # LoRA SFT under one shape (ep / ep_cp / etp / cp / fsdp, --qlora for a 4-bit base), the save
-# reloaded on a fresh base; LoRA under TP is refused at construction (tests/cpu/trainers/test_expert_lora_tp_gate.py)
+# reloaded on a fresh base; LoRA under TP is refused at construction (tests/cpu/trainers/test_expert_lora_tp_gate.py),
+# adapters that left the wrap frozen likewise (tests/cpu/peft/test_adapters_trainable_check.py)
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model gpt_oss_20b --mode ep --save-reload
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model qwen3_0_6b --mode cp --save-reload --resume
 # merge_expert_lora_on_save checkpoint: servable, and resumed exactly against an uninterrupted run

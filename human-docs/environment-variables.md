@@ -39,7 +39,7 @@ or set it in the repo-root `.env`, to choose the volume yourself.
 `.env` holds the ones you need: `HF_TOKEN` (gated models and datasets),
 `WANDB_API_KEY`, the `AWS_*` trio for `s3://` (or a mounted `~/.aws`),
 `OPENAI_API_KEY` / `OPENROUTER_API_KEY` for the external-LLM judge and the
-generation scripts, `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` /
+generation scripts, `WHITECIRCLE_API_KEY` for a `whitecircle` reward term, `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` /
 `KEENABLE_API_KEY` for the matching web-search backend (`duckduckgo` needs none),
 and `VLLM_API_KEY` for a keyed OpenAI-compatible endpoint.
 
@@ -74,7 +74,9 @@ the default.
   `prepare_dataset.py`), for example on a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels),
   `HALO_HC_KERNELS=0` (the hyper-connections of GLM-5 Next and DeepSeek-V4),
-  `HALO_DSA_MATMUL=0` (the DSA layers of GLM-5 Next on SDPA) or
+  `HALO_DSA_MATMUL=0` (the DSA layers of GLM-5 Next on SDPA),
+  `HALO_QSA_KERNEL=off` (the QSA layers of Qwen3.8-Flash-Next on tiled SDPA),
+  `HALO_GATED_RESIDUAL_KERNELS=0` (its hyper-connections) or
   `HALO_FLEX_SLIDING=0` on every rank (FlexAttention on SDPA runs of Gemma 4 and Step-3.7,
   also needed for `full_determinism` on more than one GPU).
 - **A weight sync that raises naming `HALO_WEIGHT_SYNC_CHUNK_MB`:** set it above the

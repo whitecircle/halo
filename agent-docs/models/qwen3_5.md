@@ -2,7 +2,7 @@
 
 A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSparseMoeBlock`, `Qwen3_5MoeAttention`). Three traits drive parallelism: a sigmoid-gated shared expert, a double-width `q_proj` fusing query with a sigmoid gate, and a hybrid `layer_types` scheme interleaving full attention with `Qwen3_5MoeGatedDeltaNet` linear-attention layers.
 
-Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). Dense text towers have an [unpacked CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft); MoE hybrid CP remains refused. Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 
@@ -32,7 +32,7 @@ The imports reach the layer through transformers' hub-kernel funnel, whose packa
 
 On Blackwell the delta rule's state kernel (`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`, shared by the gated delta rule and KDA) autotunes only over its `num_warps=2` configs: `finalize_loaded_model` restricts it at the end of every load (`apply_fla_launch_options`, `halo/kernels/fla_launch.py`), so it holds whether the kernel is later reached through this funnel or a remote-code module's own `fla` import. Under the image's Triton 3.6 its `num_warps=4` configs give run-to-run different, at some positions wrong, outputs and gradients on packed (`cu_seqlens`) rows, and on B300 also on larger unpacked batches; the stock autotuner picks them at this family's shapes. Upstream applies the same restriction from fla 0.5.2 (fla #953). Triton keys its autotune cache on the config list, so a pick cached by an earlier run is not reused. `tests/gpu/kernels/test_fla_blackwell_autotune.py` pins it, with a `num_warps=4` control that must still miss.
 
-FLA's kernels for the q/k l2norm inside the delta rule and for the gated output norm (which the Liger spec installs) take `NB = cdiv(tokens × heads, 65536)` as an autotune-key constexpr their bodies never read, so each new value compiles and benchmarks every autotune config: one every 2,048 tokens at Qwen3.5-35B-A3B's 32 value heads, to which q/k are repeated. The binaries and FLA's autotune picks (`FLA_CACHE_RESULTS`, default on) persist in the Triton disk cache anchored on `HF_HOME`, so this is paid once per value per volume, as for [Bailing's KDA kernels](bailing.md#remote-code-compatibility). Picks differ across fresh caches, and so does bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)).
+FLA's kernels for the q/k l2norm inside the delta rule and for the gated output norm (which the Liger spec installs) take `NB = cdiv(tokens × heads, 65536)` as an autotune-key constexpr their bodies never read, so each new value compiles and benchmarks every autotune config: one every 2,048 tokens at Qwen3.5-35B-A3B's 32 value heads, to which q/k are repeated. The binaries and FLA's autotune picks (`FLA_CACHE_RESULTS`, default on) persist in the Triton disk cache anchored on `HF_HOME`, so this is paid once per value per volume, as for [Bailing's KDA kernels](bailing.md#remote-code-compatibility). Picks differ across fresh caches, and so does bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)). `HALO_FLA_L2NORM_FIXED_NB=1` ([Configuration Reference](../reference/configuration-reference.md#environment-variables)) holds `NB` out of the l2norm kernels' key and launches them with a constant one, so one binary and one tuned config per width and dtype serve every row count; `finalize_loaded_model` then compiles and tunes it at the `head_k_dim` of each gated-delta-rule module of the model, on 65,536 rows. It leaves the gated output norm as it is, and a launch's reduction order can differ from the per-bucket pick, not its value beyond fp32 rounding.
 
 The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing, and SMPO refuses its own `padding_free` likewise ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
@@ -76,14 +76,19 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family qwen3_5_moe_text`.
 
-## Why CP is blocked on real checkpoints
+Dense `Qwen3_5GatedDeltaNet` is claimed by `ULYSSES_GATED_DELTA_MAP` through
+`Qwen3_5UlyssesGatedDelta` in `halo/distributed/context_parallel/gated_delta.py`. It redistributes
+projected head groups before the causal convolution and delta recurrence, then returns each rank's
+sequence chunk. Its admitted scope is [dense hybrid CP2 SFT](../parallelism/context-parallelism.md#dense-hybrid-sft).
 
-Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
+## Why MoE hybrid CP is refused
+
+MoE checkpoints ship hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
 
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` 0.4.2, the pinned line, carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/conv/cp/` for the conv), but the Ulysses path does not call them. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+The validator refuses MoE GatedDeltaNet and unclaimed linear-attention layers. Dense CP2 SFT instead redistributes heads before these sequence operations ([Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft)); it does not use FLA's CP context. For MoE, train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards pretrained linear-attention weights).
 
 ## TP and ETP
 

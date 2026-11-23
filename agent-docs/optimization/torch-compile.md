@@ -14,7 +14,7 @@ The clamped combines latch into `_fused_glu_mul`, the GLU-combine seam every bas
 
 The EP routing sort stays eager too (`torch.compiler.disable` on the counting sort in `halo/kernels/moe_route_sort.py`, which every grouped-GEMM path runs on CUDA): its three Triton kernels are already fused, and traced, the slot counts that size it (the dispatch's host-side receive counts) would become graph inputs that change every step. A compiled EP layer breaks its graph there.
 
-The low-precision weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats (mxfp8/mxfp4; nvfp4's weight stays eager), with a permanent eager fallback on any compile or runtime failure — see [Low-Precision MoE](low-precision-moe-kernels.md).
+The cached EP expert-weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats mxfp8 and mxfp4 (nvfp4's takes its fused kernel on a GPU that runs it, and eager elsewhere), with a permanent eager fallback on any compile or runtime failure. Uncached weights, such as the FSDP2-managed ep1 experts, quantize on every call through the format's fused kernel, with the blocked axis moved last and back, and eagerly only on a GPU older than that kernel needs — see [Low-Precision MoE](low-precision-moe-kernels.md).
 
 ## Chunked log-prob head
 

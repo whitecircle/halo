@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 """apply_lowp_compute on a representative model: only the MLP projections convert, and training converges with bf16 and
-fp32 masters."""
+fp32 masters. The compiled weight round trip matches eager on all-zero blocks."""
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from halo.kernels.lowp import quantization
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
@@ -109,11 +110,33 @@ def test_converges_both_masters():
         )
 
 
+def test_compiled_round_trip_matches_eager_on_zero_blocks():
+    """The compiled ``_round_trip`` EP expert weights take (``cached_fake_quant``) flushes subnormals, which turned an
+    all-zero mxfp8 block into 0/0 = NaN (#151). On the repro tensor, one expert's first 32 rows zero: no NaN, the zero
+    blocks exactly 0, and every value equal to eager's."""
+    torch.manual_seed(0)
+    w = torch.randn(4, 64, 32, device=DEV, dtype=torch.bfloat16) * 0.05
+    w[1, :32, :] = 0
+    for fmt in ("mxfp8", "mxfp4"):
+        compiled = quantization._round_trip(w, fmt, 1)
+        assert not quantization._compile_failed, f"{fmt}: the round trip fell back to eager, so nothing was compiled"
+        eager = quantization._block_round_trip(w, fmt, 1)
+        assert not compiled.isnan().any(), f"{fmt}: {int(compiled.isnan().sum())} NaNs from the compiled round trip"
+        assert torch.equal(compiled[1, :32, :], torch.zeros_like(compiled[1, :32, :])), f"{fmt}: zero block not 0"
+        assert torch.equal(compiled, eager), f"{fmt}: compiled and eager round trips differ"
+        print(f"  {fmt}: compiled round trip on zero blocks equals eager, no NaN — OK")
+
+
 @gpu_test_main(exact_world_size=1, prefix="lowp_production", partial_state=False)
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
     record_check(checks, "conversion_scope", test_conversion_scope)
     record_check(checks, "converges_both_masters", test_converges_both_masters)
+    record_check(
+        checks,
+        "compiled_round_trip_matches_eager_on_zero_blocks",
+        test_compiled_round_trip_matches_eager_on_zero_blocks,
+    )
     return {"checks": checks}
 
 
