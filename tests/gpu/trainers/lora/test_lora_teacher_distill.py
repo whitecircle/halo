@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """LoRA, QLoRA and native expert LoRA on the teacher-distillation trainer: adapter-only training and an adapter
-checkpoint round trip, with Liger on."""
+checkpoint round trip, with Liger on. ``--chunked`` trains through the chunked loss with a LoRA on ``lm_head`` too, and
+requires that adapter to move."""
 
 import argparse
 import math
@@ -16,6 +17,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.adapters import (
+    attention_target_modules,
     check_adapters_moved,
     check_only_adapters_trainable,
     load_peft_model,
@@ -55,6 +57,7 @@ def run(ctx) -> dict:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", default="lora", choices=["lora", "qlora", "lora_ep", "expert_lora"])
     parser.add_argument("--ep", type=int, default=2)
+    parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss, LoRA on lm_head")
     args, _ = parser.parse_known_args()
     mode, ep = args.mode, args.ep
 
@@ -63,7 +66,12 @@ def run(ctx) -> dict:
     parallelism_config = ParallelismConfig(ep_size=ep) if mode in ("lora_ep", "expert_lora") else ParallelismConfig()
     attn = "flex_attention" if parallelism_config.has_ep_group else "sdpa"
     # The trainer wraps it, as the script has it do.
-    student, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
+    head_targets = None
+    if args.chunked and mode != "expert_lora":
+        head_targets = [*attention_target_modules(model_name_for(mode, parallelism_config)), "lm_head"]
+    student, tokenizer, peft_config = load_peft_model(
+        mode, parallelism_config, attn_implementation=attn, lora_target_modules=head_targets
+    )
     expert_lora = model_has_expert_lora(student)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
 
@@ -98,6 +106,7 @@ def run(ctx) -> dict:
         distill_loss="kl_divergence",
         distill_temperature=1.0,
         distill_alpha=0.5,
+        use_chunked_distillation_loss=args.chunked,
     )
     trainer = DistributedTeacherDistillationTrainer(
         student_model=student,
@@ -128,6 +137,11 @@ def run(ctx) -> dict:
     ok, detail = check_adapters_moved(adapters_before, adapters_after)
     checks["adapters_moved"] = ok
     log(f"  [moved] {detail}")
+    if head_targets is not None:
+        head_b = [key for key in adapters_before if "lm_head" in key and "lora_B" in key]
+        checks["lm_head_adapter_moved"] = bool(head_b) and all(
+            not torch.equal(adapters_before[key], adapters_after[key]) for key in head_b
+        )
 
     ok, detail = save_and_check_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
     checks["adapter_checkpoint"] = ok

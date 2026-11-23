@@ -27,10 +27,11 @@ class _Accelerator:
 class _OnlineStub:
     """Borrows the real gate + hook off the trainer without constructing one (needs vLLM)."""
 
-    def __init__(self, *, std_floor=0.0, rlrr=None, drop_degenerate=False):
+    def __init__(self, *, std_floor=0.0, rlrr=None, drop_degenerate=False, use_maxrl=False):
         self._scale_rewards_std_floor = std_floor
         self._rlrr_config = rlrr
         self._drop_degenerate_groups = drop_degenerate
+        self._use_maxrl = use_maxrl
         self.num_generations = G
         self.args = _Args()
         self.accelerator = _Accelerator()
@@ -62,6 +63,7 @@ def test_std_floor_alone_arms_the_reward_stash():
     [
         {"rlrr": object()},
         {"drop_degenerate": True},
+        {"use_maxrl": True},
     ],
 )
 def test_other_hooks_still_arm_the_stash(kwargs):

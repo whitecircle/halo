@@ -333,10 +333,16 @@ class BalancingBiasCallback(MoELoadMetricsBase):
     bias adds to detached top-k scores, so gradients flow through the unbiased gate. ``expert_load_counter`` is a plain
     attribute, unseen by ``state_dict()`` and the PP lazy loader. The ``moe/*`` summary is a periodic host sync."""
 
-    def __init__(self, update_rate: float = 1e-3, exclude_last_slot: bool = False, log_every_n_steps: int = 1):
+    def __init__(
+        self,
+        update_rate: float = 1e-3,
+        exclude_last_slot: bool = False,
+        log_every_n_steps: int = 1,
+        top_k: int | None = None,
+    ):
         if update_rate <= 0:
             raise ValueError(f"update_rate must be > 0, got {update_rate}")
-        super().__init__(exclude_last_slot=exclude_last_slot, log_every_n_steps=log_every_n_steps)
+        super().__init__(exclude_last_slot=exclude_last_slot, log_every_n_steps=log_every_n_steps, top_k=top_k)
         self.update_rate = float(update_rate)
 
     def on_train_begin(self, args, state, control, **kwargs):
@@ -391,6 +397,8 @@ class BalancingBiasCallback(MoELoadMetricsBase):
                 f"{sorted(widths)}. The per-slot bias update and its all-reduce assume a single width."
             )
         counters = torch.stack([_expert_load_counter(r).to(device) for r in routers], dim=0)
+        # This rank's own counts, before the reduce: the run totals reduce once, when read.
+        self._count_step(state.global_step, counters.unbind(0))
         if get_global_world_size() > 1:
             dist.all_reduce(counters, op=dist.ReduceOp.SUM, group=self.reduce_group)
 

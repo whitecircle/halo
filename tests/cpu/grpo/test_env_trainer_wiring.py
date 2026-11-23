@@ -54,6 +54,30 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     return trainer
 
 
+@pytest.mark.parametrize(
+    ("grpo", "config", "price", "match"),
+    [
+        ({"scale_rewards": "group"}, {}, 0.0, r"use_maxrl with scale_rewards='group'"),
+        ({"scale_rewards": "none"}, {"scale_rewards_std_floor": 0.05}, 0.0, r"use_maxrl with scale_rewards_std_floor"),
+        ({"scale_rewards": "none"}, {}, 0.5, "use_maxrl with reasoning_price on"),
+        ({"scale_rewards": "none"}, {"reasoning_floor": 0.2}, 0.0, "use_maxrl with reasoning_floor on"),
+    ],
+    ids=["std-scaling", "std-floor", "reasoning-price", "reasoning-floor"],
+)
+def test_each_maxrl_refusal_fires_when_the_rollout_state_is_configured(tmp_path, grpo, config, price, match):
+    """Every refusal from the config alone, so a run that would divide by a mean it cannot trust never starts."""
+    trainer = _trainer(tmp_path, grpo=grpo, use_maxrl=True, rollout_stop_tokens=[_STOP], **config)
+    trainer._rollout_env.reasoning_terms_for_effort = lambda level: (256, price)
+    with pytest.raises(ValueError, match=match):
+        trainer._configure_rollout_state()
+
+
+def test_maxrl_without_a_conflict_configures(tmp_path):
+    trainer = _trainer(tmp_path, grpo={"scale_rewards": "none"}, use_maxrl=True, rollout_stop_tokens=[_STOP])
+    trainer._configure_rollout_state()
+    assert trainer.async_config.use_maxrl
+
+
 def _callbacks(trainer, cls) -> list:
     return [callback for callback in trainer.callback_handler.callbacks if isinstance(callback, cls)]
 

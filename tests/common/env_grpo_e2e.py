@@ -48,6 +48,7 @@ from tests.common.on_policy_e2e import (
     qa_dataset,
     record_adapter_training,
     record_dp_layout,
+    record_maxrl_logged,
     record_optimizer_restore,
     record_parallelism_engaged,
     record_resume_continuity,
@@ -149,13 +150,31 @@ def draw_number_dataset(num_samples: int) -> Dataset:
     )
 
 
-def _environment_and_dataset(environment_type: str | None) -> tuple[dict, Dataset]:
+# MaxRL refuses a negative episode reward. The default pricing books -0.1 for a failed tool call, and ReAct -0.05 for a
+# turn without a Thought, so a MaxRL row turns those penalties off.
+MAXRL_SHAPING: dict[str | None, dict[str, float]] = {
+    None: {"tool_error_penalty": 0.0},
+    "react_math": {"tool_error_penalty": 0.0, "no_thought_penalty": 0.0},
+}
+
+
+def _environment_and_dataset(environment_type: str | None, maxrl: bool = False) -> tuple[dict, Dataset]:
     """The trainer's environment keywords and rows: :class:`DrawNumberEnvironment`, or the registry's
-    ``environment_type`` on arithmetic rows."""
+    ``environment_type`` on arithmetic rows. ``maxrl`` zeroes the penalties that make a reward negative."""
+    if maxrl and environment_type not in MAXRL_SHAPING:
+        raise ValueError(f"no non-negative shaping for environment_type {environment_type!r} in MAXRL_SHAPING")
+    shaping = MAXRL_SHAPING[environment_type] if maxrl else {}
     if environment_type is None:
-        environment = {"environment_cls": DrawNumberEnvironment, "environment_kwargs": {"max_turns": MAX_TURNS}}
+        environment = {
+            "environment_cls": DrawNumberEnvironment,
+            "environment_kwargs": {"max_turns": MAX_TURNS, **shaping},
+        }
         return environment, draw_number_dataset(8)
-    environment = {"environment_config": EnvironmentConfig(environment_type=environment_type, max_turns=MAX_TURNS)}
+    environment = {
+        "environment_config": EnvironmentConfig(
+            environment_type=environment_type, max_turns=MAX_TURNS, environment_kwargs=shaping
+        )
+    }
     return environment, qa_dataset(8)
 
 
@@ -183,7 +202,9 @@ def _make_trainer(
     )
 
 
-def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | None, chunked: bool) -> GRPOConfig:
+def _grpo_config(
+    *, output_dir: str, max_steps: int, save: bool, peft: str | None, chunked: bool, maxrl: bool = False
+) -> GRPOConfig:
     return GRPOConfig(
         output_dir=output_dir,
         max_steps=max_steps,
@@ -209,6 +230,7 @@ def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | Non
         max_completion_length=128,
         beta=0.0,
         remove_unused_columns=False,
+        **({"scale_rewards": "none"} if maxrl else {}),
     )
 
 
@@ -226,6 +248,7 @@ def _async_config(
     length_ordered: bool | None,
     phase_times: bool,
     stop_tokens: list[str],
+    maxrl: bool = False,
 ) -> AsyncRolloutConfig:
     return AsyncRolloutConfig(
         rollout_backend=backend,
@@ -251,6 +274,7 @@ def _async_config(
         model_name=model_name,
         # Train the ids the engine sampled, not a re-tokenization of the text it rendered.
         train_on_sampled_tokens=True,
+        use_maxrl=maxrl,
     )
 
 
@@ -529,6 +553,7 @@ def run_env_grpo_e2e(
     chunked: bool = False,
     length_ordered: bool | None = None,
     phase_times: bool = False,
+    maxrl: bool = False,
 ) -> dict:
     """Train Environmental GRPO against a live ``backend`` server and assert the sync landed. ``model_name`` must
     already be served. ``layout`` is the policy's parallel shape, and :class:`DrawNumberEnvironment` guarantees a step
@@ -562,7 +587,7 @@ def run_env_grpo_e2e(
 
     ensure_model_downloaded(model_name, ctx.rank)
     output_dir = shared_output_dir(ctx) if resume else ctx.output_dir
-    environment, dataset = _environment_and_dataset(environment_type)
+    environment, dataset = _environment_and_dataset(environment_type, maxrl=maxrl)
     async_config = _async_config(
         backend=backend,
         server_url=server_url,
@@ -576,8 +601,11 @@ def run_env_grpo_e2e(
         length_ordered=length_ordered,
         phase_times=phase_times,
         stop_tokens=[HARMONY_CALL_TOKEN] if HARMONY_CALL_TOKEN in tokenizer.get_vocab() else [],
+        maxrl=maxrl,
     )
-    grpo_config = _grpo_config(output_dir=output_dir, max_steps=max_steps, save=resume, peft=peft, chunked=chunked)
+    grpo_config = _grpo_config(
+        output_dir=output_dir, max_steps=max_steps, save=resume, peft=peft, chunked=chunked, maxrl=maxrl
+    )
 
     parallelism_config = layout.parallelism_config()
     model, peft_config = load_policy(
@@ -671,6 +699,8 @@ def run_env_grpo_e2e(
     losses, trained = record_step_losses(trainer, checks)
     metrics["steps_logged"] = float(len(losses))
     metrics["training_had_a_gradient"] = float(trained)
+    if maxrl:
+        record_maxrl_logged(trainer, checks)
     if pool_starts is not None:
         record_follower_skips_rollouts(trainer, checks, pool_starts, acquired)
     if prefetch_depth is not None and not trainer._is_tp_follower():

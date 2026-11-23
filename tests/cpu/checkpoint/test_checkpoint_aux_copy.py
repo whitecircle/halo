@@ -10,6 +10,7 @@ from transformers.trainer import SCHEDULER_NAME, TRAINER_STATE_NAME
 from halo.checkpoint.atomic import atomic_torch_save, create_staged_file
 from halo.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
+    MOE_EXPERT_TOKEN_COUNTS_FILE,
     OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
@@ -56,6 +57,7 @@ SIDECARS = (
     ROUTER_BALANCING_BIASES_FILE,
     REFERENCE_LOGPS_FILE,
     prefetch_pending_filename(0, 2),
+    MOE_EXPERT_TOKEN_COUNTS_FILE,
 )
 # modules.json names these directories, and 2_Dense carries weights no merge rewrites.
 MODULE_DIRS = ("1_Pooling", "2_Dense", "original_adapter_config")

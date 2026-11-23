@@ -23,7 +23,7 @@ rewards:
 | Field | Default | Effect |
 |---|---|---|
 | `source` | — | Where the score comes from (table below) |
-| `name` | Required for the external terms (`judge`, `reward_model`); defaulted otherwise | The metric key: `reward/<name>` on the environment arm, `rewards/<name>/mean` on the online arm. Unique. The `environment` term is always `objective`; any other `name` raises |
+| `name` | Required for the external terms (`judge`, `reward_model`, `whitecircle`); defaulted otherwise | The metric key: `reward/<name>` on the environment arm, `rewards/<name>/mean` on the online arm. Unique. The `environment` term is always `objective`; any other `name` raises |
 | `weight` | `1.0` (`0` for a veto judge) | Signed; negative makes a penalty |
 | `exponent` | `1.0` | `> 0`. Above 1 is convex credit (half a score earns under half the weight), below 1 concave |
 
@@ -34,11 +34,12 @@ There is no constant-offset knob, failure offset included: a constant cancels in
 | `environment` | the environment's own grade | environments |
 | `judge` | a [generative judge](judge.md): a score over `requirements`, or a veto over `checks` | both; a veto judge environments only |
 | `reward_model` | a [served](reward-model.md) Bradley-Terry or sequence-classification model | both |
+| `whitecircle` | a [White Circle](whitecircle.md) policy check of the completion | both |
 | `accuracy`, `format` | the [RLVR graders](../online.md#rewards) | online |
 
 ## Common options
 
-The external sources (`judge`, `reward_model`) score the finished completion and take:
+The external sources (`judge`, `reward_model`, `whitecircle`) score the finished completion and take:
 
 | Option | Default | Effect |
 |---|---|---|
@@ -67,7 +68,7 @@ Judge requests retry (`halo/inference/openai_client.py`):
 - up to four times, with `request_timeout` bounding each attempt, not the whole call;
 - four more times, at 2, 4, 8 and 16 s, on a reply with no choices that carries a 408, 429, 500, 502, 503 or 504 error code (how OpenRouter reports a rate-limited model).
 
-One stuck call can hold a step for minutes; lower the timeout first.
+One stuck call can hold a step for minutes; lower the timeout first. White Circle requests retry on their own schedule ([Failures](whitecircle.md#failures)).
 
 ## Environment arm
 
@@ -123,3 +124,4 @@ Some episodes never reach a scorer:
 
 - [Generative Judge](judge.md)
 - [Served Reward Model](reward-model.md)
+- [White Circle](whitecircle.md)

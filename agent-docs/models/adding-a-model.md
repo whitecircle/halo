@@ -53,7 +53,7 @@ Guard each upstream signature a replacement is written for with `verify_upstream
 
 ## Declare the head transform
 
-The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`, as does the PP stage seam. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or the chunked path refuses the family.
+The chunked GRPO log-probs (`use_chunked_grpo_logprobs`) and the chunked distillation loss of teacher distillation and self-distillation (`use_chunked_distillation_loss`) compute logits from the backbone's hidden state instead of calling `*ForCausalLM.forward`, as does the PP stage seam. Whatever that forward applies around `lm_head` — a hidden-state scale, a logit scale or division, a softcap, a vocabulary cut — has to be declared, or the chunked path refuses the family.
 
 Declare it with a `HeadTransformSpec` subclass in `halo/models/head_transform.py`: claim the causal-LM class names in `HF_MODULE_NAMES` and build the `HeadTransform` from the config in `transform`. Resolution walks the class's MRO. A family with no spec gets the base, which applies `final_logit_softcapping` where the config sets it.
 
