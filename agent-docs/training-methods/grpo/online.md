@@ -129,7 +129,7 @@ For a shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small 
 | Knob | Set it to | Why |
 |---|---|---|
 | `loss_type` | `dapo` (TRL's default) | Length-unbiased: normalizes over the global active-token count, unlike `grpo`'s per-sequence mean |
-| `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens |
+| `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens; inert at the defaults, like `epsilon` (below) |
 | `scale_rewards` | `batch` for a shaped reward | `group` divides by the group's own spread, inflating shaping noise to full-scale advantages |
 | `mask_truncated_completions` | `true` (default `false`) | Drops a completion cut at the budget instead of scoring it. Async GRPO widens `truncated` to a turn overflow; its recipes leave it off |
 

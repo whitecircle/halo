@@ -85,13 +85,13 @@ Sweeping `M` (tokens routed to one expert) at the gpt-oss square-expert shape `K
 
 | M | TFLOP/s | AI | regime |
 |---|---|---|---|
-| 128 | 180 | 118 | below ridge → **weight-bandwidth-bound** |
+| 128 | 180 | 118 | below ridge, and far below the memory ceiling too → **occupancy-bound** |
 | 512 | 548 | 378 | above ridge → compute-bound |
 | 8192 | 1375 | 1225 | compute-bound |
 
 The crossover at M≈256–512 is fixed by the shape. Absolute TFLOP/s vary ±10–20% with clocks, more so at the smallest M, whose ~12 µs runtime sits near the launch floor.
 
-At `M=128` the kernel hits ~180 TFLOP/s, about 10% of the 1818 TFLOP/s measured ceiling. ~92% of its bytes are the `2880×2880` weight (16 MB bf16), streamed in full while only 128 token-rows multiply, so the tensor cores finish and idle. Growing `M` amortizes that one weight load over more rows.
+At `M=128` the kernel hits ~180 TFLOP/s, about 10% of the 1818 TFLOP/s measured ceiling. ~92% of its bytes are the `2880×2880` weight (16 MB bf16), streamed in full while only 128 token-rows multiply; that stream is about a quarter of HBM bandwidth, so the limit is the few tiles in flight (§1), not the memory. Growing `M` amortizes that one weight load over more rows.
 
 Per-expert `M` is set by routing:
 
@@ -102,7 +102,7 @@ M ≈ (batch × seq × top_k) / num_experts
 `batch × seq` is the token count the EP group dispatches — EP relocates experts across ranks, it does
 not change how many tokens reach one expert.
 
-A fine-grained MoE (many narrow experts, high top-k — Qwen3.6 has 256) puts few tokens on each one, deep in the bandwidth-bound regime. There the per-expert loop fires hundreds of tiny launches, so grouped GEMM's single batched launch wins big. It also collapses hundreds of autograd nodes, each pinning its own saved activations, into two.
+A fine-grained MoE (many narrow experts, high top-k — Qwen3.6 has 256) puts few tokens on each one, at the small-M end of the table above, where the limit is the few tiles in flight (§1), not the memory. There the per-expert loop fires hundreds of tiny launches, so grouped GEMM's single batched launch wins big. It also collapses hundreds of autograd nodes, each pinning its own saved activations, into two.
 
 A coarse MoE (gpt-oss: 32–128 experts, `2880²`) gives each expert more tokens and bigger matmuls that a single cuBLAS call already handles, so the grouped win shrinks ([Grouped GEMM](../optimization/grouped-gemm.md)).
 
@@ -228,7 +228,7 @@ An LM's final step multiplies each position's hidden state by `lm_head` to produ
 
 FLCE never materializes it. It fuses the `lm_head` projection and cross-entropy into one kernel that processes the sequence in chunks, computing each block's logits, loss, and gradient and freeing them before the next — often the difference between a long sequence and OOM.
 
-The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (preference and distillation need logits for log-probs), turns off entropy logging, and forces it off under TP and PP (under CP the Ulysses wrapper runs it over each chunk). It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`, `nemotron_h`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
+The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (the preference and distillation losses read per-token log-probs or a whole distribution, which the fused kernel does not return), turns off entropy logging, and forces it off under TP and PP (under CP the Ulysses wrapper runs it over each chunk). It is default-on for the large-vocab families whose logits plane is the binding limit (`zaya`, `deepseek_v4`, `glm4_moe_lite`, `nemotron_h`), opt-in elsewhere (`liger_kernel_config: {fused_linear_cross_entropy: true}`). Per-model defaults and the measured savings: [Liger Kernels](../optimization/liger-kernels.md).
 
 ### What fusion does not buy
 
