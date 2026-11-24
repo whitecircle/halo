@@ -8,7 +8,7 @@ from typing import Any
 from datasets import Dataset, DatasetDict
 
 from halo.data.pipeline.coordinated_map import coordinated_pack, resolve_map_num_proc
-from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, PreprocessingConfig
+from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, PreprocessingConfig, is_chat_bake
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo, write_stamped_sidecar
 from halo.data.preprocessed.tokenization import resolve_label_eos_token_ids, tokenize_dataset, tokenize_vlm_dataset
 from halo.data.sources.paths import METADATA_FILE, eval_split_name
@@ -119,11 +119,12 @@ def _resolve_baked_splits(dataset: Dataset | DatasetDict) -> tuple[Dataset | Non
 
 
 def _tokenize_splits(
-    splits: dict[str, Dataset | None], tokenizer_or_processor: Any, tokenizer: Any, config: PreprocessingConfig
+    splits: dict[str, Dataset | None],
+    tokenizer_or_processor: Any,
+    config: PreprocessingConfig,
+    eos_token_ids: frozenset[int] | None,
 ) -> dict[str, Dataset]:
     tokenize = tokenize_vlm_dataset if config.is_vlm else tokenize_dataset
-    # Before any tokenization pass: the set reads the model config, and an unreadable one would surface only later.
-    eos_token_ids = resolve_label_eos_token_ids(config, tokenizer) if config.train_on_completions_only else None
     tokenized = {}
     for split, split_data in splits.items():
         if split_data is None:
@@ -202,12 +203,18 @@ def preprocess_dataset(
 
     # The VLM tokenization takes the processor itself; the metadata needs the tokenizer it wraps.
     tokenizer = resolve_tokenizer(tokenizer_or_processor) if config.is_vlm else tokenizer_or_processor
-    tokenized = _tokenize_splits({"train": train_data, "test": test_data}, tokenizer_or_processor, tokenizer, config)
+    # Before any tokenization pass: the set reads the model config, and an unreadable one would surface only later.
+    eos_token_ids = (
+        resolve_label_eos_token_ids(config, tokenizer) if is_chat_bake(config.mode, config.is_vlm) else None
+    )
+    splits = {"train": train_data, "test": test_data}
+    tokenized = _tokenize_splits(splits, tokenizer_or_processor, config, eos_token_ids)
     metadata = PreprocessedDatasetMetadata(
         model_name=config.model_name_or_path,
         tokenizer_vocab_size=len(tokenizer),
         # The processor's for a VLM bake: it renders with a template of its own.
         rendered_chat_template=tokenizer_or_processor.chat_template if config.mode == "chat" else None,
+        eos_token_ids=sorted(eos_token_ids) if eos_token_ids is not None else None,
         max_length=config.max_length,
         packed=config.pack_sequences,
         packing_strategy=config.packing_strategy if config.pack_sequences else None,

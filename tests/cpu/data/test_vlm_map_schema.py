@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
-"""VLM map Arrow-schema stability on mixed datasets: ``vlm_map_features`` pins the schema, since shard-wise
-inference diverges when image and text rows land in different workers. ``_closure_fingerprint`` covers captured
-helpers, so editing one invalidates the cache."""
+"""VLM map Arrow-schema stability on mixed datasets: ``vlm_map_features`` pins the schema, since inference diverges
+when image and text rows land in different workers or a level column opens on unlabelled rows.
+``_closure_fingerprint`` covers captured helpers, so editing one invalidates the cache."""
 
 import importlib.util
+import inspect
 
 import numpy as np
 import pytest
-from datasets import Dataset
+from datasets import Dataset, DatasetDict
 from PIL import Image
 
-from halo.data.pipeline import map_cache_key
+from halo.configs.distillation import SelfDistillScriptArguments
+from halo.data.pipeline import map_cache_key, vlm_rows
 from halo.data.pipeline.map_cache_key import _closure_fingerprint, function_cache_id
-from halo.data.pipeline.vlm_rows import build_vlm_row_processor, vlm_map_features
+from halo.data.pipeline.vlm_rows import build_vlm_row_processor, prepare_vlm_dataset, vlm_map_features
+
+# The rows a map writer types a column from when nothing pins it.
+_WRITER_BATCH_ROWS = inspect.signature(Dataset.map).parameters["writer_batch_size"].default
 
 
 def _image(color: int) -> Image.Image:
@@ -49,6 +54,30 @@ def test_mixed_modality_multiproc_map_with_pinned_features():
     assert text_row["history"][0]["content"] == [{"type": "text", "text": "text question 3"}], (
         "text rows must share the parts-form schema"
     )
+
+
+@pytest.mark.parametrize("keep", [(), ("answer",)], ids=["no-kept-column", "kept-column"])
+def test_the_map_carries_each_rows_level_past_a_writer_batch_of_unlabelled_rows(monkeypatch, tmp_path, keep):
+    """The collator renders the mapped ``reasoning_effort``. Unpinned, a first writer batch of null levels types the
+    column ``null``, which the first level fails to cast to. The kept column stands for self-distillation's privileged
+    ones, which a split may hold as nulls alone, so each split keeps its own type."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
+    monkeypatch.setattr(vlm_rows, "_filter_vlm_over_length", lambda ds, *args: ds)
+    monkeypatch.setattr(vlm_rows, "reject_unrendered_reasoning_effort", lambda *args: None)
+    levels = [None] * _WRITER_BATCH_ROWS + ["high", None]
+    conversations = [[{"role": "user", "content": "hi"}]] * len(levels)
+    splits = {
+        name: Dataset.from_dict({"conversation": conversations, "effort": levels, "answer": [answer] * len(levels)})
+        for name, answer in (("train", "4"), ("test", None))
+    }
+    args = SelfDistillScriptArguments(
+        conversation_field="conversation", reasoning_effort_field="effort", assistant_message_template="assistant"
+    )
+    mapped = prepare_vlm_dataset(DatasetDict(splits), args, None, None, 128, 1, eos_token_ids=frozenset(), keep=keep)
+    for name, split in splits.items():
+        assert mapped[name]["reasoning_effort"] == levels
+        kept = mapped[name]["answer"] if "answer" in mapped[name].column_names else None
+        assert kept == (split["answer"] if keep else None)
 
 
 def _probe_wrapper(tmp_path, module_name: str, helper_body: str):

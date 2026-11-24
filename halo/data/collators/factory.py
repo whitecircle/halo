@@ -32,6 +32,7 @@ def select_data_collator(
     use_context_parallel: bool = False,
     train_on_last_assistant_only: bool = False,
     model_config=None,
+    generation_config=None,
     per_device_train_batch_size: int = 1,
     keeps_packed_rows: bool = False,
     allow_cross_document_linear_attention: bool = False,
@@ -39,7 +40,8 @@ def select_data_collator(
     emit_varlen_one_document: bool = False,
 ):
     """The collator matching the config, ``None`` for TRL's own; raises on a combination no collator can serve.
-    ``model_config`` supplies the eos set that ends assistant turns (GLM-4's role-marker templates).
+    ``model_config`` and ``generation_config`` supply the eos set that ends assistant turns (GLM-4's role-marker
+    templates, gpt-oss's ``<|call|>``).
 
     ``emit_varlen_one_document`` hands a one-document batch its varlen set where the model takes it, outside PP (whose
     stages build their own) and the CP routes (Ulysses hands the kernel its own ``cu_seqlens``). Only for a caller
@@ -64,7 +66,7 @@ def select_data_collator(
         "response_prompt_template": assistant_message_template,
         "tokenizer": tokenizer,
         "train_on_last_assistant_only": train_on_last_assistant_only,
-        "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config),
+        "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config, generation_config),
     }
     if train_on_completions_only and getattr(tokenizer, "chat_template", None):
         reject_untrainable_completions(

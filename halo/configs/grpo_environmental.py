@@ -29,6 +29,7 @@ from halo.configs.rollout_arguments import RolloutBudgetArguments, RolloutSampli
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from halo.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, nccl_timeout
 from halo.environments.rollout_config import (
+    ENABLE_THINKING,
     SGLANG_BACKEND,
     RolloutBackend,
     RolloutConfig,
@@ -335,7 +336,8 @@ class AsyncRolloutConfig(
             "help": "Train on the server's sampled token ids, each assistant turn its own row sharing the "
             "trajectory's advantage, instead of re-tokenizing a chat-template re-render. vLLM needs "
             "--return-tokens-as-token-ids (SGLang no flag), and a trajectory with an uncaptured turn falls back to "
-            "one re-tokenized row. See agent-docs/training-methods/async-grpo/objective.md#training-rows."
+            "one re-tokenized row, or is dropped under an environment whose view rewrites earlier turns, which "
+            "requires this field. See agent-docs/training-methods/async-grpo/objective.md#training-rows."
         },
     )
     routing_replay: Literal["none", "recompute", "rollout"] = field(
@@ -433,8 +435,9 @@ class AsyncRolloutConfig(
         default_factory=list,
         metadata={
             "help": "Special-token strings that end a turn, sent as the engine's stop_token_ids; list the model's "
-            "tool-call terminator when it is no eos (gpt-oss <|call|> under harmony-disabled serving, refused without "
-            "it on a tool environment). Empty = only eos stops a turn. "
+            "tool-call terminator when the served generation config lists no such eos (gpt-oss <|call|> under "
+            "harmony-disabled serving, refused without it on a tool environment whose checkpoint omits it). Empty = "
+            "only the eos ids stop a turn. "
             "See agent-docs/training-methods/async-grpo/episodes.md#tool-calls."
         },
     )
@@ -443,8 +446,18 @@ class AsyncRolloutConfig(
         metadata={
             "help": "Chat-template variables sent with every rollout request (chat_template_kwargs) and applied to "
             "the trainer's own renders, so both sides see one template state. reasoning_effort is refused here: "
-            "it is per episode and travels as the request's top-level field. "
-            "See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
+            "it is per episode and travels as the request's top-level field. enable_thinking is refused too: "
+            "rollout_thinking writes it. See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
+        },
+    )
+    rollout_thinking: bool = field(
+        default=True,
+        metadata={
+            "help": "Sample the policy with a reasoning block per turn. false adds enable_thinking: false to "
+            "rollout_chat_template_kwargs, so the template closes the block on the engine and in the trainer's "
+            "renders and the model works in its visible messages and tool calls; it needs a chat template that "
+            "reads the switch, and refuses the reasoning-only knobs. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#thinking-off."
         },
     )
     enable_prefetch: bool | None = field(
@@ -506,6 +519,8 @@ class AsyncRolloutConfig(
     )
 
     def _validate_fields(self) -> None:
+        """Normalizes ``rollout_chat_template_kwargs`` to carry ``enable_thinking: False`` under ``rollout_thinking:
+        false``, so the engine's renders and the trainer's close the reasoning block alike."""
         super()._validate_fields()
         owner = type(self).__name__
         # A 0 divides by zero (the sync period, the empty actor list), reads as unset or fails inside the DataLoader.
@@ -576,6 +591,17 @@ class AsyncRolloutConfig(
                 f"rollout_adapter_dir={self.rollout_adapter_dir!r} needs rollout_adapter_sync: true and an absolute "
                 "path the rollout servers read at the same path."
             )
+        # The normalized form below passes, so validating a normalized config again holds.
+        if ENABLE_THINKING in self.rollout_chat_template_kwargs and (
+            self.rollout_thinking or self.rollout_chat_template_kwargs[ENABLE_THINKING] is not False
+        ):
+            raise ValueError(
+                "rollout_chat_template_kwargs must not carry 'enable_thinking': set rollout_thinking, which writes the "
+                "switch for the engine and the trainer's renders alike."
+            )
+        if not self.rollout_thinking:
+            self._reject_reasoning_knobs_without_thinking(owner)
+            self.rollout_chat_template_kwargs = {**self.rollout_chat_template_kwargs, ENABLE_THINKING: False}
         if self.rollout_weight_precision != "bf16" and self.rollout_adapter_sync:
             raise ValueError(
                 f"rollout_weight_precision={self.rollout_weight_precision!r} cannot be combined with "
@@ -619,6 +645,31 @@ class AsyncRolloutConfig(
                 f"{owner}: rollout_server_url={self.rollout_server_url!r} is set beside rollout_server_configs, whose "
                 "entries alone name the servers, so it would never be dialed. Remove it, or add it to the list."
             )
+
+    def _reject_reasoning_knobs_without_thinking(self, owner: str) -> None:
+        unread = "it sets how the reasoning terms charge, and no turn reasons"
+        cap = (
+            "a reasoning cap counts each turn's sampled tokens as reasoning up to a close the turn never writes, so "
+            "a long visible turn reads as reasoning that ran to the cap"
+        )
+        refusals = {
+            "reasoning_floor": (
+                self.reasoning_floor > 0,
+                "the floor charges a failed episode its shortfall under its level's reasoning_budget, all of it "
+                "without reasoning, so every failed episode would pay the full weight: a gradient back toward "
+                "reasoning",
+            ),
+            "reasoning_price_cap": (differs_from_default(self, "reasoning_price_cap"), unread),
+            "reasoning_terms_in_failed_groups": (self.reasoning_terms_in_failed_groups, unread),
+            "rollout_max_thinking_tokens": (self.rollout_max_thinking_tokens is not None, cap),
+            "rollout_max_answer_tokens": (self.rollout_max_answer_tokens is not None, cap),
+        }
+        for knob, (is_set, why) in refusals.items():
+            if is_set:
+                raise ValueError(
+                    f"{owner}: {knob} is set with rollout_thinking: false: {why}. Remove it, or set rollout_thinking: "
+                    "true."
+                )
 
     def _stops_on_skipped_updates(self) -> bool:
         return self.early_stop_on_skipped_updates

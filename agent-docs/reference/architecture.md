@@ -38,7 +38,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | Leaf | Holds |
 |---|---|
 | `halo/data/turn_markers.py` | what delimits an assistant turn: the response marker, the terminator set, and the construction-time marker refusals |
-| `halo/data/completion_spans.py` | the named span policies, the span search, the one span-to-labels rule (`build_span_labels`) and the completion-only label builders over it |
+| `halo/data/completion_spans.py` | the named span policies, the span search, its bounds (`resolve_span_bounds`: the next turn of another role, and the restart after a block the template injects into the model's turn), the one span-to-labels rule (`build_span_labels`) and the completion-only label builders over it |
 | `halo/models/introspection/unwrapping.py` | wrapper peeling (framework, toolkit, PEFT) and the plain hub spelling of a name read off a wrapped tree |
 | `halo/models/introspection/module_tree.py` | module-tree lookups: the decoder-layer list and the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding, the embedding modules, module paths by identity, the attribute probe |
 | `halo/models/introspection/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins |
@@ -75,7 +75,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/data/vlm_render.py` | the VLM chat render, the processor call, the over-length refusal, image decoding and the placeholder token ids; one render for the batch and the offline bake, so both tokenize a row identically |
 | `halo/data/vlm_detection.py` | whether a run takes the VLM data path: the image-column spellings, a dataset's image evidence and the cross-rank verdicts and refusals off them |
 | `halo/data/preprocessed/metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts, readable without importing the bake that wrote the rows |
-| `halo/environments/rollout_config.py` | `RolloutConfig`, the rollout defaults `AsyncRolloutConfig` reads, the reasoning-effort levels, and the stop-token and reasoning-end id resolvers; pickled to the Ray rollout actors, which keeps the Ray import out of `halo.configs` |
+| `halo/environments/rollout_config.py` | `RolloutConfig`, the rollout defaults `AsyncRolloutConfig` reads, the reasoning-effort levels, the stop-token and reasoning-end id resolvers, and the chat-template check of `rollout_thinking: false`; pickled to the Ray rollout actors, which keeps the Ray import out of `halo.configs` |
 | `halo/config_validation.py` | the bounds guards, the validation base, the declared-default comparison and the argument refusals — standard library only |
 | `halo/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only, so a family registers by subclassing, with no list to edit |
 | `halo/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `halo/config_validation.py` guards are its only first-party imports, so `rewards:` parses at config time without the scorers' SDK client |

@@ -467,7 +467,9 @@ rescale. A missing `adapter_config.json` raises too.
 Under CP `remap_cp_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
 spelling, read off the same PEFT selection the save made, so every adapter-name spelling PEFT writes
 (`lora_A.default.weight`, `modules_to_save.default.weight`, `lora_embedding_A.default`, a DoRA magnitude) maps
-back; a key it does not produce fails the check above. See
+back; a key it does not produce fails the check above. A mixed run's expert keys keep the CP wrapper's `model.`
+level when saved under CP, and the restore matches them to the live adapters by `plain_module_name`, so a mixed
+adapter resumes at any `cp_size`. See
 [Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).
 
 ## Merging adapters
@@ -509,7 +511,8 @@ draw (`apply_adapter`, `halo/checkpoint/tools/adapter_merge.py`).
 
 The merge re-applies the run's training sidecars to the merged model and copies both files into the output:
 the GptOss sinks policy recorded in `training_provenance.json`, and `router_balancing_biases.pt` into the
-family's native routing-bias slots, so the merged model routes on the trained bias.
+family's native routing-bias slots at fp32, so the merged model routes on the trained bias. A router whose family has
+no slot trained a transient bias no checkpoint carries, which the merge drops, naming those routers in its log.
 
 The in-memory merge **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LORA` or
 `LORA_WITH_EP_EXPERT_LORA`, or tensor keys ending at `.experts.<attr>.lora_{A,B}`), because
@@ -517,9 +520,11 @@ The in-memory merge **refuses native EP expert-LoRA adapters** (`peft_type` of `
 refusal. A stock PEFT adapter on a per-expert `nn.Linear` MoE keys as `.experts.<i>.<proj>.lora_A.default.weight`
 and merges normally; only the grouped namespace is refused.
 
-`merge_peft_adapters.py` folds such an adapter after the fact through its [streaming merge](#streaming-merge),
-automatically for expert-only and mixed adapters. `merge_expert_lora_on_save: true` produces the merged servable
-checkpoint at training time instead, for expert-only **and** mixed runs alike. Each merged training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
+`merge_peft_adapters.py` routes such an adapter, expert-only or mixed, to its [streaming merge](#streaming-merge),
+which folds both halves and the balancing sidecar except on the families and adapters it refuses.
+`merge_expert_lora_on_save: true` produces the merged servable checkpoint at training time instead, for expert-only
+**and** mixed runs alike, and is the only fold for an expert adapter the stream refuses. Each merged training
+checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
 base, so the run continues from its trained adapters rather than the fold
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
@@ -537,24 +542,46 @@ and with `save_sharded_ep: true`.
 ### Streaming merge
 
 `merge_peft_adapters.py --streaming` (automatic for an adapter holding native expert LoRA, whose in-memory merge is
-refused) loads no model: it reads each tensor of the base's safetensors shards, folds the adapter into the ones it
-targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
+refused) loads no weights into a model: it reads each tensor of the base's safetensors shards, folds the adapter into
+the ones it targets and writes the result through the streaming shard writer, so host memory is the adapter, one tensor, the
 fp32 expert deltas of the layer being folded and the writer's parts: about one expert layer's fp32 delta times a small
 factor (the preflight budgets 3x), which at 397B scale is tens of GB per layer. Linear LoRA (rslora,
 rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so each tensor equals the in-memory
 merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
 arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace
-the base's. Tensors keep the base's stored dtype and key spelling, so `--dtype` is ignored (logged) and `--device_map`,
-`--fp32_norms` and `--task classification` are refused. The tool resolves every key the adapter rewrites against the base before the
-first write and raises, with no output, when one is absent (a text-only class's spelling, a fused or renamed layout,
-a tied head), when the base's experts are not in the family's export layout, when a stored tensor was resized (a
-grown vocabulary) and on embedding LoRA; merge those in memory. A `training_provenance.json` recording neutralized
-GptOss sinks is re-applied: the merge writes every sink tensor at its dtype minimum, as `reset_sinks.py` does, and
-refuses a base that stores none. An adapter that rewrites a tensor the base stores packed (a non-float stored dtype,
-such as NVFP4 nibbles or MXFP8 bytes) is refused: a delta folded into the stored values gives no weight
-([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). An adapter over a quantized base merges when every
-tensor it rewrites is stored as a float, as an attention adapter over gpt-oss's MXFP4 release is. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer replaces them, and
-the adapter config lands in `original_adapter_config/`.
+the base's, and the balancing sidecar's biases land in their native slots at fp32, as the
+[in-memory merge](#merging-adapters) writes them. A `training_provenance.json` recording neutralized GptOss
+sinks is re-applied: the merge writes every sink tensor at its dtype minimum, as `reset_sinks.py` does.
+
+A linear adapter's module path, a `modules_to_save` name and a balancing slot reach the key the base stores them under
+as `from_pretrained` renames it, planned on a weightless shell of the class the base's config names, so a module the
+hub layout spells another way folds into its hub key (GLM-5 Next's `forget_gate.f_a_proj`, stored as `f_a_proj`;
+Laguna's `gate.e_score_correction_bias`, stored as `experts.e_score_correction_bias`). Where the meta device cannot
+build that class (Ling-3.0's remote code on the hub's `rope_scaling: null`), each tensor folds under the key spelling
+its module path, provided the base stores every one so. Expert tensors are matched under the layer's module path.
+Tensors keep the base's stored dtype and key spelling, balancing slots aside, so `--dtype` is ignored (logged) and
+`--device_map`, `--fp32_norms` and `--task classification` are refused. The shell's class comes from the base's
+config, so a remote-code base needs `--trust_remote_code`, off by default for an adapter on a Hub base.
+
+The tool resolves everything it rewrites against the base before the first write and raises, with no output, on:
+
+- a tensor with no stored key of its own: a `text_only_model` adapter over a multimodal base, a tensor the load fuses
+  or splits out of other keys, a tied head, a module path the base respells when the shell cannot be built;
+- expert tensors of a family whose hub layout respells the layer path: DeepSeek-V4, Nemotron-H, Step-3.7 Flash and
+  the multimodal classes of Inkling and Mistral Small 4;
+- base experts outside the family's export layout, or a stored tensor the run resized (a grown vocabulary);
+- embedding LoRA, or a `training_provenance.json` recording neutralized GptOss sinks over a base that stores no
+  sink tensor;
+- a tensor the base stores packed (a non-float stored dtype, such as NVFP4 nibbles or MXFP8 bytes): a delta folded
+  into the stored values gives no weight ([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). An adapter
+  over a quantized base merges when every tensor it rewrites is stored as a float, as an attention adapter over
+  gpt-oss's MXFP4 release is;
+- a balancing sidecar naming a module the base lacks, at another expert count, or in a config-gated slot the base
+  does not build (LFM-2 under `use_expert_bias: false`).
+
+A dense adapter it refuses merges in memory; one holding expert LoRA folds only through
+`merge_expert_lora_on_save: true`. The base's `config.json` and tokenizer files are copied, the adapter's tokenizer
+replaces them, and the adapter config lands in `original_adapter_config/`.
 
 **Adapters must train.** Trainer construction runs `verify_adapters_trainable` (`halo/model_loading/parallel/peft_setup.py`)
 on the PEFT wrap before any mode wraps the model, so the check covers every mode alike. It raises when a tuner layer

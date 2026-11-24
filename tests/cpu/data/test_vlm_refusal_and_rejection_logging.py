@@ -90,13 +90,14 @@ def _plain_text_dataset(good: int, bad: int) -> Dataset:
     return Dataset.from_list([good_row] * good + [bad_row] * bad)
 
 
-def _vlm_config() -> PreprocessingConfig:
+def _vlm_config(**overrides) -> PreprocessingConfig:
     return PreprocessingConfig(
         model_name_or_path="fake/vlm",
         max_length=64,
         conversation_field="conversation",
         is_vlm=True,
         num_proc=1,
+        **overrides,
     )
 
 
@@ -106,7 +107,22 @@ def test_unsupported_vision_keys_abort_mixed_dataset_tokenization():
     dataset = _mixed_vlm_dataset(num_text=4, num_image=4)
 
     with pytest.raises(NotImplementedError, match="vision keys"):
-        tokenize_vlm_dataset(dataset, _UnsupportedKeysVLMProcessor(), _vlm_config(), split_name="train")
+        tokenize_vlm_dataset(
+            dataset, _UnsupportedKeysVLMProcessor(), _vlm_config(), split_name="train", eos_token_ids=frozenset()
+        )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"tools_field": "tools"}, {"reasoning_effort_field": "effort"}, {"interleaved_thinking": True}],
+    ids=["tools", "level", "interleaved"],
+)
+def test_template_knobs_the_vlm_bake_does_not_render_are_refused(overrides):
+    """The bake renders the bare history, so a declared knob would diverge from the runtime VLM render."""
+    with pytest.raises(NotImplementedError, match=next(iter(overrides))):
+        tokenize_vlm_dataset(
+            _plain_text_dataset(good=1, bad=0), FakeVLMProcessorBase(), _vlm_config(**overrides), split_name="train"
+        )
 
 
 def test_bad_rows_still_degrade_per_row():
@@ -122,7 +138,11 @@ def test_bad_rows_still_degrade_per_row():
             return rendered
 
     tokenized = tokenize_vlm_dataset(
-        _plain_text_dataset(good=3, bad=1), _CrashingTemplateProcessor(), _vlm_config(), split_name="train"
+        _plain_text_dataset(good=3, bad=1),
+        _CrashingTemplateProcessor(),
+        _vlm_config(),
+        split_name="train",
+        eos_token_ids=frozenset(),
     )
     assert len(tokenized) == 3
 
@@ -139,7 +159,11 @@ def test_a_template_row_refusal_drops_the_row():
             return rendered
 
     tokenized = tokenize_vlm_dataset(
-        _plain_text_dataset(good=3, bad=1), _RefusingTemplateProcessor(), _vlm_config(), split_name="train"
+        _plain_text_dataset(good=3, bad=1),
+        _RefusingTemplateProcessor(),
+        _vlm_config(),
+        split_name="train",
+        eos_token_ids=frozenset(),
     )
     assert len(tokenized) == 3, "the template's per-row refusal did not drop just that row"
 
@@ -147,7 +171,9 @@ def test_a_template_row_refusal_drops_the_row():
 def test_an_unreadable_image_path_drops_the_row():
     """Named explicitly, since the shared ``OSError`` base would also swallow a full disk or an I/O fault."""
     dataset = Dataset.from_list([_TEXT_ROW] * 2 + [_image_row("/nonexistent/missing.png")])
-    tokenized = tokenize_vlm_dataset(dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train")
+    tokenized = tokenize_vlm_dataset(
+        dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train", eos_token_ids=frozenset()
+    )
     assert len(tokenized) == 2, "an unreadable image path did not drop just its own row"
 
 
@@ -156,7 +182,9 @@ def test_an_oversized_image_drops_the_row(monkeypatch, tmp_path):
     whole map."""
     dataset = _mixed_vlm_dataset(num_text=2, num_image=1)
 
-    baseline = tokenize_vlm_dataset(dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train")
+    baseline = tokenize_vlm_dataset(
+        dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train", eos_token_ids=frozenset()
+    )
     assert len(baseline) == 3, "the image row must bake when its pixel count is within budget"
 
     # The pixel budget is a PIL global invisible to the map's cache key, so the run below would otherwise replay the
@@ -164,7 +192,9 @@ def test_an_oversized_image_drops_the_row(monkeypatch, tmp_path):
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets_bomb"))
     # Under the row's 28x28: PIL raises above 2x MAX_IMAGE_PIXELS, warns between.
     monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 16)
-    tokenized = tokenize_vlm_dataset(dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train")
+    tokenized = tokenize_vlm_dataset(
+        dataset, _ImageTolerantVLMProcessor(), _vlm_config(), split_name="train", eos_token_ids=frozenset()
+    )
     assert len(tokenized) == 2, "the oversized image did not drop just its own row"
 
 
@@ -177,7 +207,9 @@ def test_a_filesystem_error_aborts_the_map():
 
     dataset = Dataset.from_list([{"conversation": [{"role": "user", "content": "hi there"}]}] * 3)
     with pytest.raises(OSError, match="No space left on device"):
-        tokenize_vlm_dataset(dataset, _OutOfSpaceProcessor(), _vlm_config(), split_name="train")
+        tokenize_vlm_dataset(
+            dataset, _OutOfSpaceProcessor(), _vlm_config(), split_name="train", eos_token_ids=frozenset()
+        )
 
 
 def test_non_data_errors_abort_the_map():
@@ -197,7 +229,7 @@ def test_non_data_errors_abort_the_map():
     )
 
     with pytest.raises(RuntimeError, match="processor bug"):
-        tokenize_vlm_dataset(dataset, _BuggyProcessor(), config, split_name="train")
+        tokenize_vlm_dataset(dataset, _BuggyProcessor(), config, split_name="train", eos_token_ids=frozenset())
 
 
 def _reject_fraction_process_fn(row):

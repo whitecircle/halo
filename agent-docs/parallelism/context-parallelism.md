@@ -92,7 +92,7 @@ entropy, as FLCE does without CP. On GLM-4.7-Flash at ep8 × cp4 and 65,536 toke
 46.99 GiB (−11.8%), step-1 loss within 7e-8 relative.
 
 Eval forwards keep the logits loss. A training forward without labels returns the full logits, with one warning:
-only a labelled forward (SFT) runs the fused loss, and SMPO scores its pairs from those logits. A forward that cannot
+only a labeled forward (SFT) runs the fused loss, and SMPO scores its pairs from those logits. A forward that cannot
 take the fused path keeps the logits loss, with one warning:
 no `logits_to_keep` parameter (Bailing's remote code), a PEFT tuner or a non-`nn.Linear` module on the output
 embedding, a head path the transform probe cannot verify, or a logit scale over a biased head. The model's own head

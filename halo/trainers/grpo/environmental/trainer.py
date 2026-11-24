@@ -33,6 +33,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_unsupported_score_centering,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
+    reject_whole_trajectory_render_of_rewritten_view,
 )
 from halo.trainers.grpo.environmental.loss.centered_scoring import ScoreCenteringMixin
 from halo.trainers.grpo.environmental.loss.importance_sampling import ImportanceSamplingMixin
@@ -130,6 +131,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Read off the env instance, not the config dict: the class owns its defaults and validation.
         self._group_random_effort = self._rollout_env.reasoning_effort == RANDOM_REASONING_EFFORT
         reject_unverified_carried_reasoning(self._rollout_env, self.async_config.rollout_backend)
+        if not self.async_config.rollout_thinking:
+            self._rollout_env.reject_settings_without_thinking()
+        reject_whole_trajectory_render_of_rewritten_view(self._rollout_env, self.async_config.train_on_sampled_tokens)
         kwargs.setdefault("reward_funcs", placeholder_reward_func)
         with self._supplying_kl_reference():
             super().__init__(*args, **kwargs)

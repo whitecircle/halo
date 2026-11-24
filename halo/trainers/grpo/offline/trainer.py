@@ -193,7 +193,12 @@ class OfflineGRPOTrainer(
             "Set it explicitly in your OfflineGRPOConfig.",
         )
         train_dataset, eval_dataset = tokenize_offline_splits(
-            train_dataset, eval_dataset, args, processing_class, getattr(model, "config", None)
+            train_dataset,
+            eval_dataset,
+            args,
+            processing_class,
+            getattr(model, "config", None),
+            getattr(model, "generation_config", None),
         )
 
         self.ref_model = self._kl_reference(model, ref_model, self.beta, self.parallelism_config, peft_config)

@@ -8,13 +8,20 @@ import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory, engine_view
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.rollout.completions_logging import unbounded_completion_logs
 from tests.common.world_metrics import attach_world_metrics
+
+
+def engine_view_env(carry_reasoning: bool = False) -> types.SimpleNamespace:
+    """The trainer renders each turn's prompt off its environment's view; a plain environment's is the engine view."""
+    return types.SimpleNamespace(
+        observation_view=lambda messages: engine_view(messages, carry_reasoning), rewrites_history_in_view=False
+    )
 
 
 def episode(reward: float, *, valid: bool = True) -> RolloutResult:

@@ -14,6 +14,7 @@ from transformers import AutoTokenizer
 
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.text_rows import build_chat_row_processor
+from halo.data.turn_markers import resolve_eos_token_ids
 from halo.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
@@ -62,6 +63,7 @@ def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
 
     extra_columns = list(set(ds["train"].column_names))
@@ -96,6 +98,7 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
     extra_columns = list(set(ds["train"].column_names))
 
@@ -129,6 +132,7 @@ def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
     extra_columns = list(set(ds["train"].column_names))
 
@@ -167,6 +171,7 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
     extra_columns = list(set(ds["train"].column_names))
     result_a = coordinated_map_and_filter(
@@ -180,6 +185,7 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
         tokenizer=alt_tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(alt_tokenizer),
     )
     ds_b = create_conversation_splits(num_train=20, num_test=5)
     extra_columns_b = list(set(ds_b["train"].column_names))
@@ -206,6 +212,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         add_generation_prompt=False,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
 
     # Different function body.
@@ -214,6 +221,7 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         add_generation_prompt=True,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
 
     extra_columns = list(set(ds["train"].column_names))
@@ -251,6 +259,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
     extra_columns = list(set(ds["train"].column_names))
 
@@ -268,6 +277,7 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
     )
     extra_columns2 = list(set(ds2["train"].column_names))
 

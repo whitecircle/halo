@@ -127,7 +127,7 @@ Examples under `examples/sft/qwen3_5/`:
 
 Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` (code contests, plus the `-aime-`, `-exam-qa-` and `-react-math-` ep4 task recipes) and the `sglang/` ep1 siblings; both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn), and the Qwen3.6 MTP recipes `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`, as a reply with no think block reads far worse ([MTP heads](../optimization/mtp-heads.md#recipes)). On `qwen3-multiturn.jinja` a first-step loss near 3.3 is that missing block: Qwen3.6-35B reads 3.3 at step 0 and 0.83 after two optimizer steps. Train and serve under one render. `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (tool-call `arguments` must be a parsed mapping). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
+Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn), and the Qwen3.6 MTP recipes `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`, as a reply with no think block reads far worse ([MTP heads](../optimization/mtp-heads.md#recipes)). On `qwen3-multiturn.jinja` a first-step loss near 3.3 is that missing block: Qwen3.6-35B reads 3.3 at step 0 and 0.83 after two optimizer steps. Train and serve under one render. `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (a call's `arguments`: [Tool-call arguments](../data/dataset-formats.md#tool-call-arguments)). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
 
 The family also carries the per-method canonical examples: Qwen3.5-9B (dense) for DPO/SMPO/KTO (`examples/preference/qwen3_5/`), reward, classification, and distillation; Qwen3.6-35B-A3B for the GRPO task configs.
 
@@ -151,7 +151,8 @@ Pin a Halo template with `force_chat_template` where those renders are not the t
 The Qwen3.6 code-contests async GRPO recipes pin `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` with
 `force_chat_template: true`, and the servers run `--chat-template` on the same file
 (`VLLM_CHAT_TEMPLATE` in the compose file). It is the hub template reduced to text-only tool use —
-thinking always on, carried reasoning always rendered, the vision branch and the
-`enable_thinking`/`preserve_thinking` switches dropped — plus a system-block line stating the episode's
-`reasoning_effort`, which the hub template has no variable for
-([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)).
+carried reasoning always rendered, the vision branch and the `preserve_thinking` switch dropped — plus a
+system-block line stating the episode's `reasoning_effort`, which the hub template has no variable for
+([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)). It keeps the hub's
+`enable_thinking` switch: `false` closes the reasoning block in the generation prompt
+([Thinking off](../training-methods/async-grpo/reasoning.md#thinking-off)).

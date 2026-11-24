@@ -56,7 +56,10 @@ alongside the expert shards (`tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, 
 undistributed composite reference).
 
 Image-text SFT rides the VLM data path (`VLMDataCollator` + `processing_inkling`); text-only data
-through the same class is what the multi-node runs below validated. CP rejects the class outright, so
+through the same class is what the multi-node runs below validated. That path hands a message's text to the template
+as a text part, and Inkling's template writes a tool reply's content only when it is a string, so a tool reply renders
+empty in every row of a VLM run, a text-only row of an image dataset included: the run, not the row, picks the data path
+(`is_vlm_run_across_ranks`). A run with no image data takes the text pipeline and renders the reply whole. CP rejects the class outright, so
 multimodal is EP/ETP-only.
 
 ## Multi-node EP
@@ -78,7 +81,7 @@ Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP a
 
 That division and cut are the family's declared head transform (`halo/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep applies them too.
 
-Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here under `allow_cross_document_linear_attention: true` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
+Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: a text-only SFT run takes the text pipeline, so `packing` is available here under `allow_cross_document_linear_attention: true` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 
 The shipped config sets `packing: false`: packed rows would attend the full 8192 tokens/rank/step, against the ~2.3k real tokens the measurement above ran at with a 246 of 288 GB peak, and the depthwise convs would cross packed documents (refused without the opt-in).
 

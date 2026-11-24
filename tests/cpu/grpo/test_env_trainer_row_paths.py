@@ -22,6 +22,7 @@ from halo.trainers.grpo.environmental.trajectory_tokenize import (
     UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY,
 )
 from halo.trainers.grpo.objective.logratio import zero_engine_forced_closes
+from tests.common.env_grpo_batch import engine_view_env
 from tests.common.routing import BareEPLayer, npy_routing_payload
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
@@ -55,7 +56,7 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
         train_on_sampled_tokens=per_turn,
         drop_degenerate_groups=False,
     )
-    trainer._carry_reasoning = False
+    trainer._rollout_env = engine_view_env()
     trainer._rows_over_cap = 0
     trainer._context_limit = lambda: context_limit
     trainer._metrics = {"train": defaultdict(list)}
