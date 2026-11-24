@@ -390,7 +390,16 @@ def test_a_garbled_argument_name_is_refused_unspent_and_named():
     assert env._test_calls(traj) == 0
 
 
-@pytest.mark.parametrize("name", ["EMPTY_TURN_NUDGE", "LENGTH_CUTOFF_NUDGE", "LENGTH_CUTOFF_IN_CALL_NUDGE"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "EMPTY_TURN_NUDGE",
+        "LENGTH_CUTOFF_NUDGE",
+        "LENGTH_CUTOFF_IN_CALL_NUDGE",
+        "EMPTY_TURN_NUDGE_NO_REASONING",
+        "LENGTH_CUTOFF_IN_CALL_NUDGE_NO_REASONING",
+    ],
+)
 def test_the_recovery_nudges_name_the_graded_channel_and_offer_no_final_answer(name):
     """A final text answer ends a code-contests episode ungraded, so the nudge the protocol sends after
     an unproductive turn must ask for the tool call, naming submit_solution."""

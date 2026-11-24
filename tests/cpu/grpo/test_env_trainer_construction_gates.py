@@ -48,6 +48,8 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
 # site would leave those tests green and the gate dead.
 _INIT_GATES = (
     "reject_unverified_carried_reasoning",
+    "reject_settings_without_thinking",
+    "reject_whole_trajectory_render_of_rewritten_view",
     "reject_straddling_train_groups",
     "reject_straddling_eval_groups",
     "keep_all_dataset_columns",
@@ -406,8 +408,8 @@ _CALL_TOKENIZER = types.SimpleNamespace(convert_tokens_to_ids={"<|call|>": _CALL
 
 
 def test_gpt_oss_on_a_tool_environment_needs_its_call_terminator_stopped():
-    """<|call|> is no eos of unsloth/gpt-oss-20b-BF16, so a turn runs past its call into a tool result the model
-    writes itself, and no call ever executes."""
+    """A checkpoint whose eos lists omit <|call|> lets a turn run past its call into a tool result the model writes
+    itself, so no call ever executes."""
     model = _serving_model("gpt_oss", [200002, 199999])
     with pytest.raises(ValueError, match=r'rollout_stop_tokens: \["<\|call\|>"\]'):
         reject_open_ended_tool_turns(_TOOL_ENV, model, _CALL_TOKENIZER, None)

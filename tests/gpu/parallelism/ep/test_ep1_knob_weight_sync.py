@@ -18,7 +18,7 @@ from halo.env import env_flag, env_str
 from halo.hardware import supports_grouped_mm
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
-from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from halo.trainers.grpo.rollout.weight_push import FORWARDING_RANK, gather_and_send_weights
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -52,7 +52,7 @@ def holds_every_expert(shapes: dict[str, tuple[int, ...]], num_experts: int) -> 
     return bool(shapes) and all(indices == set(range(num_experts)) for indices in groups.values())
 
 
-def gather_is_full(reshard, tokenizer, local_rank, output_dir):
+def gather_is_full(reshard, tokenizer, rank, local_rank, output_dir):
     device = f"cuda:{local_rank}"
     mode = "ZeRO3" if reshard else "ZeRO2"
     log(f"\n===== reshard_after_forward={reshard} ({mode}) fsdp_shard_ep1_experts=ON =====")
@@ -119,30 +119,32 @@ def gather_is_full(reshard, tokenizer, local_rank, output_dir):
     )
     log(f"  raw expert sharded-at-rest={raw_sharded}  gather full/plain={full}  tensors={len(vals)} shapes={shapes}")
 
-    # No DTensor may reach vLLM, and both expert and dense params must be present.
-    recorder = RecordingSender()
+    # No DTensor may reach vLLM, and both expert and dense params must be present. The push assembles each layer on
+    # the forwarding rank alone, the one rank that holds an engine client.
+    recorder = RecordingSender() if rank == FORWARDING_RANK else None
     gather_and_send_weights(wrapped, recorder)
-    names = recorder.names
-    any_dtensor = any(param.is_dtensor for param in recorder.params)
-    has_experts = any("expert" in n.lower() for n in names)
-    has_dense = any("lm_head" in n or "embed" in n for n in names)
-    sent_experts_full = holds_every_expert(
-        {param.name: param.shape for param in recorder.params if ".experts." in param.name}, layer.num_experts
-    )
-    log(
-        f"  gather_and_send_weights: {len(names)} params, any_dtensor={any_dtensor}, experts={has_experts}, "
-        f"dense={has_dense}, every expert sent={sent_experts_full}"
-    )
+    sent = {}
+    if recorder is not None:
+        names = recorder.names
+        any_dtensor = any(param.is_dtensor for param in recorder.params)
+        has_experts = any("expert" in n.lower() for n in names)
+        has_dense = any("lm_head" in n or "embed" in n for n in names)
+        sent_experts_full = holds_every_expert(
+            {param.name: param.shape for param in recorder.params if ".experts." in param.name}, layer.num_experts
+        )
+        log(
+            f"  gather_and_send_weights: {len(names)} params, any_dtensor={any_dtensor}, experts={has_experts}, "
+            f"dense={has_dense}, every expert sent={sent_experts_full}"
+        )
+        sent = {
+            "send_all_plain": not any_dtensor and has_experts and has_dense,
+            "send_experts_full": sent_experts_full,
+        }
 
     trainer.cleanup_ep()
     del trainer, model, wrapped
     cleanup_memory()
-    return {
-        "raw_sharded": raw_sharded,
-        "gather_full": full,
-        "send_all_plain": not any_dtensor and has_experts and has_dense,
-        "send_experts_full": sent_experts_full,
-    }
+    return {"raw_sharded": raw_sharded, "gather_full": full, **sent}
 
 
 def run(ctx) -> dict:
@@ -151,23 +153,14 @@ def run(ctx) -> dict:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    z2 = gather_is_full(False, tokenizer, ctx.local_rank, ctx.output_dir)
+    z2 = gather_is_full(False, tokenizer, ctx.rank, ctx.local_rank, ctx.output_dir)
     barrier()
-    z3 = gather_is_full(True, tokenizer, ctx.local_rank, ctx.output_dir)
+    z3 = gather_is_full(True, tokenizer, ctx.rank, ctx.local_rank, ctx.output_dir)
     barrier()
 
-    return {
-        "checks": {
-            "zero2_raw_sharded": z2["raw_sharded"],
-            "zero2_gather_full": z2["gather_full"],
-            "zero2_send_all_plain": z2["send_all_plain"],
-            "zero2_send_experts_full": z2["send_experts_full"],
-            "zero3_raw_sharded": z3["raw_sharded"],
-            "zero3_gather_full": z3["gather_full"],
-            "zero3_send_all_plain": z3["send_all_plain"],
-            "zero3_send_experts_full": z3["send_experts_full"],
-        }
-    }
+    checks = {f"zero2_{name}": ok for name, ok in z2.items()} | {f"zero3_{name}": ok for name, ok in z3.items()}
+    # The send checks exist on the forwarding rank alone, so its verdict is what every rank reports.
+    return {"checks": ctx.broadcast_checks(checks)}
 
 
 main = gpu_test_main(min_world_size=2, prefix="ep1_knob_weight_sync")(run)

@@ -41,6 +41,7 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import SFTScriptArguments
+from halo.data.conversation import template_column_kwargs
 from halo.data.sources.loading import load_datasets_auto
 from halo.entrypoints.model_setup import apply_max_length, apply_text_path_padding_side
 from halo.env import env_int
@@ -291,7 +292,7 @@ def _packed_train_rows(values: dict, hf_config) -> int:
         args.test_size,
         args.dataset_ratio,
         conversation_field=args.conversation_field,
-        tools_field=args.tools_field,
+        template_columns=template_column_kwargs(args),
     )
     tokenizer = apply_max_length(sft_config, args, None, load_cached_tokenizer(QWEN3_0_6B))
     apply_text_path_padding_side(tokenizer, vlm_run=False)

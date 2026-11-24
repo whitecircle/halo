@@ -19,6 +19,9 @@ from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT, load_script_module
 
+# Registered so the SGLang patch table's own ``from engine_source_patch import ...`` resolves, as in the image.
+load_script_module("docker/engine_source_patch.py", register=True)
+
 _ENV_SCRIPT = REPO_ROOT / "scripts/training/grpo/environmental.py"
 _ONLINE_SCRIPT = REPO_ROOT / "scripts/training/grpo/online.py"
 

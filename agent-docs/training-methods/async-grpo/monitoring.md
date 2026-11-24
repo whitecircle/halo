@@ -54,6 +54,8 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 | `logratio_mean` | Unclamped mean log-ratio in nats, near 0 when healthy ([IS correction](objective.md#importance-sampling-correction)) |
 | `is_correction_coverage` | Share of loss tokens that carry a correction: covered by the engine's sampling log-probs and not emitted with probability 1 |
 | `is_masked_frac` | Share of those a mask stage zeroed |
+| `is_masked_traj_frac` / `is_masked_token_frac` | World-wide share of corrected trajectories masked whole, and of corrected tokens masked, logged in train rounds under `skip_update_masked_frac`, which trips on the larger ([Breaker](objective.md#breaker)) |
+| `truncated_masked_frac` | Share of trajectories `mask_truncated_completions` dropped as truncated |
 | `is_ratio_extreme_frac` | Share of corrected tokens whose raw ratio lies outside `[1/c, c]` before any mask, `c` being `vllm_importance_sampling_clip_max` |
 | `is_ess_frac` | Normalized effective sample size `(Σw)² / (n Σw²)` of the applied IS weights; it falls as a few tokens carry the correction |
 | `is_ratio_mean` / `is_ratio_max` | The ratios that survive the mask stages; under score centering the 0/1 keep verdict, 1 on every kept token, as the centered term carries the weight ([Score centering](objective.md#score-centering)) |
@@ -140,7 +142,12 @@ Both JSON columns are `{}` when empty. TRL's `log_completions` controls only the
 
 ### Cut tool calls
 
-A turn the engine cut mid-tool-call shows the partial call after its text, tagged `cut by the engine before the turn closed; never run`. On vLLM, with the turn's sampled ids captured and a reasoning budget resolving the reasoning close to a single token, it carries the whole decoded text past the close; elsewhere (SGLang, which enforces no reasoning cap, included), what the tool parser salvaged. It never runs, and later turns never see it.
+A turn the engine cut mid-tool-call shows the partial call after its text, tagged `cut by the engine before the turn closed; never run`. It never runs, and later turns never see it. The call shows what the tool parser salvaged, except on vLLM with the turn's sampled ids captured, where the call being written carries the text the policy wrote, decoded from those ids, less the turn's visible message:
+
+- with thinking on, the text past the reasoning close, on a run with a [reasoning cap](reasoning.md#reasoning-cap) whose `rollout_reasoning_end_token` encodes to a single token;
+- under [thinking off](reasoning.md#thinking-off), the whole turn, no budget needed.
+
+That text still holds any call written before it in the turn.
 
 ### Writer rank
 

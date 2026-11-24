@@ -60,8 +60,11 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/gpt-oss-20b-lora
 ```
 
-The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which no tool merges
-afterwards, so `merge_expert_lora_on_save` folds the adapters into each save.
+The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which
+`merge_expert_lora_on_save` folds into each save. `halo run merge-peft-adapters` merges a saved adapter
+afterwards only on a BF16 base: it folds by stored key, and the MXFP4 release stores the experts as
+`_blocks` and `_scales`. An adapter trained with neutralized sinks, the SFT default
+(`reset_sinks: true`), merges with them neutralized.
 
 ### GRPO
 
@@ -109,8 +112,9 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - **Router aux-loss coefficient.** The hub config ships `router_aux_loss_coef: 0.9`, which swamps the SFT
   loss. The shipped SFT recipes set it to `0.001` in `model_init_kwargs`. Do the same on any other run
   that balances with `aux_loss`, which is what `auto` picks for GPT-OSS.
-- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`, without which
-  the model writes past its tool call and invents the result. They also set
+- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`. Without it, on a
+  checkpoint whose `generation_config.json` does not list `<|call|>`, the model writes past its tool call and
+  invents the result. They also set
   `use_chunked_grpo_logprobs: true`, because the ~201k-token vocabulary makes the full logits plane too
   large.
 

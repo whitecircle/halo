@@ -59,9 +59,11 @@ Mixing sources has side effects:
 
 - Only columns common to every source survive. Every source must carry the
   conversation column your config names, or the load raises naming the source.
-  The tools column it names is null-filled where a source lacks it.
+  The tools and reasoning-effort columns it names are null-filled where a source
+  lacks them or holds only nulls.
 - Columns whose types differ between sources are dropped. This is the usual
-  reason a field goes missing.
+  reason a field goes missing. The conversation, tools or reasoning-effort column
+  your config names is refused instead.
 - A list loads fully on every rank. A sharded entry loads whole on every rank,
   and a pre-processed dataset is detected only at a single path. Point `dataset`
   at a single path to use either.

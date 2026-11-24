@@ -126,6 +126,25 @@ def test_special_token_id_lands_where_the_model_reads_it(model_type, field):
         assert getattr(level, field) == 4242
 
 
+@pytest.mark.parametrize("model_type", COMPOSITE_MODEL_TYPES + PLAIN_MODEL_TYPES)
+def test_a_listed_eos_id_keeps_the_list_it_is_in(model_type):
+    """GLM lists the role markers that end a turn beside its eos; naming that eos must not drop them."""
+    config = _config(model_type)
+    model = _FakeModel(config)
+    levels = configs_declaring(config, "eos_token_id")
+    for level in levels:
+        level.eos_token_id = [11, 12, 13]
+    model.generation_config.eos_token_id = [11, 12, 13]
+
+    sync_special_token_id(model, "eos_token_id", 11)
+    assert levels and all(level.eos_token_id == [11, 12, 13] for level in levels)
+    assert model.generation_config.eos_token_id == [11, 12, 13]
+
+    sync_special_token_id(model, "eos_token_id", 99)
+    assert all(level.eos_token_id == 99 for level in levels), "an id outside the list replaces it"
+    assert model.generation_config.eos_token_id == 99
+
+
 def test_special_token_id_does_not_invent_a_field():
     config = _config("qwen3_moe")
     model = _FakeModel(config)

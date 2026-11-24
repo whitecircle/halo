@@ -70,7 +70,7 @@ Halo is an LLM alignment toolkit that extends HuggingFace (Transformers, TRL, Ac
 make check-lock                  # check uv.lock installs into the image (throwaway container; fails on a stale lock)
 
 # Single GPU / LoRA
-python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml
+python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 # Multi-GPU: FSDP2 and EP/CP/TP/ETP/PP (torchrun)
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml

@@ -33,8 +33,9 @@ lora_target_modules:               # expert projs peel to native grouped-LoRA (s
 lora_modules_to_save:              # full-trained, not LoRA; the router stays frozen
 - embed_tokens
 - lm_head
-merge_expert_lora_on_save: true    # fold both halves into each save -> servable, as no tool folds this adapter later;
-                                   # every kept checkpoint holds a gathered full copy beside its resume adapters
+merge_expert_lora_on_save: true    # fold both halves into each save -> servable with no merge step (without it,
+                                   # merge_peft_adapters.py streams the merge); every kept checkpoint holds a
+                                   # gathered full copy beside its resume adapters
 
 # --- Environment ---
 environment_type: codeforces

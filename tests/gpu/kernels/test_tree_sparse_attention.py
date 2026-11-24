@@ -36,8 +36,8 @@ LEAK_REL_FLOOR = 0.3  # A row without its plan must be far from the reference, o
 FAMILY = "glm5_next_text"
 # Every expert active; a top-k past every path of the row (the longest is 406 tokens); the tail on.
 OVERRIDES = {"index_topk": 512, "index_kpool_always_select_tail": True, "num_experts_per_tok": 8}
-# Eight indexer heads (fewer score many pools exactly zero, a tie stock top-k breaks arbitrarily) and sixteen keys, so
-# paths past twenty tokens select.
+# Eight indexer heads (fewer score many pools exactly zero, a tie stock top-k breaks arbitrarily) and sixteen keys: one
+# of the default 16-token pools beside the tail, so a path selects from its 32nd token on.
 SELECTING = {"index_n_heads": 8, "index_topk": 16}
 # (takes a state, returns one, normalizes query and key itself) along a chain: root, middle, leaf. A tree row
 # normalizes once.

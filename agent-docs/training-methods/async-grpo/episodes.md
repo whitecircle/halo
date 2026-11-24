@@ -69,9 +69,11 @@ Native-tool environments send their `tools` schema, so the server needs the matc
 - [ReAct](environments/protocols/react.md) environments send no `tools` and are served without a parser.
 
 `rollout_stop_tokens` (default empty) lists special-token strings sent as `stop_token_ids`. Use it for a tool-call
-terminator the model's `eos_token_id` omits: gpt-oss with harmony disabled ends a call with `<|call|>` and otherwise
-hallucinates the result (the gpt-oss recipes set `["<|call|>"]`), so gpt-oss on a tool environment without it is
-refused at trainer construction. An unknown name raises there too.
+terminator that the served `generation_config.json`, the server's only other source of stop ids, may not list
+([Collators](../../data/collators.md#eos-pad-and-the-response-template)): gpt-oss with harmony disabled ends a call
+with `<|call|>` and, stopped on neither, hallucinates the result (the gpt-oss recipes set `["<|call|>"]`). A family
+whose terminator is no eos, on a tool environment whose checkpoint's generation config omits it and with no such
+entry, is refused at trainer construction. An unknown name raises there too.
 
 ## Unproductive turns
 
@@ -87,6 +89,8 @@ What follows:
 - A cut or empty turn is nudged and retried within `max_turns` and `max_length_cutoff_recoveries` (`null` = no cap
   beyond `max_turns`), a cap the two kinds share. A rejected turn is answered with the refusals and spends a turn, not
   the cap.
+- A nudge names the reasoning (a call written inside it is not run) only when the turn it answers carried some; a
+  turn with none gets the same fact without it.
 - Every cut turn counts under `episode/length_cutoff_turns` and every empty one under `episode/empty_turns`, the one
   that ends the episode included. Under the native protocol, a turn cut at its token cap with a tool call the
   server's parser salvaged also counts under `episode/length_cutoff_in_call_turns`.
@@ -129,8 +133,11 @@ Two safe setups:
 Rows train on the engine's prompt ids, so a mismatch shows in no loss. The startup probe asks each server for its render
 of a no-tool prompt under two of the run's contracts: a server whose prompt does not move with the level, where the
 trainer's does, is refused, as the reasoning terms would charge for a contract the model never read. Any other
-difference warns with the first differing token, since an engine also derives a thinking toggle the trainer's render
-lacks.
+difference in the first contract warns with the first differing token, since an engine also derives a thinking toggle
+the trainer's render lacks. With [thinking off](reasoning.md#thinking-off) the request carries that toggle, so a
+difference at any probed level refuses, as do a probe the server does not answer and a reply without prompt ids;
+with thinking on, an unanswered probe is skipped with a warning. A trainer template that cannot render the probe skips
+it with a warning.
 
 A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
 it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
@@ -138,4 +145,5 @@ it, and no `--chat-template` on the server, the two sides diverge silently. The 
 per-turn rows take the engine's ids and cannot drift.
 
 `rollout_chat_template_kwargs` applies template variables to every request **and** the trainer's own renders. It
-refuses `reasoning_effort`, which is per episode ([Effort templates](reasoning.md#effort-templates)).
+refuses `reasoning_effort`, which is per episode ([Effort templates](reasoning.md#effort-templates)), and
+`enable_thinking`, which `rollout_thinking` writes ([Thinking off](reasoning.md#thinking-off)).

@@ -57,9 +57,13 @@ class TrainingContract:
     def rollout_config(self, env: EnvironmentBase) -> RolloutConfig:
         """The run's ``RolloutConfig`` for an eval of ``env``, stop tokens resolved by the trained tokenizer. A vLLM
         reasoning cap the run binds is refused where vLLM cannot enforce it, and has the eval capture
-        sampled ids to count reasoning as training does; routing is never captured. The eval joins no process group, so
-        no NCCL watchdog bound."""
+        sampled ids to count reasoning as training does; routing is never captured. A run that samples without
+        thinking refuses an ``env`` that reads reasoning and, on vLLM, captures the ids a cut call is decoded from,
+        which training captures only under ``train_on_sampled_tokens``. The eval joins no process group, so no NCCL
+        watchdog bound."""
         cfg, model = self.async_config, self.model_config
+        if not cfg.rollout_thinking:
+            env.reject_settings_without_thinking()
         efforts = efforts_by_level(
             env,
             max_tokens=cfg.rollout_max_tokens,
@@ -93,7 +97,8 @@ class TrainingContract:
         )
         return replace(
             rollout,
-            capture_token_ids=reasoning_end_token_id is not None,
+            capture_token_ids=reasoning_end_token_id is not None
+            or (rollout.backend == VLLM_BACKEND and not rollout.thinking),
             capture_candidate_logprobs=0,
             capture_routed_experts=False,
         )

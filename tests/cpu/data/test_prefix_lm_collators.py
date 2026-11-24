@@ -10,6 +10,7 @@ import torch
 from transformers import Gemma3Config
 
 from halo.data.collators.self_distill import SelfDistillVLMDataCollator
+from halo.data.collators.vlm import VLMDataCollator
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.attention.prefix_lm import has_prefix_lm_attention, prefix_lm_token_type_ids
 from tests.common.prefix_lm import (
@@ -140,6 +141,42 @@ def test_the_newline_the_processor_appends_trains_nowhere(completions_only):
         assert batch["input_ids"][row, -1] == newline_id
         assert batch["labels"][row, -1] == IGNORE
         assert batch["labels"][row, -2] == processor.tokenizer.eos_token_id, "the answer's own terminator trains"
+
+
+# Turns that end only at the next turn's role marker (GLM's shape), which leaves a row's last assistant turn open.
+_ROLE_DELIMITED_TEMPLATE = (
+    "{% for m in messages %}<|{{ m['role'] }}|> {% for p in m['content'] %}"
+    "{% if p['type'] == 'image' %}<image>{% else %}{{ p['text'] }} {% endif %}{% endfor %}{% endfor %}"
+)
+
+
+@pytest.mark.parametrize("completions_only", [True, False], ids=["completions-only", "all-tokens"])
+def test_an_open_last_turn_is_closed_ahead_of_the_newline_the_processor_appends(completions_only):
+    """The eos goes into the text the processor takes, so the row ends as one whose template writes its own eos:
+    the eos trains, the newline after it does not, and the suffix opens where it did."""
+    processor = _newline_keeping_processor()
+    tokenizer = processor.tokenizer
+    tokenizer.add_special_tokens(
+        {"additional_special_tokens": ["<|user|>", "<|assistant|>"]}, replace_extra_special_tokens=False
+    )
+    processor.chat_template = _ROLE_DELIMITED_TEMPLATE
+    config = tiny_paligemma_config(processor)
+    config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|user|>")]
+    collator = VLMDataCollator(
+        processor,
+        tokenizer,
+        256,
+        train_on_completions_only=completions_only,
+        response_prompt_template="<|assistant|>" if completions_only else None,
+        model_config=config,
+    )
+
+    batch = collator([digit_row(3)])
+
+    tokens = tokenizer.convert_ids_to_tokens(batch["input_ids"][0].tolist())
+    assert tokens[-4:] == ["3", ".", "<eos>", "\n"]
+    assert batch["labels"][0, -2] == tokenizer.eos_token_id and batch["labels"][0, -1] == IGNORE
+    _assert_suffix_from_first_scored(batch["labels"][0], batch["token_type_ids"][0])
 
 
 def test_the_processor_appends_a_newline_after_the_conversation():

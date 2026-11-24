@@ -75,10 +75,15 @@ class _TokenizerSpy:
 
 
 class _ExpertLoraLayer(StubEPLayerBase):
+    """Holds the adapters ``EXPERT_STATE`` saves, as a layer that built them does."""
+
     def __init__(self, spec: ExpertLoraSpec | None = None):
         super().__init__()
         self._expert_lora_attrs = frozenset({"gate_up_proj"})
-        self.ep_config = SimpleNamespace(expert_lora=spec)
+        self.ep_config = SimpleNamespace(expert_lora=spec, ep_size=1)
+        for key, tensor in EXPERT_STATE.items():
+            attr = key.rpartition(".experts.")[2].replace(".", "_")
+            setattr(self, attr, nn.Parameter(torch.zeros_like(tensor)))
 
 
 class _ExpertOnlyModel(nn.Module):

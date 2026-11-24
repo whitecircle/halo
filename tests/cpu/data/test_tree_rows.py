@@ -18,6 +18,7 @@ from transformers import GptOssConfig, Qwen3Config, Trainer
 
 from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
+from halo.data.completion_spans import resolve_span_bounds
 from halo.data.pipeline.text_rows import build_chat_row_processor
 from halo.data.pipeline.tree_rows import (
     MIN_SHARED_TOKENS,
@@ -47,6 +48,12 @@ from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table
 from scripts.training import sft as sft_script
 from scripts.training.sft import _prepare_text_data
 from tests.common.models import GPT_OSS_20B
+from tests.common.open_turn_templates import (
+    GLM_ASSISTANT_MARKER,
+    OPEN_FINAL_TURN_TEMPLATES,
+    TWO_EXCHANGES,
+    load_open_turn_tokenizer,
+)
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_tokenizer
@@ -109,7 +116,9 @@ def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, last_only=True)
 
 def _flat_examples(tokenizer, conversations, *, last_only=True) -> list[tuple[list[int], list[int]]]:
     """(tokens, labels) of every row by the flat packed pipeline."""
-    tokenize = build_chat_row_processor(tokenizer, MAX_LENGTH, conversation_field="conversation")
+    tokenize = build_chat_row_processor(
+        tokenizer, MAX_LENGTH, conversation_field="conversation", eos_token_ids=resolve_eos_token_ids(tokenizer)
+    )
     collator = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE,
         tokenizer=tokenizer,
@@ -225,6 +234,7 @@ def test_a_row_opening_on_the_response_marker_leaves_its_first_token_untrained_a
         eos_token_ids=resolve_eos_token_ids(tokenizer),
         assistant_message_template=RESPONSE,
         train_on_last_assistant_only=True,
+        span_bounds=resolve_span_bounds(tokenizer, RESPONSE, resolve_eos_token_ids(tokenizer)),
     )
     flat = DataCollatorForCompletionOnlyLMWithPacking(
         response_prompt_template=RESPONSE, tokenizer=tokenizer, eos_token_ids=resolve_eos_token_ids(tokenizer)
@@ -232,6 +242,33 @@ def test_a_row_opening_on_the_response_marker_leaves_its_first_token_untrained_a
     assert trained == (flat != LABEL_IGNORE_INDEX).tolist() and trained[1] and not trained[0]
     row = serialize_tree(build_trie([input_ids], [share_limit(trained)], 16), [input_ids], [trained])
     assert _tree_examples(_collate(tokenizer, [row])) == [(input_ids, flat.tolist())]
+
+
+@pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
+def test_a_tree_path_ending_on_an_open_assistant_turn_is_closed_and_trains_its_stop(name):
+    """GLM's templates end an assistant turn only at the next role marker: every tree path, as a flat row, closes its
+    last turn with the terminator and trains it."""
+    glm, model_config = load_open_turn_tokenizer(name)
+    glm.padding_side = "right"
+    eos_token_ids = resolve_eos_token_ids(glm, model_config)
+    rows = [TWO_EXCHANGES, [*TWO_EXCHANGES[:-1], {"role": "assistant", "content": "Response echo another answer"}]]
+    plain = [glm(glm.apply_chat_template(row, tokenize=False), add_special_tokens=False)["input_ids"] for row in rows]
+    assert not any(ids[-1] in eos_token_ids for ids in plain), "the template closes its last turn: this tests nothing"
+    processor = build_tree_row_processor(
+        glm,
+        MAX_LENGTH,
+        conversation_field="conversation",
+        share_markers=("Question charlie",),
+        share_requires=None,
+        eos_token_ids=eos_token_ids,
+        assistant_message_template=GLM_ASSISTANT_MARKER,
+        train_on_last_assistant_only=True,
+    )
+    trees = list(Dataset.from_dict(processor({"conversation": rows}), features=TREE_ROW_FEATURES))
+    assert len(trees) == 1, "the two rows share their history up to the marker"
+    examples = _tree_examples(_collate(glm, trees))
+    assert sorted(tokens for tokens, _ in examples) == sorted([*ids, glm.eos_token_id] for ids in plain)
+    assert all(labels[-1] == glm.eos_token_id for _, labels in examples), "a path's stop is not trained"
 
 
 def _run_sft_main(tmp_path, yaml_body: str) -> None:
@@ -529,6 +566,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             model_supports_system_role=False,
             interleaved_thinking=False,
             tools_field=None,
+            reasoning_effort_field=None,
             train_on_completions_only=True,
             assistant_message_template=template,
             train_on_last_assistant_only=True,
@@ -563,6 +601,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             tokenizer,
             SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
             hf_config=hf_config,
+            generation_config=None,
         )
         return train, test, collator
 

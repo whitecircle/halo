@@ -51,6 +51,7 @@ _TORCHRUN_MULTINODE_FLAGS = frozenset(
 # HALO_SANDBOX_REPL routes the Python REPL tools to that backend too, off the in-process REPL.
 ROLLOUT_BACKEND_ENV: dict[str, dict[str, str]] = {
     "modal": {"HALO_SANDBOX_BACKEND": "modal", "HALO_SANDBOX_REPL": "1"},
+    "baseten": {"HALO_SANDBOX_BACKEND": "baseten"},
 }
 
 app = typer.Typer(no_args_is_help=True, add_completion=False)

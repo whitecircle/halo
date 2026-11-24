@@ -12,12 +12,14 @@ from transformers import PreTrainedTokenizer
 from halo.callbacks.generate_examples import GenerateExamplesCallback
 from halo.config_validation import reject_non_default_args, reject_unsupported_args
 from halo.data.collators.vlm import VLMDataCollator
+from halo.data.conversation import template_column_kwargs
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc
 from halo.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.sources.loading import is_presharded_dataset_load_across_ranks, load_datasets, share_s3_control_files
-from halo.data.vlm_detection import dataset_declares_images_across_ranks, is_vlm_run_across_ranks, reject_image_columns
+from halo.data.turn_markers import resolve_eos_token_ids
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_declares_images_across_ranks, is_vlm_run_across_ranks
 from halo.data.vlm_render import apply_image_pixel_bounds
 from halo.distributed.fsdp import fsdp2_param_groups
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -79,23 +81,24 @@ def load_script_datasets(
     data_parallel_size = parallelism_config.data_parallel_size
     share_s3_control_files(args.dataset)
     dataset_presharded = is_presharded_dataset_load_across_ranks(args.dataset, data_parallel_size)
-    # For every script, so a typo'd tools column fails the load; the scripts that cannot render it (KTO, environmental
-    # GRPO) refuse the knob first.
-    loader_kwargs.setdefault("tools_field", args.tools_field)
     ds = loader(
         args.dataset,
         args.test_size,
         args.dataset_ratio,
         data_parallel_rank=data_parallel_rank,
         data_parallel_size=data_parallel_size,
+        # For every script, so a typo'd template column fails the load; a script that cannot render one refuses the
+        # knob.
+        template_columns=template_column_kwargs(args),
         **loader_kwargs,
     )
     return ds, dataset_presharded
 
 
 def _reject_images_under_text_only_model(args, datasets, *, text_only_model: bool) -> None:
-    """Refuse image data on a multimodal checkpoint loaded through its text-only class: ``is_vlm_run_across_ranks``
-    reads the still-multimodal config and would route the run to a VLM data path with no vision model."""
+    """COLLECTIVE under ``text_only_model``. Refuse image data on a multimodal checkpoint loaded through its text-only
+    class, since ``is_vlm_run_across_ranks`` reads the still-multimodal config and would route the run to a VLM data
+    path with no vision model. A presharded load answers per rank, so the verdict is agreed."""
     if not text_only_model:
         return
     images_field = getattr(args, "images_field", None)
@@ -105,13 +108,15 @@ def _reject_images_under_text_only_model(args, datasets, *, text_only_model: boo
             f"CausalLM class, which has no vision path. Drop text_only_model to train the "
             f"multimodal wrapper, or drop images_field for a text-only run."
         )
-    reject_image_columns(datasets, "text_only_model=True (text-only CausalLM load)")
     conversation_field = getattr(args, "conversation_field", None)
-    if conversation_field and dataset_declares_images_across_ranks(datasets, conversation_field):
+    if dataset_declares_images_across_ranks(datasets, conversation_field):
+        declared = f"an image column ({', '.join(VLM_IMAGE_COLUMNS)})"
+        if conversation_field:
+            declared += f" or image content parts in its {conversation_field!r} column"
         raise ValueError(
-            f"The {conversation_field!r} column embeds image content parts, but text_only_model=True "
-            f"loads the text-only CausalLM class, which has no vision path. Drop text_only_model to "
-            f"train the multimodal wrapper, or drop the image parts for a text-only run."
+            f"The dataset carries {declared}, but text_only_model=True loads the text-only CausalLM class, which has "
+            f"no vision path. Drop text_only_model to train the multimodal wrapper, or drop the image data for a "
+            f"text-only run."
         )
 
 
@@ -355,26 +360,41 @@ def log_script_dataset_examples(datasets: dict, tokenizer: PreTrainedTokenizer, 
     )
 
 
-def prepare_chat_text_split(ds, tokenizer, args, training_config, *, desc: str):
+def prepare_chat_text_split(ds, tokenizer, args, training_config, model_config, generation_config, *, desc: str):
     """COLLECTIVE: ``(train, eval)`` chat-templated and tokenized once; a row over ``max_length`` is dropped, never
-    truncated mid-turn. ``desc`` keys the map's cache."""
+    truncated mid-turn, and a last assistant turn the template leaves open is closed against the terminators the model
+    and generation configs name. ``desc`` keys the map's cache."""
     render_kwargs = text_render_kwargs(args)
+    eos_token_ids = resolve_eos_token_ids(tokenizer, model_config, generation_config)
     ds = coordinated_map_and_filter(
         ds,
-        build_chat_row_processor(tokenizer=tokenizer, max_length=training_config.max_length, **render_kwargs),
+        build_chat_row_processor(
+            tokenizer=tokenizer, max_length=training_config.max_length, eos_token_ids=eos_token_ids, **render_kwargs
+        ),
         # sorted: this list feeds the coordinated-map cache key, and set order is hash-randomized per process.
         remove_columns=sorted(set(ds["train"].column_names)),
         desc=desc,
-        cache_key_extras={**render_kwargs, "add_generation_prompt": False},
+        cache_key_extras={**render_kwargs, "add_generation_prompt": False, "eos_token_ids": sorted(eos_token_ids)},
         num_proc=resolve_map_num_proc(training_config.dataset_num_proc),
     )
     return ds["train"], ds["test"]
 
 
-def prepare_raw_vlm_split(ds, args, training_config, processor, tokenizer, model_config, *, desc: str):
+def prepare_raw_vlm_split(
+    ds, args, training_config, processor, tokenizer, model_config, generation_config, *, desc: str
+):
     """COLLECTIVE: ``(train, eval, collator)``, raw conversations mapped for :class:`VLMDataCollator`."""
     num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
-    ds = prepare_vlm_dataset(ds, args, processor, tokenizer, training_config.max_length, num_proc, desc=desc)
+    ds = prepare_vlm_dataset(
+        ds,
+        args,
+        processor,
+        tokenizer,
+        training_config.max_length,
+        num_proc,
+        eos_token_ids=resolve_eos_token_ids(tokenizer, model_config, generation_config),
+        desc=desc,
+    )
     # The mapped columns are not model-forward kwargs, so HF's default remove_unused_columns=True would strip them.
     training_config.remove_unused_columns = False
     collator = VLMDataCollator(
@@ -384,6 +404,7 @@ def prepare_raw_vlm_split(ds, args, training_config, processor, tokenizer, model
         response_prompt_template=args.assistant_message_template,
         train_on_completions_only=args.train_on_completions_only,
         model_config=model_config,
+        generation_config=generation_config,
     )
     return ds["train"], ds["test"], collator
 
@@ -404,13 +425,14 @@ def prepare_script_preference_data(
         train_dataset, eval_dataset = ds["train"], ds.get("test")
     else:
         num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
+        template_columns = template_column_kwargs(args)
         train_dataset, eval_dataset = prepare_preference_datasets(
-            ds["train"], ds["test"], tokenizer, num_proc=num_proc, tools_field=args.tools_field
+            ds["train"], ds["test"], tokenizer, num_proc=num_proc, **template_columns
         )
         # Only when the callback will consume it: the prep tokenizes the whole test split.
         if args.generate_eval_examples:
             generate_dataset = prepare_generative_dataset(
-                ds["test"], tokenizer, generation_max_prompt_length, num_proc=num_proc, tools_field=args.tools_field
+                ds["test"], tokenizer, generation_max_prompt_length, num_proc=num_proc, **template_columns
             )
 
     log_script_dataset_examples(

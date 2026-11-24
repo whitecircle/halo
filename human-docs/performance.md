@@ -34,8 +34,10 @@ More shapes:
 [Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗.
 
 GLM-5.3-Flash runs two kernels of its own: DeepSeek sparse attention as a tiled
-matmul over the keys a query can reach, and hyper-connections as one launch per
-direction, which DeepSeek-V4 shares. LoRA at `ep8` reaches 2,840 at 8,192 tokens
+matmul over the keys a query can reach, and hyper-connections as one kernel launch per
+step (normalize and project, Sinkhorn, collapse, mix): 16 launches forward and 14 backward
+for a hyper-connection and its mix, against upstream's 143 and 306. DeepSeek-V4 shares the
+hyper-connection kernels. LoRA at `ep8` reaches 2,840 at 8,192 tokens
 and 2,390 at 16,384, against 1,282 and 893 without them; a full fine-tune on two
 8-GPU machines reaches 1,504 at `ep16` and 2,423 at `pp2 × ep8`
 ([GLM-5 Next](../agent-docs/models/glm5-next.md#throughput) ↗).
@@ -59,9 +61,9 @@ Set these per run:
   fill the global batch with `gradient_accumulation_steps`, not more
   parallelism. It is the largest effect on MoE.
 - **`gradient_checkpointing: false`** when the activations fit, at much higher
-  peak memory. On packed SFT rows `gradient_checkpointing_plan: auto` finds that
-  out itself: it measures step 2 and checkpoints only the layers the memory
-  needs ([Callbacks](../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback) ↗).
+  peak memory. On packed SFT rows keep it on and set
+  `gradient_checkpointing_plan: auto` instead: it measures step 2 and
+  checkpoints only the layers the memory needs ([Callbacks](../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback) ↗).
 - **`packing: true`** on a corpus of short rows; `padding_free: true` gains
   less. Where SFT rows share long prefixes (GPT-OSS, Qwen3, Qwen3.5/3.6,
   GLM-5 Next), `tree_packing: true` stores each prefix once, at some extra

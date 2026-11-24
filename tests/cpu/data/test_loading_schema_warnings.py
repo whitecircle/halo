@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Schema-normalization logging: the module loggers stay pinned at INFO, and ``_normalize_dataset_schema`` warns
-once, only for columns lost from a dataset that had them."""
+"""Schema normalization: the module loggers stay pinned at INFO, ``_normalize_dataset_schema`` warns once, only for
+columns lost from a dataset that had them, and a declared column is pinned or refused, never lost."""
 
 import json
 import logging
@@ -16,7 +16,7 @@ import halo.data.sources.loading
 import halo.data.sources.s3_client
 import halo.data.sources.s3_dataset_store
 import halo.data.sources.sharded_dataset  # noqa: F401  each module sets its logger level at import
-from halo.data.sources.corpus import _normalize_dataset_schema
+from halo.data.sources.corpus import _normalize_dataset_schema, _pin_declared_columns
 from tests.common.repo import REPO_ROOT
 
 _CORPUS_LOGGER = "halo.data.sources.corpus"
@@ -55,19 +55,15 @@ def test_schema_warning_names_only_columns_actually_lost(caplog):
         assert never_present not in message, message
 
 
-def test_schema_warning_names_the_runs_own_declared_column(caplog):
-    """A custom ``conversation_field`` is pinned through the concatenation, so only a type mismatch can lose it, and
-    a hardcoded tuple would not name it."""
+def test_a_declared_column_typed_differently_across_datasets_is_refused_by_its_knob():
+    """No null fill bridges the two types, and the intersection would drop the column from every row."""
     ds_a = Dataset.from_dict({"dialogue": [[{"role": "user", "content": "hi"}]], "row_id": [0]})
     ds_b = Dataset.from_dict({"dialogue": ["hi"], "row_id": [1]})
 
-    with caplog.at_level(logging.WARNING, logger=_CORPUS_LOGGER):
-        normalized = _normalize_dataset_schema([ds_a, ds_b], declared_columns=("dialogue",))
-
-    assert all(ds.column_names == ["row_id"] for ds in normalized)
-    warnings = [r.getMessage() for r in caplog.records if "ssential" in r.getMessage()]
-    assert len(warnings) == 1, warnings
-    assert "dialogue" in warnings[0], warnings[0]
+    with pytest.raises(
+        ValueError, match=r"conversation_field='dialogue' is a type mismatch .*Value\('string'\) in \['b'\]"
+    ):
+        _pin_declared_columns([ds_a, ds_b], ["a", "b"], {"conversation_field": "dialogue"})
 
 
 def test_declared_column_absent_from_one_dataset_is_pinned_not_dropped(caplog):
@@ -76,7 +72,8 @@ def test_declared_column_absent_from_one_dataset_is_pinned_not_dropped(caplog):
     ds_without = Dataset.from_dict({"conversation": ["b"]})
 
     with caplog.at_level(logging.WARNING, logger=_CORPUS_LOGGER):
-        normalized = _normalize_dataset_schema([ds_with, ds_without], declared_columns=("tools",))
+        pinned = _pin_declared_columns([ds_with, ds_without], ["with", "without"], {"tools_field": "tools"})
+        normalized = _normalize_dataset_schema(pinned)
 
     assert all("tools" in ds.column_names for ds in normalized)
     assert normalized[1]["tools"] == [None]

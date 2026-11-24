@@ -73,8 +73,7 @@ VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
 
 In the training container, copy the template and set `dataset`, `environment_type` and `rewards`. The
 template's generation prompt opens `<think>`, so rollouts start in thinking mode while SFT trained the
-non-thinking render. To keep rollouts non-thinking, also add
-`rollout_chat_template_kwargs: {enable_thinking: false}` to the copy. Then launch:
+non-thinking render. To keep rollouts non-thinking, also add `rollout_thinking: false` to the copy. Then launch:
 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml glm47-grpo.yaml

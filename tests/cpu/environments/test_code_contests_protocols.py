@@ -314,7 +314,9 @@ async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
         return chat_reply("done", completion_tokens=3)
 
     monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
-    traj = await eval_runner.run_episode(env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout)
+    traj = await eval_runner.run_episode(
+        env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout, extra_body={}
+    )
 
     assert env.reasoning_effort is None
     filters = {"top_k": rollout.top_k, "min_p": rollout.min_p, "repetition_penalty": rollout.repetition_penalty}

@@ -218,7 +218,7 @@ layer that does the split cannot disagree on which config spelling carries the p
 |---|---|---|
 | expert LoRA | rejected at config time — the replicated adapter half would receive partial gradients and drift across ranks. Every `merge_lora=True` gather (weight sync, merge-on-save) guards it once more, unreachably | `ParallelismConfig` |
 | `save_sharded_ep` | rejected — the merge script cannot reconstruct TP-sharded expert weights | `reject_unmergeable_ep_sharded_save` |
-| `use_hsdp` | rejected — ETP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
+| `use_hsdp` | rejected — an ETP run keeps its non-expert parameters on the EP path's 1-D FSDP | `_reject_hsdp` |
 | `use_peft` / attention LoRA | supported — pure ETP leaves attention unsharded, so the adapter is a genuine replica | — |
 | online GRPO `rollout_func` | rejected, as under TP — it replaces the generation that hands every ETP partner its leader's completions, so partners would feed different tokens into the expert-TP all-reduce | `reject_unshared_rollout_func` |
 

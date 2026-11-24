@@ -117,7 +117,7 @@ def test_generative_prep_normalizes_hub_shapes_before_templating(monkeypatch):
     row reaching ``prepare_generative_row`` is normalized."""
     seen = {}
 
-    def fake_prepare(row, tokenizer, max_length, tools_field=None):
+    def fake_prepare(row, tokenizer, max_length, tools_field=None, reasoning_effort_field=None):
         seen["prompt"] = row["prompt"]
         return {"input_ids": [1], "attention_mask": [1]}
 

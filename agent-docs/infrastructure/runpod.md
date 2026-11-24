@@ -58,11 +58,13 @@ A bare `NCCL_TIMEOUT` does nothing — PyTorch does not read it.
 ```bash
 cd /workspace
 git clone https://github.com/whitecircle/halo.git code && cd code
+export PYTHONPATH=/workspace/code   # the volume hides the image's own copy at /workspace
 hf auth login --token $HF_TOKEN
 wandb login $WANDB_API_KEY  # optional
 
 python -c "import torch; print(torch.__version__, torch.version.cuda)"
 python -c "import deep_ep; print('DeepEP OK')"
+python -c "import halo; print(halo.__file__)"   # /workspace/code/halo/__init__.py
 python -c "from flash_attn_interface import flash_attn_func; print('FA3 OK')"
 
 # Optional: pre-fetch the model on every pod (with DIST_SHARED_FILESYSTEM=0 each pod's local rank 0
@@ -99,6 +101,7 @@ set -e
 export DIST_NCCL_TIMEOUT_MINUTES=30
 export HF_HOME=/workspace/hf_cache
 export DIST_SHARED_FILESYSTEM=0       # RunPod pods have independent storage
+export PYTHONPATH=/workspace/code
 
 NODE_RANK=${1:?Usage: bash launch.sh <node_rank> <master_ip>}
 MASTER_ADDR=${2:?Usage: bash launch.sh <node_rank> <master_ip>}

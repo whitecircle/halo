@@ -44,8 +44,13 @@ logger = logging.getLogger(__name__)
 # Engine-paused seconds, or an awaitable of them (a read of the actor's Ray copy).
 _PausedClock = Callable[[], float | Awaitable[float]]
 
-# The sandbox selection the launcher sets (HALO_SANDBOX_BACKEND / _URL / _REPL / ...); never a credential.
-_SANDBOX_ENV_PREFIX = "HALO_SANDBOX_"
+# The sandbox selection the launcher sets. A credential is never among them, whatever its variable is named.
+_SANDBOX_ENV_NAMES = (
+    "HALO_SANDBOX_BACKEND",
+    "HALO_SANDBOX_URL",
+    "HALO_SANDBOX_REPL",
+    "HALO_SANDBOX_MAX_CONCURRENCY",
+)
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 _MAX_RAY_TEMP_DIR_LEN = 40
 _RAY_LINK_PARENT = "/tmp"
@@ -194,7 +199,7 @@ def ray_init_kwargs(**overrides) -> dict:
     kwargs: dict = {"ignore_reinit_error": True, "include_dashboard": False, **overrides}
     # An actor on a shared cluster (ray_address) takes its environment from its node's raylet, not from this
     # process: without the sandbox selection it would run model-written code on the default local backend.
-    sandbox_env = {name: value for name, value in os.environ.items() if name.startswith(_SANDBOX_ENV_PREFIX)}
+    sandbox_env = {name: os.environ[name] for name in _SANDBOX_ENV_NAMES if name in os.environ}
     if sandbox_env:
         runtime_env = dict(kwargs.get("runtime_env") or {})
         runtime_env["env_vars"] = {**sandbox_env, **runtime_env.get("env_vars", {})}

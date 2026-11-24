@@ -69,10 +69,10 @@ Three templates under `jinja-templates/glm/` serve this family (`glm5-chat.jinja
 - `glm-chat.jinja` — multi-turn system/user/assistant.
 - `glm-native.jinja` — the verbatim upstream `zai-org/GLM-4.7-Flash` template: system messages, tools
   (`<tool_call>` XML arg pairs), thinking via `reasoning_content`/`<think>`, observation turns. Use it
-  when the training render must match native serving byte-for-byte (tool data, RL); tool-call
-  `arguments` must be a parsed mapping, not the OpenAI JSON-string form.
+  when the training render must match native serving byte-for-byte (tool data, RL); a call's
+  `arguments` reach it as [Tool-call arguments](../data/dataset-formats.md#tool-call-arguments) describes.
 
-Neither injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`halo/data/turn_markers.py`). The final assistant turn ends with an explicit `<|endoftext|>` so it carries an in-document terminator under packing.
+None of the three injects a per-turn `<|endoftext|>` mid-conversation, matching native serving where an assistant turn ends at the next role marker (`<|user|>` / `<|observation|>`, both in `config.eos_token_id`). Completion masking stops each turn at that terminator (`halo/data/turn_markers.py`). `glm-instruct.jinja` and `glm-chat.jinja` end the final assistant turn with an explicit `<|endoftext|>`, so it carries an in-document terminator under packing; `glm-native.jinja` writes none, and the training renders append the tokenizer's ([Collators](../data/collators.md#eos-pad-and-the-response-template)).
 
 Pair them with `assistant_message_template: "<|assistant|>"` — the role token alone marks every assistant turn and matches both the thinking and non-thinking renders, where `<|assistant|></think>` would silently miss a thinking turn. See [Collators](../data/collators.md).
 

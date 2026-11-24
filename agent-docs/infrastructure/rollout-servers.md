@@ -271,8 +271,8 @@ adapter served ran over 5% slower than merged weights on the model measured.
   routed only to servers that hold the version it leased: one that lacks it is skipped, and one that answers "not
   loaded" is excluded for that version and the episode replayed on another. If the restarted server launched with the
   trainer's base (its `/server_info` `served_model_name` equals the `model_name` its requests name, and its `model_path`
-  names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache, or the same
-  real path; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
+  names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache at the commit
+  the trainer loaded, or the same real path; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
   at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
   the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
   would wait out the broadcast deadline). The old client is dropped without a destroy, probe or request to the vanished
@@ -558,6 +558,7 @@ server that does not answer is logged as unread.
 | `score_centering_top_k` and a server whose one-token probe does not return that many candidates, as a distribution holding the sampled token (an SGLang image without the flat arrays) | No candidates, or the wrong ones, reach the objective ([Candidate log-probs](#candidate-log-probs)) |
 | A server that, timed on a 64-token completion (the better of two, one idle sequence), would need over twice `request_timeout` to decode a full `rollout_max_tokens` turn (`verify_turn_deadline`); over half of it only warns, since a loaded server decodes slower per sequence | A timed-out episode trains as a masked row, so the batch keeps only the episodes that finished fast ([Monitoring](../training-methods/async-grpo/monitoring.md#halts)) |
 | A server whose prompt does not move with the reasoning level, where the trainer's does (`verify_server_chat_template`) | Its template ignores the level, and the reasoning terms charge for a contract the model never read ([Chat template](../training-methods/async-grpo/episodes.md#chat-template)) |
+| With `rollout_thinking: false`, a server whose generation prompt differs from the trainer's at any probed level, that does not answer the probe (a busy server timing it out), or whose reply to it carries no prompt ids (`verify_server_chat_template`) | Its template differs or goes unchecked, and one that ignores `enable_thinking` samples a reasoning block the trainer's render closes ([Thinking off](../training-methods/async-grpo/reasoning.md#thinking-off)) |
 
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry: a
 family's `export_key_renames`, then transformers' own save-side revert of what the load converted

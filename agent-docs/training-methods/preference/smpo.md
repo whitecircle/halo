@@ -38,7 +38,7 @@ gradient_checkpointing: false      # a 2 × 4,096 pair holds ~33 GB of activatio
 output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 ```
 
-`beta` scales the margin logit before the loss, and `target_margin` is the log-ratio gap a pair must reach, ramped linearly from `initial_margin` over the run under `use_margin_schedule`, which off refuses `initial_margin`. `chosen_sft_ratio` splits the SFT anchor between chosen and rejected cross-entropy. The margin term alone clips the bottom `lower_clip_percentile` of rejected log-probs and the top `upper_clip_percentile` of chosen, then floors rejected tokens at `min_log_prob`. Types, defaults and bounds: [SMPOConfig](../../reference/configuration-reference.md#smpoconfig).
+`beta` scales the margin logit before the loss, and `target_margin` is the log-ratio gap a pair must reach, ramped linearly from `initial_margin` over the run under `use_margin_schedule`, which off refuses `initial_margin`. `chosen_sft_ratio` splits the SFT anchor between chosen and rejected cross-entropy. The margin term alone clips the bottom `lower_clip_percentile` of rejected log-probs and the chosen log-probs above their `upper_clip_percentile` quantile (the top 1% at `0.99`), then floors rejected tokens at `min_log_prob`. Types, defaults and bounds: [SMPOConfig](../../reference/configuration-reference.md#smpoconfig).
 
 | `loss_type` | `loss_fn(z)` | Behavior |
 |---|---|---|
