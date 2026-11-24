@@ -55,23 +55,25 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-23 — Halo 1.3.0rc2.** Environmental GRPO on Inkling-2-Small: LoRA on the attention or on the routed
-  experts over the release's frozen NVFP4/MXFP8 experts, served to vLLM as an adapter
-  ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
+- **2026-11-23 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention or its
+  routed experts while the released NVFP4/MXFP8 expert weights stay frozen, and environmental GRPO serves each
+  adapter version to vLLM ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
   - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
     weights to, such as Inkling 2, is served from its release with no NCCL group.
   - **Inkling 2 vLLM image:** a second tag, `:vllm-0.1.dev25249` on vLLM's Inkling 2 build, with expert LoRA on the
     quantized experts in fused Triton kernels. Every other family stays on `:vllm-0.32.0`.
+  - **Inkling 2 attention:** a compiled FlexAttention kernel supports the family's relative-position bias and
+    attention sinks, cutting layer time by ~75% and peak memory by ~95% against eager attention. Packed rows
+    train with it in SFT and GRPO ([Inkling 2](agent-docs/models/inkling2.md#measured)).
   - **Commands:** `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2` build the image, serve
     and train.
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
     faster LoRA steps at EP8 on 8× B300), and its weights now sync to vLLM and SGLang for RL
     ([Qwen3.8-Flash-Next](agent-docs/models/qwen4_exp.md#kernel-defaults)).
-  - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer and
-    covering ep1 expert weights; an export layout vLLM serves; gpt-oss's native MXFP4 release loads through the lazy
-    loaders; and the trainer checks the converted modules against `lowp_precision`. Two fixes: MXFP8 quantizes with
-    a multiply, so an all-zero block does not become NaN where subnormals flush to zero, and eager MXFP4 and MXFP8
-    scale every block by an exact power of two, as the fused kernels do.
+  - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer,
+    including ep1 expert weights. Exports use a layout vLLM serves, and native MXFP4 releases load
+    directly. The trainer checks the converted modules against `lowp_precision`. Fixed: an all-zero MXFP8 block
+    no longer becomes NaN, and eager MXFP4/MXFP8 scale each block by an exact power of two.
   - **Distillation:** `use_chunked_distillation_loss` trains teacher and self-distillation without the full
     `[tokens, vocab]` logits, and online SDPG computes its OPD term the same way under `use_chunked_grpo_logprobs`.
     Teacher distillation takes `lowp_precision`, fitting a fake-quant student to a BF16 teacher. `bias_update`
@@ -83,15 +85,12 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     fine-tune).
   - **MoE metrics:** each checkpoint carries `moe_expert_token_counts.json`, the tokens routed to each expert over
     the run.
-  - **Adapters:** an adapter save records the Hub commit of its base model, and `merge_peft_adapters.py` and
-    `convert_to_bf16.py --check_inference` read the base at that commit (`--base_revision` names one for an adapter
-    that records none). A checkpoint saved in its source config schema reads that schema at the same commit. An
-    expert-only GPT-OSS adapter records whether its run neutralized the attention sinks, and the streaming merge
-    writes them neutralized again. A PEFT wrap that leaves an adapter with no trainable parameter is refused when
-    the trainer is built.
+  - **Adapters:** an adapter save records the Hub commit of its base model, and the merge and BF16-conversion
+    tools read the base at that commit (`--base_revision` for an adapter that records none). An expert-only
+    adapter records whether its run neutralized the attention sinks, and the streaming merge repeats it.
+    A PEFT wrap that leaves no trainable adapter parameter is refused when the trainer is built.
   - **Also:** Transformers 5.23, DPO/KTO reference log-probs swept after the FSDP2 wrap, SGLang turns requeued at a
-    weight push, Keenable as a web-search backend, and a fix: fused AdamWBF16 takes `1 - beta` from the float64
-    betas.
+    weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
     Pull or build the 1.3.0rc2 tags.
 - **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
