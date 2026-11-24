@@ -225,7 +225,7 @@ advanced parallelism. What each family is for:
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP on a tiny-model LoRA test only |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP on tiny models only; LoRA skips the grouped `o_a_proj` |
-| Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, PP ran Super VL's text tower for 13 steps with checkpointing on, the other modes and image SMPO on tiny models only; Lightning ran 5 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
+| Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, PP ran Super VL's text tower for 13 steps with checkpointing on, the other modes and image SMPO on tiny models only; Lightning ran 20 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP8 ran on the 200B+ checkpoint, on Halo 1.0.0 or earlier; the other modes and LoRA on tiny models |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; PP takes the text tower; the fp8 release needs `halo run convert-glm5-bf16` first |
@@ -240,7 +240,7 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 
 | Feature | Status |
 | --- | --- |
-| LoRA | supported except under TP, EP+TP, PP and hybrid CP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B and Nemotron 3.5 Super VL and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
+| LoRA | supported except under TP, EP+TP, PP and hybrid CP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B, Nemotron 3.5 Super VL and GLM-5.3-Flash and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
 | QLoRA | DDP, FSDP and non-hybrid CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint, native EP expert LoRA included (on GPT-OSS: a BF16 base); `merge_expert_lora_on_save: true` merges at save time instead |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export; `--export_format compressed-tensors` writes the layout vLLM 0.32.0 serves, per-expert MoE layouts only ([Serving the export with vLLM](../agent-docs/optimization/low-precision-moe-kernels.md#serving-the-export-with-vllm) ↗) |

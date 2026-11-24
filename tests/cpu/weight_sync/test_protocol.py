@@ -903,6 +903,22 @@ def test_a_row_that_names_no_engine_build_is_read_as_upstream(server, monkeypatc
     assert "POST /init_weight_transfer_engine" not in server.requests
 
 
+def test_an_engine_whose_report_cannot_be_read_still_shows_its_version(server, monkeypatch):
+    """An unreadable /server_info refuses nothing by itself, so the wire is checked by version before the group forms."""
+    monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
+    server.version = "0.26.0"
+    handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
+
+    def unreadable():
+        raise requests.exceptions.ConnectionError("/server_info")
+
+    monkeypatch.setattr(handle, "read_server_flags", unreadable)
+
+    with pytest.raises(RuntimeError, match=r"runs vLLM '0\.26\.0'"):
+        handle.read_engine_layout(require=True)
+    assert "GET /get_world_size" not in server.requests
+
+
 def test_the_packed_geometry_rides_the_init_request(server, monkeypatch):
     """An update carrying the geometry is refused, and an init without it leaves the engine receiving tensor by tensor
     while the trainer sends packed."""
