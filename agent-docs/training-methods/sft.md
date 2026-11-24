@@ -60,7 +60,8 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --expert_parallel_size=8
 
 # the same through the CLI
-halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
+halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --nproc 8 \
+    --expert_parallel_size=8
 
 # single GPU / LoRA
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
