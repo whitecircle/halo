@@ -585,6 +585,26 @@ def test_expert_adapters_over_the_packed_inkling2_release_are_refused_by_name(tm
     assert not out.exists(), "a refused merge left an output directory behind"
 
 
+@pytest.mark.parametrize("family", _EXPERT_FAMILIES)
+def test_an_expert_adapter_over_an_expert_tensor_the_base_stores_packed_is_refused_by_name(tmp_path, family):
+    """An expert delta folds under the layer's own key, so a base that packs that key in place has no weight there."""
+    base, adapter, reference = _expert_run(tmp_path, family, None)
+    stored = safetensors_state_dict(base)
+    rewritten = sorted(
+        key for key, tensor in safetensors_state_dict(reference).items() if not torch.equal(tensor, stored[key])
+    )
+    assert rewritten and ".experts." in rewritten[0], f"premise: the adapter rewrites expert tensors, got {rewritten}"
+    shard = next(path for path in sorted(base.glob("*.safetensors")) if rewritten[0] in load_file(str(path)))
+    tensors = load_file(str(shard))
+    tensors[rewritten[0]] = tensors[rewritten[0]].to(torch.uint8)
+    save_file(tensors, str(shard), metadata={"format": "pt"})
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match=rf"stores packed.*{re.escape(rewritten[0])} \(U8\).*no merged export"):
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
 def test_an_adapter_directory_without_a_weight_file_is_refused_by_name(tmp_path):
     base, adapter = tmp_path / "base", tmp_path / "adapter"
     _dense_base(base, torch.float32)
