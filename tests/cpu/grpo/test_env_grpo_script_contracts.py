@@ -15,7 +15,6 @@
     python tests/cpu/grpo/test_env_grpo_script_contracts.py
 """
 
-import logging
 import re
 import sys
 import types
@@ -159,19 +158,18 @@ def test_overhead_without_env_system_prompt_still_measures(env_grpo_module):
     assert env_grpo_module.measure_env_prompt_overhead(_env(system_prompt=None), _Tokenizer(), {}) == 0
 
 
-def test_tools_discovered_on_reset_are_warned_as_missing(env_grpo_module, caplog):
-    """An MCP environment learns its tools at its first reset and the probe env is never reset, so the overhead omits
-    their schema."""
+def test_prompt_overhead_counts_the_discovered_schema(env_grpo_module):
+    tools = [{"name": "dynamic_tool"}]
+    dynamic = _env(tools=[], tools_arrive_on_reset=True)
+    dynamic.discover_tools_schema = mock.AsyncMock(return_value=tools)
+    static = _env(tools=tools)
+    static.discover_tools_schema = mock.AsyncMock(side_effect=AssertionError("static tools must not connect"))
+    measure = env_grpo_module.measure_env_prompt_overhead
+    tokenizer = _Tokenizer()
 
-    def warned():
-        return [r for r in caplog.records if "tools arrive when its first reset" in r.getMessage()]
-
-    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.name):
-        for declared in (None, []):
-            env_grpo_module.measure_env_prompt_overhead(_env(tools=declared), _Tokenizer(), {})
-        assert not warned()
-        env_grpo_module.measure_env_prompt_overhead(_env(tools=[], tools_arrive_on_reset=True), _Tokenizer(), {})
-    assert warned()
+    assert measure(dynamic, tokenizer, {}) == measure(static, tokenizer, {}) > measure(_env(), tokenizer, {})
+    dynamic.discover_tools_schema.assert_awaited_once_with()
+    static.discover_tools_schema.assert_not_called()
 
 
 def test_overhead_raises_when_the_template_cannot_render_the_preamble(env_grpo_module):
