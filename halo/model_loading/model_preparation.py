@@ -2,11 +2,13 @@
 policies every loaded model takes."""
 
 import logging
+import os
 
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    GenerationConfig,
     PretrainedConfig,
     PreTrainedModel,
 )
@@ -26,6 +28,7 @@ from halo.models.attention.backend_setup import (
     patch_transformers_flash_varlen_int_seqlen,
     patch_transformers_packed_sequence_probe,
 )
+from halo.models.attention.dsa_indexer import patch_glm5_next_indexer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.masked_matmul import dsa_matmul_enabled, install_glm5_next_masked_matmul
 from halo.models.attention.prefix_lm import apply_prefix_lm_causal_decoder
@@ -127,6 +130,17 @@ def resolve_build_config(
     return config
 
 
+def find_generation_config(model_name_or_path: str, *, revision: str | None = None) -> GenerationConfig | None:
+    """The checkpoint's ``generation_config.json``, ``None`` where it ships none. A local file that does not parse
+    raises: the stops it lists would be lost in silence."""
+    try:
+        return GenerationConfig.from_pretrained(model_name_or_path, revision=revision)
+    except OSError:
+        if os.path.isfile(os.path.join(model_name_or_path, "generation_config.json")):
+            raise
+        return None
+
+
 def declared_load_ignores(config) -> tuple[str, ...]:
     """What the class ``config`` loads through drops at load (``_keys_to_ignore_on_load_unexpected``); none for a
     remote-code class no mapping names, which builds what it stores."""
@@ -189,6 +203,9 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # of a long step, and cuDNN on Hopper.
     if attn_implementation == "sdpa" and model_type_matches(model_config, "glm5_next") and dsa_matmul_enabled():
         install_glm5_next_masked_matmul()
+    # Else a padded row's DSA indexer scores every query against every pool in one call, 96 fp32 bytes a squared token.
+    if model_type_matches(model_config, "glm5_next"):
+        patch_glm5_next_indexer()
     # Else each hyper-connection and its mix launch some 450 kernels a forward and backward, most of them on a Sinkhorn
     # matrix of 64 bytes a token, and copy the residual streams into fp32 several times over.
     apply_hyper_connection_patches(model_config)

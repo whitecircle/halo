@@ -11,6 +11,7 @@ import threading
 import time
 import types
 from collections import deque
+from unittest import mock
 
 import pytest
 import torch
@@ -233,6 +234,7 @@ class _LifecycleHost:
     _adapter_versions = None
     _adapter_routes = None
     _adapter_sync = None
+    _rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False)
     _start_rank_rollout_components = _T._start_rank_rollout_components
     _start_rollout_pool = _T._start_rollout_pool
     _resolve_rollout_pool = _T._resolve_rollout_pool
@@ -459,6 +461,21 @@ def test_a_tp_follower_starts_no_ray_and_no_pool(monkeypatch):
     assert ray_calls == [] and host._rollout_manager is None and host._loop is None
     assert host.prefetch_starts == 0, "a follower started a prefetch worker"
     assert host.pushed == [0.0], "a follower must still join the weight push"
+
+
+def test_static_tool_environment_starts_without_discovery(monkeypatch):
+    host = _LifecycleHost(torch.zeros(1))
+    discover = mock.AsyncMock(side_effect=AssertionError("static tools must not connect"))
+    host._rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False, discover_tools_schema=discover)
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True))
+    monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _StubManager())
+
+    try:
+        host._init_async_components()
+        assert host._rollout_manager is not None
+        discover.assert_not_called()
+    finally:
+        host._loop.close()
 
 
 def test_a_second_component_init_without_a_cleanup_joins_no_collective_on_any_rank(monkeypatch):

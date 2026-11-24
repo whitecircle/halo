@@ -18,7 +18,7 @@ from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
 from halo.checkpoint.reading import reject_partial_checkpoint
-from halo.data.chat_render import tokenize_rendered
+from halo.data.chat_render import render_chat_template, tokenize_rendered
 from halo.data.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from halo.entrypoints.resumable_generation import assistant_turn, follow_up_messages, reject_empty_results
 from halo.inference.openai_client import build_openai_client, chat_completion
@@ -170,14 +170,12 @@ def prepend_answer_context(conversation: list[dict], correct_answer: str | None)
 
 
 def encode_for_scoring(tokenizer, conversations: list[list[dict]], correct_answer: str | None) -> dict:
-    """Tokenize as the training rows were: render through the chat template, then :func:`tokenize_rendered`, so BOS
-    lands once; re-tokenizing the rendered text would double it. A conversation past ``model_max_length`` raises
+    """Tokenize as the training rows were: render through :func:`render_chat_template`, then :func:`tokenize_rendered`,
+    so BOS lands once; re-tokenizing the rendered text would double it. A conversation past ``model_max_length`` raises
     :class:`OverlongConversationError`."""
     encoded = [
         tokenize_rendered(
-            tokenizer,
-            tokenizer.apply_chat_template(prepend_answer_context(conv, correct_answer), tokenize=False),
-            truncation=False,
+            tokenizer, render_chat_template(tokenizer, prepend_answer_context(conv, correct_answer)), truncation=False
         )
         for conv in conversations
     ]

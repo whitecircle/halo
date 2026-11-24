@@ -164,8 +164,13 @@ def test_the_documented_sft_invocation_runs_once_the_marker_is_supplied():
         ),
         ([*_DOC_TEXT_ARGV, "--text_field", "body"], "text_field", "body"),
         ([*_DOC_CHAT_ARGV, "--assistant_message_template", "<a>", "--tools_field", "tools"], "tools_field", "tools"),
+        (
+            [*_DOC_CHAT_ARGV, "--assistant_message_template", "<a>", "--reasoning_effort_field", "effort"],
+            "reasoning_effort_field",
+            "effort",
+        ),
     ],
-    ids=["conversation", "text", "tools"],
+    ids=["conversation", "text", "tools", "level"],
 )
 def test_a_column_flag_naming_no_input_column_is_refused_before_tokenization(argv, knob, column):
     """Otherwise a bare ``KeyError`` in a map worker, or every row baked without the column."""

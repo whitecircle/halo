@@ -117,9 +117,11 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
 - No video or audio rows. They raise.
 - `trust_remote_code: true` on the composite is refused at the load: the hub's modeling file hands its text tower
   no document markers, so leave it unset. `text_only_model: true` builds transformers' class either way.
-- Pipeline parallelism takes the text tower only and passes tiny-model GPU tests only.
+- Pipeline parallelism takes the text tower only. Beyond tiny-model GPU tests, it ran the release's text tower for
+  13 steps at `pp2 × ep8` on two 8-GPU machines, with gradient checkpointing on.
 - `save_sharded_ep` and `merge-ep-shards` are refused. Gathered saves stream one layer at a time.
-- `merge-peft-adapters` streams the merge of expert adapters; `merge_expert_lora_on_save` folds them at training time instead.
+- `merge-peft-adapters` merges attention and Mamba adapters but refuses expert adapters: the release stores the
+  experts under another layer path. Fold them at training time with `merge_expert_lora_on_save: true`.
 
 ## Export and serve
 

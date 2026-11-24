@@ -10,7 +10,7 @@ Trainer `DistributedKTOTrainer`, script `scripts/training/preference/kto.py` (te
 {"prompt": [{"role": "user", "content": "What is 2+2?"}], "completion": [{"role": "assistant", "content": "4"}], "label": true}
 ```
 
-`prompt` / `completion` may be plain strings or message lists — TRL templates them itself. `completion_field` / `label_field` rename those columns, and a name the dataset lacks raises before training. `tools_field` and `log_decoded_samples` are refused: TRL templates the raw columns without `tools=`, and the rows reach it untokenized.
+`prompt` / `completion` may be plain strings or message lists — TRL templates them itself. `completion_field` / `label_field` rename those columns, and a name the dataset lacks raises before training. `tools_field`, `reasoning_effort_field` and `log_decoded_samples` are refused: TRL templates the raw columns, reading tools and a level only from its own `tools` and `chat_template_kwargs` columns, and the rows reach it untokenized.
 
 ## Configuration
 

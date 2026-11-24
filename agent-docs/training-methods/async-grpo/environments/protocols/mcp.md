@@ -2,7 +2,7 @@
 
 `NativeMCPClientEnvironment` (`halo/environments/protocols/mcp.py`, registry name `mcp`) connects to a [Model Context Protocol](https://modelcontextprotocol.io/) server and exposes its tools as native function calls.
 
-It extends `AsyncNativeToolUseEnvironment`, so the [native protocol's](native-tool-use.md) turn budget and reward apply, with `tool_success_reward` raised to `0.1`. The MCP SDK ships in the image; the server does not, so its launcher must be on the actor's `PATH`.
+It extends `AsyncNativeToolUseEnvironment`, so the [native protocol's](native-tool-use.md) turn budget and reward apply, with `tool_success_reward` raised to `0.1`. The MCP SDK ships in the image. For stdio, the server launcher must be on the rollout actors' `PATH` and on the GRPO trainer ranks that lead rollouts. For SSE, those same processes need to reach `server_url`.
 
 ## Configuration
 
@@ -26,12 +26,15 @@ environment_kwargs:
 
 ## Tools
 
-Whatever the server advertises, discovered on the first reset and shown to the model as the server wrote the schema:
-array `items`, nested objects and `anyOf` survive, and only the `$schema` draft URL is dropped. The block is
-therefore longer than a flattened one, and because the tools do not exist before that reset, the startup
-context-window check leaves them out of its prompt overhead and logs a warning. Admission still checks the declared
-properties, so a schema that explicitly permits extra keys through `additionalProperties` or `patternProperties`
-will have those calls refused before the server. A call that hangs returns a tool error after 120 s.
+The rollout environment discovers tools on its first reset and shows them to the model as the server wrote the
+schema. Array `items`, nested objects and `anyOf` survive. Halo drops the `$schema` draft URL. Admission still
+checks the declared properties, so calls with extra keys allowed by `additionalProperties` or `patternProperties`
+are refused before they reach the server. A call that hangs returns a tool error after 120 s.
+
+Environmental GRPO discovers tools at startup for the context-window check and for trainer-side prompt renders.
+The training leader shares its schema with its TP/ETP group. Each probe closes its discovery connection before
+continuing, without starting episode servers. Startup fails if discovery fails or returns no tools. The server
+must advertise the same ordered tool schema to the trainer and the rollout actors.
 
 The `filesystem` server's allowlist is a fresh directory under `TMPDIR`. Under `episode_scratch` an
 episode's first tool call starts its own server over its own directory, so concurrent episodes (a GRPO

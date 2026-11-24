@@ -29,7 +29,7 @@ VLM_MODEL_REVISION = PINNED_REVISIONS[QWEN2_5_VL_3B]
 
 
 class PreprocessingArgsStub:
-    pad_token = bos_token = eos_token = chat_template = added_special_tokens = None
+    pad_token = bos_token = eos_token = chat_template = added_special_tokens = reasoning_effort_field = None
     force_chat_template = False
 
     def __init__(self, tokenizer_backend: str) -> None:

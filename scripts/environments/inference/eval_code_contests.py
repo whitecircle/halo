@@ -123,8 +123,8 @@ def _add_generation_args(p: argparse.ArgumentParser) -> None:
         help=f"Solver reasoning effort, passed to the model's chat template (low/medium/high), or "
         f"{NO_REASONING_EFFORT}: no level, for a non-thinking model. "
         f"{NO_REASONING_EFFORT} sends no reasoning_effort, so a thinking template keeps its default: "
-        f"Qwen3/3.5/3.6 still think unless enable_thinking=false reaches the template (vLLM "
-        f"--default-chat-template-kwargs). Default: the "
+        f"Qwen3/3.5/3.6 still think unless enable_thinking=false reaches the template (a --training_config "
+        f"with rollout_thinking: false, or vLLM --default-chat-template-kwargs). Default: the "
         f"training config's under --training_config (a null there is {NO_REASONING_EFFORT}), else "
         f"{DEFAULT_REASONING_EFFORT}.",
     )

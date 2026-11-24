@@ -57,13 +57,13 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹¹ Tiny-model GPU tests only: no Qwen3-Next checkpoint is trained at full scale here.
 
-¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
+¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps and 13 steps of `pp2 × ep8` full fine-tuning on the text tower have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
 
-¹³ Tiny-model GPU tests, plus a 20-step Qwen3-30B-A3B correctness smoke on Qwen3 MoE: no released checkpoint is otherwise trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
+¹³ Tiny-model GPU tests. On release checkpoints, PP ran a 20-step Qwen3-30B-A3B correctness smoke at `pp2 × ep4` and 13 steps of `pp2 × ep8` full fine-tuning on the text towers of Qwen3.8-Flash-Next and Nemotron 3.5 Super VL; GLM-4 MoE Lite, Laguna and Inkling ran PP on tiny models only. The measured PP runs of the other rows, GLM-5.3-Flash's `pp2 × ep8` among them: [Measured throughput](../parallelism/pipeline-parallelism.md#measured-throughput). Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
 
 ¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
 
-¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 5 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Everything else on this row, ETP and pipeline parallelism among it, runs on tiny models ([Nemotron-H](nemotron-h.md#status)).
+¹⁵ `ep8` recipes, images included, ran 5–20 steps on Super VL on 8× B300, with an exact resume at a 9-layer cut. Lightning ran 20 steps at `ep8`, with an exact resume at a 9-layer cut and a byte-identical full export. Pure ETP and EP+ETP run on tiny models, and ¹³ has the PP run ([Nemotron-H](nemotron-h.md#status)).
 
 ¹⁶ [Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) restrictions apply.
 

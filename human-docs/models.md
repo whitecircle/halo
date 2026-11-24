@@ -20,7 +20,7 @@ of them are MoE.
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | hybrid short-convolution layers |
 | [ZAYA1](cookbooks/halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | MoE | trains without gradient checkpointing, always |
 | [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision |
-| [Nemotron 3.5 Super VL](cookbooks/halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | MoE | Mamba-2 layers; EP8 on B300; short runs on the release; no online RL; the text-only [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](../agent-docs/models/nemotron-h.md#lightning) ↗ has its own recipe, run for 5 steps at EP8 |
+| [Nemotron 3.5 Super VL](cookbooks/halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | MoE | Mamba-2 layers; EP8 on B300; short runs on the release; no online RL; the text-only [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](../agent-docs/models/nemotron-h.md#lightning) ↗ has its own recipe, run for 20 steps at EP8 |
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; SDPA; the tokenizer ships no pad token |
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |

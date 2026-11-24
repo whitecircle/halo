@@ -364,8 +364,11 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
     )
     ids, _ = env.reset(["t"])
     assert env.get_trajectories(ids)[0].info["seen"] == {"max_probes": 2}
-    ids, _ = env.reset(["t"], [{"reasoning_effort": "random"}])
-    assert env.get_trajectories(ids)[0].info["seen"] == {}, "an undetermined level binds an empty profile"
+    drawn = _Task(
+        tool_registry=_registry(), reasoning_effort="random", reasoning_effort_profiles={"medium": {"max_probes": 2}}
+    )
+    ids, _ = drawn.reset(["t"])
+    assert drawn.get_trajectories(ids)[0].info["seen"] == {}, "an undetermined level binds an empty profile"
     with pytest.raises(ValueError, match=r"reasoning_effort_profiles\['low'\]: max_probes must be an integer >= 0"):
         _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_probes": -1}})
 

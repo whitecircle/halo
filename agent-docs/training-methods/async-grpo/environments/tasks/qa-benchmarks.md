@@ -65,7 +65,7 @@ forms (`square root of 2`).
 
 ### Multiple choice
 
-A row with `choices` switches `exam_qa` to letter grading and appends the choices to the prompt, each led by its letter. A choice already labelled with its own letter (`"B: Jupiter"`) is shown as written; more than ten choices are refused.
+A row with `choices` switches `exam_qa` to letter grading and appends the choices to the prompt, each led by its letter. A choice already labeled with its own letter (`"B: Jupiter"`) is shown as written; more than ten choices are refused.
 
 - The response's letter (A–J) is extracted ("A", "(A)", "The answer is A") and compared to the expected one. In prose only an uppercase letter standing alone counts ("the answer is a tie" and "the answer is definitely C" name no choice); a bracketed or bare letter may be lowercase.
 - `answer` may be that letter or a 0-based int index into `choices` (MMLU ships the index).

@@ -72,10 +72,17 @@ def judge_text(config: Path) -> str:
     return "\n".join(text for text in texts if text)
 
 
+def names_tool(text: str, name: str) -> bool:
+    """A name with an underscore is an identifier wherever it appears; a plain word (notes) names the tool only as its
+    calls or the tool itself, since the word also reads as prose."""
+    word = re.escape(name)
+    return re.search(rf"\b{word}\b" if "_" in name else rf"\b{word} (?:calls?|tool)\b", text) is not None
+
+
 def foreign_tools(text: str, offered: frozenset[str]) -> set[str]:
     """The tools some shipped example offers that ``text`` names but ``offered`` does not hold."""
     shipped = frozenset().union(*map(offered_tools, _EXAMPLES))
-    return {name for name in shipped - offered if re.search(rf"\b{re.escape(name)}\b", text)}
+    return {name for name in shipped - offered if names_tool(text, name)}
 
 
 _JUDGED_EXAMPLES = [config for config in _EXAMPLES if runs_judge(config)]
@@ -135,6 +142,13 @@ def test_a_judge_naming_another_runs_scratchpad_is_caught():
     not offer."""
     config = next(config for config in _JUDGED_EXAMPLES if "python_repl" in offered_tools(config))
     assert foreign_tools("run_code is the policy's scratchpad", offered_tools(config)) == {"run_code"}
+
+
+def test_a_judge_naming_the_notes_tool_outside_a_notes_run_is_caught():
+    """The plain-word rule still catches the notes tool where a judge text describes its calls, and only there."""
+    config = next(config for config in _JUDGED_EXAMPLES if "notes" not in offered_tools(config))
+    assert foreign_tools("the notes calls show every change", offered_tools(config)) == {"notes"}
+    assert foreign_tools("stubs, notes in place of code", offered_tools(config)) == set()
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import copy
 import itertools
 import logging
 import os
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import replace
 from functools import partial
 
@@ -38,6 +38,7 @@ from halo.checkpoint.sidecars import write_training_provenance
 from halo.checkpoint.weights_source import weights_read_at
 from halo.checkpoint.writing import adapter_save_dtype_caster
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
+    expert_lora_checkpoint_shapes,
     gather_expert_lora_adapters,
     load_expert_lora_adapters,
 )
@@ -51,6 +52,7 @@ from halo.models.introspection.unwrapping import (
     base_transformers_model,
     find_peft_model,
     plain_adapter_key,
+    plain_module_name,
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
@@ -167,7 +169,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
         peft_config = _cp_normalized_config(peft_config)
     if mixed:
         # unwrap_toolkit_wrappers stops at the PeftModel, so under CP the expert keys keep the wrapper's 'model.'
-        # level; restore_adapters applies them through the same unwrap, so the keys round-trip.
+        # level; the restore and the streaming merge match them by plain module name.
         expert_state = gather_expert_lora_adapters(unwrap_toolkit_wrappers(ctx.model), retain=ctx.is_save_rank)
         saved = (
             f"PEFT + EP expert adapters to {output_dir} ({len(state)} attention + {len(expert_state)} expert tensors)"
@@ -342,11 +344,14 @@ def _attention_adapter_mismatch(live_tensors: dict | None, attn_state: dict, che
     )
 
 
-def remap_cp_adapter_keys_to_live(state: dict, live_keys: Iterable[str]) -> dict:
-    """Map CP-normalized adapter keys back onto ``live_keys``, which carry ``.original_attention.`` / extra ``model.``
-    paths on a CP-wrapped resume. An unknown key passes through for the restore's layout check to name."""
-    normalized_to_live = {plain_adapter_key(key): key for key in live_keys}
-    return {normalized_to_live.get(key, key): value for key, value in state.items()}
+def remap_adapter_keys_to_live(
+    state: dict, live_keys: Iterable[str], *, normalize: Callable[[str], str] = plain_adapter_key
+) -> dict:
+    """Map saved adapter keys onto ``live_keys`` by their ``normalize`` spelling, which drops the ``.original_attention.``
+    / extra ``model.`` levels a CP-wrapped tree carries on either side. An unknown key passes through for the restore's
+    layout check to name."""
+    normalized_to_live = {normalize(key): key for key in live_keys}
+    return {normalized_to_live.get(normalize(key), key): value for key, value in state.items()}
 
 
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
@@ -368,12 +373,19 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     if loaded_path is None:
         return None  # no adapters anywhere: full fine-tuning
 
-    expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
-    attn_state = {k: v for k, v in state.items() if k not in expert_state}
+    expert_model = unwrap_toolkit_wrappers(unwrapped)  # the tree the savers walk
+    # A mixed save under CP keeps the wrapper's level in its expert keys; matched by plain module name, the adapter
+    # resumes at any cp_size.
+    expert_state = remap_adapter_keys_to_live(
+        {k: v for k, v in state.items() if is_expert_lora_key(k)},
+        expert_lora_checkpoint_shapes(expert_model),
+        normalize=plain_module_name,
+    )
+    attn_state = {k: v for k, v in state.items() if not is_expert_lora_key(k)}
     live_tensors = live_adapter_tensors(peft_model) if peft_model is not None else None
     # Saver wrote CP-normalized keys; remap to live CP-wrapped names or all keys miss.
     if is_cp_mode and live_tensors is not None:
-        attn_state = remap_cp_adapter_keys_to_live(attn_state, live_tensors)
+        attn_state = remap_adapter_keys_to_live(attn_state, live_tensors)
     if live_tensors is not None:
         attn_state = _with_tied_aliases(live_tensors, attn_state)
         live_tensors = _without_unsaved_grown_rows(peft_model, live_tensors, attn_state, checkpoint)
@@ -382,8 +394,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     reject_across_ranks(
         _attention_adapter_mismatch(live_tensors, attn_state, checkpoint), f"PEFT adapter resume from {checkpoint}"
     )
-    # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
-    load_expert_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
+    load_expert_lora_adapters(expert_model, expert_state)
     if attn_state:
         _load_peft_adapter_state(live_tensors, attn_state)
 

@@ -125,3 +125,9 @@ class OnlineGRPOScriptArguments(
     def _validate_fields(self) -> None:
         super()._validate_fields()
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails before any server is touched
+        if self.reasoning_effort is not None and self.reasoning_effort_field:
+            raise ValueError(
+                f"reasoning_effort={self.reasoning_effort!r} steers every prompt and reasoning_effort_field="
+                f"{self.reasoning_effort_field!r} gives each row its own level, but a prompt renders one. Drop "
+                f"reasoning_effort to render each row's level, or drop reasoning_effort_field for the run-wide steer."
+            )

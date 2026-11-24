@@ -431,7 +431,7 @@ def test_the_text_collator_keeps_the_real_eos_label_when_pad_is_eos():
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     tokenizer.pad_token = tokenizer.eos_token
     args = types.SimpleNamespace(train_on_completions_only=False, assistant_message_template=None)
-    collator = teacher_distill_script._text_distill_collator(args, tokenizer, None)
+    collator = teacher_distill_script._text_distill_collator(args, tokenizer, None, None)
     rows = [{"input_ids": [11, 12, 13, tokenizer.eos_token_id]}, {"input_ids": [21, tokenizer.eos_token_id]}]
     labels = collator(rows)["labels"]
     assert labels[:, -1].tolist() == [tokenizer.eos_token_id, LABEL_IGNORE_INDEX]

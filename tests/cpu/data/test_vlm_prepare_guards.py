@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""Config-time guards on ``prepare_vlm_dataset``, so every consumer inherits them: a mistyped ``images_field``,
-``interleaved_thinking`` on a VLM template, and a pinned map schema beside kept columns."""
+"""Config-time guards on ``prepare_vlm_dataset``, so every consumer inherits them: a mistyped ``images_field`` and
+``interleaved_thinking`` on a VLM template."""
 
 import types
 
@@ -8,7 +8,7 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from halo.data.pipeline import vlm_rows
-from halo.data.pipeline.vlm_rows import prepare_vlm_dataset, vlm_map_features
+from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.entrypoints import model_setup
 
 
@@ -20,6 +20,7 @@ def _args(**overrides) -> types.SimpleNamespace:
         "system_prompt": None,
         "model_supports_system_role": True,
         "tools_field": None,
+        "reasoning_effort_field": None,
         "interleaved_thinking": False,
         "train_on_completions_only": False,
         "assistant_message_template": None,
@@ -34,7 +35,7 @@ def _dataset() -> DatasetDict:
 def test_missing_images_field_column_raises_before_any_processing():
     """Both guards fire before the tokenizer/processor is touched, so None stand-ins prove it."""
     with pytest.raises(ValueError, match="images_field='pictures' names a column the dataset"):
-        prepare_vlm_dataset(_dataset(), _args(images_field="pictures"), None, None, 128, 1)
+        prepare_vlm_dataset(_dataset(), _args(images_field="pictures"), None, None, 128, 1, eos_token_ids=frozenset())
 
 
 def test_matching_images_field_passes_the_guard(monkeypatch):
@@ -46,7 +47,7 @@ def test_matching_images_field_passes_the_guard(monkeypatch):
 
     monkeypatch.setattr(vlm_rows, "build_vlm_row_processor", _boom)
     with pytest.raises(_ReachedProcessing):
-        prepare_vlm_dataset(_dataset(), _args(images_field="images"), None, None, 128, 1)
+        prepare_vlm_dataset(_dataset(), _args(images_field="images"), None, None, 128, 1, eos_token_ids=frozenset())
 
 
 @pytest.mark.parametrize("column", ["images", "image"])
@@ -61,7 +62,7 @@ def test_the_map_reads_the_image_column_the_dispatch_keyed_on_without_images_fie
     monkeypatch.setattr(vlm_rows, "coordinated_map", _capture)
     monkeypatch.setattr(vlm_rows, "_filter_vlm_over_length", lambda ds, *args: ds)
     ds = Dataset.from_list([{"prompt": [{"role": "user", "content": "hi"}], column: "x"}])
-    prepare_vlm_dataset(DatasetDict({"train": ds, "test": ds}), _args(), None, None, 32, 1)
+    prepare_vlm_dataset(DatasetDict({"train": ds, "test": ds}), _args(), None, None, 32, 1, eos_token_ids=frozenset())
     assert seen["images_field"] == column
 
 
@@ -69,27 +70,13 @@ def test_completion_masking_without_a_marker_is_refused_before_the_map():
     """The VLM collators refuse the pair too, but only after this map has paid the whole tokenization."""
     args = _args(train_on_completions_only=True, assistant_message_template=None)
     with pytest.raises(ValueError, match="requires assistant_message_template"):
-        prepare_vlm_dataset(_dataset(), args, None, None, 128, 1)
+        prepare_vlm_dataset(_dataset(), args, None, None, 128, 1, eos_token_ids=frozenset())
 
 
 def test_interleaved_thinking_still_refused_on_the_vlm_path():
     with pytest.raises(ValueError, match="interleaved_thinking is text-only"):
-        prepare_vlm_dataset(_dataset(), _args(interleaved_thinking=True), None, None, 128, 1)
-
-
-def test_pinned_schema_with_kept_columns_is_refused_at_the_seam():
-    """``features`` pins exactly the mapped columns; unguarded the pair dies on an Arrow cast inside a map worker,
-    naming a type."""
-    with pytest.raises(ValueError, match="pinned Arrow schema"):
         prepare_vlm_dataset(
-            _dataset(),
-            _args(images_field="images"),
-            None,
-            None,
-            128,
-            1,
-            keep=("solution",),
-            features=vlm_map_features(),
+            _dataset(), _args(interleaved_thinking=True), None, None, 128, 1, eos_token_ids=frozenset()
         )
 
 

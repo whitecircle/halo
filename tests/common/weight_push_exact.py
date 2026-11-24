@@ -34,6 +34,7 @@ from tests.common.models import (
     BAILING_MOE_LING_MINI,
     GEMMA4_26B_A4B,
     GLM4_FLASH,
+    GLM5_3_FLASH,
     GPT_OSS_20B,
     LAGUNA_XS_2_1,
     LFM2_24B_A2B,
@@ -65,7 +66,7 @@ TINY_CHECKPOINT_KNOBS = {
 }
 # Where a written tiny checkpoint takes its tokenizer, chat template and image-processor files: the served architecture
 # builds its multimodal processor from the checkpoint.
-_TINY_CHECKPOINT_HUB = {"glm5_next": "zai-org/GLM-5.3-Flash", "qwen4_exp_text": QWEN3_8_FLASH_NEXT}
+_TINY_CHECKPOINT_HUB = {"glm5_next": GLM5_3_FLASH, "qwen4_exp_text": QWEN3_8_FLASH_NEXT}
 _TINY_CHECKPOINT_HUB_FILES = ("tokenizer*", "special_tokens_map.json", "chat_template*", "*processor*.json")
 # The families whose served layout is the trainer's own gathered save, not transformers': Flash-Next's composite, with
 # the release's output gate, an indexer budget its server's top-k kernel takes (k = budget / compress ratio is 512,

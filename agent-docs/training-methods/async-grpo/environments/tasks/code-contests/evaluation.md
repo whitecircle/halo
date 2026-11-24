@@ -60,9 +60,13 @@ mean-over-samples pass@1 ([Running an evaluation](../../../evaluation.md#running
   [reasoning parser](../../../reasoning.md#reasoning-cap) on the vLLM server, which
   otherwise rejects the request.
 - Evaluate a non-thinking model with `--reasoning_effort none`; a think-tag parser reads its whole answer as
-  reasoning. `none` does not switch a thinking model's reasoning off: the request carries no `reasoning_effort`, so
-  the template keeps its own default. Qwen3/3.5/3.6 still think, and stop only on `enable_thinking: false` (the
-  server's `--default-chat-template-kwargs`, or `rollout_chat_template_kwargs` under `--training_config`).
+  reasoning. `none` means no level, not no thinking: the request carries no `reasoning_effort`, so the template keeps
+  its own default, and Qwen3/3.5/3.6 still think unless the server's `--default-chat-template-kwargs` sets
+  `enable_thinking: false` or a `--training_config` with `rollout_thinking: false` sends it on every request.
+- Evaluate a policy trained with `rollout_thinking: false` under `--training_config` of that run: every request
+  carries `enable_thinking: false`, at the level `--reasoning_effort` picks
+  ([Thinking off](../../../reasoning.md#thinking-off)). A server default cannot do it at a level: vLLM sets
+  `enable_thinking` from a request's level.
 - The eval treats the server as SGLang only when `--training_config` names `rollout_backend: sglang`, and then
   drops the reasoning cap as training does.
 

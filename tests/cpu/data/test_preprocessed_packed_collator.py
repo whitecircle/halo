@@ -77,6 +77,8 @@ def _write_metadata(dataset_dir: str, packed: bool, max_length: int = 64) -> Non
         "preprocessed": True,
         "model_name": "stub-model",
         "tokenizer_vocab_size": 100,
+        # A chat bake records the turn terminators it closed its rows against: the stub tokenizer's eos.
+        "eos_token_ids": [EOS],
         "max_length": max_length,
         "packed": packed,
         "packing_strategy": "bfd" if packed else None,
@@ -134,6 +136,7 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             tokenizer,
             parallelism_config,
             hf_config=None,
+            generation_config=None,
         )
         return collator
     finally:

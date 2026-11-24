@@ -13,6 +13,7 @@ from halo.data.pipeline.rejected_rows import blank_conversation, build_rejection
 from halo.data.pipeline.text_rows import build_chat_row_processor
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.tokenization import tokenize_dataset, tokenize_vlm_dataset
+from halo.data.turn_markers import resolve_eos_token_ids
 from scripts.training.grpo.online import build_rlvr_row_fn
 from tests.common.vlm_fakes import FakeVLMProcessorBase
 
@@ -142,7 +143,9 @@ def test_map_and_filter_survives_all_rejected_writer_batch():
     """The first worker's first writer batch is entirely over-length; an all-None sentinel raises when the worker
     later writes real rows."""
     tokenizer = _WordTokenizer()
-    processor = build_chat_row_processor(tokenizer, max_length=8, conversation_field="messages")
+    processor = build_chat_row_processor(
+        tokenizer, max_length=8, conversation_field="messages", eos_token_ids=resolve_eos_token_ids(tokenizer)
+    )
     dataset = _chat_dataset(num_over_length=_NUM_REJECTED, num_valid=_NUM_VALID, over_words=32, valid_words=4)
 
     result = coordinated_map_and_filter(
@@ -305,7 +308,9 @@ def test_tokenize_vlm_dataset_survives_all_rejected_writer_batch():
         num_proc=2,
     )
 
-    tokenized = tokenize_vlm_dataset(dataset, FakeVLMProcessorBase(), config, split_name="train")
+    tokenized = tokenize_vlm_dataset(
+        dataset, FakeVLMProcessorBase(), config, split_name="train", eos_token_ids=frozenset()
+    )
 
     assert len(tokenized) == _NUM_VALID
     for row in tokenized.select(range(0, len(tokenized), 100)):
