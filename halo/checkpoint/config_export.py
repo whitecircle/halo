@@ -17,7 +17,7 @@ from transformers.utils import CONFIG_NAME, cached_file
 from halo.checkpoint.format import PROCESSOR_FILES
 from halo.checkpoint.model_card import tag_exported_model_card
 from halo.checkpoint.reading import read_checkpoint_config
-from halo.checkpoint.weights_source import config_schema_source
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_REVISION_ATTR, config_schema_source
 from halo.log import info_logger
 from halo.models.introspection.config_access import config_export_ready
 from halo.models.introspection.model_classes import (
@@ -321,7 +321,9 @@ def save_model_config(model, output_dir: str) -> None:
         config.save_pretrained(output_dir)
     if (remote_code_cls := remote_code_model_class(model)) is not None:
         custom_object_save(remote_code_cls, output_dir)
-    finalize_exported_config(config, output_dir, source=config_schema_source(model))
+    # The stamp straight off the model handed in, as config_schema_source reads its source: a save unwraps first.
+    revision = getattr(model, LOADED_WEIGHTS_REVISION_ATTR, None)
+    finalize_exported_config(config, output_dir, source=config_schema_source(model), revision=revision)
     generation_config = getattr(model, "generation_config", None)
     if generation_config is not None and getattr(model, "can_generate", lambda: False)():
         generation_config.save_pretrained(output_dir)

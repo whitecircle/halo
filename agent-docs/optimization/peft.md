@@ -111,7 +111,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
   runs on GPT-OSS, Qwen3 MoE, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. Every other EP
   family refuses it, as it would put PEFT layers inside the EP layer. There, name attention and expert projections
   explicitly (see [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
-- **Learning rate:** higher than the same run's full fine-tune. The shipped SFT recipes start at `1e-4`, and the
+- **Learning rate:** higher than the same run's full fine-tune on SFT and GRPO. The shipped SFT recipes start at `1e-4`, and the
   code-contests recipes run `3e-6` against `2e-7`.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
@@ -122,7 +122,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
 | Trainer | Full-FT band | LoRA start |
 |---|---|---|
 | SFT | `2e-6` – `2e-5` | `1e-4` |
-| SMPO / DPO | `5e-7` – `5e-6` | `5e-5` |
+| SMPO / DPO | `5e-7` – `5e-6` | `5e-7` (the two shipped DPO LoRA recipes) |
 | GRPO | `1e-6` – `5e-6` | `3e-6` (every shipped LoRA async GRPO recipe under `examples/grpo/environmental/`) |
 
 The effective-batch formula is unchanged by LoRA — see
@@ -298,8 +298,8 @@ fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchm
 | LoRA r=64, attn + experts | 457M (3.86%) | 14,316 | 32.0 GiB |
 
 **LoRA under EP is far leaner than full fine-tuning.** The frozen base carries no gradients or optimizer
-state, so every variant peaks at 30–32 GiB against full fine-tuning's 78.9 GiB at this shape (batch 1), and
-every variant runs faster than its 12,432 tok/s/GPU. Experts-only is 5% faster than attention-only, since
+state, so every variant peaks at 30–32 GiB against full fine-tuning's 79.0 GiB at this shape (batch 1), and
+every variant runs faster than its 12,121 tok/s/GPU. Experts-only is 5% faster than attention-only, since
 the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either alone.
 
 On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
@@ -550,7 +550,8 @@ rank and alpha patterns, a LoRA bias) and DoRA fold through PEFT's own layer, so
 merge; native expert LoRA folds `scaling * bmm(A.float(), B.float())`, the weight sync's and the merge-on-save's
 arithmetic, through the family's `ExpertLayout`, on any projection subset. `modules_to_save` tensors replace
 the base's, and the balancing sidecar's biases land in their native slots at fp32, as the
-[in-memory merge](#merging-adapters) writes them.
+[in-memory merge](#merging-adapters) writes them. A `training_provenance.json` recording neutralized GptOss
+sinks is re-applied: the merge writes every sink tensor at its dtype minimum, as `reset_sinks.py` does.
 
 A linear adapter's module path, a `modules_to_save` name and a balancing slot reach the key the base stores them under
 as `from_pretrained` renames it, planned on a weightless shell of the class the base's config names, so a module the
@@ -569,7 +570,8 @@ The tool resolves everything it rewrites against the base before the first write
 - expert tensors of a family whose hub layout respells the layer path: DeepSeek-V4, Nemotron-H, Step-3.7 Flash and
   the multimodal classes of Inkling and Mistral Small 4;
 - base experts outside the family's export layout, or a stored tensor the run resized (a grown vocabulary);
-- embedding LoRA, or a `training_provenance.json` recording neutralized GptOss sinks;
+- embedding LoRA, or a `training_provenance.json` recording neutralized GptOss sinks over a base that stores no
+  sink tensor;
 - a balancing sidecar naming a module the base lacks, at another expert count, or in a config-gated slot the base
   does not build (LFM-2 under `use_expert_bias: false`).
 

@@ -52,7 +52,7 @@ flaky shared mount (NFS/EFS). Input wants per-node: global rank 0 writing the HF
 remote ranks reading those same inodes is a read-after-cross-node-write that NFS surfaces as
 `OSError: [Errno 116] Stale file handle`.
 
-Output is fine shared — checkpoints have a single writer, per-rank dumps are distinct files, and a
+Output is fine shared — each checkpoint file has one writer, per-rank dumps are distinct files, and a
 shared mount gives one authoritative copy with no post-hoc gather. That combination is
 `DIST_INPUT_SHARED_FILESYSTEM=0` with the umbrella left at its shared default.
 
@@ -121,7 +121,9 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
   writes its own copy.
 
     Every gathered/sharded save, the `run.log` tee, and `fs_aware_makedirs` by default route their
-    writer choice through it.
+    writer choice through it. On a shared output filesystem a gathered EP save adds the first
+    `HALO_CHECKPOINT_WRITERS_PER_NODE` local ranks of every node (default 1) as writers of its
+    EP layers; the non-expert tensors stay with the save rank.
 
 - `fs_aware_makedirs(path, writer_rank=is_fs_save_rank)` — creates a directory with the correct
   rank behind `barrier_on_exit`, so a read-only or full volume raises on every rank. Pass
@@ -231,7 +233,7 @@ contents still require a resume, `overwrite_output_dir: true`, or a different ou
 Put read-only models and datasets on shared storage; put the HF cache and temp files on local NVMe.
 
 ```bash
-export DIST_SHARED_FILESYSTEM=1          # 0 for per-node local storage
+export DIST_INPUT_SHARED_FILESYSTEM=0    # the caches are per-node; outputs keep the shared default
 export HF_HOME=/local/hf_cache
 export HF_DATASETS_CACHE=/local/hf_cache/datasets
 export TMPDIR=/local/tmp

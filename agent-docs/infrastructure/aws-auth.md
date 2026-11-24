@@ -15,7 +15,7 @@ Give dataset URIs as `s3://<your-bucket>/...`, or set `HALO_S3_DEFAULT_BUCKET=<y
 
 ## Credentials inside the training container
 
-Mount `~/.aws` and pass the repo-root `.env` (it supplies `AWS_DEFAULT_REGION` alongside `WANDB_API_KEY` / `HF_TOKEN` and **must** be passed via `--env-file` — the code does not auto-load it):
+Mount `~/.aws` and pass the repo-root `.env` (it supplies `WANDB_API_KEY` / `HF_TOKEN`, and `AWS_DEFAULT_REGION` once you uncomment it with a value, and **must** be passed via `--env-file` — the code does not auto-load it):
 
 ```bash
 SCRATCH=/path/to/large/volume    # confirm its capacity with findmnt / df -h

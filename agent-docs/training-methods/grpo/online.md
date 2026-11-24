@@ -64,7 +64,7 @@ learning_rate: 1.0e-06
 ```
 
 - `max_completion_length` must be a positive int; `null` raises, and leaving it out takes TRL's default, so set it. With both length knobs bounded, their sum becomes `model_max_length`.
-- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
+- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0` (`0.04` in the two White Circle code recipes), `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
 - `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it. `reasoning_effort_field` gives each prompt its row's own level instead; setting both raises.
 - Learning rate: `1e-6` to `5e-6` in the recipes, all full fine-tunes; LoRA takes more ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
@@ -129,14 +129,14 @@ For a shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small 
 | Knob | Set it to | Why |
 |---|---|---|
 | `loss_type` | `dapo` (TRL's default) | Length-unbiased: normalizes over the global active-token count, unlike `grpo`'s per-sequence mean |
-| `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens |
+| `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens; inert at the defaults, like `epsilon` (below) |
 | `scale_rewards` | `batch` for a shaped reward | `group` divides by the group's own spread, inflating shaping noise to full-scale advantages |
 | `mask_truncated_completions` | `true` (default `false`) | Drops a completion cut at the budget instead of scoring it. Async GRPO widens `truncated` to a turn overflow; its recipes leave it off |
 
 - A single binary reward keeps `scale_rewards: group`: the `1e-4` added to the divisor keeps a uniformly-failed group's advantages at zero, not NaN.
 - The clip binds only when a generation batch outlives one optimizer step. At the defaults (`num_iterations: 1`, `steps_per_generation` = `gradient_accumulation_steps`) `epsilon` is inert. `epsilon_high` falls back to `epsilon`.
 
-`beta` is the KL anchor to the base model; every online recipe runs `beta: 0`. TRL weights the KL term by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain k3 term. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
+`beta` is the KL anchor to the base model. The two White Circle code recipes (`examples/grpo/online/whitecircle/qwen3-4b-code-whitecircle.yaml`, `gemma4-26b-a4b-code-whitecircle.yaml`) run `beta: 0.04` as full fine-tunes, so each loads a frozen reference; the other recipes run `beta: 0`. TRL weights the KL term by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain k3 term. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
 
 - The script loads it as the policy loads (`load_reference_model_for_on_policy_grpo`, `halo/model_loading/parallel/frozen_models.py`): run dtype, `model_revision`, the policy's attention request and `reset_sinks`, the non-persistent buffers repaired, the vocabulary grown with the tokenizer. The trainer hands it to TRL in place of the fp32 copy TRL would build from the hub's default revision.
 - It is an unsharded dense replica on every rank. Before it loads, the script sizes it from a config-only meta shell at the run dtype and refuses, on every rank, a reference over half the GPU memory free beside the loaded policy or whose copies across the node's ranks (each stages its own in host memory) exceed 80% of the available host RAM; the error names `beta: 0`, an attention LoRA target and offline GRPO's precomputed reference. This covers plain FSDP2 as much as EP, ETP and TP. The check runs twice: before the policy loads, against the free memory then (a run it refuses would fail the later check too), and again after it, against the memory the loaded policy leaves. The half is a heuristic: optimizer state, gradients and activations are not budgeted, so a reference that passes can still run out of memory at the first step. A reference that fits is warned about under EP, ETP and TP when the trainer is built. A resume loads it from `model_name_or_path`, never the checkpoint.

@@ -61,7 +61,7 @@ label, except for Bailing/Ling.
 GLM-5 Next (tree packing keeps GLM-5 Next's documents apart). Ring and Inkling mix
 documents on every kernel, so packing them takes
 `allow_cross_document_linear_attention: true`. `padding_free` needs a flash
-kernel, and Qwen3.5/3.6 refuse it
+kernel; on Blackwell Qwen3.5/3.6 take FA2 for it unless you pin FA4
 ([Document isolation](../agent-docs/data/collators.md#document-isolation-under-packing) ↗).
 Per-family details:
 [Flash Attention](../agent-docs/optimization/flash-attention.md#model-specific-handling) ↗.
@@ -95,12 +95,12 @@ uses vLLM by default; `rollout_backend: sglang` switches engines. The engines
 differ in which families they can take an online weight update for. The scripts
 refuse an unsupported pair at startup, naming the family and the reason.
 
-The last column is what passed on this release: async GRPO, full fine-tuning on
+The last column is what passed on Halo 1.2.0 (1.3.0rc1 where a row says so): async GRPO, full fine-tuning on
 a real checkpoint, on one 8× B300 node with a TP=1 server, unless it says
 otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 `tensor_parallel_size: 2`, and replay is `routing_replay: rollout`.
 
-| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on this release |
+| Family | vLLM 0.32.0 | SGLang 0.5.22 | Replay | Ran on 1.2.0 |
 | --- | :---: | :---: | :---: | --- |
 | Dense families | Yes | Yes | No, MoE only | vLLM: online GRPO, SDPG and async GRPO on Qwen3-0.6B. SGLang: a weight push on Qwen3-0.6B, no training loop |
 | GPT-OSS | Yes | Yes | Yes | `unsloth/gpt-oss-20b-BF16`. SGLang: every SGLang mode marked Ran below. vLLM: `ep4`, `ep2` with `tp2` or ETP2, `tp2` and `ep2` at DP2, HSDP, online GRPO at `ep2` |
@@ -113,8 +113,9 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Laguna | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | Laguna-XS-2.1 on vLLM: `ep1`, `ep2`, replay at `ep2` |
 | Step-3.7 Flash | Yes | No (SGLang's loader asserts full coverage per call) | vLLM | vLLM: Step-3.7-Flash on a TP=2 server, a weight push at `ep2` and an expert-LoRA row at `ep4`; a full fine-tune at `ep4` does not fit four GPUs |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
-| GLM-5 Next | Yes | Yes | Not run | A tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
-| Inkling, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
+| GLM-5 Next | Yes | Yes | Not run | On 1.3.0rc1, a tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
+| Qwen3.8-Flash-Next | Yes | Yes, from this repo's image only | Not run | On 1.3.0rc1, tiny composite checkpoints on both engines at two ranks: an exact weight push and a LoRA adapter sync. No GRPO run on the release checkpoint |
+| Inkling, Qwen3-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has
 no validated expert layout on either engine and is refused too. Offline GRPO needs no
@@ -209,7 +210,7 @@ advanced parallelism. What each family is for:
 | Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | broadest coverage; PP on tiny models and one 20-step Qwen3-30B-A3B run at `pp2` × `ep4`, with `moe_balancing: none` |
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text rows only; SFT and SMPO refuse an image run under CP |
-| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | Yes (CP2 SFT) | Yes | Yes | [Hybrid CP restrictions](../agent-docs/parallelism/context-parallelism.md#dense-hybrid-sft) ↗; the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
+| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | Yes (CP2 SFT) | Yes | Yes | [Hybrid CP restrictions](../agent-docs/parallelism/context-parallelism.md#dense-hybrid-sft) ↗; the 9B image recipes train on plain FSDP with `flash_attention_2`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower, with `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | tiny models only |
 | Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental, text rows: EP8 trains the release cut to four layers, PP ran the whole text tower for 13 steps with checkpointing on, the rest runs on tiny models; full fine-tuning or LoRA; PP takes the text tower, full fine-tuning with `moe_balancing: none`; the 95 GiB n-gram table stays in host memory; `ep_size: 1` loads about 246 GiB on every GPU ([details](../agent-docs/models/qwen4_exp.md) ↗) |
@@ -222,7 +223,7 @@ advanced parallelism. What each family is for:
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP on a tiny-model LoRA test only |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP on tiny models only; LoRA skips the grouped `o_a_proj` |
-| Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, PP ran Super VL's text tower for 13 steps with checkpointing on, the other modes and image SMPO on tiny models only; Lightning ran 5 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
+| Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, PP ran Super VL's text tower for 13 steps with checkpointing on, the other modes and image SMPO on tiny models only; Lightning ran 20 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP8 ran on the 200B+ checkpoint, on Halo 1.0.0 or earlier; the other modes and LoRA on tiny models |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; PP takes the text tower; the fp8 release needs `halo run convert-glm5-bf16` first |
@@ -237,9 +238,9 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 
 | Feature | Status |
 | --- | --- |
-| LoRA | supported except under TP, EP+TP, PP and hybrid CP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B and Nemotron 3.5 Super VL and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
+| LoRA | supported except under TP, EP+TP, PP and hybrid CP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Qwen3.6-35B-A3B, Ring-mini-linear-2.0, Gemma 4 26B, Nemotron 3.5 Super VL and GLM-5.3-Flash and, for a few steps or one, Qwen3.8-Flash-Next and Step-3.7 Flash's experts. The other families' LoRA ran on tiny models. |
 | QLoRA | DDP, FSDP and non-hybrid CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
-| Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
+| Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint, native EP expert LoRA included (on GPT-OSS: a BF16 base); `merge_expert_lora_on_save: true` merges at save time instead |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export; `--export_format compressed-tensors` writes the layout vLLM 0.32.0 serves, per-expert MoE layouts only ([Serving the export with vLLM](../agent-docs/optimization/low-precision-moe-kernels.md#serving-the-export-with-vllm) ↗) |
 | FP8 rollouts (`rollout_weight_precision: fp8_block`) | online GRPO on vLLM and async GRPO on either engine, on Qwen3.5/3.6 MoE only; ran on Qwen3.5-35B-A3B; refused beside adapter sync and QLoRA ([FP8 rollouts](../agent-docs/infrastructure/rollout-servers.md#fp8-rollouts) ↗) |
 | Muon, FlashAdamW | supported optimizer options, except under PP |

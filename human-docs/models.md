@@ -10,7 +10,7 @@ of them are MoE.
 
 | Family | Hub example | Kind | What to know |
 | --- | --- | --- | --- |
-| [Qwen3 MoE](cookbooks/halo-qwen3-moe-cookbook.md) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | MoE | the reference MoE |
+| [Qwen3 MoE](cookbooks/halo-qwen3-moe-cookbook.md) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | MoE | the reference MoE; no recipe ships, the cookbook carries the config |
 | [Qwen3.5 / Qwen3.6 MoE](cookbooks/halo-qwen3.5-qwen3.6-moe-cookbook.md) | `Qwen/Qwen3.5-35B-A3B` | MoE | hybrid linear attention; [`Qwen/Qwen3.8-2.4T-A95B`](../agent-docs/models/qwen3_5.md#qwen38-24t-a95b) ↗ takes the same path, with no recipe and no GPU run |
 | [GPT-OSS](cookbooks/halo-gpt-oss-cookbook.md) | `unsloth/gpt-oss-20b-BF16` | MoE | attention sinks; FA2 refused for on-policy RL |
 | [GLM-4 MoE Lite](cookbooks/halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | MoE | compressed (MLA) attention |
@@ -20,7 +20,7 @@ of them are MoE.
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | hybrid short-convolution layers |
 | [ZAYA1](cookbooks/halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | MoE | trains without gradient checkpointing, always |
 | [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision |
-| [Nemotron 3.5 Super VL](cookbooks/halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | MoE | Mamba-2 layers; EP8 on B300; short runs on the release; no online RL; the text-only [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](../agent-docs/models/nemotron-h.md#lightning) ↗ has its own recipe, run for 5 steps at EP8 |
+| [Nemotron 3.5 Super VL](cookbooks/halo-nemotron-3.5-super-cookbook.md) | `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16` | MoE | Mamba-2 layers; EP8 on B300; short runs on the release; no online RL; the text-only [`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`](../agent-docs/models/nemotron-h.md#lightning) ↗ has its own recipe, run for 20 steps at EP8 |
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; SDPA; the tokenizer ships no pad token |
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |

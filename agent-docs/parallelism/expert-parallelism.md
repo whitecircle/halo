@@ -509,11 +509,14 @@ next collective.
 
 | Mode | Writers | Output | Loading |
 |---|---|---|---|
-| **Gathered** (default) | one rank, streaming | HF-standard, auto-sharded | `from_pretrained()` |
+| **Gathered** (default) | one rank per node at the default, streaming | HF-standard, auto-sharded | `from_pretrained()` |
 | **Sharded** (`save_sharded_ep`) | every rank, in parallel | Per-rank files | `merge_ep_shards.py` first |
 
-**Gathered:** experts are `all_gather`ed (every rank must enter) but only the **save rank** keeps
-the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise. The RL weight sync instead delivers each
+**Gathered:** experts are `all_gather`ed (every rank must enter) but only a **writing rank** keeps
+the tensors. On a shared FS, `HALO_CHECKPOINT_WRITERS_PER_NODE` ranks per node write
+([Environment variables](../reference/configuration-reference.md#environment-variables)): at the default `1`, global
+rank 0 on one node and each node's first rank on several, with the layers striped over them. On per-node storage each
+node's local rank 0 writes the whole checkpoint. The RL weight sync instead delivers each
 layer to the forwarding rank alone ([Rollout Servers](../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 
 `retain` reaches inside the expert gather, so a non-writing rank joins every collective and returns
@@ -525,16 +528,16 @@ The save streams into a `StreamingShardWriter` one chunk at a time, the non-expe
 then one EP layer per chunk, and finalizes with `close_as_hf_checkpoint()`. Its host RAM holds the
 current chunk, the part it is filling and one part per background write thread
 (`save_max_shard_size`, default `5GB`; `HALO_CHECKPOINT_WRITE_THREADS`, default `0`), not the whole
-checkpoint. A multi-node shared-filesystem save stripes the layers over each node's first rank
-([Checkpoints](../reference/checkpoints.md)), so each writer holds its own current layer and parts. By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
+checkpoint. Under the stripe each writer holds its own current layer and parts
+([Checkpoints](../reference/checkpoints.md)). By arithmetic, writing in line, that peak is about 12 GB on the writer at gpt-oss-120b
 (`ep8`) and about 21 GB at Qwen3.5-397B-A17B (`ep64`); each write thread adds up to one part.
 
 The plain FSDP2, CP and TP gathered saves stream through the same writer
 (`stream_gathered_checkpoint`), one decoder layer at a time.
 
 **Sharded exists for write bandwidth, not for memory.** N ranks write their own slice in parallel,
-so the pause at each save is bounded by one rank's shard instead of by the whole artifact funneled
-through a single writer. Host memory is not a reason to choose it: a sharded save holds *more* per
+so the pause at each save is bounded by one rank's shard, where a gathered save at the default has one
+writer per node, and the EP layers go round-robin over those writers. Host memory is not a reason to choose it: a sharded save holds *more* per
 node (every local rank buffers its own slice).
 
 The cost is that nothing loads the result. `merge_ep_shards.py` must run before resume or serving;
@@ -596,7 +599,7 @@ each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix
 restrictions. A `ep_group_size > 1` run on a dense model or a MoE with no family spec is refused at load,
 before the process groups (`reject_ep_without_family`), and one that still patches **zero** MoE layers raises.
 
-**Axis combinations.** EP composes with one of TP, CP or ETP; the allowlist and the topology rules
+**Axis combinations.** EP composes with one of TP, CP, ETP or PP; the allowlist and the topology rules
 on top of it: [Supported combinations](README.md#supported-combinations).
 
 **Kernel warm-up.** GptOss's expert-bias gradient is one cuBLAS GEMM contracting over the receive, whose kernel cuBLAS

@@ -23,7 +23,7 @@ Three conversational columns. A group is one **row**: put every completion of a 
 {"prompt": [{"role": "user", "content": "What is 2+2?"}], "completions": [[{"role": "assistant", "content": "4"}], [{"role": "assistant", "content": "5"}]], "rewards": [1.0, -0.5]}
 ```
 
-- A singleton or exactly-tied group gets advantage 0 under every method.
+- A singleton or exactly-tied group gets advantage 0 under every method, and so does any group whose IQR is 0 under `robust` (one success among seven failures).
 - A `completions`/`rewards` length mismatch, an empty tokenized prompt, or a non-finite reward raises, naming the row or group.
 - Strict templates (Qwen3.5) work: the script renders `prompt + completion` and strips the prompt.
 - A `tools_field` column is passed as `tools=`, and a `reasoning_effort_field` column as `reasoning_effort=`.
@@ -162,7 +162,7 @@ Read `positive/logps_mean` (stable or rising), `negative/logps_mean` (falling) a
 
 | Symptom | Cause | Fix |
 |---|---|---|
-| Loss NaN or exploding | Low-probability tokens on negative-advantage rows | `min_log_prob: -3.0` and `max_grad_norm: 1.0` |
+| Loss NaN or exploding | Low-probability tokens on negative-advantage rows | Raise `min_log_prob` toward 0 (default `-3.0`), or lower `max_grad_norm` below its `1.0` default |
 | `positive/pg_objective_mean` falls through training | Distribution shift from the offline data | Add `kl_beta: 0.05`, lower the learning rate |
 | `Batch-count equalization left 0 full batches` | The split is too small for this world size | Lower `per_device_train_batch_size`, shrink the world |
 | OOM | Full-vocab logits over long completions | `use_chunked_grpo_logprobs: true`, lower the batch or `max_completion_length`, or raise EP size |

@@ -14,7 +14,7 @@ From a shell inside the container (bring your own subscription or API key):
 cd /workspace && claude
 ```
 
-Describe the task. Four skills (`parallelism`, `optimize`, `debug`, `docs`) fire on
+Describe the task. Five skills (`parallelism`, `optimize`, `debug`, `docs`, `visuals`) fire on
 their own when relevant. The other six are user-invoked only: name them with
 `/launch`, `/checkpoints`, `/data`, `/add-model`, `/rl-setup`, `/write-tests`.
 
@@ -30,6 +30,7 @@ their own when relevant. The other six are user-invoked only: name them with
 | `add-model` | integrates a new model family (EP layer, registries, tests) |
 | `write-tests` | writes CPU/GPU tests that actually fail when behavior breaks |
 | `docs` | maintains `agent-docs/`, this guide and `skills/` under the style charter |
+| `visuals` | writes a doc figure or a White Circle social graphic as an HTML page in the shared figure style and renders it to a PNG |
 
 ## What the agent reads
 

@@ -49,7 +49,8 @@ The base trainer logs loss, learning rate and grad norm every `logging_steps`
 | `save_completions` (online and async GRPO) | each logged step's rollouts as parquet under `<output_dir>/completions/`, and a W&B `completions` table when `report_to` includes `wandb` |
 | `log_completions` (online and async GRPO) | also prints the per-sample table to the console |
 
-Defaults and the exact keys:
+`enable_moe_metrics` and `save_completions` are on by default. `generate_eval_examples` is on by default for
+DPO, SMPO and offline GRPO and off for SFT. The other fields are off until set. Every default and the exact keys:
 [CommonScriptArguments](../agent-docs/reference/configuration-reference.md#commonscriptarguments) ↗.
 
 ## RL health
