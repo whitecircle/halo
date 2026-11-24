@@ -537,7 +537,7 @@ The plain FSDP2, CP and TP gathered saves stream through the same writer
 
 **Sharded exists for write bandwidth, not for memory.** N ranks write their own slice in parallel,
 so the pause at each save is bounded by one rank's shard, where a gathered save at the default has one
-writer per node, and the decoder layers go round-robin over those writers. Host memory is not a reason to choose it: a sharded save holds *more* per
+writer per node, and the EP layers go round-robin over those writers. Host memory is not a reason to choose it: a sharded save holds *more* per
 node (every local rank buffers its own slice).
 
 The cost is that nothing loads the result. `merge_ep_shards.py` must run before resume or serving;

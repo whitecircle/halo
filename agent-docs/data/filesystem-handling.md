@@ -121,9 +121,9 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
   writes its own copy.
 
     Every gathered/sharded save, the `run.log` tee, and `fs_aware_makedirs` by default route their
-    writer choice through it. On a shared output filesystem a gathered save adds the first
+    writer choice through it. On a shared output filesystem a gathered EP save adds the first
     `HALO_CHECKPOINT_WRITERS_PER_NODE` local ranks of every node (default 1) as writers of its
-    decoder layers.
+    EP layers; the non-expert tensors stay with the save rank.
 
 - `fs_aware_makedirs(path, writer_rank=is_fs_save_rank)` — creates a directory with the correct
   rank behind `barrier_on_exit`, so a read-only or full volume raises on every rank. Pass

@@ -3,9 +3,9 @@ name: visuals
 description: Load when making, restyling or reviewing a figure for a Halo doc page (the HTML figure pages under agent-docs/assets/), or an image, chart or figure for a White Circle social post (X, LinkedIn, Threads), or when asked for the White Circle look on a graphic. Claude writes the image as an HTML page and renders it to a PNG itself.
 ---
 
-# Social graphics
+# Visuals
 
-How White Circle images for social posts look, read and are made. A post image is a research
+How White Circle images for doc pages and social posts look, read and are made. A post image is a research
 figure in miniature: a black canvas, a serif title, thin lines, generous space, and colour only
 where it means something. It has to read in a feed at a third of its size, and survive a stranger
 checking its numbers.
