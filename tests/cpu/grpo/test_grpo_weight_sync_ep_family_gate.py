@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import get_args
 
 import pytest
 import torch.nn as nn
@@ -13,6 +14,7 @@ from transformers import Qwen3Config
 import scripts.training.grpo.environmental as environmental_script
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.environments.rollout_config import RolloutBackend
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.trainers.grpo.rollout.weight_push import (
     base_push_refusal,
@@ -111,6 +113,14 @@ def test_adapter_sync_does_not_lift_the_refusal_of_a_family_no_run_validated(bac
     model.mlp = _UnsupportedEPModuleStub()
     with pytest.raises(ValueError, match="does not support weight sync"):
         reject_unsyncable_model(model, backend, adapter_sync=True)
+
+
+def test_every_adapter_sync_backend_a_family_names_is_a_rollout_backend():
+    """The gate compares these names with the client's ``BACKEND_KEY``, so a misspelt one refuses the family."""
+    named = {backend for cls in set(MOE_LAYER_MAP.values()) for backend in cls.FAMILY.adapter_sync_backends}
+    assert named <= set(get_args(RolloutBackend)), (
+        f"not rollout backends: {sorted(named - set(get_args(RolloutBackend)))}"
+    )
 
 
 def test_adapter_sync_is_validated_for_inkling2_on_vllm_alone():

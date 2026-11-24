@@ -13,6 +13,7 @@ import halo.model_loading.parallel.ep as ep_lazy_loader
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.lowp.frozen_bank import build_frozen_banks
 from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.frozen_experts import apply_frozen_bank_slots
 from halo.model_loading.parallel.lazy_plan import LAZY_QUANTIZED, lazy_load_blocker
 from halo.models.moe.family_specs import INKLING2
 from tests.common.inkling2 import TINY_INKLING2_MXFP8_LAYERS, TINY_INKLING2_TEXT, write_tiny_inkling2_release
@@ -79,6 +80,17 @@ def test_each_container_holds_this_ranks_packed_slice(release, ep_size):
             assert bank.num_experts == local
             expected = reference[_EXPERTS_KEY.format(layer=layer, weight=slot.weight)][:local]
             assert torch.equal(bank.dequantize_linear(), expected), f"layer {layer} {slot.weight}"
+
+
+def test_a_second_apply_leaves_the_frozen_slots_as_they_are(release):
+    release_dir, _ = release
+    model = _lazy(release_dir, ep_size=2)
+    held = {name: (buffer.dtype, buffer.shape) for name, buffer in model.named_buffers()}
+
+    apply_frozen_bank_slots(model, release_dir)
+
+    assert {name: (buffer.dtype, buffer.shape) for name, buffer in model.named_buffers()} == held
+    assert not any(SLOTS[0].weight in dict(module.named_parameters(recurse=False)) for module in model.modules())
 
 
 def test_every_other_tensor_loads_as_from_pretrained_loads_it(release):

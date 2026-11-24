@@ -1061,8 +1061,9 @@ def test_a_server_launched_without_what_the_adapters_need_is_refused(launch, rea
     fake = FakeSGLangServer()
     try:
         fake.lora = None if launch is None else {**_LORA, **launch}
-        with pytest.raises(ValueError, match=reason):
+        with pytest.raises(ValueError, match=reason) as refusal:
             _verify(fake)
+        assert "SGLANG_LORA_MAX_RANK" in str(refusal.value)
     finally:
         fake.close()
 
@@ -1093,6 +1094,26 @@ def test_a_vllm_server_without_its_runtime_adapter_routes_is_refused_before_any_
                 verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
         else:
             verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+    finally:
+        fake.close()
+
+
+@pytest.mark.parametrize(
+    ("launch", "reason"),
+    [
+        ({"max_cpu_loras": 2}, r"--max-cpu-loras is 2, below the 3 versions"),
+        ({"max_loras": 1}, r"--max-loras is 1, so rounds on two versions"),
+        ({"max_lora_rank": 4}, r"--max-lora-rank is 4, below the run's lora_r 8"),
+    ],
+)
+def test_a_vllm_server_short_of_what_the_adapters_need_is_refused_under_its_own_flags(launch, reason):
+    """The vLLM client reads ``--max-loras`` and ``--max-cpu-loras`` into the fact names SGLang's flags carry."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora, fake.runtime_lora_updating = {**_VLLM_LORA, **launch}, True
+        with pytest.raises(ValueError, match=reason) as refusal:
+            verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+        assert "VLLM_EXTRA_ARGS" in str(refusal.value) and "SGLANG" not in str(refusal.value)
     finally:
         fake.close()
 

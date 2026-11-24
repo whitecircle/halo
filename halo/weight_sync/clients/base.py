@@ -206,11 +206,17 @@ class WeightSyncClientBase(UpdateStream, ABC):
     REASONING_PARSER_FLAG: str
     TOOL_PARSER_FLAG: str
     CHAT_TEMPLATE_FLAG: str
+    # The launch flags behind the loaded-adapter and per-batch limits, and how a launch sets the adapter flags.
+    ADAPTER_LOADED_LIMIT_FLAG: str
+    ADAPTER_BATCH_LIMIT_FLAG: str
+    ADAPTER_FLAGS_REMEDY: str
     # Format fields: init log ``engine_ws, master, port, bind``; failure hint ``master, port, url, env``.
     _INIT_LOG: str
     _READY_LOG: str
     FORMATION_STEP: str
     _FORMATION_FAILURE: str
+    # Names the adapter a score request reads through, when the run serves its policy as one.
+    adapter_source: Callable[[], str | None] | None = None
 
     def __init__(
         self,
@@ -459,8 +465,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
         return None if response.ok else response.text[:300]
 
     def loaded_adapters(self) -> list[str]:
-        """The adapters registered on the engine."""
-        self._reject_adapter_serving()
+        """The adapters registered on the engine: the model cards that name a parent."""
+        return [str(card["id"]) for card in self._served_model_cards() if card.get("parent")]
 
     def served_model_id(self) -> str:
         if self._served_model_id is None:

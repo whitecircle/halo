@@ -19,7 +19,7 @@ from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.parallel.expert_fuser import ExpertFuser
-from halo.model_loading.parallel.frozen_experts import install_frozen_bank_slots
+from halo.model_loading.parallel.frozen_experts import apply_frozen_bank_slots
 from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
@@ -75,7 +75,7 @@ def _meta_shell(
         **model_kwargs,
     )
     if frozen_quantized_experts:
-        install_frozen_bank_slots(shell, model_name_or_path)
+        apply_frozen_bank_slots(shell, model_name_or_path)
     return shell
 
 
@@ -228,18 +228,19 @@ def load_ep_model(
                 **from_pretrained_kwargs,
             ),
         )
-    elif pc.frozen_quantized_experts:
-        reason = lazy_load_blocker(source.local_dir, frozen_quantized_experts=True) or LAZY_NESTED_EXPERT_KEYS
-        raise ValueError(
-            f"frozen_quantized_experts needs the lazy safetensors loader, which {source.local_dir} cannot take ({reason})."
-        )
     else:
         # A declared blocker is the checkpoint's property (from_pretrained is its route); missing safetensors is an
         # environment problem costing every rank the full checkpoint in RAM.
         if not has_whole_model_weight_file(source.local_dir, safetensors_only=True):
             fallback_reason, log = "no_safetensors", logger.warning
         else:
-            fallback_reason, log = lazy_load_blocker(source.local_dir) or LAZY_NESTED_EXPERT_KEYS, logger.info
+            blocker = lazy_load_blocker(source.local_dir, frozen_quantized_experts=pc.frozen_quantized_experts)
+            fallback_reason, log = blocker or LAZY_NESTED_EXPERT_KEYS, logger.info
+        if pc.frozen_quantized_experts:
+            raise ValueError(
+                f"frozen_quantized_experts needs the lazy safetensors loader, which {source.local_dir} cannot take "
+                f"({fallback_reason})."
+            )
         if main:
             log(f"[Rank 0] Using HuggingFace from_pretrained + EP patch (reason={fallback_reason})")
         method = f"huggingface_ep_fallback_{fallback_reason}"

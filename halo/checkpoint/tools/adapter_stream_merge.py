@@ -87,6 +87,11 @@ _LAYER_COPIES_IN_FLIGHT = 3
 Fold = Callable[[torch.Tensor], torch.Tensor]
 
 
+class _StoredTensor(NamedTuple):
+    shape: tuple[int, ...]
+    dtype: str
+
+
 @dataclass
 class _LinearAdapter:
     """One module's saved tensors, at fp32 as PEFT's autocast loads them."""
@@ -329,11 +334,6 @@ def _expert_spec(config: dict) -> ExpertLoraSpec:
     elif peft_type != EXPERT_LORA_PEFT_TYPE:
         raise ValueError(f"adapter_config.json peft_type {peft_type!r} carries no native expert LoRA recipe.")
     return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=bool(config.get("use_rslora")))
-
-
-class _StoredTensor(NamedTuple):
-    shape: tuple[int, ...]
-    dtype: str
 
 
 def _base_tensors(base_dir: str) -> dict[str, _StoredTensor]:

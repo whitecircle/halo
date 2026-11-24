@@ -177,6 +177,25 @@ def _build_hub_respeller(model: torch.nn.Module) -> Callable[[str], str | None]:
     return respell
 
 
+def _unservable_expert_lora(model: torch.nn.Module, peft_config, client_cls) -> list[str]:
+    """Native grouped expert adapters ride beside the attention ones, so they need the engine's routed-expert LoRA for
+    the model and the attention adapters' rank and scaling: one adapter config carries both."""
+    layers = expert_lora_layers(model)
+    if not layers:
+        return []
+    reasons = []
+    model_types = config_model_types(getattr(base_transformers_model(model), "config", None))
+    if not client_cls.ADAPTER_EXPERT_MODEL_TYPES.intersection(model_types):
+        reasons.append(
+            f"native expert LoRA: {client_cls.ENGINE_RELEASE} serves no routed-expert adapter on this model"
+        )
+    attention = ExpertLoraSpec(r=peft_config.r, alpha=peft_config.lora_alpha, use_rslora=peft_config.use_rslora)
+    _name, layer = layers[0]
+    if layer.ep_config.expert_lora.r != peft_config.r or layer.expert_lora_scaling != attention.scaling:
+        reasons.append("native expert LoRA at another rank or scaling than the attention adapters: one is served")
+    return reasons
+
+
 def _unadaptable_reasons(model: torch.nn.Module, parallelism_config: ParallelismConfig, client_cls) -> list[str]:
     reasons = []
     peft_model = find_peft_model(model)
@@ -287,25 +306,6 @@ def _hub_adapter_state(model: torch.nn.Module, state: dict[str, torch.Tensor]) -
             raise ValueError(f"The adapter tensor {key!r} has no hub spelling the engine could load it under.")
         hub[f"{PEFT_BASE_MODEL_PREFIX}{path}{marker}{leaf}"] = tensor
     return hub
-
-
-def _unservable_expert_lora(model: torch.nn.Module, peft_config, client_cls) -> list[str]:
-    """Native grouped expert adapters ride beside the attention ones, so they need the engine's routed-expert LoRA for
-    the model and the attention adapters' rank and scaling: one adapter config carries both."""
-    layers = expert_lora_layers(model)
-    if not layers:
-        return []
-    reasons = []
-    model_types = config_model_types(getattr(base_transformers_model(model), "config", None))
-    if not client_cls.ADAPTER_EXPERT_MODEL_TYPES.intersection(model_types):
-        reasons.append(
-            f"native expert LoRA: {client_cls.ENGINE_RELEASE} serves no routed-expert adapter on this model"
-        )
-    attention = ExpertLoraSpec(r=peft_config.r, alpha=peft_config.lora_alpha, use_rslora=peft_config.use_rslora)
-    _name, layer = layers[0]
-    if layer.ep_config.expert_lora.r != peft_config.r or layer.expert_lora_scaling != attention.scaling:
-        reasons.append("native expert LoRA at another rank or scaling than the attention adapters: one is served")
-    return reasons
 
 
 def _engine_expert_adapters(model: torch.nn.Module, experts: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:

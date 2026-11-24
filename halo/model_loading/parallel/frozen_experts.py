@@ -61,18 +61,21 @@ def _meta_buffer(owner: nn.Module, name: str, header: tuple[str, tuple[int, ...]
     owner.register_buffer(name, torch.empty(shape, dtype=dtype, device="meta"))
 
 
-def install_frozen_bank_slots(model: nn.Module, model_path: str) -> int:
+def apply_frozen_bank_slots(model: nn.Module, model_path: str) -> None:
     """Swap every fused expert container's bf16 weights on the meta ``model`` for release-layout buffers sized from the
-    checkpoint's headers; returns the containers converted. A bf16 expert tensor is refused, as there is nothing to
-    keep frozen."""
+    checkpoint's headers; a container that already holds them is left alone. A bf16 expert tensor is refused, as there
+    is nothing to keep frozen."""
     reject_frozen_experts_family(model.config)
     slots = find_moe_family_spec_for_config(model.config).frozen_expert_slots
     weights = resolve_checkpoint_weights(model_path)
     disk_to_model, _ = family_key_mapping(model, list(weights.weight_map))
     model_to_disk = {target: disk for disk, target in disk_to_model.items()}
     header = _HeaderReader(model_path)
-    converted = 0
+    converted = held = 0
     for name, module in model.named_modules():
+        if all(slot.weight in module._buffers for slot in slots):
+            held += 1
+            continue
         if not all(isinstance(module._parameters.get(slot.weight), nn.Parameter) for slot in slots):
             continue
         for slot in slots:
@@ -94,7 +97,7 @@ def install_frozen_bank_slots(model: nn.Module, model_path: str) -> int:
                 denominator_key = f"{disk_key}_outer_scale_denominator"
                 _meta_buffer(module, slot.denominator, header(denominator_key), denominator_key)
         converted += 1
-    if not converted:
+    if not converted and not held:
         raise ValueError("frozen_quantized_experts: the model has no fused expert container to keep frozen")
-    logger.info(f"frozen_quantized_experts: {converted} expert containers keep the release's packed layout")
-    return converted
+    if converted:
+        logger.info(f"frozen_quantized_experts: {converted} expert containers keep the release's packed layout")

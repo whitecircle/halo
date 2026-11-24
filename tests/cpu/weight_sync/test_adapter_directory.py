@@ -2,6 +2,8 @@
 its mount when a server cannot read it."""
 
 import json
+import logging
+from pathlib import Path
 
 import pytest
 import torch
@@ -29,6 +31,26 @@ def test_a_published_version_is_a_whole_peft_directory_and_leaves_no_stage(tmp_p
     assert sorted(path.name for path in tmp_path.iterdir()) == ["v1"], "the stage was renamed, not left beside it"
     remove_adapter_directories(tmp_path, ["v1", "never-published"])
     assert not published.exists()
+
+
+def test_a_version_that_cannot_be_removed_is_logged_and_the_rest_still_go(tmp_path, monkeypatch, caplog):
+    tensors = {"base_model.model.x.lora_A.weight": torch.zeros(1, 1, dtype=torch.bfloat16)}
+    for name in ("v1", "v2"):
+        publish_adapter_directory(tmp_path, name, tensors, {"r": 1})
+    remove_tree = adapter_directory.shutil.rmtree
+
+    def denied_on_v1(path, *args, **kwargs):
+        if Path(path).name == "v1":
+            raise PermissionError(13, "Permission denied", str(path))
+        remove_tree(path, *args, **kwargs)
+
+    monkeypatch.setattr(adapter_directory.shutil, "rmtree", denied_on_v1)
+    with caplog.at_level(logging.WARNING, logger=adapter_directory.__name__):
+        remove_adapter_directories(tmp_path, ["v1", "never-published", "v2"])
+
+    assert (tmp_path / "v1").exists() and not (tmp_path / "v2").exists()
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+    assert str(tmp_path / "v1") in caplog.text and "Permission denied" in caplog.text
 
 
 def test_a_write_that_raises_leaves_no_staging_directory(tmp_path, monkeypatch):

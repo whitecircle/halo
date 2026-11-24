@@ -200,9 +200,11 @@ def _server_flag_refusals(
     return refusals
 
 
-def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[str]:
-    """Each launch fact that would make a server serve the adapter wrong or not at all; an unreported one reads as
-    unread."""
+def _adapter_refusals(
+    client_cls: type[WeightSyncClientBase], flags: ServerFlags, needs: AdapterRequirements
+) -> list[str]:
+    """Each launch fact that would make a server serve the adapter wrong or not at all, under the engine's own flag
+    names; an unreported one reads as unread."""
     facts = flags.extras
     refusals = []
     if not facts.get("enable_lora"):
@@ -218,22 +220,20 @@ def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[st
     loaded = facts.get("max_loaded_loras")
     if loaded is not None and int(loaded) < needs.live_versions:
         refusals.append(
-            f"its --max-loaded-loras is {loaded}, below the {needs.live_versions} versions the run keeps live, so a "
-            f"load would evict one a round still runs under."
+            f"its {client_cls.ADAPTER_LOADED_LIMIT_FLAG} is {loaded}, below the {needs.live_versions} versions the run "
+            f"keeps live, so a load would evict one a round still runs under."
         )
     per_batch = facts.get("max_loras_per_batch")
     if per_batch is not None and int(per_batch) < 2:
         refusals.append(
-            f"its --max-loras-per-batch is {per_batch}, so rounds on two versions could not share a batch."
+            f"its {client_cls.ADAPTER_BATCH_LIMIT_FLAG} is {per_batch}, so rounds on two versions could not share a "
+            f"batch."
         )
     if facts.get("speculative_algorithm"):
         refusals.append("it serves with speculative decoding, whose draft runs without the adapter.")
     if int(facts.get("dp_size") or 1) != 1:
         refusals.append("it runs data-parallel replicas, which cannot load an adapter at runtime.")
-    remedy = (
-        " Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service), or "
-        "set rollout_adapter_sync: false."
-    )
+    remedy = f" {client_cls.ADAPTER_FLAGS_REMEDY}, or set rollout_adapter_sync: false."
     refusals = [refusal + remedy for refusal in refusals]
     if facts.get(RUNTIME_ADAPTER_ROUTES_FACT) is False:
         refusals.append(
@@ -251,7 +251,7 @@ def _verify_adapter_servers_on_rank0(
     for url, flags in zip(urls, readings, strict=True):
         if flags is None:
             continue
-        if refusals := _adapter_refusals(flags, needs):
+        if refusals := _adapter_refusals(client_cls, flags, needs):
             raise ValueError(f"Rollout server {url} cannot serve the policy as an adapter: " + " ".join(refusals))
         logger.info(f"Rollout server {url} serves adapters: {dict(flags.extras)}")
 

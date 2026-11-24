@@ -78,6 +78,12 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     )
     MOE_BACKEND_FLAG = "--moe-backend triton (VLLM_MOE_BACKEND)"
     REASONING_PARSER_FLAG = "--reasoning-parser (VLLM_REASONING_PARSER)"
+    ADAPTER_LOADED_LIMIT_FLAG = "--max-cpu-loras"
+    ADAPTER_BATCH_LIMIT_FLAG = "--max-loras"
+    ADAPTER_FLAGS_REMEDY = (
+        "Serve with --enable-lora, --max-lora-rank, --max-loras and --max-cpu-loras (VLLM_EXTRA_ARGS of the vLLM compose "
+        "service)"
+    )
     TOOL_PARSER_FLAG = "--enable-auto-tool-choice --tool-call-parser (VLLM_TOOL_PARSER)"
     CHAT_TEMPLATE_FLAG = "--chat-template (VLLM_CHAT_TEMPLATE)"
     # Lifted for a family whose spec lists this backend in ``adapter_sync_backends``.
@@ -93,8 +99,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     # Inkling 2's quantized experts take an adapter with Halo's source patch (docker/vllm/patches/patch_vllm_inkling2.py).
     ADAPTER_EXPERT_MODEL_TYPES = frozenset(INKLING2.model_types)
-    # Names the adapter a score request reads through, when the run serves its policy as one.
-    adapter_source: Callable[[], str | None] | None = None
     UNSERVABLE_MODEL_TYPES = {
         "zaya": f"{ENGINE_RELEASE} ships no Zaya implementation (agent-docs/models/zaya.md)",
         "mistral4": (
@@ -151,10 +155,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     def adapter_request_model(cls, base_model: str, adapter: str) -> str:
         """vLLM serves a loaded adapter under its own name."""
         return adapter
-
-    def loaded_adapters(self) -> list[str]:
-        """The adapters registered on the engine: the model cards that name a parent."""
-        return [str(card["id"]) for card in self._served_model_cards() if card.get("parent")]
 
     def served_base(self) -> ServedBase:
         info = self.request(

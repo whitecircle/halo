@@ -2,6 +2,7 @@
 a version is published whole, and its directory is removed when the version leaves the servers."""
 
 import json
+import logging
 import os
 import shutil
 import tempfile
@@ -12,6 +13,8 @@ import torch
 from safetensors.torch import save_file
 
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
+
+logger = logging.getLogger(__name__)
 
 
 def publish_adapter_directory(root: str | Path, name: str, tensors: Mapping[str, torch.Tensor], config: dict) -> Path:
@@ -33,6 +36,12 @@ def publish_adapter_directory(root: str | Path, name: str, tensors: Mapping[str,
 
 
 def remove_adapter_directories(root: str | Path, names: Iterable[str]) -> None:
-    """Removes the published directory of each version in ``names``; one that was never published is skipped."""
+    """Removes the published directory of each version in ``names``; one that was never published is skipped, and one
+    that cannot be removed is logged and left."""
     for name in names:
-        shutil.rmtree(Path(root) / name, ignore_errors=True)
+        try:
+            shutil.rmtree(Path(root) / name)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            logger.warning(f"Could not remove the adapter version at {Path(root) / name}: {error}")

@@ -118,7 +118,7 @@ def test_the_build_asserts_the_engine_build_of_the_tag_it_builds():
     assert 'release) build="${VLLM_VERSION}"' in verify and 'inkling2) build="${VLLM_INKLING2_BUILD}"' in verify
     assert 'python3 /tmp/verify_image.py "${VLLM_ENGINE}" "${build}"' in verify
     script = (REPO_ROOT / "docker/vllm/verify_image.py").read_text(encoding="utf-8")
-    assert "    check_engine_build(pinned_build)\n" in script and "    check_model_runner_v2,\n" in script
+    assert "    check_engine_build(engine, pinned_build)\n" in script and "    check_model_runner_v2,\n" in script
 
 
 @pytest.mark.parametrize("guard_shipped", [True, False], ids=["release", "inkling2"])

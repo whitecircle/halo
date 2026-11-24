@@ -60,8 +60,8 @@ _UNSUPPORTED_SEQUENCE_AXIS_LAYERS: dict[str, str] = {
         _sequence_axis_detail(
             "this depthwise causal Conv1d runs (Inkling 2 applies it to the projected K/V inside attention and "
             "after each decoder sublayer)",
-            "Inkling 2 also adds a relative-logits bias and a sink to every attention call and runs eager attention "
-            "only, so no Ulysses wrapper is possible. Inkling 2 does not support CP — use EP (optionally + ETP).",
+            "Inkling 2 also adds a relative-logits bias and a sink to every attention call, which flash_attn_func "
+            "cannot take, so no Ulysses wrapper is possible. Inkling 2 does not support CP — use EP.",
         ),
     ),
     "BailingMoeV2LinearAttention": _sequence_axis_detail(

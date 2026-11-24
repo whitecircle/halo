@@ -315,7 +315,7 @@ class AsyncRolloutConfig(
             "name that new episodes select. A family whose base no push carries (Inkling 2) is never pushed: its "
             "servers keep the base they launched with. SGLang launched with --enable-lora, and vLLM for Inkling 2 "
             "with rollout_adapter_dir and VLLM_ALLOW_RUNTIME_LORA_UPDATING=True; attention and dense-MLP "
-            "projections only. A model it cannot serve is refused at "
+            "projections, plus Inkling 2's routed experts on vLLM. A model it cannot serve is refused at "
             "startup with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
         },
     )

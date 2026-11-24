@@ -129,6 +129,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     IMAGE_REMEDY = "Serve from the toolkit's SGLang image (make build-sglang), or its docker-compose.sglang.yml."
     MOE_BACKEND_FLAG = "--moe-runner-backend triton (SGLANG_MOE_RUNNER_BACKEND)"
     REASONING_PARSER_FLAG = "--reasoning-parser (SGLANG_REASONING_PARSER)"
+    ADAPTER_LOADED_LIMIT_FLAG = "--max-loaded-loras"
+    ADAPTER_BATCH_LIMIT_FLAG = "--max-loras-per-batch"
+    ADAPTER_FLAGS_REMEDY = (
+        "Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service)"
+    )
     TOOL_PARSER_FLAG = "--tool-call-parser (SGLANG_TOOL_PARSER, the family's name where auto cannot read the template)"
     CHAT_TEMPLATE_FLAG = "--chat-template (SGLANG_CHAT_TEMPLATE)"
     LAUNCH_FACTS = {
@@ -169,8 +174,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         self._own_group_name = f"weight_update_group_{urlparse(self.base_url).netloc}"
         self.group_name = group_name or self._own_group_name
         self._joined_names: set[str] = set()
-        # Names the adapter a score request reads through, when the run serves its policy as one.
-        self.adapter_source: Callable[[], str | None] | None = None
         self._engine_ranks: int | None = None
 
     def read_server_flags(self) -> ServerFlags:
@@ -453,10 +456,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             path=(info.get("model_path") or "").rstrip("/") or None,
             revision=info.get("revision") or None,
         )
-
-    def loaded_adapters(self) -> list[str]:
-        """The adapters registered on the engine: the model cards that name a parent, after the base's own."""
-        return [str(card["id"]) for card in self._served_model_cards() if card.get("parent")]
 
     def _adapter_update_refusal(self, response: requests.Response) -> str | None:
         """The engine answers a refused update with ``success: false`` and its ``error_message``."""

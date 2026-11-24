@@ -93,6 +93,22 @@ def test_lazy_fallback_level_separates_a_family_property_from_an_environment_fai
     assert "no_safetensors" in no_safetensors.warning.call_args.args[0]
 
 
+@pytest.mark.parametrize(
+    ("has_safetensors", "reason"),
+    [(False, "no_safetensors"), (True, "lazy_incompatible_expert_layout")],
+)
+def test_frozen_experts_off_the_lazy_loader_are_refused_with_the_cause(has_safetensors, reason):
+    """Frozen banks load only lazily, and a checkpoint with no safetensors is not an expert layout problem."""
+    with (
+        patch(f"{_EP_LOADING}.agree_lazy_load", lambda *a, **k: False),
+        patch(f"{_EP_LOADING}.has_whole_model_weight_file", lambda *a, **k: has_safetensors),
+        pytest.raises(ValueError, match=rf"frozen_quantized_experts needs the lazy safetensors loader.*\({reason}\)"),
+    ):
+        load_ep_model(
+            _SOURCE, _ep_pc(frozen_quantized_experts=True), None, _KWARGS, preserve_checkpoint_precision=False
+        )
+
+
 def test_load_ep_model_threads_revision():
     seen = {}
 
