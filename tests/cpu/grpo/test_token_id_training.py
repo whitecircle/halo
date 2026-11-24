@@ -61,6 +61,13 @@ class _DiscoveryRenderHost(AsyncRolloutMixin, TrajectoryTokenizeMixin):
         self._broadcast_object_from_tp_leader = lambda schema: schema
 
 
+def test_dynamic_tool_rerender_before_startup_raises():
+    env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=True, get_tools_schema=lambda: [])
+    host = _DiscoveryRenderHost(env, None, _ToolAwareTokenizer(), train_on_sampled_tokens=False)
+    with pytest.raises(RuntimeError, match="Dynamic tool schema has not been discovered at rollout startup"):
+        host._render_messages_to_ids([Message.user("task")], True, {})
+
+
 @pytest.mark.parametrize("episode_scratch", [False, True])
 @pytest.mark.parametrize(
     ("train_on_sampled_tokens", "sampled_ids"),
