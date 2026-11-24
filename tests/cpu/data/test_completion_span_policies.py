@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """The two completion-span policies of ``resolve_completion_spans`` on identical rows. Collator: starts at the
 marker, a terminator must precede the next marker (else an empty ``-1`` span), a global ``eos_fallback_to_end``.
-Self-distill: starts after the marker, runs to the first terminator anywhere, falls back to the row end per span."""
+Self-distill: starts after the marker, runs to the first terminator through later markers, falls back to the row end
+per span. Under both, another role's turn ends a span where the bounds name the turn opener."""
 
 import pytest
 import torch
@@ -9,6 +10,7 @@ import torch
 from halo.data.completion_spans import (
     PADDED_SPAN_POLICY,
     SELF_DISTILL_SPAN_POLICY,
+    SpanBounds,
     build_training_labels,
     resolve_completion_spans,
 )
@@ -19,6 +21,12 @@ MARKER = [M1, M2]
 U, A = 20, 30
 IMG = 77
 IGNORE = -100
+
+# gpt-oss's shape: every turn opens at M1, the marker M1 M2 opens only a final answer, which ends at an untracked
+# <|end|> (END); another role's turn (M1 U) and a call turn (M1 C) follow, the call ending at a served stop (EOS).
+END, C = 2, 40
+FINAL_THEN_CALL = [M1, M2, A, END, M1, U, U, END, M1, C, A, EOS, M1, M2, A, EOS]
+TURN_BOUNDS = SpanBounds(turn_opener=M1)
 
 
 def _collator_spans(sequence, eos_fallback_to_end=False):
@@ -68,6 +76,34 @@ def test_fallback_scope_divergence_partial_terminators():
 
     assert _collator_spans(row, eos_fallback_to_end=True) == ([0, 5], [3, -1])
     assert _self_distill_spans(row) == ([2, 7], [3, 8])
+
+
+@pytest.mark.parametrize(
+    ("bounds", "collator", "self_distill"),
+    [
+        # Only the markers bound a span: the first final runs on through the user turn to the call's stop.
+        (None, ([0, 12], [11, 15]), ([2, 14], [11, 15])),
+        (TURN_BOUNDS, ([0, 12], [-1, 15]), ([2, 14], [-1, 15])),
+    ],
+    ids=["markers", "turns"],
+)
+def test_another_roles_turn_ends_a_span_under_both_policies(bounds, collator, self_distill):
+    eos = frozenset({EOS})
+    assert resolve_completion_spans(FINAL_THEN_CALL, MARKER, eos, span_bounds=bounds) == collator
+    assert (
+        resolve_completion_spans(FINAL_THEN_CALL, MARKER, eos, span_bounds=bounds, **SELF_DISTILL_SPAN_POLICY)
+        == self_distill
+    )
+
+
+def test_the_self_distill_scan_still_runs_through_its_own_markers():
+    """gpt-oss's analysis and final blocks each open at the marker and are one completion: a turn opener the marker
+    follows is no other role's turn."""
+    row = [M1, M2, A, END, M1, M2, A, EOS]
+    spans = resolve_completion_spans(
+        row, MARKER, frozenset({EOS}), span_bounds=TURN_BOUNDS, **SELF_DISTILL_SPAN_POLICY
+    )
+    assert spans == ([2], [7])
 
 
 def _reference_self_distill_labels(input_ids: torch.Tensor, marker: list[int], eos_ids: set[int]) -> torch.Tensor:

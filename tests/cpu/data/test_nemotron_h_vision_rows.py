@@ -85,7 +85,7 @@ def _baked_rows(processor) -> Dataset:
     rows = [{"conversation": _TURNS, "images": [_image()]}, {"conversation": _TEXT_TURNS, "images": []}]
     config = _bake_config()
     config.images_field = "images"
-    return tokenize_vlm_dataset(Dataset.from_list(rows), processor, config, "train")
+    return tokenize_vlm_dataset(Dataset.from_list(rows), processor, config, "train", eos_token_ids=frozenset())
 
 
 def test_the_runtime_collator_hands_the_forward_its_grid_and_the_pixels_reach_the_loss():
@@ -247,7 +247,7 @@ def test_a_video_part_is_refused_by_the_bake_instead_of_dropping_its_row(monkeyp
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets"))
     rows = Dataset.from_list([{"conversation": _TEXT_TURNS}, {"conversation": _VIDEO_TURNS}])
     with pytest.raises(ValueError, match="video"):
-        tokenize_vlm_dataset(rows, tiny_processor(_MODEL_TYPE), _bake_config(), "train")
+        tokenize_vlm_dataset(rows, tiny_processor(_MODEL_TYPE), _bake_config(), "train", eos_token_ids=frozenset())
 
 
 def _image_dataset() -> DatasetDict:

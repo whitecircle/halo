@@ -15,6 +15,7 @@ from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
+from tests.common.env_grpo_batch import engine_view_env
 from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI, QWEN3_0_6B
 from tests.common.tokenizers import try_cached_tokenizer
 
@@ -103,7 +104,7 @@ def _stub(tok):
         _tools_schema=None,
         _batch_errors=BatchBuildFence(),
         async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
-        _carry_reasoning=False,
+        _rollout_env=engine_view_env(),
         _rows_over_cap=0,
         _warned_once=set(),
         # Named in the fall-back warning, whose remedy differs per engine.

@@ -41,6 +41,7 @@ from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from halo.models.attention.gpt_oss_sinks import (
     NEUTRALIZED_TEACHER_SINKS_COST,
     SINK_CARRYING_ATTN_HINT,
@@ -122,7 +123,7 @@ def _load_teacher_metadata(*, args, model_config) -> tuple[PreTrainedTokenizerBa
     return hub_metadata_main_first("teacher_metadata", fetch)
 
 
-def _text_distill_collator(args, tokenizer, model_config):
+def _text_distill_collator(args, tokenizer, model_config, generation_config):
     """The completions-only collator, else the padded causal-LM one, which restores a turn-ending EOS where pad == eos;
     a plain LM collator masks it, leaving no stop signal to learn."""
     return select_data_collator(
@@ -130,6 +131,7 @@ def _text_distill_collator(args, tokenizer, model_config):
         train_on_completions_only=args.train_on_completions_only,
         assistant_message_template=args.assistant_message_template,
         model_config=model_config,
+        generation_config=generation_config,
     ) or DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False)
 
 
@@ -178,6 +180,8 @@ def main():
     )
     policy = load_policy_model(context, training_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
     student_model = policy.model
+    if is_vlm:
+        mark_processor_rendered_rows(policy.tokenizer)
     tokenizer = apply_max_length(training_config, args, student_model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)
@@ -210,13 +214,20 @@ def main():
             processing_class,
             tokenizer,
             student_model.config,
+            student_model.generation_config,
             desc="Processing VLM distillation dataset",
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, training_config, desc="Processing distillation dataset"
+            ds,
+            tokenizer,
+            args,
+            training_config,
+            student_model.config,
+            student_model.generation_config,
+            desc="Processing distillation dataset",
         )
-        data_collator = _text_distill_collator(args, tokenizer, student_model.config)
+        data_collator = _text_distill_collator(args, tokenizer, student_model.config, student_model.generation_config)
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, training_config)
 

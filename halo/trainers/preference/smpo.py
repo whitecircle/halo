@@ -378,7 +378,9 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         # After the load: the ctor accepts a model id, and the config is where a family that closes
         # turns with a role marker (GLM-4, Gemma) declares it. Resolved once, because the tokenize map
         # runs in worker processes and fingerprints its fn_kwargs.
-        self._eos_token_ids = resolve_eos_token_ids(tokenizer, getattr(model, "config", None))
+        self._eos_token_ids = resolve_eos_token_ids(
+            tokenizer, getattr(model, "config", None), getattr(model, "generation_config", None)
+        )
         model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
             model, peft_config, args, disable_dropout=args.disable_dropout
         )

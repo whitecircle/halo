@@ -1,7 +1,8 @@
-"""Generation and retry configuration for rollout collection. Free of Ray and rollout-engine imports:
-``AsyncRolloutConfig`` builds one and the actors receive it pickled."""
+"""Generation and retry configuration for rollout collection, and the tokenizer and chat-template checks it rests on.
+Free of Ray and rollout-engine imports: ``AsyncRolloutConfig`` builds one and the actors receive it pickled."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
@@ -22,6 +23,8 @@ IDENTITY_SAMPLER = {"temperature": 1.0, "top_p": 1.0, **SAMPLER_FILTERS_OFF}
 ReasoningEffortChoice = Literal["low", "medium", "high", "random"]
 RANDOM_REASONING_EFFORT = "random"
 VALID_REASONING_EFFORTS = tuple(level for level in get_args(ReasoningEffortChoice) if level != RANDOM_REASONING_EFFORT)
+# The chat-template variable that closes the reasoning block (rollout_thinking: false writes it as False).
+ENABLE_THINKING = "enable_thinking"
 # Example end strings of the families' reasoning parsers, for the knob's help and its refusal.
 REASONING_END_TOKEN_EXAMPLES = (
     "Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|end|><|start|>assistant<|channel|>final<|message|>'"
@@ -78,6 +81,31 @@ class RolloutConfig:
     """Max retry attempts for a transient engine failure."""
     retry_base_wait: float = 1.0
     """Base wait time in seconds for exponential backoff."""
+
+    @property
+    def thinking(self) -> bool:
+        """Whether the policy opens a reasoning block: off where the run's template variables close it."""
+        return self.chat_template_kwargs.get(ENABLE_THINKING) is not False
+
+
+def verify_template_closes_thinking(tokenizer, template_kwargs: Mapping[str, Any]) -> None:
+    """The chat-template check of ``rollout_thinking: false``. Raises when the template renders the same generation
+    prompt with ``enable_thinking`` false and true: it ignores the switch, so whether the policy reasons is the
+    template's fixed choice. A template that opens the block anyway gets reasoning written into the visible message on
+    vLLM, whose parser then reads the turn as content."""
+    messages = [{"role": "user", "content": "Probe."}]
+
+    def generation_prompt(enable_thinking: bool) -> str:
+        kwargs = {**template_kwargs, ENABLE_THINKING: enable_thinking}
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kwargs)
+
+    if generation_prompt(False) == generation_prompt(True):
+        raise ValueError(
+            "rollout_thinking: false needs a chat template that closes the reasoning block on enable_thinking: false, "
+            "and this one renders the same generation prompt either way. Set chat_template: to one that reads the "
+            "switch (such as jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja) and serve the same file, or set "
+            "rollout_thinking: true."
+        )
 
 
 def resolve_rollout_stop_token_ids(tokenizer, names: list[str]) -> list[int] | None:

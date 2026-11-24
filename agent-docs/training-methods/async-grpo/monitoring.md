@@ -142,7 +142,12 @@ Both JSON columns are `{}` when empty. TRL's `log_completions` controls only the
 
 ### Cut tool calls
 
-A turn the engine cut mid-tool-call shows the partial call after its text, tagged `cut by the engine before the turn closed; never run`. On vLLM, with the turn's sampled ids captured and a reasoning budget resolving the reasoning close to a single token, it carries the whole decoded text past the close; elsewhere (SGLang, which enforces no reasoning cap, included), what the tool parser salvaged. It never runs, and later turns never see it.
+A turn the engine cut mid-tool-call shows the partial call after its text, tagged `cut by the engine before the turn closed; never run`. It never runs, and later turns never see it. The call shows what the tool parser salvaged, except on vLLM with the turn's sampled ids captured, where the call being written carries the text the policy wrote, decoded from those ids, less the turn's visible message:
+
+- with thinking on, the text past the reasoning close, on a run with a [reasoning cap](reasoning.md#reasoning-cap) whose `rollout_reasoning_end_token` encodes to a single token;
+- under [thinking off](reasoning.md#thinking-off), the whole turn, no budget needed.
+
+That text still holds any call written before it in the turn.
 
 ### Writer rank
 

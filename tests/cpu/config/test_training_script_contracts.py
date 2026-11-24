@@ -17,6 +17,7 @@ from halo.cli import training_methods
 from halo.configs.script_arguments import VisionTrainingArguments
 from halo.data.collators import padded
 from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, verify_preprocessed_dataset
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
@@ -279,12 +280,18 @@ def test_sft_forwards_render_args_and_packing_to_the_preprocessed_check():
         )
 
 
-def _passed_name(call: ast.Call, func: ast.FunctionDef, param: str) -> str | None:
-    """The variable ``call`` passes for ``func``'s parameter ``param``, positionally or by keyword."""
+def _passed_value(call: ast.Call, func: ast.FunctionDef, param: str) -> ast.expr | None:
+    """The expression ``call`` passes for ``func``'s parameter ``param``, positionally or by keyword."""
     value = {kw.arg: kw.value for kw in call.keywords}.get(param)
     if value is None:
         index = [a.arg for a in func.args.args].index(param)
         value = call.args[index] if index < len(call.args) else None
+    return value
+
+
+def _passed_name(call: ast.Call, func: ast.FunctionDef, param: str) -> str | None:
+    """The variable ``call`` passes for ``func``'s parameter ``param``, positionally or by keyword."""
+    value = _passed_value(call, func, param)
     return value.id if isinstance(value, ast.Name) else None
 
 
@@ -306,6 +313,69 @@ def test_sft_holds_the_preprocessed_rows_to_the_template_the_trainer_exports():
         assert path_param is not None and _passed_name(outer, functions[path], path_param) == exported, (
             f"sft.py {path} checks another object than the processing_class the trainer exports"
         )
+
+
+def test_sft_holds_the_preprocessed_rows_to_the_terminators_the_run_resolves():
+    """``required_eos_token_ids=None`` skips the terminator check, so rows a bake closed against another set would
+    train in silence."""
+    tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    (check,) = _named_calls(tree, "verify_preprocessed_dataset")
+    checked = {kw.arg: kw.value for kw in check.keywords}.get("required_eos_token_ids")
+    assert isinstance(checked, ast.Name), "sft.py must pass the run's terminators as required_eos_token_ids"
+    checker = next(name for name, node in functions.items() if _named_calls(node, "verify_preprocessed_dataset"))
+    index = [arg.arg for arg in functions[checker].args.args].index(checked.id)
+    for path in ("_prepare_text_data", "_prepare_vlm_data"):
+        (inner,) = _named_calls(functions[path], checker)
+        passed = inner.args[index] if index < len(inner.args) else None
+        assert isinstance(passed, ast.Call) and getattr(passed.func, "id", None) == "resolve_eos_token_ids", (
+            f"sft.py {path} does not hold the rows to the terminators resolve_eos_token_ids gives the run"
+        )
+
+
+def test_sft_resolves_every_terminator_set_with_the_models_generation_config():
+    """Without the generation config a row misses a stop the engine serves (gpt-oss ``<|call|>``) and trains a
+    terminator past it."""
+    tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    calls = _named_calls(tree, "resolve_eos_token_ids")
+    assert calls and all(
+        len(call.args) == 3 and getattr(call.args[2], "id", None) == "generation_config" for call in calls
+    ), "every resolve_eos_token_ids call in sft.py must pass the run's generation_config"
+    for path in ("_prepare_text_data", "_prepare_vlm_data"):
+        (outer,) = _named_calls(functions["main"], path)
+        passed = _passed_value(outer, functions[path], "generation_config")
+        assert passed is not None and ast.unparse(passed) == "model.generation_config", (
+            f"sft.py main passes {path} another generation config than the model's"
+        )
+
+
+def test_post_load_column_checks_join_across_ranks_on_the_loaders_shard_verdict():
+    """On a sharded load each rank checks its own shards: a check outside the join raises on one rank while its peers
+    wait in the next collective."""
+    for script in sorted(_TRAINING_DIR.rglob("*.py")):
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+        for func in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
+            flags = {a.arg for a in func.args.args + func.args.kwonlyargs} | {
+                target.elts[1].id
+                for node in ast.walk(func)
+                if isinstance(node, ast.Assign) and _named_calls(node.value, "load_script_datasets")
+                for target in node.targets
+                if isinstance(target, ast.Tuple) and isinstance(target.elts[1], ast.Name)
+            }
+            joined = set()
+            for node in ast.walk(func):
+                if isinstance(node, ast.With) and any(
+                    _named_calls(item.context_expr, "render_column_checks_across_ranks") for item in node.items
+                ):
+                    (join,) = _named_calls(node.items[0].context_expr, "render_column_checks_across_ranks")
+                    sharded = {kw.arg: kw.value for kw in join.keywords}["sharded"]
+                    assert isinstance(sharded, ast.Name) and sharded.id in flags, (
+                        f"{script.name}:{join.lineno} joins its checks on another verdict than the loader's"
+                    )
+                    joined |= {id(call) for stmt in node.body for call in _named_calls(stmt, "reject_image_columns")}
+            for call in _named_calls(func, "reject_image_columns"):
+                assert id(call) in joined, f"{script.name}:{call.lineno} checks image columns outside the join"
 
 
 def _run_main_with_yaml(module, yaml_body: str, tmp_path: Path):
@@ -442,6 +512,24 @@ def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
         assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
     else:
         assert seen, f"{script}: calls no tokenizer length seam ({', '.join(_TOKENIZER_SEAMS)})."
+
+
+def test_a_script_rendering_rows_through_its_processor_marks_its_tokenizer_before_the_length_seam():
+    """The length seam probes the tokenizer's template for a row's level, a template that renders no row of an image
+    run: unmarked, one blind to the level would refuse a run whose processor states it, before the row pipeline probes
+    the processor's own."""
+    rendering, unmarked = [], []
+    for script in _TRAINING_SCRIPTS:
+        tree = ast.parse(script.read_text(encoding="utf-8"))
+        if not any(_named_calls(tree, pipeline) for pipeline in ("prepare_vlm_dataset", "prepare_raw_vlm_split")):
+            continue
+        rendering.append(script)
+        marks = [call.lineno for call in _named_calls(tree, mark_processor_rendered_rows.__name__)]
+        seams = [call.lineno for seam in _TOKENIZER_SEAMS for call in _named_calls(tree, seam)]
+        if not marks or min(marks) > min(seams):
+            unmarked.append(str(script.relative_to(_TRAINING_DIR)))
+    assert rendering, "the sweep found no script rendering rows through a processor"
+    assert not unmarked, f"these scripts probe the tokenizer's template for an image run's rows: {unmarked}"
 
 
 @pytest.mark.parametrize(

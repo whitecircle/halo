@@ -39,6 +39,17 @@ def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:
         )
 
 
+def reject_whole_trajectory_render_of_rewritten_view(env, train_on_sampled_tokens: bool) -> None:
+    """An environment whose view rewrites earlier turns shows each turn a prompt that is no prefix of the next one's, so
+    one render of the whole trajectory would train turns on context the engine never sent."""
+    if env.rewrites_history_in_view and not train_on_sampled_tokens:
+        raise ValueError(
+            f"{type(env).__name__} rewrites earlier turns in each turn's prompt, so only per-turn training rows "
+            "match what the engine saw: set train_on_sampled_tokens: true (a vLLM server also needs "
+            "--return-tokens-as-token-ids)."
+        )
+
+
 def reject_straddling_train_groups(
     per_device_train_batch_size: int, steps_per_generation: int, num_generations: int
 ) -> None:

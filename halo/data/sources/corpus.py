@@ -1,12 +1,16 @@
 """Multi-dataset corpora: per-entry ratios and subsets, one schema over every entry, and train/test concatenation."""
 
+from collections.abc import Mapping
+
 import numpy as np
-from datasets import Dataset, DatasetDict, concatenate_datasets
+from datasets import Dataset, DatasetDict, Value, concatenate_datasets
 
 from halo.data.render_columns import (
     drop_empty_conversation_rows,
+    has_render_column,
     missing_render_column_splits,
     reject_missing_render_column,
+    resolve_declared_render_columns,
 )
 from halo.data.sources.paths import reject_partial_splits
 from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
@@ -79,25 +83,26 @@ def subset_dataset_dict(dataset: DatasetDict, dataset_ratio: float | None, seed:
     return dataset
 
 
-def _reject_tools_field_nowhere(paths: list, datasets: list, tools_field: str) -> None:
-    """Refuse a ``tools_field`` no entry carries (a typo); warn about entries without it, as in a mixed corpus."""
-    without = [
-        entry_path
+def _reject_template_column_nowhere(paths: list, datasets: list, knob: str, column: str) -> None:
+    """Refuse an optional template column no rendered split of any entry carries (a typo); warn about the splits
+    lacking it, whose rows the concatenation null-fills, as in a mixed corpus."""
+    absent = {
+        entry_path: splits
         for entry_path, ds_dict in zip(paths, datasets, strict=True)
-        if missing_render_column_splits(ds_dict, tools_field)
-    ]
-    if not without:
+        if (splits := missing_render_column_splits(ds_dict, column))
+    }
+    if not absent:
         return
-    if len(without) == len(paths):
+    if not any(has_render_column(ds_dict, column) for ds_dict in datasets):
         raise ValueError(
-            f"tools_field='{tools_field}' names a column NONE of the {len(paths)} configured "
-            f"dataset(s) carry ({without}) — every row would render without tools. Point tools_field "
+            f"{knob}='{column}' names a column NONE of the {len(paths)} configured "
+            f"dataset(s) carry ({list(absent)}) — every row would render as if {knob} were unset. Point {knob} "
             f"at an existing column in the YAML, or drop it."
         )
     if is_global_main_process():
         logger.warning(
-            f"tools_field='{tools_field}' is absent from {without}; rows from those source(s) render "
-            f"without tools. Intentional for a mixed corpus — check the column name if it is not."
+            f"{knob}='{column}' is absent from {absent} (dataset: split(s)); rows from those splits render as if "
+            f"{knob} were unset. Intentional for a mixed corpus — check the column name if it is not."
         )
 
 
@@ -120,37 +125,55 @@ def _find_common_columns(datasets):
     return common_columns
 
 
-def _pin_declared_columns(datasets: list[Dataset], declared_columns) -> list[Dataset]:
-    """Null-fill declared render columns into entries lacking them, at the carrying entry's type, so the schema
-    intersection keeps them."""
-    donor_features = {}
-    for column in declared_columns:
-        donor = next((ds for ds in datasets if column in ds.column_names), None)
-        if donor is not None:
-            donor_features[column] = donor.features[column]
-
-    filled = []
-    for dataset in datasets:
-        for column, feature in donor_features.items():
-            if column not in dataset.column_names:
-                dataset = dataset.add_column(column, [None] * len(dataset), feature=feature)
-        filled.append(dataset)
-    return filled
+def _null_column(dataset: Dataset, column: str, feature) -> Dataset:
+    """``dataset`` with ``column`` all null at ``feature``, in place of any it holds."""
+    if column in dataset.column_names:
+        dataset = dataset.remove_columns(column)
+    return dataset.add_column(column, [None] * len(dataset), feature=feature)
 
 
-def _normalize_dataset_schema(datasets, declared_columns=()):
+def _pin_declared_columns(
+    datasets: list[Dataset], sources: list[str], declared_columns: Mapping[str, str]
+) -> list[Dataset]:
+    """Null-fill each declared render column, keyed by its knob, into the datasets lacking it or holding only nulls
+    (Arrow's ``null`` type), at the type the others carry, so the schema intersection keeps it. Raises on a column the
+    datasets type differently, which no fill bridges, naming the ``sources`` of each type."""
+    untyped = str(Value("null"))
+    for knob, column in declared_columns.items():
+        features, holders = {}, {}
+        for dataset, source in zip(datasets, sources, strict=True):
+            if column in dataset.column_names:
+                key = str(dataset.features[column])
+                features[key] = dataset.features[column]
+                holders.setdefault(key, set()).add(source)
+        if not features:
+            continue
+        typed = sorted(key for key in features if key != untyped)
+        if len(typed) > 1:
+            held = "; ".join(f"{key} in {sorted(holders[key])}" for key in typed)
+            raise ValueError(
+                f"{knob}='{column}' is a type mismatch across the configured datasets ({held}): the concatenation "
+                f"would drop the column from every row. Store it with one type in every dataset."
+            )
+        target = typed[0] if typed else untyped
+        datasets = [
+            ds if str(ds.features.get(column)) == target else _null_column(ds, column, features[target])
+            for ds in datasets
+        ]
+    return datasets
+
+
+def _normalize_dataset_schema(datasets):
     if not datasets:
         return []
-    datasets = _pin_declared_columns(datasets, declared_columns)
     common_columns = _find_common_columns(datasets)
     if not common_columns:
         raise ValueError("No common columns found across datasets! Cannot concatenate.")
 
     # Only essential columns some dataset actually had: a column no dataset carries was never lost.
-    essential_columns = (*_ESSENTIAL_COLUMNS, *declared_columns)
     present_somewhere = set().union(*(ds.column_names for ds in datasets))
     lost_essentials = sorted(
-        {col for col in essential_columns if col in present_somewhere and col not in common_columns}
+        {col for col in _ESSENTIAL_COLUMNS if col in present_somewhere and col not in common_columns}
     )
     if lost_essentials and is_global_main_process():
         logger.warning(
@@ -165,7 +188,9 @@ def _normalize_dataset_schema(datasets, declared_columns=()):
     return [ds.select_columns(common_columns) for ds in datasets]
 
 
-def _concatenate_entries(paths: list[str], subsets: list[DatasetDict], declared_columns) -> DatasetDict:
+def _concatenate_entries(
+    paths: list[str], subsets: list[DatasetDict], declared_columns: Mapping[str, str]
+) -> DatasetDict:
     """The test split comes only from entries shipping one, else a placeholder."""
     train_datasets = [d["train"] for d in subsets]
     test_datasets = [d["test"] for d in subsets if "test" in d]
@@ -181,7 +206,13 @@ def _concatenate_entries(paths: list[str], subsets: list[DatasetDict], declared_
         logger.info("Normalizing dataset schemas before concatenation...")
     # One intersection over both sides: the shared row processor cannot map two split schemas.
     num_train = len(train_datasets)
-    normalized = _normalize_dataset_schema(train_datasets + test_datasets, declared_columns)
+    sources = [
+        *(f"{path} (train)" for path in paths),
+        *(f"{path} (test)" for path, d in zip(paths, subsets, strict=True) if "test" in d),
+    ]
+    normalized = _normalize_dataset_schema(
+        _pin_declared_columns(train_datasets + test_datasets, sources, declared_columns)
+    )
     train_datasets, test_datasets = normalized[:num_train], normalized[num_train:]
 
     if is_global_main_process():
@@ -205,35 +236,29 @@ def build_corpus(
     conversation_field: str,
     conversation_declared: bool,
     conversation_knob: str,
-    tools_field: str | None,
+    template_columns: Mapping[str, str | None],
 ) -> DatasetDict:
     """One train/test ``DatasetDict``. Each entry is checked and filtered on its own, so a refusal names the offending
-    dataset; declared render columns are pinned through the concatenation, then re-checked."""
+    dataset; declared render columns are pinned through the concatenation. ``template_columns`` maps each optional
+    template knob to the column it names."""
+    declared_render_columns = resolve_declared_render_columns(
+        conversation_knob, conversation_field if conversation_declared else None, template_columns
+    )
+    conversation_column = declared_render_columns.get(conversation_knob)
     # A SHARDED entry missing a split is a per-rank shard-index fault, not a source that ships only train.
     for entry_path, (entry_ds, entry_sharded) in zip(paths, loaded, strict=True):
         if entry_sharded:
             reject_partial_splits(entry_ds, entry_path)
-        drop_empty_conversation_rows(
-            entry_ds, entry_path, conversation_field, required=conversation_declared, knob=conversation_knob
-        )
+        if conversation_column:
+            reject_missing_render_column(entry_ds, entry_path, conversation_knob, conversation_column)
+        drop_empty_conversation_rows(entry_ds, conversation_field)
     datasets = [entry_ds for entry_ds, _ in loaded]
-    if tools_field:
-        _reject_tools_field_nowhere(paths, datasets, tools_field)
+    for knob, column in template_columns.items():
+        if column:
+            _reject_template_column_nowhere(paths, datasets, knob, column)
 
-    declared_render_columns = {
-        knob: column
-        for knob, column in (
-            (conversation_knob, conversation_field if conversation_declared else None),
-            ("tools_field", tools_field),
-        )
-        if column
-    }
     subsets = [
         subset_dataset_dict(entry_ds, ratio, seed + i)
         for i, (entry_ds, ratio) in enumerate(zip(datasets, ratios, strict=True))
     ]
-    ds = _concatenate_entries(paths, subsets, declared_render_columns.values())
-    # A schema mismatch no null fill bridges drops a declared column anyway; tools_field would say nothing.
-    for knob, column in declared_render_columns.items():
-        reject_missing_render_column(ds, ", ".join(paths), knob, column)
-    return ds
+    return _concatenate_entries(paths, subsets, declared_render_columns)

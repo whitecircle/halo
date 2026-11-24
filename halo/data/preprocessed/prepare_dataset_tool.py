@@ -18,6 +18,7 @@ from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTok
 
 from halo.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
 from halo.data.collators.collator_rules import reject_unpackable_family
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
 from halo.data.pipeline.coordinated_map import dataset_num_proc_override, ensure_cache_dir, scratch_dataset_maps
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
@@ -148,10 +149,10 @@ def load_input_dataset(args: PrepareDatasetArguments) -> DatasetDict:
 
 
 def require_declared_columns(dataset: DatasetDict, config: PreprocessingConfig, source: str) -> None:
-    """Refuse a column knob naming no column of the baked splits, before a map worker dies on a bare ``KeyError`` or a
-    tools or images column is silently left out."""
+    """Refuse a column knob naming no column of the baked splits, before a map worker dies on a bare ``KeyError`` or an
+    optional column is silently left out."""
     rendered = "text_field" if config.mode == "text" else "conversation_field"
-    for knob in (rendered, "tools_field", "images_field"):
+    for knob in (rendered, *TEMPLATE_COLUMN_KNOBS, "images_field"):
         column = getattr(config, knob)
         if column:
             reject_missing_render_column(dataset, source, knob, column)

@@ -1,6 +1,7 @@
 """Dataset loading across nodes whose copies of the source are their own, simulated by giving each rank a working
-directory holding its node-local copy. Ranks that must hold the same rows and diverged raise everywhere, a failed
-first load or pack raises its cause everywhere without repeating, and a Hub source resolves once per input scope."""
+directory holding its node-local copy. Ranks that must hold the same rows and diverged raise everywhere, as does a
+render column only some ranks' shards carry, found by the load or by a script's own check; a failed first load or pack
+raises its cause everywhere without repeating, and a Hub source resolves once per input scope."""
 
 import datetime
 import json
@@ -11,11 +12,14 @@ import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
 
+from halo.configs.grpo_environmental import EnvironmentalGRPOScriptArguments
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
 from halo.data.pipeline import coordinated_map as coordinated_map_module
 from halo.data.preprocessed.preparation import shard_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from halo.data.sources import loading
 from tests.common.gloo import run_gloo_ranks
+from tests.common.repo import load_script_module
 
 WORLD_SIZE = 2
 # Two nodes of two ranks: every input scope holds a follower, and per-node scopes hold copies of their own.
@@ -43,11 +47,21 @@ def _save_replicated(node: str, rows: list[str]) -> None:
     DatasetDict(splits).save_to_disk(os.path.join(node, "ds"))
 
 
-def _save_sharded(node: str, rows: list[str], num_shards: int) -> None:
+def _save_sharded(node: str, rows: list[str], num_shards: int, *, extra_column: bool = False) -> None:
+    columns = {"text": rows, "extra": rows} if extra_column else {"text": rows}
     for split in ("train", "test"):
         directory = os.path.join(node, "ds")
-        index = shard_dataset(Dataset.from_dict({"text": rows}), num_shards, directory, split_name=split)
+        index = shard_dataset(Dataset.from_dict(columns), num_shards, directory, split_name=split)
         write_stamped_sidecar(os.path.join(directory, split, SHARD_INDEX_FILE), index)
+
+
+def _share_node0_shard_index(tmp_dir) -> None:
+    """Node 1 reads node 0's shard index over its own shards, as a copy that diverged under one index does."""
+    for split in ("train", "test"):
+        index = os.path.join(split, SHARD_INDEX_FILE)
+        with open(os.path.join(_node_dir(tmp_dir, 0), "ds", index)) as source:
+            with open(os.path.join(_node_dir(tmp_dir, 1), "ds", index), "w") as target:
+                target.write(source.read())
 
 
 def _record(tmp_dir: str, rank: int, outcome: str) -> None:
@@ -143,6 +157,37 @@ def _pack_worker(rank: int, tmp_dir: str) -> None:
     _record(tmp_dir, rank, outcome)
 
 
+def _render_column_worker(rank: int, tmp_dir: str, render: dict) -> None:
+    """Load this rank's DP slice of its node's copy with the ``render`` columns declared; record the error."""
+    PartialState()
+    os.chdir(_node_dir(tmp_dir, rank))
+    try:
+        loading.load_datasets(SAVED_SOURCE, None, 1, data_parallel_rank=rank, data_parallel_size=WORLD_SIZE, **render)
+        outcome = "NO RAISE"
+    except BaseException as exc:
+        outcome = f"{type(exc).__name__}: {exc}"
+    _record(tmp_dir, rank, outcome)
+
+
+def _carried_column_worker(rank: int, tmp_dir: str, carried: dict) -> None:
+    """Load this rank's DP slice of its node's copy, then run Environmental GRPO's own check of the ``carried``
+    columns on it as the script does; record the error."""
+    PartialState()
+    os.chdir(_node_dir(tmp_dir, rank))
+    script = load_script_module("scripts/training/grpo/environmental.py", "halo_test_multinode_environmental_grpo")
+    args = EnvironmentalGRPOScriptArguments(dataset=SAVED_SOURCE, **carried)
+    try:
+        ds = loading.load_datasets(
+            SAVED_SOURCE, None, 1, conversation_field=None, data_parallel_rank=rank, data_parallel_size=WORLD_SIZE
+        )
+        sharded = loading.is_presharded_dataset_load_across_ranks(SAVED_SOURCE, WORLD_SIZE)
+        script.reject_missing_carried_columns(args, ds, sharded=sharded)
+        outcome = "NO RAISE"
+    except BaseException as exc:
+        outcome = f"{type(exc).__name__}: {exc}"
+    _record(tmp_dir, rank, outcome)
+
+
 def _run(tmp_path, worker, *args, env=None, world_size: int = WORLD_SIZE) -> list[str]:
     run_gloo_ranks(
         worker,
@@ -193,11 +238,7 @@ def test_the_siblings_of_a_sharded_replica_must_hold_the_same_rows(tmp_path):
     scores another's labels."""
     _save_sharded(_node_dir(tmp_path, 0), ROWS, num_shards=2)
     _save_sharded(_node_dir(tmp_path, 1), EDITED_ROWS, num_shards=2)
-    for split in ("train", "test"):
-        index = os.path.join(split, SHARD_INDEX_FILE)
-        with open(os.path.join(_node_dir(tmp_path, 0), "ds", index)) as source:
-            with open(os.path.join(_node_dir(tmp_path, 1), "ds", index), "w") as target:
-                target.write(source.read())
+    _share_node0_shard_index(tmp_path)
 
     for rank, outcome in enumerate(_loads(tmp_path, data_parallel_size=1)):
         assert outcome.get("error", "").startswith("ValueError"), f"rank {rank} trained on: {outcome}"
@@ -224,6 +265,44 @@ def test_a_split_only_some_node_copies_carry_raises(tmp_path):
     for rank, outcome in enumerate(_loads(tmp_path, data_parallel_size=WORLD_SIZE)):
         assert outcome.get("error", "").startswith("ValueError"), f"rank {rank} trained on: {outcome}"
         assert "'test'" in outcome["error"], f"rank {rank} was not told which split: {outcome}"
+
+
+@pytest.mark.parametrize("knob", ["conversation_field", *TEMPLATE_COLUMN_KNOBS])
+def test_a_render_column_only_some_ranks_shards_carry_raises_on_every_rank(tmp_path, knob):
+    """Node 1's copy predates the column under the same index. Each DP rank checks only its own shards, which no
+    replica comparison spans, so a rank refusing alone would leave its peers in the next collective."""
+    _save_sharded(_node_dir(tmp_path, 0), ROWS, num_shards=2, extra_column=True)
+    _save_sharded(_node_dir(tmp_path, 1), ROWS, num_shards=2)
+    _share_node0_shard_index(tmp_path)
+    render = (
+        {"conversation_field": "extra"}
+        if knob == "conversation_field"
+        else {"conversation_field": None, "template_columns": {knob: "extra"}}
+    )
+
+    outcomes = _run(tmp_path, _render_column_worker, render)
+
+    assert outcomes[1].startswith(f"ValueError: {knob}='extra' names a column"), outcomes
+    assert outcomes[0].startswith("RuntimeError: The render-column check"), f"rank 0 never got the cause: {outcomes}"
+    assert f"{knob}='extra'" in outcomes[0], outcomes
+
+
+@pytest.mark.parametrize(
+    "carried", [{"answer_field": "extra"}, {"context_fields": ["extra"]}], ids=["answer_field", "context_fields"]
+)
+def test_a_scripts_render_column_check_after_a_sharded_load_raises_on_every_rank(tmp_path, carried):
+    """The script checks the columns it carries after the load, again on each rank's own shards: rank 0 passing alone
+    would walk into its next collective while rank 1 raised."""
+    _save_sharded(_node_dir(tmp_path, 0), ROWS, num_shards=2, extra_column=True)
+    _save_sharded(_node_dir(tmp_path, 1), ROWS, num_shards=2)
+    _share_node0_shard_index(tmp_path)
+
+    outcomes = _run(tmp_path, _carried_column_worker, carried)
+
+    knob = next(iter(carried))
+    assert outcomes[1].startswith(f"ValueError: {knob}='extra' names a column"), outcomes
+    assert outcomes[0].startswith("RuntimeError: The render-column check"), f"rank 0 never got the cause: {outcomes}"
+    assert f"{knob}='extra'" in outcomes[0], outcomes
 
 
 def test_identical_sharded_copies_load(tmp_path):

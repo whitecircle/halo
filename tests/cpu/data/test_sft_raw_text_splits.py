@@ -32,6 +32,7 @@ def _args(generate_eval_examples: bool) -> SimpleNamespace:
         model_supports_system_role=True,
         interleaved_thinking=False,
         tools_field=None,
+        reasoning_effort_field=None,
         train_on_completions_only=False,
         assistant_message_template=None,
         train_on_last_assistant_only=False,
@@ -83,6 +84,7 @@ def _prepare(train_messages, test_messages, generate_eval_examples: bool = False
         tokenizer,
         SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
         hf_config=hf_config,
+        generation_config=None,
     )
 
 

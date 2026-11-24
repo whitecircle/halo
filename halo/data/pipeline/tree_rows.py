@@ -14,13 +14,18 @@ import pyarrow.compute as pc
 from datasets import Dataset, DatasetDict, Features, List, Value
 from transformers import PreTrainedTokenizer
 
-from halo.data.chat_render import tokenize_rendered
-from halo.data.completion_spans import PACKED_SPAN_POLICY, build_span_labels, resolve_spans_or_warn
+from halo.data.completion_spans import (
+    PACKED_SPAN_POLICY,
+    SpanBounds,
+    build_span_labels,
+    resolve_span_bounds,
+    resolve_spans_or_warn,
+)
 from halo.data.conversation import resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows
-from halo.data.pipeline.text_rows import render_row_conversation
+from halo.data.pipeline.text_rows import tokenize_training_row
 from halo.data.tree_layout import (
     DEPTH_COLUMN,
     POSITION_COLUMN,
@@ -106,6 +111,7 @@ def _trained_tokens(
     eos_token_ids: frozenset[int],
     assistant_message_template: str,
     train_on_last_assistant_only: bool,
+    span_bounds: SpanBounds,
 ) -> list[bool]:
     """Which tokens of a flat example the packing completion collator trains: each span through its closing token, never
     the document's first token."""
@@ -118,6 +124,7 @@ def _trained_tokens(
         response_prompt_template=assistant_message_template,
         tokenizer=tokenizer,
         row_label="tree row",
+        span_bounds=span_bounds,
     )
     trained = [label != LABEL_IGNORE_INDEX for label in build_span_labels(input_ids, input_ids, spans)]
     if trained:
@@ -142,9 +149,10 @@ def build_tree_row_processor(
     conversation over ``max_length`` is dropped; a run a batch or worker boundary cuts becomes two trees and changes no
     example."""
     # Partials: the map's cache key reads a partial's bound arguments and skips a dict a closure captures.
-    render = functools.partial(
-        render_row_conversation,
+    tokenize = functools.partial(
+        tokenize_training_row,
         tokenizer=tokenizer,
+        eos_token_ids=eos_token_ids,
         conversation_field=conversation_field,
         **render_kwargs,
     )
@@ -155,6 +163,7 @@ def build_tree_row_processor(
         eos_token_ids=eos_token_ids,
         assistant_message_template=assistant_message_template,
         train_on_last_assistant_only=train_on_last_assistant_only,
+        span_bounds=resolve_span_bounds(tokenizer, assistant_message_template, eos_token_ids),
     )
 
     def process_batch(batch: dict[str, list]) -> dict[str, list]:
@@ -162,10 +171,7 @@ def build_tree_row_processor(
         rows = [{column: values[i] for column, values in batch.items()} for i in range(len(batch[conversation_field]))]
         keys = [share_key(resolve_json_value(row[conversation_field]), share_markers, share_requires) for row in rows]
         for _, run in groupby(range(len(rows)), key=keys.__getitem__):
-            paths = [
-                tokenize_rendered(tokenizer, render(rows[i]), truncation=False, padding=False)["input_ids"]
-                for i in run
-            ]
+            paths = [tokenize(rows[i])["input_ids"] for i in run]
             trained = [trained_tokens(path) for path in paths]
             nodes = build_trie(paths, [share_limit(mask) for mask in trained], MIN_SHARED_TOKENS)
             trees, dropped = split_to_budget(nodes, max_length)

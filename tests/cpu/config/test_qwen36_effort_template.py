@@ -9,12 +9,10 @@ import pytest
 from huggingface_hub import try_to_load_from_cache
 from transformers.utils.chat_template_utils import _compile_jinja_template
 
-from tests.common.effort_templates import LEVEL_LINES
+from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
 from tests.common.models import QWEN3_6_MOE_35B
-from tests.common.repo import REPO_ROOT
-from tests.common.tokenizers import skip_uncached
+from tests.common.tokenizers import load_cached_tokenizer, skip_uncached
 
-TEMPLATE_PATH = REPO_ROOT / "jinja-templates" / "qwen3" / "qwen3.6-reasoning-effort.jinja"
 STOCK_TEMPLATE_REPO = QWEN3_6_MOE_35B
 
 TOOLS = [
@@ -53,7 +51,7 @@ def _render(template_text: str, messages, **kwargs) -> str:
 
 @pytest.fixture(scope="module")
 def template() -> str:
-    return TEMPLATE_PATH.read_text()
+    return QWEN3_6_EFFORT_TEMPLATE.read_text()
 
 
 def _stock_template() -> str | None:
@@ -125,6 +123,26 @@ def test_assistant_turns_render_reasoning_tool_calls_and_tool_responses(template
     assert plain.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\na<|im_end|>\n")
 
 
+def test_enable_thinking_false_closes_the_block_the_assistant_turn_renders(template):
+    """Thinking stays on unless the switch is false, which closes the block in the generation prompt exactly as an
+    assistant turn without reasoning renders it, so that turn's row extends the prompt it was sampled from."""
+    on = _render(template, CONVERSATION[:2], add_generation_prompt=True)
+    assert on.endswith("<|im_start|>assistant\n<think>\n")
+    assert _render(template, CONVERSATION[:2], add_generation_prompt=True, enable_thinking=True) == on
+    off = _render(template, CONVERSATION[:2], add_generation_prompt=True, enable_thinking=False)
+    assert off == on + "\n</think>\n\n"
+    row = _render(template, [*CONVERSATION[:2], {"role": "assistant", "content": "1"}], enable_thinking=False)
+    assert row.startswith(off) and row[len(off) :] == "1<|im_end|>\n"
+
+
+def test_the_closed_prompt_is_a_token_prefix_of_the_assistant_turn(template):
+    tokenizer = load_cached_tokenizer(STOCK_TEMPLATE_REPO)
+    off = _render(template, CONVERSATION[:2], add_generation_prompt=True, enable_thinking=False)
+    row = _render(template, [*CONVERSATION[:2], {"role": "assistant", "content": "1"}])
+    prompt_ids = tokenizer(off, add_special_tokens=False)["input_ids"]
+    assert tokenizer(row, add_special_tokens=False)["input_ids"][: len(prompt_ids)] == prompt_ids
+
+
 def test_text_item_lists_render_and_other_items_are_refused(template):
     text = _render(template, [{"role": "user", "content": [{"type": "text", "text": "hi"}]}])
     assert text == "<|im_start|>user\nhi<|im_end|>\n"
@@ -132,14 +150,15 @@ def test_text_item_lists_render_and_other_items_are_refused(template):
         _render(template, [{"role": "user", "content": [{"type": "image", "image": "x"}]}])
 
 
-def test_matches_the_hub_template_apart_from_the_effort_line(template):
+@pytest.mark.parametrize("switch", [{}, {"enable_thinking": True}, {"enable_thinking": False}], ids=str)
+def test_matches_the_hub_template_apart_from_the_effort_line(template, switch):
     stock = _stock_template()
     if stock is None:
         skip_uncached(STOCK_TEMPLATE_REPO, "chat template of")
-    ours = _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True, reasoning_effort="high")
-    theirs = _render(stock, CONVERSATION, tools=TOOLS, add_generation_prompt=True, preserve_thinking=True)
+    ours = _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True, reasoning_effort="high", **switch)
+    theirs = _render(stock, CONVERSATION, tools=TOOLS, add_generation_prompt=True, preserve_thinking=True, **switch)
     assert ours.replace("\n\n" + LEVEL_LINES["high"], "") == theirs
-    assert _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True) == theirs
+    assert _render(template, CONVERSATION, tools=TOOLS, add_generation_prompt=True, **switch) == theirs
 
 
 if __name__ == "__main__":

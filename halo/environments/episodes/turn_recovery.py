@@ -12,7 +12,8 @@ EMPTY_TURNS_KEY = "empty_turns"
 
 class TurnRecoveryMixin:
     # What a protocol feeds back after a cut turn, a turn cut inside a tool call (``None`` = the plain cut nudge)
-    # and an empty turn, asking for its own next move; ``None`` = no recovery path for that kind of turn.
+    # and an empty turn, asking for its own next move; ``None`` = no recovery path for that kind of turn. A nudge that
+    # names the reasoning declares ``<NAME>_NO_REASONING`` in the same class, sent after a turn that carried none.
     LENGTH_CUTOFF_NUDGE: str | None = None
     LENGTH_CUTOFF_IN_CALL_NUDGE: str | None = None
     EMPTY_TURN_NUDGE: str | None = None
@@ -49,7 +50,8 @@ class TurnRecoveryMixin:
     ) -> StepOutcome:
         """Retried within ``max_turns`` and ``max_length_cutoff_recoveries``; past them, or on the ``last_turn``, the
         episode ends truncated."""
-        nudge = self._unproductive_turn_nudge(nudge_attr)
+        thinking = trajectory.last_assistant_message().thinking
+        nudge = self._unproductive_turn_nudge(nudge_attr, reasoned=bool(thinking and thinking.strip()))
         if nudge is None:
             raise NotImplementedError(
                 f"{type(self).__name__} routed an unproductive turn to recovery without declaring "
@@ -64,9 +66,15 @@ class TurnRecoveryMixin:
         info = {kind: True, "unrecovered_turn": True} if ended else {kind: True}
         return StepOutcome(trajectory=trajectory, reward=0.0, done=ended, truncated=ended, info=info)
 
-    def _unproductive_turn_nudge(self, nudge_attr: str) -> str | None:
-        """A protocol whose wording depends on the instance (a tool-less registry) overrides this."""
-        return getattr(self, nudge_attr)
+    def _unproductive_turn_nudge(self, nudge_attr: str, *, reasoned: bool) -> str | None:
+        """The nudge, after a turn that carried no reasoning in the ``_NO_REASONING`` wording its own class declares,
+        so a subclass's nudge never takes a parent's. A protocol whose wording depends on the instance (a tool-less
+        registry) overrides this."""
+        nudge = getattr(self, nudge_attr)
+        if reasoned:
+            return nudge
+        owner = next(cls for cls in type(self).__mro__ if nudge_attr in vars(cls))
+        return vars(owner).get(f"{nudge_attr}_NO_REASONING", nudge)
 
     @staticmethod
     def _unproductive_turns(trajectory: Trajectory) -> int:

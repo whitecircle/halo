@@ -17,7 +17,7 @@ from halo.data.preprocessed.metadata import (
     PreprocessingConfig,
     verify_preprocessed_dataset,
 )
-from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, shard_dataset
+from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, preprocess_dataset, shard_dataset
 from halo.data.preprocessed.shard_index import (
     SHARD_INDEX_FILE,
     IncompatiblePreprocessedDataset,
@@ -27,6 +27,7 @@ from halo.data.preprocessed.shard_index import (
 )
 from halo.data.preprocessed.tokenization import tokenize_dataset
 from halo.data.sources.paths import hub_repo_id
+from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
 from tests.common.tokenizers import load_cached_tokenizer
 
 
@@ -105,6 +106,36 @@ def test_tokenize_dataset():
     assert len(row["input_ids"]) == len(row["attention_mask"])
 
     print("  tokenize_dataset: PASSED")
+
+
+def test_the_bake_renders_each_rows_level():
+    """The offline bake renders through the training renderer's knobs, so a declared level column reaches the
+    template; undeclared, no row states one."""
+    turns = [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4."}]
+    dataset = Dataset.from_dict({"prompt": [turns, turns], "effort": ["high", None]})
+    tokenizer = load_cached_tokenizer("Qwen/Qwen3-0.6B")
+    tokenizer.chat_template = QWEN3_6_EFFORT_TEMPLATE.read_text()
+
+    def baked(**config_overrides) -> list[str]:
+        config = PreprocessingConfig(model_name_or_path="Qwen/Qwen3-0.6B", max_length=512, **config_overrides)
+        return [tokenizer.decode(ids) for ids in tokenize_dataset(dataset, tokenizer, config)["input_ids"]]
+
+    high, null = baked(reasoning_effort_field="effort")
+    assert LEVEL_LINES["high"] in high
+    assert "Reasoning effort" not in null
+    assert all("Reasoning effort" not in text for text in baked())
+
+
+def test_the_bake_refuses_a_level_column_under_a_template_rendering_no_level():
+    """A run training the baked rows renders none of them, so the bake probes its template as run setup would: under
+    Qwen3's stock template both levels would bake alike, the stamp still recording the column."""
+    turns = [{"role": "user", "content": "What is 2+2?"}, {"role": "assistant", "content": "4."}]
+    dataset = Dataset.from_dict({"prompt": [turns, turns], "effort": ["low", "high"]})
+    config = PreprocessingConfig(model_name_or_path="Qwen/Qwen3-0.6B", max_length=512, reasoning_effort_field="effort")
+    with pytest.raises(
+        ValueError, match="reasoning_effort_field='effort' .* renders a conversation alike at no level"
+    ):
+        preprocess_dataset(dataset, load_cached_tokenizer("Qwen/Qwen3-0.6B"), config)
 
 
 def test_tokenize_dataset_completion_only():
@@ -226,6 +257,8 @@ def test_mode_inapplicable_knobs_rejected_both_directions():
         PreprocessingConfig(model_name_or_path="m", mode="text", system_prompt="you are helpful")
     with pytest.raises(ValueError, match="tools_field"):
         PreprocessingConfig(model_name_or_path="m", mode="text", tools_field="tools")
+    with pytest.raises(ValueError, match="reasoning_effort_field"):
+        PreprocessingConfig(model_name_or_path="m", mode="text", reasoning_effort_field="effort")
     with pytest.raises(ValueError, match="text_field"):
         PreprocessingConfig(model_name_or_path="m", mode="chat", text_field="body")
 
@@ -408,6 +441,7 @@ class _RenderArgs:
             "system_prompt": None,
             "model_supports_system_role": True,
             "tools_field": None,
+            "reasoning_effort_field": None,
             "interleaved_thinking": False,
             "assistant_message_template": None,
             "pad_token": None,
@@ -449,6 +483,35 @@ def test_matching_render_knobs_pass():
     )
 
 
+def test_a_level_column_the_artifact_was_baked_without_raises():
+    """The levels are baked into the ids, so a run stating another column than the artifact recorded trains on rows
+    rendered differently from what it says."""
+    plain = _metadata_with_recorded_config()
+    assert plain.config["reasoning_effort_field"] is None
+    with pytest.raises(ValueError, match="reasoning_effort_field: prepared=None vs run='effort'"):
+        verify_preprocessed_dataset(
+            plain, required_max_length=4096, render_args=_RenderArgs(reasoning_effort_field="effort")
+        )
+    labelled = _metadata_with_recorded_config(reasoning_effort_field="effort")
+    verify_preprocessed_dataset(
+        labelled, required_max_length=4096, render_args=_RenderArgs(reasoning_effort_field="effort")
+    )
+
+
+def test_a_stamp_predating_the_level_column_reads_as_baked_without_one(caplog):
+    """No bake before the knob existed could render a level, so a run stating one is refused, and one leaving it unset
+    is not warned about a knob the stamp could not record."""
+    legacy = _metadata_with_recorded_config()
+    del legacy.config["reasoning_effort_field"]
+    with pytest.raises(ValueError, match="reasoning_effort_field: prepared=None vs run='effort'"):
+        verify_preprocessed_dataset(
+            legacy, required_max_length=4096, render_args=_RenderArgs(reasoning_effort_field="effort")
+        )
+    with caplog.at_level(logging.WARNING):
+        verify_preprocessed_dataset(legacy, required_max_length=4096, render_args=_RenderArgs())
+    assert "reasoning_effort_field" not in caplog.text, caplog.text
+
+
 def test_assistant_template_only_checked_when_labels_are_masked():
     """Without completion masking the template is inert; with it, the baked labels were built from the recorded
     template."""
@@ -478,6 +541,31 @@ def test_text_mode_artifact_skips_the_render_check():
         required_max_length=4096,
         render_args=_RenderArgs(system_prompt="anything", conversation_field="messages"),
     )
+
+
+def test_a_chat_bake_is_held_to_the_turn_terminators_the_run_resolves():
+    """The bake closed its rows' last assistant turns and ended their completion spans at the recorded ids, so a run
+    resolving other ids trains rows its own raw path would have built differently."""
+    baked = _metadata_with_recorded_config()
+    baked.eos_token_ids = [151643, 151645]
+    verify_preprocessed_dataset(baked, required_max_length=4096, required_eos_token_ids=frozenset({151643, 151645}))
+    with pytest.raises(ValueError, match=r"closed against the turn terminators \[151643, 151645\].*\[151645\]"):
+        verify_preprocessed_dataset(baked, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
+
+
+def test_a_chat_bake_predating_the_terminator_record_is_refused_with_the_rebake_remedy():
+    """Such a bake closed no open last turn, so a GLM row ends without the terminator a raw run appends."""
+    payload = asdict(_metadata_with_recorded_config())
+    del payload["eos_token_ids"]
+    legacy = PreprocessedDatasetMetadata.from_dict(payload)
+    with pytest.raises(IncompatiblePreprocessedDataset, match="eos_token_ids.*prepare_dataset.py"):
+        verify_preprocessed_dataset(legacy, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
+
+
+def test_a_text_bake_closes_no_turn_and_is_held_to_no_terminators():
+    text = _metadata_with_recorded_config(mode="text")
+    assert text.eos_token_ids is None
+    verify_preprocessed_dataset(text, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
 
 
 def test_legacy_metadata_without_recorded_render_knobs_warns_not_raises(caplog):
@@ -513,6 +601,7 @@ def test_render_check_set_is_derived_from_the_config_dataclass():
         "system_prompt",
         "model_supports_system_role",
         "tools_field",
+        "reasoning_effort_field",
         "interleaved_thinking",
         # The images column merged into the conversation: it expands vision placeholders into the
         # baked ids, so an artifact prepared without it is a different tokenization.

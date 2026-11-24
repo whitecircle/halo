@@ -17,7 +17,13 @@ from halo.data.collators.self_distill import (
     require_aligned_responses,
     teacher_history,
 )
-from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, build_training_labels
+from halo.data.completion_spans import (
+    PACKED_SPAN_POLICY,
+    PADDED_SPAN_POLICY,
+    InjectedBlock,
+    SpanBounds,
+    build_training_labels,
+)
 from halo.data.pipeline import map_cache_key
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import (
@@ -208,6 +214,21 @@ def test_dataset_dict_same_content_stable():
     name_a = map_cache_file_name("map", _add_one, dd_a, "d", {})
     name_b = map_cache_file_name("map", _add_one, dd_b, "d", {})
     assert name_a == name_b, "Identical DatasetDicts produced different cache names"
+
+
+def test_a_captured_span_bounds_keys_by_value():
+    """The bake's label map captures the resolved ``SpanBounds``, which nests an ``InjectedBlock``: skipped as an
+    unknown type, a closer the probe reads differently would serve the previous bake's labels."""
+
+    def make_labeller(bounds):
+        def labeller(x):
+            return (x, bounds)
+
+        return labeller
+
+    first = SpanBounds(turn_opener=105, injected_block=InjectedBlock(opener=50, head=None, closer=51))
+    second = first._replace(injected_block=first.injected_block._replace(closer=52))
+    assert _closure_fingerprint(make_labeller(first)) != _closure_fingerprint(make_labeller(second))
 
 
 def test_closures_with_different_captured_values():
@@ -529,7 +550,8 @@ def test_function_id_builtin_fallback():
 
 
 class _LeafTok:
-    """Minimal tokenizer stub carrying every field the identity folds in."""
+    """Minimal tokenizer stub carrying every field the identity folds in, and the special-token surface a collator
+    resolves its completion marker against."""
 
     def __init__(self, name="org/model", vocab=32000, template="{{ messages }}", eos=2, bos=1, pad=0, side="right"):
         self.name_or_path = name
@@ -540,9 +562,14 @@ class _LeafTok:
         self.pad_token_id = pad
         self.padding_side = side
         self.truncation_side = "right"
+        self.all_special_ids = [bos, eos, pad]
+        self.added_tokens_decoder = {}
 
     def __len__(self):
         return self.vocab_size
+
+    def encode(self, text, add_special_tokens=False):
+        return [ord(char) for char in text]
 
 
 class _Processor(ProcessorMixin):
@@ -747,21 +774,39 @@ def test_a_helper_called_from_nested_code_keys_its_caller(caller, monkeypatch):
     assert function_cache_id(caller) != before
 
 
-def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
-    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
-    processor = build_tree_row_processor(
+def _tree_row_processor(tokenizer, eos_token_ids):
+    return build_tree_row_processor(
         tokenizer,
         64,
         conversation_field="conversation",
         share_markers=("<tool_response>",),
         share_requires=None,
-        eos_token_ids=frozenset({tokenizer.eos_token_id}),
+        eos_token_ids=eos_token_ids,
         assistant_message_template="<|im_start|>assistant\n",
         train_on_last_assistant_only=False,
     )
+
+
+def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    processor = _tree_row_processor(tokenizer, frozenset({tokenizer.eos_token_id}))
     before = function_cache_id(processor)
     _edit_source_of(serialize_tree, monkeypatch)
     assert function_cache_id(processor) != before
+
+
+def test_the_tree_map_key_covers_the_terminators():
+    """They decide which rows the map closes and where a trained span ends, so two models on one tokenizer that
+    list different ones build different trees."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    eos, role_marker = tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|im_start|>")
+    ds = _make_dataset(4)
+
+    def name_for(eos_token_ids):
+        return map_cache_file_name("map", _tree_row_processor(tokenizer, eos_token_ids), ds, "trees", {})
+
+    assert name_for(frozenset({eos})) != name_for(frozenset({eos, role_marker}))
+    assert name_for(frozenset({eos})) == name_for(frozenset({eos}))
 
 
 def test_the_worker_count_is_a_named_parameter_not_a_cache_keyed_kwarg():

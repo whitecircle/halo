@@ -23,6 +23,8 @@ def _make_tokenizer():
     tok.pad_token_id = 0
     tok.eos_token_id = 2
     tok.padding_side = "right"
+    # A completion collator reads its marker's ids at construction, where a mock's would iterate as none.
+    tok.encode.return_value = [7, 7]
     return tok
 
 
@@ -397,6 +399,20 @@ def test_a_turn_ended_by_the_next_role_marker_is_accepted():
     assert _select_completion_only(tokenizer, config) is not None
     with pytest.raises(ValueError, match="ends in a turn terminator"):
         _select_completion_only(tokenizer, None)
+
+
+def test_a_turn_closed_only_past_another_roles_turn_is_refused():
+    """The template leaves each assistant turn open and closes only user turns: a span ends where the next user turn
+    opens, before that turn's ``<|im_end|>``, so nothing would train."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    tokenizer.chat_template = (
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}"
+        "{% if m.role == 'user' %}<|im_end|>{% endif %}\n{% endfor %}"
+    )
+    with pytest.raises(ValueError, match="ends in a turn terminator"):
+        select_data_collator(
+            tokenizer=tokenizer, train_on_completions_only=True, assistant_message_template="<|im_start|>assistant\n"
+        )
 
 
 def _probe_tokenizer(*, renders: bool):

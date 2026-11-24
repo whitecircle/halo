@@ -8,7 +8,7 @@ import torch
 from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerBase
 from trl.trainer.sft_trainer import DataCollatorForLanguageModeling as TRLDataCollatorForLanguageModeling
 
-from halo.data.completion_spans import mask_batch_to_completion_spans
+from halo.data.completion_spans import mask_batch_to_completion_spans, resolve_span_bounds
 from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template, warn_if_pad_equals_eos
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.segment_markers import single_row_varlen_kwargs
@@ -33,6 +33,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         self.train_on_last_assistant_only = train_on_last_assistant_only
         self.response_token_ids = tokenize_response_template(response_prompt_template, self.tokenizer)
         self.eos_token_ids = eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(self.tokenizer)
+        self.span_bounds = resolve_span_bounds(self.tokenizer, self.response_token_ids, self.eos_token_ids)
         self.emit_varlen_one_document = emit_varlen_one_document
 
         warn_if_pad_equals_eos(self.tokenizer)
@@ -45,6 +46,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
             self.train_on_last_assistant_only,
             self.response_prompt_template,
             tokenizer=self.tokenizer,
+            span_bounds=self.span_bounds,
         )
         if self.emit_varlen_one_document:
             batch.update(single_row_varlen_kwargs(batch))

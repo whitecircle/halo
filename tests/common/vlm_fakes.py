@@ -5,11 +5,19 @@ from __future__ import annotations
 import torch
 
 
+def _whitespace_ids(text: str) -> list[int]:
+    return [2 + (j % 97) for j, _ in enumerate(text.split())]
+
+
 class FakeVLMTokenizer:
-    """Minimal tokenizer stand-in: pad/eos ids, vocab lookup for image-token masking, vocab size."""
+    """Minimal tokenizer stand-in: whitespace ids, a pad id, vocab lookup for image-token masking, vocab size. It names
+    no eos, so no row counts as ending on an open turn."""
 
     pad_token_id = 0
-    eos_token_id = 1
+    eos_token_id = None
+
+    def __call__(self, text, add_special_tokens=False) -> dict[str, list[int]]:
+        return {"input_ids": _whitespace_ids(text)}
 
     def get_vocab(self) -> dict[str, int]:
         return {"<|image_pad|>": 99}
@@ -39,7 +47,7 @@ class FakeVLMProcessorBase:
 
     def encode_batch(self, text, max_length: int | None = None) -> dict[str, torch.Tensor]:
         """Whitespace ids + mask, right-padded to the batch's widest row, truncated when asked."""
-        rows = [[2 + (j % 97) for j, _ in enumerate(t.split())] for t in text]
+        rows = [_whitespace_ids(t) for t in text]
         if max_length is not None:
             rows = [row[:max_length] for row in rows]
         width = max(len(row) for row in rows)

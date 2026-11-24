@@ -42,8 +42,9 @@ lora_target_modules:
 - gate_up_proj
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> servable HF
-                                      #   checkpoint; without it the adapter stays mixed and
-                                      #   merge_peft_adapters.py streams the merge instead
+                                      #   checkpoint; without it the adapter stays mixed, and
+                                      #   merge_peft_adapters.py refuses the whole adapter before
+                                      #   writing any output (the hub respells the expert layer path)
 
 # --- Attention & sequence ---
 # Packing note: plain full/sliding attention only (no conv or linear-attention mixers), and the

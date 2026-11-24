@@ -256,6 +256,14 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "apply_chat_template. Scripts that don't render chat templates from rows reject it up front."
         },
     )
+    reasoning_effort_field: str | None = field(
+        default=None,
+        metadata={
+            "help": "Dataset column holding each row's reasoning-effort level (a non-blank string such as 'low', "
+            "'medium' or 'high'; a null cell passes none, so the template's own default applies), passed to "
+            "apply_chat_template as reasoning_effort. Scripts that can't render it from rows reject it up front."
+        },
+    )
     unfreeze_layers_patterns: list[str] | None = field(
         default=None,
         metadata={
