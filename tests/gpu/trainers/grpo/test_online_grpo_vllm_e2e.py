@@ -27,6 +27,8 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     full_fsdp_kl        full fine-tune under plain FSDP2 DP at ``beta=0.01`` — TRL scores the KL against the
                         frozen reference the trainer hands it
     full_fsdp_zero3     full fine-tune under FSDP2 FULL_SHARD (``fsdp_reshard_after_forward``)
+    lora_head_fsdp_zero3  attention and ``lm_head`` PEFT under FULL_SHARD: with ``--chunked`` the sweep adds the
+                        head adapter's delta, gathered inside the redirected forward, and its ``lora_B`` must move
     full_tp2_dp2        four ranks, TP x DP
     full_hsdp           four ranks, HSDP over two simulated NVLink domains of two
 
@@ -40,9 +42,9 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     ``--maxrl`` (``--trainer online`` or ``environmental``, a ``*_world1`` mode) trains with ``use_maxrl`` and
     ``scale_rewards: none`` on a non-negative reward, and checks ``sampling/maxrl_zero_mean_group_frac`` is logged
     beside finite losses
-    ``--chunked`` (``--trainer sdpg``, no resume) runs ``use_chunked_grpo_logprobs``, the OPD term included, and checks
-    the ``opd_loss`` of the first step whose OPD term is non-zero on the same batch against the same forward with the
-    term projected unchunked, and against the full-logits path
+    ``--chunked`` (``--trainer online`` or ``sdpg``, no resume) runs ``use_chunked_grpo_logprobs``; under SDPG the OPD
+    term included, checking the ``opd_loss`` of the first step whose OPD term is non-zero on the same batch against
+    the same forward with the term projected unchunked, and against the full-logits path
 
 Each row also reads its layout's data-parallel half off the trained policy (``record_dp_layout``): FULL_SHARD
 resharding after a forward, where ep1 experts live, the HSDP mesh, the EP groups' expert replicas in step.
@@ -91,7 +93,7 @@ parser.add_argument("--maxrl", action="store_true", help="online / environmental
 parser.add_argument(
     "--chunked",
     action="store_true",
-    help="sdpg: use_chunked_grpo_logprobs, the first non-zero OPD step against full logits",
+    help="online / sdpg: use_chunked_grpo_logprobs; sdpg also checks the first non-zero OPD step",
 )
 ARGS = parser.parse_args()
 POLICY = MODES[ARGS.mode].family
@@ -103,8 +105,8 @@ if ARGS.prefetch_depth is not None and ARGS.trainer != "environmental":
     parser.error("--prefetch-depth drives the environmental trainer's prefetch")
 if ARGS.maxrl and (ARGS.trainer == "sdpg" or POLICY != "world1"):
     parser.error("--maxrl runs the online or environmental trainer in one process: a *_world1 mode")
-if ARGS.chunked and (ARGS.trainer != "sdpg" or ARGS.resume):
-    parser.error("--chunked drives the SDPG trainer's chunked OPD term, which has no resume row")
+if ARGS.chunked and (ARGS.trainer == "environmental" or ARGS.resume):
+    parser.error("--chunked drives the online or SDPG trainer's chunked scorer, which has no resume row")
 
 
 def _row_index() -> int:

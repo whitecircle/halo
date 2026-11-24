@@ -1788,6 +1788,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer sdpg --mode full_fsdp_zero3 --chunked",
                     "--trainer sdpg --mode full_tp2 --chunked",
                     "--trainer sdpg --mode lora_fsdp --chunked",
+                    "--trainer online --mode lora_head_fsdp_zero3 --chunked",
+                    "--trainer sdpg --mode lora_head_fsdp_zero3 --chunked",
                     "--trainer online --mode full_tp2 --resume",
                     "--trainer sdpg --mode full_tp2 --resume",
                     "--trainer online --mode lora_fsdp --resume",

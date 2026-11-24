@@ -11,7 +11,7 @@ from functools import partial
 import pytest
 import torch
 
-import halo.trainers.grpo.logprob_scoring as logprob_scoring
+import halo.trainers.head_projection as head_projection
 from halo.configs.grpo import ScoreCenteringConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -157,13 +157,13 @@ def _warm_host(top_k: int | None, monkeypatch):
     host.args.num_iterations, host.args.beta, host.args.importance_sampling_level = 1, 0.0, "token"
     host.model.eval()
     calls = []
-    head = logprob_scoring.chunked_head_logprobs
+    head = head_projection.chunked_head_logprobs
 
     def recording(hidden, weight, targets, *args, compute_entropy=False, **kwargs):
         calls.append((tuple(targets.shape), compute_entropy, torch.is_grad_enabled()))
         return head(hidden, weight, targets, *args, compute_entropy=compute_entropy, **kwargs)
 
-    monkeypatch.setattr(logprob_scoring, "chunked_head_logprobs", recording)
+    monkeypatch.setattr(head_projection, "chunked_head_logprobs", recording)
     # The warm-up runs where kernels compile; on the host it would return before scoring anything.
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     return host, calls
