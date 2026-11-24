@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """The VLM renders close a row's last assistant turn where the chat template leaves it open, at the text the
-processor tokenizes: the runtime collator, the over-length filter and the offline bake take the same eos. Runs on
-GLM-5.3-Flash's processor, whose template ends a turn only at the next role marker, and on Qwen3-VL's, which
-terminates its turns and stays as rendered."""
+processor tokenizes: the runtime collator, the over-length filter and the offline bake take the same closing token,
+the one the template writes after such a turn. Runs on GLM-5.3-Flash's processor, whose template ends a turn only at
+the next role marker, and on Qwen3-VL's, which terminates its turns and stays as rendered."""
+
+import json
 
 import numpy as np
 import pytest
@@ -16,10 +18,15 @@ from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from halo.data.turn_markers import resolve_eos_token_ids
-from halo.data.vlm_render import extract_conversation_images, render_vlm_text, run_vlm_processor
+from halo.data.vlm_render import (
+    extract_conversation_images,
+    render_vlm_text,
+    run_vlm_processor,
+    vlm_row_template_kwargs,
+)
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from tests.common.models import GLM5_3_FLASH, PINNED_REVISIONS, QWEN3_VL_2B
-from tests.common.open_turn_templates import GLM_ASSISTANT_MARKER, TWO_EXCHANGES
+from tests.common.open_turn_templates import GLM_ANSWER_CLOSER, GLM_ASSISTANT_MARKER, GLM_CALL_CLOSER, TWO_EXCHANGES
 from tests.common.tokenizers import load_cached_config, load_cached_processor
 
 MAX_LENGTH = 4096
@@ -72,10 +79,11 @@ def _real(batch, key: str, index: int) -> list[int]:
 
 @pytest.mark.parametrize("completions_only", [True, False], ids=["completions-only", "all-tokens"])
 def test_the_runtime_collator_closes_an_open_last_turn(completions_only):
-    """Each row of a padded batch, the image row included, is its render plus the eos, in every per-token column the
-    processor builds, and the eos trains."""
+    """Each row of a padded batch, the image row included, is its render plus the ``<|user|>`` the template writes after
+    an answer, in every per-token column the processor builds, and that stop trains."""
     processor, config = _load(GLM5_3_FLASH)
-    tokenizer, eos = processor.tokenizer, processor.tokenizer.eos_token_id
+    tokenizer = processor.tokenizer
+    closer = tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
     collator = _collator(GLM5_3_FLASH, processor, config, completions_only=completions_only)
     rows = [_row(_image_turns()), _row(TWO_EXCHANGES)]
     batch = collator(rows)
@@ -85,12 +93,32 @@ def test_the_runtime_collator_closes_an_open_last_turn(completions_only):
         plain = _plain(processor, row)
         plain_ids = plain["input_ids"][0].tolist()
         assert plain_ids[-1] not in collator.eos_token_ids, "the template closes its last turn"
-        assert _real(batch, "input_ids", index) == [*plain_ids, eos]
+        assert _real(batch, "input_ids", index) == [*plain_ids, closer]
         assert _real(batch, "mm_token_type_ids", index) == [*plain["mm_token_type_ids"][0].tolist(), 0]
-        assert _real(batch, "labels", index)[-1] == eos, "the stop is not trained"
+        assert _real(batch, "labels", index)[-1] == closer, "the stop is not trained"
     trained = tokenizer.decode([token for token in _real(batch, "labels", 1) if token != LABEL_IGNORE_INDEX])
     assert "delta" in trained and (not completions_only or "charlie" not in trained), trained
     assert batch["pixel_values"].shape == _plain(processor, rows[0])["pixel_values"].shape
+
+
+@pytest.mark.parametrize("tools", [True, False], ids=["tools", "no-tools"])
+def test_a_row_ending_on_a_tool_call_closes_with_the_tool_replys_marker(tools):
+    """The call is read off the message's folded fields: its turn ends where the template opens the tool reply
+    (``<|observation|>``), as the call ends mid-row, not at the ``<|user|>`` after an answer."""
+    processor, config = _load(GLM5_3_FLASH)
+    tokenizer = processor.tokenizer
+    call = {"type": "function", "id": "call_0", "function": {"name": "lookup", "arguments": {"key": "alpha"}}}
+    tool = {"type": "function", "function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}
+    conversation = [*_image_turns()[:1], {"role": "assistant", "content": "", "tool_calls": [call]}]
+    row = {**_row(conversation), "tools_json": json.dumps([tool]) if tools else None}
+    batch = _collator(GLM5_3_FLASH, processor, config, completions_only=True)([row])
+    plain = run_vlm_processor(
+        processor, [render_vlm_text(processor, row["history"], **vlm_row_template_kwargs(row))], [row["images"]]
+    )["input_ids"][0].tolist()
+    closer = tokenizer.convert_tokens_to_ids(GLM_CALL_CLOSER)
+    assert tokenizer.decode(plain).endswith("</tool_call>"), tokenizer.decode(plain[-8:])
+    assert _real(batch, "input_ids", 0) == [*plain, closer]
+    assert _real(batch, "labels", 0)[-1] == closer, "the stop is not trained"
 
 
 def test_a_row_ending_on_a_user_turn_is_left_as_rendered():
@@ -114,7 +142,7 @@ def _mapped(*conversations) -> DatasetDict:
 
 
 def test_the_over_length_filter_measures_the_closed_row():
-    """A text row the closing eos takes one token over ``max_length`` would pass a filter measuring the bare render,
+    """A text row the closing token takes one token over ``max_length`` would pass a filter measuring the bare render,
     then raise in the collator of the rank that drew it."""
     processor, config = _load(GLM5_3_FLASH)
     tokenizer = processor.tokenizer
@@ -166,7 +194,7 @@ def test_the_offline_bake_closes_a_row_as_the_runtime_collator_does(model_name, 
     assert baked[0]["input_ids"] == batch["input_ids"][0].tolist()
     assert baked[0]["labels"] == batch["labels"][0].tolist()
     bare = _plain(processor, _row(TWO_EXCHANGES))["input_ids"][0].tolist()
-    closing = [processor.tokenizer.eos_token_id] if model_name == GLM5_3_FLASH else []
+    closing = [processor.tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)] if model_name == GLM5_3_FLASH else []
     assert baked[0]["input_ids"] == [*bare, *closing]
 
 
@@ -197,8 +225,8 @@ def test_a_full_sequence_bake_reads_the_terminators_from_the_model_config(monkey
         processor,
         _bake_config(GLM5_3_FLASH, completions_only=False),
     )
-    eos = processor.tokenizer.eos_token_id
-    assert [result[split][0]["input_ids"][-1] for split in ("train", "test")] == [eos, eos]
+    closer = processor.tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    assert [result[split][0]["input_ids"][-1] for split in ("train", "test")] == [closer, closer]
     assert len(reads) == 1, f"the model config was read {len(reads)} times for two splits"
 
 

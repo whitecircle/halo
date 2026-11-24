@@ -35,6 +35,7 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
 from tests.common.models import GLM4_FLASH, GLM5_3_FLASH, PINNED_REVISIONS, QWEN3_0_6B
 from tests.common.open_turn_templates import (
+    GLM_ANSWER_CLOSER,
     GLM_ASSISTANT_MARKER,
     OPEN_FINAL_TURN_TEMPLATES,
     TWO_EXCHANGES,
@@ -162,17 +163,18 @@ def _plain_ids(tokenizer, history, row):
 
 @pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
 def test_both_branches_close_the_last_turn_an_open_template_leaves(name):
-    """The student and the hinted teacher end on one assistant turn, so both take the closing eos and still supervise
-    the same tokens. Left open, that turn trains to the row end and never a stop."""
+    """The student and the hinted teacher end on one assistant turn, so both take the ``<|user|>`` the template writes
+    after an answer and still supervise the same tokens. Left open, that turn trains to the row end and never a stop."""
     collator = _glm_collator(name)
-    tokenizer, eos = collator.tokenizer, collator.tokenizer.eos_token_id
+    tokenizer = collator.tokenizer
+    closer = tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
     row = {"messages": TWO_EXCHANGES, "answer": "delta"}
     encoded = collator.encode_row(row)
     for prefix, history in (("", TWO_EXCHANGES), ("teacher_", collator._teacher_history(TWO_EXCHANGES, row))):
         plain = _plain_ids(tokenizer, history, row)
         assert plain[-1] not in collator.eos_token_ids, "the template closes its last turn: this case tests nothing"
-        assert encoded[f"{prefix}input_ids"] == [*plain, eos]
-        assert encoded[f"{prefix}labels"][-1] == eos, "the stop is not trained"
+        assert encoded[f"{prefix}input_ids"] == [*plain, closer]
+        assert encoded[f"{prefix}labels"][-1] == closer, "the stop is not trained"
 
     batch = collator([encoded])
     student = batch["input_ids"][0][batch["labels"][0] != -100]
@@ -199,10 +201,11 @@ def test_a_terminated_last_turn_and_a_row_ending_on_a_user_turn_take_no_eos():
 
 def test_the_vlm_branches_close_the_last_turn_an_open_template_leaves():
     """The VLM collator closes each branch at the text its processor tokenizes, so the student and the hinted teacher
-    of an image row both end on the eos and stay aligned."""
+    of an image row both end on the ``<|user|>`` its template writes after an answer and stay aligned."""
     revision = PINNED_REVISIONS[GLM5_3_FLASH]
     processor = load_cached_processor(GLM5_3_FLASH, revision=revision)
-    tokenizer, eos = processor.tokenizer, processor.tokenizer.eos_token_id
+    tokenizer = processor.tokenizer
+    closer = tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
     collator = SelfDistillVLMDataCollator(
         processor,
         tokenizer,
@@ -229,7 +232,7 @@ def test_the_vlm_branches_close_the_last_turn_an_open_template_leaves():
     trained = {}
     for branch, prefix in (("student", ""), ("teacher", "teacher_")):
         input_ids, labels = batch[f"{prefix}input_ids"][0], batch[f"{prefix}labels"][0]
-        assert input_ids[-1] == eos and labels[-1] == eos, f"the {branch} branch is left open"
+        assert input_ids[-1] == closer and labels[-1] == closer, f"the {branch} branch is left open"
         trained[branch] = input_ids[labels != -100]
     assert torch.equal(trained["student"], trained["teacher"])
     assert "Seven." in tokenizer.decode(trained["student"])

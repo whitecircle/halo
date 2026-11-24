@@ -49,6 +49,7 @@ from scripts.training import sft as sft_script
 from scripts.training.sft import _prepare_text_data
 from tests.common.models import GPT_OSS_20B
 from tests.common.open_turn_templates import (
+    GLM_ANSWER_CLOSER,
     GLM_ASSISTANT_MARKER,
     OPEN_FINAL_TURN_TEMPLATES,
     TWO_EXCHANGES,
@@ -247,7 +248,7 @@ def test_a_row_opening_on_the_response_marker_leaves_its_first_token_untrained_a
 @pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
 def test_a_tree_path_ending_on_an_open_assistant_turn_is_closed_and_trains_its_stop(name):
     """GLM's templates end an assistant turn only at the next role marker: every tree path, as a flat row, closes its
-    last turn with the terminator and trains it."""
+    last answer with the ``<|user|>`` the template writes after one and trains it."""
     glm, model_config = load_open_turn_tokenizer(name)
     glm.padding_side = "right"
     eos_token_ids = resolve_eos_token_ids(glm, model_config)
@@ -267,8 +268,9 @@ def test_a_tree_path_ending_on_an_open_assistant_turn_is_closed_and_trains_its_s
     trees = list(Dataset.from_dict(processor({"conversation": rows}), features=TREE_ROW_FEATURES))
     assert len(trees) == 1, "the two rows share their history up to the marker"
     examples = _tree_examples(_collate(glm, trees))
-    assert sorted(tokens for tokens, _ in examples) == sorted([*ids, glm.eos_token_id] for ids in plain)
-    assert all(labels[-1] == glm.eos_token_id for _, labels in examples), "a path's stop is not trained"
+    closer = glm.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    assert sorted(tokens for tokens, _ in examples) == sorted([*ids, closer] for ids in plain)
+    assert all(labels[-1] == closer for _, labels in examples), "a path's stop is not trained"
 
 
 def _run_sft_main(tmp_path, yaml_body: str) -> None:

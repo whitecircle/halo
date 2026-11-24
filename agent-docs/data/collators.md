@@ -360,22 +360,28 @@ role marker (GLM's native ones, tool data included) writes nothing after the las
 would then be masked under the padded and packed policies (an earlier turn's role marker keeps the
 end-of-sequence fallback from firing) and train with no stop under the self-distillation policy or
 without completion masking. A row that ends on an assistant turn with no terminator from the resolved set
-therefore takes the tokenizer's eos.
+therefore takes the token the template writes after such a turn when the conversation goes on
+(`resolve_final_turn_closer`, `halo/data/chat_render.py`): GLM's `<|observation|>` after a tool call and
+`<|user|>` after an answer, so the last turn trains the stop it trains mid-row and a served model stops at.
+The probe renders a turn of the row's kind (a tool call or an answer) closed and then followed by a tool
+reply or a user turn, once per template, terminator set and tools declaration. Where a probe render
+raises, the closed turn is no token prefix of the followed one, or the first token after it is outside
+the resolved set, the row takes the tokenizer's eos.
 
 The training renders append it to the token ids (`close_final_assistant_turn`,
 `halo/data/chat_render.py`): the text row maps (flat SFT, teacher-distillation and tree rows, the
-offline text bake), the text self-distillation collator's student and teacher
-branches. The VLM renders (the runtime collators, their over-length filter and the offline
-VLM bake) append it to the text (`render_vlm_training_text`, `halo/data/vlm_render.py`), since a processor
-tokenizes and pads in one call; on a prefix LM it lands ahead of the newline the processor appends.
-SMPO (text and VLM) and offline-GRPO completions close through `_close_completions`
-(`halo/data/pipeline/prompt_completion.py`) against the same set. DPO's text completions reach TRL
-rendered, and TRL appends the tokenizer's `eos_token` to each one not ending in it, whatever the set; the
-async-GRPO re-render appends nothing to the template's own render.
+offline text bake), the text self-distillation collator's student and teacher branches. The VLM renders
+(the runtime collators, their over-length filter and the offline VLM bake) append it to the text
+(`render_vlm_training_text`, `halo/data/vlm_render.py`), probed on the processor's template, since a
+processor tokenizes and pads in one call; on a prefix LM it lands ahead of the newline the processor appends.
+SMPO (text and VLM) and offline-GRPO completions append the tokenizer's eos through `_close_completions`
+(`halo/data/pipeline/prompt_completion.py`) where they end on no token from the same set. DPO's text
+completions reach TRL rendered, and TRL appends the tokenizer's `eos_token` to each one not ending in it,
+whatever the set; the async-GRPO re-render appends nothing to the template's own render.
 
 A turn the template terminates stays as rendered, and a row ending on a user or tool turn, like a
 generation prompt, takes nothing. A tool-call turn ends at its stop: gpt-oss's `…<|call|>` and Gemma 4's
-`…<tool_call|><|tool_response>` take no eos after it, and the span ends at that stop.
+`…<tool_call|><|tool_response>` take nothing after it, and the span ends at that stop.
 
 **A span restarts after a block the template writes into the model's own turn.** Gemma 4 renders a
 tool's reply inside the model turn that called it, and the answer after it with no new marker:

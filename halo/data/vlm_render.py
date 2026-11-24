@@ -10,7 +10,7 @@ from typing import Any, get_type_hints
 from datasets import Features, Sequence, Value
 from PIL import Image
 
-from halo.data.chat_render import has_open_final_assistant_turn, render_chat_template
+from halo.data.chat_render import has_open_final_assistant_turn, render_chat_template, resolve_final_turn_closer
 from halo.data.conversation import (
     IMAGE_PART_PAYLOAD_KEY,
     IMAGE_PART_SOURCE_KEYS,
@@ -70,14 +70,22 @@ def render_vlm_text(processor, history: list[dict[str, Any]], **template_kwargs)
 def render_vlm_training_text(
     processor, tokenizer, history: list[dict[str, Any]], eos_token_ids: frozenset[int], **template_kwargs
 ) -> str:
-    """A training row's render, the tokenizer's eos token appended where the row ends on an assistant turn the template
-    leaves open (:func:`~halo.data.chat_render.has_open_final_assistant_turn`). The text takes it, not the ids: a
-    processor tokenizes and pads in one call, so only there does the eos reach every per-token column it builds."""
+    """A training row's render, its closing token (:func:`~halo.data.chat_render.resolve_final_turn_closer`, probed on
+    the processor's template) appended where the row ends on an assistant turn the template leaves open
+    (:func:`~halo.data.chat_render.has_open_final_assistant_turn`). The text takes it, not the ids: a processor
+    tokenizes and pads in one call, so only there does the token reach every per-token column it builds."""
     text = render_vlm_text(processor, history, **template_kwargs)
     # The verdict the processor's ids would give: expanding a placeholder changes no token after it.
     input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
     if has_open_final_assistant_turn(input_ids, history, tokenizer, eos_token_ids):
-        text += tokenizer.eos_token
+        closer = resolve_final_turn_closer(
+            tokenizer,
+            _decode_message_fields(history[-1]),
+            eos_token_ids,
+            with_tools=template_kwargs.get("tools") is not None,
+            template_owner=processor,
+        )
+        text += tokenizer.convert_ids_to_tokens(closer)
     return text
 
 
