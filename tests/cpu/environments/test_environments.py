@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 import asyncio
 import dataclasses
+import importlib.util
 import json
 import logging
 import time
@@ -1892,7 +1893,9 @@ def test_environment_config_env_specific_kwargs():
 def test_all_registered_envs_resolvable():
     """A factory ignoring ``env_config`` would keep an ``is not None`` check green while every rollout ran the class
     default turns."""
-    registered = [name for name in get_registered_environments() if name != "mcp"]  # MCP needs a server
+    # MCP needs a server; honesty needs its optional harness package.
+    unbuildable = {"mcp"} | ({"honesty"} if importlib.util.find_spec("honesty_rl") is None else set())
+    registered = [name for name in get_registered_environments() if name not in unbuildable]
     assert len(registered) >= 5, f"the registry went (nearly) empty — the loop below tests nothing: {registered}"
     for env_name in registered:
         config = EnvironmentConfig(environment_type=env_name, max_turns=3)

@@ -11,7 +11,7 @@ attn_implementation: flash_attention_2
 # --- Environment (EnvironmentConfig fields) ---
 environment_type: react_math
 # Available: react_math, react_search, native_math, native_coding, native_combined,
-#            swe, codeforces, mcp, qa_search, code_contests, exam_qa
+#            swe, codeforces, mcp, qa_search, code_contests, exam_qa, honesty
 max_turns: 10
 # --- Rewards (agent-docs/training-methods/grpo/rewards/README.md) ---
 # A sum of terms, each weight x score^exponent over a score in [0, 1]; the environment's per-turn and

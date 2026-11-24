@@ -3,6 +3,7 @@
 config sets ``max_turns``. Since the shipped templates rely on ``max_turns: null``, the overview's registry table
 is held to the classes."""
 
+import importlib.util
 import math
 from operator import attrgetter
 from typing import get_type_hints
@@ -36,11 +37,19 @@ _ENV_KWARGS = {
     "react_search": {},
     "qa_search": {},
     "mcp": {},
+    "honesty": {},
 }
+
+# Registered always, built only where its optional package imports.
+_OPTIONAL_PACKAGES = {"honesty": "honesty_rl"}
+_UNBUILDABLE = frozenset(
+    env for env, package in _OPTIONAL_PACKAGES.items() if importlib.util.find_spec(package) is None
+)
+_BUILDABLE = sorted(set(_ENV_KWARGS) - _UNBUILDABLE)
 
 # The turn budget each env class declares; absent means the base 10. Written out, since deriving it from the classes
 # the overview must describe would make the check agree with itself.
-_CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "exam_qa": 8}
+_CLASS_DEFAULT_MAX_TURNS = {"code_contests": 15, "codeforces": 15, "swe": 20, "exam_qa": 8, "honesty": 14}
 
 # The environments whose reward grades only against ``context["answer"]``. Written out for the same reason.
 _REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "react_math", "react_search", "swe"}
@@ -85,7 +94,7 @@ def _documented_max_turns() -> dict[str, int]:
     return {row[0].strip("`"): int(row[column]) for row in table.rows}
 
 
-@pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
+@pytest.mark.parametrize("env_type", _BUILDABLE)
 def test_class_default_max_turns_wins_when_unconfigured(env_type):
     expected = _CLASS_DEFAULT_MAX_TURNS.get(env_type, _base_default_max_turns())
     env = build_environment(env_type, _ENV_KWARGS[env_type])
@@ -97,10 +106,10 @@ def test_class_default_table_names_every_environment_that_declares_one():
     not knowing about it."""
     declared = {
         env_type: _declared_max_turns(env_type)
-        for env_type in _ENV_KWARGS
+        for env_type in _BUILDABLE
         if _declared_max_turns(env_type) != _base_default_max_turns()
     }
-    assert declared == _CLASS_DEFAULT_MAX_TURNS
+    assert declared == {env: turns for env, turns in _CLASS_DEFAULT_MAX_TURNS.items() if env not in _UNBUILDABLE}
 
 
 def test_every_registered_environment_is_covered():
@@ -119,7 +128,7 @@ def test_the_environments_overview_states_every_environments_turn_budget():
     )
 
 
-@pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
+@pytest.mark.parametrize("env_type", _BUILDABLE)
 def test_each_environment_declares_whether_its_reward_needs_an_answer(env_type):
     """The trainer refuses an answer-less dataset by this flag: a class forgetting it trains on a constant reward,
     one declaring it spuriously refuses a dataset."""
@@ -265,14 +274,14 @@ def test_every_search_environment_takes_its_backend_from_the_config(env_type, mo
 def test_the_search_table_names_every_environment_that_registers_web_search():
     """A preset gaining ``web_search`` must arrive in the table above."""
     registering = set()
-    for env_type, kwargs in _ENV_KWARGS.items():
-        env = build_environment(env_type, {**kwargs, **_SEARCH_ENV_KWARGS.get(env_type, {})})
+    for env_type in _BUILDABLE:
+        env = build_environment(env_type, {**_ENV_KWARGS[env_type], **_SEARCH_ENV_KWARGS.get(env_type, {})})
         if "web_search" in env.registry.names():
             registering.add(env_type)
     assert registering == set(_SEARCH_ENV_KWARGS)
 
 
-@pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
+@pytest.mark.parametrize("env_type", _BUILDABLE)
 def test_every_boolean_knob_refuses_what_a_truthiness_check_would_take_as_true(env_type):
     """The parser's own guard stops at the top-level fields: ``open_book: no`` would register web_search and
     ``carry_reasoning: off`` send the reasoning back. A preset's own ``scratch_allowlist`` collides as a TypeError."""
@@ -284,7 +293,7 @@ def test_every_boolean_knob_refuses_what_a_truthiness_check_would_take_as_true(e
 
 def test_the_boolean_knob_sweep_reaches_the_knobs_that_exist():
     """Anti-vacuity: an annotation no longer matching would leave the sweep above empty and passing."""
-    swept = set().union(*map(_bool_knobs, _ENV_KWARGS))
+    swept = set().union(*map(_bool_knobs, _BUILDABLE))
     assert swept >= {
         "carry_reasoning",
         "requires_answer",

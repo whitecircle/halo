@@ -25,6 +25,7 @@ An episode ends when the environment reports it done, or at `max_turns`.
 | `code_contests` | `CodeContestsEnvironment` | scratchpad test tool, `submit_solution` | 15 |
 | `codeforces` | `CodeContestsEnvironment` | same, graded by token comparison | 15 |
 | `mcp` | `NativeMCPClientEnvironment` | whatever the server advertises | 10 |
+| `honesty` | `HonestyEnvironment` | the agent honesty harness's `list_files`, `read_file`, `write_file`, `search_email`, `get_attachment`, `draft_email` | 14 |
 
 The last column is the class's own turn budget, which `max_turns: null` keeps.
 
@@ -40,6 +41,7 @@ Actors run environments on CPU and inherit the `ray start` daemon's environment,
 | `react_math`, `native_math`, `native_coding`, closed-book `exam_qa` | Nothing beyond the image (in-process tools) |
 | `react_search`, `qa_search`, `native_combined`, open-book `exam_qa` | Outbound network. `SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` / `KEENABLE_API_KEY` picks a keyed search backend, else keyless DuckDuckGo. `search_backend` names one instead ([QA Benchmarks](tasks/qa-benchmarks.md#configuration)) |
 | `mcp` | The preset's launcher on `PATH` (`npx`; `uvx` for `fetch`) and its credential. An SSE server needs only network to `server_url` |
+| `honesty` | The agent honesty harness installed (`honesty_rl`, stdlib only); its tools run in-process ([Honesty](tasks/honesty.md)) |
 
 ## Configuration
 
@@ -90,6 +92,7 @@ Reward and penalty knobs are magnitudes (≥ 0); a negative value raises. A bare
 - [Code Contests](tasks/code-contests/README.md) — competitive programming, hidden-test grading.
 - [SWE](tasks/swe.md) — persistent-workspace agent.
 - [QA Benchmarks](tasks/qa-benchmarks.md) — `qa_search` and `exam_qa`.
+- [Honesty](tasks/honesty.md) — the agent honesty harness's probes, graded by its own verdict.
 
 **Infrastructure and authoring**
 
