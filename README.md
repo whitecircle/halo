@@ -55,6 +55,10 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
+- **2026-11-24 — Halo Competition.** Dec 1–10, with tracks for making Halo faster on a model family, post-training
+  one for a task you pick, and best-use tracks from the partners and White Circle. $200k in cash prizes and $1.5M
+  in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others. Apply by Nov 30
+  ([details](https://whitecircle.com/halo/competition), [apply](https://luma.com/ykoj0t48)).
 - **2026-11-23 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention or its
   routed experts while the released NVFP4/MXFP8 expert weights stay frozen, and environmental GRPO serves each
   adapter version to vLLM ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).

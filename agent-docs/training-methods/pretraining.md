@@ -17,11 +17,12 @@ torchrun --nproc_per_node=8 scripts/training/sft.py my-pretrain.yaml --init_from
 
 The model is built with the resolved auto class's `from_config(config)`, so weights come from `_init_weights`. The run's `seed` is set first, making init identical on every rank so FSDP2 shards and DP replicas agree.
 
-Three refusals:
+Four refusals:
 
 - **EP, TP, CP, ETP or PP** raise `NotImplementedError`: distributed random-init of sharded parameters is not implemented, and a pipeline stage has no checkpoint to stream. The gate reads `ep_group_size > 1`, so an MoE without EP or ETP random-inits fine.
 - **Quantization** raises — QLoRA loads pretrained weights.
 - **A multimodal checkpoint** raises at the VLM load; `text_only_model: true` routes it to the text-only sibling, which does random-init.
+- **A model with external tables** raises `ValueError` (`reject_random_init_tables`): Qwen3.8-Flash-Next's n-gram table is frozen and comes only from the checkpoint, so random weights would train against a pretrained table.
 
 A from-scratch GptOss has no pretrained sinks to neutralize, so they stay live and only a sink-carrying attention backend is accepted — FA4, `flex_attention` or `eager`, never FA2 or SDPA.
 

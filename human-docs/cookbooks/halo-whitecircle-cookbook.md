@@ -125,7 +125,8 @@ policy id fails before the first step. Each term logs its reward as `rewards/<na
 `whitecircle/<name>/confidence` in place of the per-policy keys. `max_concurrency: 16` caps each term's requests in
 flight.
 
-The recipes keep `beta: 0.04`, a KL penalty to the base model. It keeps a policy reward from pulling every reply
+The two code recipes keep `beta: 0.04`, a KL penalty to the base model, and `qwen3-4b-gsm8k-whitecircle.yaml` runs
+`beta: 0.0`. The penalty keeps a policy reward from pulling every reply
 toward one template the judge favors, such as a warning preamble or a line repeated until the cut-off, which the
 repetition term also scores.
 
