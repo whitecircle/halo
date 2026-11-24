@@ -71,6 +71,12 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     train with it in SFT and GRPO ([Inkling 2](agent-docs/models/inkling2.md#measured)).
   - **Commands:** `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2` build the image, serve
     and train.
+  - **Rollouts without reasoning:** `rollout_thinking: false` samples environmental GRPO with no reasoning block
+    ([Thinking off](agent-docs/training-methods/async-grpo/reasoning.md#thinking-off)), and code contests give
+    such a policy a `notes` tool that holds its working between turns
+    ([Notes](agent-docs/training-methods/async-grpo/environments/tasks/code-contests/tools.md#notes)).
+  - **SFT rows:** `reasoning_effort_field` trains each row at its own reasoning effort
+    ([Dataset Formats](agent-docs/data/dataset-formats.md#required-columns-by-method)).
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
     faster LoRA steps at EP8 on 8× B300), and its weights now sync to vLLM and SGLang for RL
     ([Qwen3.8-Flash-Next](agent-docs/models/qwen4_exp.md#kernel-defaults)).
