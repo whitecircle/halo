@@ -312,6 +312,8 @@ class TrajectoryTokenizeMixin:
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
         """The OpenAI tool schema the rollout passes the engine, rendered into the trainer's prompts too."""
+        if self._rollout_env.TOOLS_ARRIVE_ON_RESET:
+            raise RuntimeError("Dynamic tool schema has not been discovered at rollout startup")
         return self._rollout_env.get_tools_schema()
 
     def _admit_row(self, row: str, prompt_len: int, completion_label: str, completion_len: int, suspect: str) -> bool:

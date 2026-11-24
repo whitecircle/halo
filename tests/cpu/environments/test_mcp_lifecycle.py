@@ -141,6 +141,58 @@ async def test_connect_discovers_tools_and_disconnect_unwinds_in_owner_task():
     assert env.stub_transport.enter_task is not asyncio.current_task()  # owned by the connection task
 
 
+@pytest.mark.parametrize("episode_scratch", [False, True])
+async def test_discovery_returns_an_ordered_snapshot_and_closes_its_only_server(episode_scratch):
+    env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=episode_scratch)
+    schema = {"type": "object", "properties": {"values": {"type": "array", "items": {"type": "string"}}}}
+
+    async def list_tools():
+        tools = [types.SimpleNamespace(name=name, description=None, inputSchema=schema) for name in ("zeta", "alpha")]
+        return types.SimpleNamespace(tools=tools)
+
+    async def call_tool(*args, **kwargs):
+        pytest.fail("Discovery must not execute a tool")
+
+    env.stub_session.list_tools = list_tools
+    env.stub_session.call_tool = call_tool
+    tools = await env.discover_tools_schema()
+
+    schema["properties"]["values"]["items"]["type"] = "integer"
+    assert [tool["function"]["name"] for tool in tools] == ["zeta", "alpha"]
+    for tool in tools:
+        assert tool["function"]["parameters"]["properties"]["values"]["items"] == {"type": "string"}
+    assert env.get_trajectories([0]) == [None]
+    (transport,) = env.transports
+    (scratch,) = transport.args
+    assert env.stub_session.exited and transport.exited
+    assert transport.enter_task is transport.exit_task and transport.exit_task.done()
+    assert not os.path.exists(scratch)
+    assert not env.get_tools_schema()
+
+
+@pytest.mark.parametrize("episode_scratch", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+async def test_discovery_errors_and_removes_scratch_after_an_unsuccessful_list(episode_scratch, empty):
+    env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=episode_scratch)
+
+    async def list_tools():
+        if empty:
+            return types.SimpleNamespace(tools=[])
+        raise RuntimeError("list tools failed")
+
+    env.stub_session.list_tools = list_tools
+    error, message = (ValueError, "advertised no tools") if empty else (RuntimeError, "list tools failed")
+    with pytest.raises(error, match=message):
+        await env.discover_tools_schema()
+
+    (transport,) = env.transports
+    (scratch,) = transport.args
+    assert env.stub_session.exited and transport.exited
+    assert transport.enter_task is transport.exit_task and transport.exit_task.done()
+    assert not os.path.exists(scratch)
+    assert not env.get_tools_schema()
+
+
 async def test_failed_connect_unwinds_partial_state():
     """A split enter leaves _session half-initialized and the transport open."""
     env = _StubMCPEnv(fail_initialize=True)

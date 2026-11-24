@@ -35,6 +35,7 @@ See agent-docs/training-methods/async-grpo/README.md for the objective, the envi
 the rollout-server contract.
 """
 
+import asyncio
 import logging
 
 from trl import GRPOConfig
@@ -84,6 +85,7 @@ from halo.models.introspection.config_access import config_model_types
 from halo.models.introspection.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
+from halo.runtime.consensus import rank0_verdict
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_unsupported_score_centering,
@@ -110,17 +112,17 @@ logger = logging.getLogger(__name__)
 def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -> int:
     """Token count of the environment's preamble (system prompt + tool schema), which the startup context-window check
     must include or it validates a prompt smaller than any the model sees. Rendered under ``template_kwargs``, as the
-    preamble depends on them. A template that cannot render it raises, since rollouts render the same preamble. An MCP
-    environment's tools appear only at its first reset, so the overhead under-counts, with a warning."""
+    preamble depends on them. A template that cannot render it raises, since rollouts render the same preamble.
+    COLLECTIVE for environments whose tools need discovery."""
     messages = ([{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []) + [
         {"role": "user", "content": ""}
     ]
-    tools = environment.get_tools_schema()
-    if environment.TOOLS_ARRIVE_ON_RESET and not tools and is_global_main_process():
-        logger.warning(
-            "An MCP server's tools arrive when its first reset connects, so the context-window check omits "
-            "their schema from the prompt overhead."
+    if environment.TOOLS_ARRIVE_ON_RESET:
+        tools = rank0_verdict(
+            lambda: asyncio.run(environment.discover_tools_schema()), "Environment prompt overhead tool discovery"
         )
+    else:
+        tools = environment.get_tools_schema()
     rendered = tokenizer.apply_chat_template(
         messages, tools=tools, tokenize=False, add_generation_prompt=True, **template_kwargs
     )

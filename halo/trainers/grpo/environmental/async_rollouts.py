@@ -172,8 +172,11 @@ class AsyncRolloutMixin:
             return
 
         guard = DeferredRankFailure("Rollout component start")
-        guard.run(self._start_rank_rollout_components)
+        tools_schema = guard.run(self._start_rank_rollout_components)
         guard.reject()
+        # A leader can fail during discovery. Every rank must join the startup fence before the TP broadcast.
+        if self._rollout_env.TOOLS_ARRIVE_ON_RESET:
+            self._tools_schema = self._broadcast_object_from_tp_leader(tools_schema)
         self._form_weight_sync_group()
         self._async_components_started = True
 
@@ -182,13 +185,16 @@ class AsyncRolloutMixin:
             self._rollout_start_callback = _RolloutStartCallback(self)
             self.add_callback(self._rollout_start_callback)
 
-    def _start_rank_rollout_components(self) -> None:
-        """A TP/ETP follower starts no pool: it takes its group leader's rollouts, and only the score-only clients are
-        built on every rank."""
+    def _start_rank_rollout_components(self) -> list[dict] | None:
+        """Start the leader's pool and discover its dynamic tool schema. Score-only clients are built on every rank."""
+        tools_schema = None
         if not self._is_tp_follower():
             self._start_rollout_pool()
+            if self._rollout_env.TOOLS_ARRIVE_ON_RESET:
+                tools_schema = self._loop.run_until_complete(self._rollout_env.discover_tools_schema())
         if self.async_config.isr_engine_reference:
             self._engine_rescore_clients = self._build_engine_rescore_clients()
+        return tools_schema
 
     def _start_rollout_pool(self) -> None:
         if not ray.is_initialized():
