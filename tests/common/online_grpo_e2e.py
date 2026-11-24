@@ -637,7 +637,8 @@ def run_online_grpo_e2e(
         after = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
         head = [name for name in adapters_before if "lm_head" in name and is_lora_b_key(name)]
         unmoved = [name for name in head if torch.equal(adapters_before[name], after[name])]
-        checks["head_adapter_trained"] = bool(head) and (not unmoved or not trained)
+        # This row exists to prove the head adapter trains, so a run with no gradient fails here instead of passing.
+        checks["head_adapter_trained"] = bool(head) and trained and not unmoved
         log(f"  lm_head lora_B: {len(head)} adapted, unmoved {unmoved} (run had a gradient: {trained})")
     record_dp_layout(ctx, trainer, spec.layout, checks)
 
