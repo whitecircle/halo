@@ -255,10 +255,10 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             # As in the preflights, a report that cannot be read refuses nothing; a group needs the launch id, though.
             logger.warning(f"Could not read {self.base_url}/server_info, so its image goes unchecked: {e}")
             flags = None
+        if require and (flags is None or flags.engine_build is None):
+            # No identity row read: upstream vLLM or an unreadable report, which shows the wire it speaks by its version.
+            self._check_server_version()
         if require and flags is not None:
-            if flags.engine_build is None:
-                # No identity row: upstream vLLM, which shows the wire it speaks by its version.
-                self._check_server_version()
             self._require_toolkit_image(flags)
             self._group_instance = flags.instance_id
         if require:
