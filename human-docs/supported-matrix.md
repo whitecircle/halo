@@ -116,7 +116,7 @@ otherwise. `ep1` is `expert_parallel_size: 1` on the EP layers, `tp2` is
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No | No | |
 | GLM-5 Next | Yes | Yes | Not run | On 1.3.0rc1, a tiny GLM-5 Next checkpoint on both engines: serving, and an exact weight push at `ep1` and `ep2` |
 | Qwen3.8-Flash-Next | Yes | Yes, from this repo's image only | Not run | On 1.3.0rc1, tiny composite checkpoints on both engines at two ranks: an exact weight push and a LoRA adapter sync. No GRPO run on the release checkpoint |
-| Inkling 2 | Adapter sync only | No | No | On 1.3.0rc2, Inkling-2-Small on 4× B300, served by vLLM's Inkling 2 image: async GRPO at `ep2`, attention LoRA through `rollout_adapter_sync`. No weight push and no online GRPO |
+| Inkling 2 | Adapter sync only, from the `vllm-0.1.dev25249` image | No | No | On 1.3.0rc2, Inkling-2-Small on 4× B300, served by vLLM's Inkling 2 image: async GRPO at `ep2`, attention LoRA through `rollout_adapter_sync`. No weight push and no online GRPO |
 | Inkling, Qwen3-Next, Cohere2 MoE, Nemotron-H | No | No (no online RL at all) | No | |
 
 A MoE with no family in this table, such as full GLM-4.5 or GLM-4.7 (`glm4_moe`), has

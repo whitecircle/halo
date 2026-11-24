@@ -37,8 +37,8 @@ Two comparisons, both against the stock Hugging Face model built from the same w
   implementations already differ. A per-parameter bound would not hold: the hyper-connection scales of
   DeepSeek-V4 and GLM-5 Next are sums with heavy cancellation, where every bf16 run is noise.
 
-The stock reference is finalized as a loaded model is (``finalize_loaded_model``); the FLA kernel restriction it
-applies is process-wide, so every model below runs under it.
+The stock reference is finalized as a loaded model is (``finalize_loaded_model``), so every model below runs with
+the same FLA launch options.
 
 GLM-5 Next's sparse-attention indexer picks KV blocks by a top-k (``index_topk``) that fp32
 reduction-order noise flips on some inputs, which moves a few gradients wholesale. The fixed seed below

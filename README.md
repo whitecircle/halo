@@ -22,7 +22,7 @@ Halo is an open-source framework built by [White Circle](https://whitecircle.com
 
 The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, PP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
 
-Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is under 90 lines for every family but GPT-OSS, at 168 ([Model Integration Cost](human-docs/model-integration-cost.md)).
+Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is under 90 lines for every family but Inkling 2, at 117, and GPT-OSS, at 168 ([Model Integration Cost](human-docs/model-integration-cost.md)).
 
 On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.10–1.12× Megatron Bridge, 1.47× TRL 1.17.1 and 1.9–2.0× NeMo AutoModel 0.7.0, and Qwen3.5-122B-A10B at 1.50× TRL and 1.7–1.9× NeMo; it trails a tuned Megatron by 11.5% on dense Qwen3.5-9B at 64k ([Benchmarks](#benchmarks)). It runs 1.11–2.07× as fast as Halo 1.1.0 on the twelve shapes benchmarked against it.
 
@@ -79,7 +79,8 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     ([Dataset Formats](agent-docs/data/dataset-formats.md#required-columns-by-method)).
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
     faster LoRA steps at EP8 on 8× B300), and its weights now sync to vLLM and SGLang for RL
-    ([Qwen3.8-Flash-Next](agent-docs/models/qwen4_exp.md#kernel-defaults)).
+    ([kernel defaults](agent-docs/models/qwen4_exp.md#kernel-defaults),
+    [RL weight sync](agent-docs/models/qwen4_exp.md#rl-weight-sync)).
   - **Low precision:** fused Triton fake-quant kernels for MXFP4 and NVFP4, bit-exact with the eager quantizer,
     including ep1 expert weights. Exports use a layout vLLM serves, and native MXFP4 releases load
     directly. The trainer checks the converted modules against `lowp_precision`. Fixed: an all-zero MXFP8 block
@@ -99,8 +100,8 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     tools read the base at that commit (`--base_revision` for an adapter that records none). An expert-only
     adapter records whether its run neutralized the attention sinks, and the streaming merge repeats it.
     A PEFT wrap that leaves no trainable adapter parameter is refused when the trainer is built.
-  - **Also:** Transformers 5.23, DPO/KTO reference log-probs swept after the FSDP2 wrap, SGLang turns requeued at a
-    weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
+  - **Also:** Transformers 5.23 and flash-linear-attention 0.6, DPO/KTO reference log-probs swept after the FSDP2
+    wrap, SGLang turns requeued at a weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
     Pull or build the 1.3.0rc2 tags.
 - **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
@@ -151,6 +152,7 @@ docker pull public.ecr.aws/whitecircle/halo:hopper
 Versioned tags (`:blackwell-1.3.0rc2`, `:hopper-1.3.0rc2`) pin the release. There is no `latest` tag, since
 the images are architecture-specific. The RL inference images are published alongside them
 (`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.3.0rc2` and `:sglang-0.5.22-1.3.0rc2`.
+Inkling 2 is served from its own vLLM tag, `:vllm-0.1.dev25249`, pinned as `:vllm-0.1.dev25249-1.3.0rc2`.
 
 To build locally instead:
 ```bash

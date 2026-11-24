@@ -278,6 +278,12 @@ rotates a stale buffer from the second launch of a shape at the latest, backward
 `tests/gpu/kernels/test_liger_rope_repeated_calls.py` checks the bound rotary over repeated calls at Qwen3-8B's
 4096-token shape, against a control that runs the CuTe DSL kernel directly.
 
+Upstream Liger's multimodal fused forwards import per-family output classes that transformers folds into its generic
+outputs, and read `rope_deltas` off the model output, where transformers keeps it on the model.
+`ensure_folded_output_classes` (`halo/model_loading/liger/upstream_outputs.py`) runs before an upstream applier: it
+binds each missing name to Liger's generic output with a `rope_deltas` field, and gives the generic model outputs a
+`None` one.
+
 ## CrossEntropy vs FusedLinearCrossEntropy
 
 **CrossEntropy** (default) replaces only the loss function; the model still materializes the

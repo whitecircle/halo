@@ -271,7 +271,7 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   round keep the version they started on. A request with no version published raises, since the engine would serve the
   base. The `isr_engine_reference` re-score names the newest version the same way.
 - **Base no push carries.** A family whose `weight_sync_refusal` is set is never pushed, and runs only on a backend
-  its spec lists in `adapter_sync_backends`: Inkling 2 (frozen NVFP4/MXFP8 experts, attention LoRA) on vLLM. Every
+  its spec lists in `adapter_sync_backends`: Inkling 2 (frozen NVFP4/MXFP8 experts; attention or expert LoRA) on vLLM. Every
   server must serve the trainer's launch base from the start, by the match under **Restart**; the preflight skips its
   quantization and MoE-runner checks, and the trainer forms no weight-sync group. A server that serves another base
   fails the sync.
@@ -281,19 +281,22 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   about a second and logged once per outage). A server that lacks the newest version has restarted, and an episode is
   routed only to servers that hold the version it leased: one that lacks it is skipped, and one that answers "not
   loaded" is excluded for that version and the episode replayed on another. If the restarted server launched with the
-  trainer's base (its `/server_info` `served_model_name` equals the `model_name` its requests name, and its `model_path`
+  trainer's base (its served model name equals the `model_name` its requests name, and its model path
   names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache at the commit
-  the trainer loaded, or the same real path; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
+  the trainer loaded, or the same real path; SGLang reports both on `/server_info` as `served_model_name` and `model_path`, vLLM the name on
+  `/v1/models` and the path as `model_config.model` on `/server_info`; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
   at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
   the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
   would wait out the broadcast deadline). The old client is dropped without a destroy, probe or request to the vanished
   peer. Under `single_group` the group re-forms itself. A server that is down at a sync
   fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
   it takes the full push.
-- **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). The startup preflight refuses a server whose rank, module list or loaded
+- **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). On vLLM the server needs `--enable-lora`,
+  `--max-lora-rank` of at least `lora_r`, `--max-loras` of at least 2, `--max-cpu-loras` of at least `prefetch_depth` + 2
+  and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` (set in the Inkling 2 image). The startup preflight refuses a server whose rank, module list or loaded
   limit is too small for the run (`prefetch_depth` + 2 versions are live at once), one with speculative decoding
   (its draft runs without the adapter), a quantized base or data-parallel replicas. A module outside
-  `--lora-target-modules` is dropped by the engine without a trace, hence the module check.
+  `--lora-target-modules` is dropped by the engine without a trace, hence the module check (SGLang only).
 - **Cost.** On Qwen3.5-35B-A3B, SGLang 0.5.22 decoded 2.6% slower with `--enable-lora` and no adapter against a warm
   base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar, so it serves an adapter only where
   no merged push exists (Inkling 2).
@@ -308,7 +311,7 @@ alone, by `halo:vllm-0.1.dev25249`, at the attention adapters' rank and scaling:
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
 (`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is
 already refused by every weight sync. Run it with the GPU rows in
-`tests/gpu/trainers/grpo/test_adapter_sync_e2e.py`, which decide whether it stays.
+`tests/gpu/trainers/grpo/test_adapter_sync_e2e.py`, which run the SGLang path and decide whether it stays.
 
 ### Served weights stay in checkpoint layout
 
@@ -395,8 +398,8 @@ at 256 x 1,024 on one B300, and rollouts on the two-server EFA run above took 7.
 
 ### vLLM server patches
 
-The image applies six runtime patches through `sitecustomize` in the API server and every engine-core
-worker (`docker/vllm/patches/`), and every one is asserted at build:
+The release image applies six runtime patches through `sitecustomize` in the API server and every engine-core
+worker (`docker/vllm/patches/`; the Inkling 2 tag five, without the split top-p guard), and every one is asserted at build:
 
 - **Layerwise reload** (`vllm_layerwise_reload_patch.py`). vLLM's reload moves each layer to the meta
   device and wraps its `weight_loader`s; model code that writes with a direct `param.copy_()` (gpt-oss
@@ -701,8 +704,7 @@ only with `halo:vllm-0.32.0`: a row naming another build, the Inkling 2 tag's am
 join, and Inkling 2 forms no group. A server with no such row is read through `GET /version` first, and the client
 refuses one older than 0.32.0 or one that reports no version: the packed-transfer geometry (`packed`,
 `packed_buffer_size_bytes`, `packed_num_buffers`) rides `/init_weight_transfer_engine`, which older engines refuse.
-No other engine build is validated. A toolkit image whose row names its patches and no build, as the 1.2.0 and
-1.3.0rc1 tags do, is refused with the image remedy: build or pull the current tags.
+No other engine build is validated. A toolkit image whose row names its patches and no engine build is refused with the image remedy: build or pull the current tags.
 
 ### Config-schema parity
 
@@ -799,7 +801,7 @@ it (the worst-case multi-turn budget only warns).
 `VLLM_USE_V2_MODEL_RUNNER` is an env var the compose file passes through bare, so unset keeps the
 image's `1`. `0` falls back to the V1 runner, where R3 refuses to start and the gpt-oss budget loses
 its patches; vLLM reads it with `int()`, so `false` or an empty value (an empty key in `.env` counts)
-kills the server with a bare `ValueError`. The Inkling 2 build has no V1 runner and no longer declares the variable; it checks the name itself and raises
+kills the server with a bare `ValueError`. The Inkling 2 build has no V1 runner and does not declare the variable; it checks the name itself and raises
 `ValueError` ("Model Runner V1 has been removed") at startup for any value but `1`.
 
 **Tool parsers are per family.** For native-tool environments (`code_contests`, `swe`, `mcp`,

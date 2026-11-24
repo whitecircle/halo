@@ -106,8 +106,12 @@ only where the pinned engine reads that family's layout:
 - **No serving path:** Mistral4 and Ring on either engine (neither registers
   their architecture), and Zaya on SGLang, whose loader reads a layout the export
   does not carry.
+- **Adapters only:** an Inkling 2 run over the packed release saves adapters and
+  has no gathered export; environmental GRPO serves them to vLLM's Inkling 2
+  image through `rollout_adapter_sync`
+  ([Inkling 2](../agent-docs/models/inkling2.md#frozen-quantized-experts) ↗).
 - **Untested:** Zaya on vLLM's generic transformers backend, Ling 3.0, Inkling,
-  Inkling 2, and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The
+  and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The
   exports use the hub's names, but no engine has served one.
 - **Every other family** serves its normal save as is, except a Cohere2 MoE
   (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first. A

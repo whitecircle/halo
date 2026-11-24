@@ -41,7 +41,7 @@ def _tuner(jit_function, keys=("D", "NB")) -> Autotuner:
 
 @pytest.fixture
 def fake_l2norm(monkeypatch):
-    """A module of two autotuned kernels keyed on ``D`` and ``NB``, as fla 0.4.2's."""
+    """A module of two autotuned kernels keyed on ``D`` and ``NB``, as FLA's l2norm kernels are."""
     module = types.ModuleType("fla.modules.l2norm")
     module.l2norm_fwd_kernel, module.l2norm_bwd_kernel = _tuner(_ignores_nb), _tuner(_ignores_nb)
     monkeypatch.setattr(fla_launch, "fla_l2norm", module)

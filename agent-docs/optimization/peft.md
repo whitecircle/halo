@@ -464,7 +464,7 @@ A changed LoRA scaling raises too: resume compares the scaling inputs the saved 
 `use_rslora`) with the live run's, since names and shapes would still match and the delta would silently
 rescale. A missing `adapter_config.json` raises too.
 
-Under CP `remap_cp_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
+Under CP `remap_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
 spelling, read off the same PEFT selection the save made, so every adapter-name spelling PEFT writes
 (`lora_A.default.weight`, `modules_to_save.default.weight`, `lora_embedding_A.default`, a DoRA magnitude) maps
 back; a key it does not produce fails the check above. A mixed run's expert keys keep the CP wrapper's `model.`

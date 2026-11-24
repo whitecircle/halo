@@ -21,7 +21,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | Yes ¹³ | `examples/sft/glm4/*` |
 | [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | Yes ¹³ | `examples/sft/laguna/*` |
 | [Inkling-Small](inkling.md) | `inkling_text` | Yes | Yes | No | No | Yes ¹⁰ ¹³ | `examples/sft/inkling/*` |
-| [Inkling-2-Small](inkling2.md) | `inkling2_text` | Yes ¹⁷ | Yes ⁶ | No | No | No | — |
+| [Inkling-2-Small](inkling2.md) | `inkling2_text` | Yes ¹⁷ | Yes ⁶ ¹⁷ | No | No | No | `examples/grpo/environmental/inkling2/vllm/*` |
 | [Gemma 4 MoE](gemma4.md) | `gemma4` | Yes | Yes | No | No | No | `examples/sft/gemma4/*` |
 | [Bailing MoE / Ling](bailing.md) | `bailing_moe` | Yes | Yes | Yes ⁷ | No | No | `examples/sft/bailing/*` |
 | [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |

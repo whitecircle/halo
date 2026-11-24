@@ -98,8 +98,9 @@ learning_rate: 1.0e-06
 ```
 
 `examples/grpo/environmental/environmental-grpo-template.yaml` is the annotated starting point. GPT-OSS,
-Qwen3.5/3.6 and Gemma 4 ship recipes under `examples/grpo/environmental/<family>/{vllm,sglang}/`; the
-SGLang ones are `ep1` only.
+Qwen3.5/3.6, Gemma 4, Qwen3.8-Flash-Next and Inkling 2 ship recipes under
+`examples/grpo/environmental/<family>/{vllm,sglang}/`; the SGLang ones are `ep1` only, and Qwen3.8-Flash-Next
+and Inkling 2 have vLLM recipes only.
 
 - **Sampling** goes through the `rollout_*` fields. TRL's `top_p`, `top_k`, `min_p`,
   `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one raises at startup.

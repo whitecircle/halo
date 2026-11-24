@@ -22,7 +22,7 @@ from tests.common.numerics import cos_sim, max_abs_rel_err
 from tests.common.rank_log import log
 
 SEED = 1234
-# Qwen3.5/3.6-35B-A3B's GatedDeltaNet after the q/k repeat.
+# Qwen3.5/3.6-35B-A3B's GatedDeltaNet value-head count and head dim, q/k at the same head count.
 HEADS, HEAD_DIM = 32, 128
 # One packed row of four documents, the layout the padding-free collators emit.
 CU_SEQLENS = (0, 896, 2048, 3584, 4096)

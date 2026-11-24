@@ -126,6 +126,7 @@ make build-blackwell
 make build-vllm      # halo:vllm-0.32.0
 make build-vllm-inkling2   # halo:vllm-0.1.dev25249, Dockerfile.vllm with --build-arg VLLM_ENGINE=inkling2
 make build-sglang    # halo:sglang-0.5.22
+make build-all       # all five
 
 # Raw equivalent; pass the stamps `make` adds yourself
 docker build --build-arg SOURCE_REVISION=$(git rev-parse --short HEAD) \
