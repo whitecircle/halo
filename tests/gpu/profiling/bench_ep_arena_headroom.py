@@ -29,9 +29,7 @@ def time_dispatch_combine(shape: str, tokens: int, headroom: bool) -> tuple[floa
     hidden, top_k, experts = SHAPES[shape]
     padded = padded_wire_hidden(hidden)
     needed = ep_dispatch_capacity(tokens)
-    capacity = (
-        arena_capacity(needed, num_topk=top_k, padded_hidden=padded, spans_domains=False) if headroom else needed
-    )
+    capacity = arena_capacity(needed, spans_domains=False) if headroom else needed
     arena = _ElasticArena.acquire(dist.group.WORLD, padded, top_k, DEEPEP_NUM_QPS, False)
     arena.ensure(capacity)
     buffer = arena.buffer
