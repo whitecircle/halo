@@ -115,6 +115,7 @@ def _build_random_init(model_class, seed: int, from_pretrained_kwargs: dict) -> 
         seed=seed,
         trust_remote_code=from_pretrained_kwargs.get("trust_remote_code", True),
         attn_implementation=from_pretrained_kwargs.get("attn_implementation"),
+        revision=from_pretrained_kwargs.get("revision"),
     )
 
 

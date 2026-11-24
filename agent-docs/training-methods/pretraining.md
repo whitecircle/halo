@@ -19,7 +19,7 @@ The model is built from the config on the meta device and drawn on CPU by the fa
 
 Data parallelism (DDP, FSDP2, `ep1`), EP, CP, EP+CP, attention-only TP on a MoE and EP+TP are supported: each holds the whole model on a rank, so every rank draws it on CPU, a node's ranks at a time, and the loader shards it as it shards a checkpoint. Under EP that is the host memory `ep_lazy_loading: false` costs, a full model per rank.
 
-A resumed run restores its checkpoint and draws nothing: under EP, CP and TP the policy loads from the checkpoint, and under data parallelism the trainer restores the checkpoint over the build. A GptOss run's sinks keep the from-scratch handling they started with, so `reset_sinks` never neutralizes the trained ones.
+A resumed run restores its checkpoint. Under EP, CP and TP the policy loads from the checkpoint and draws nothing. Under data parallelism the run first draws the keyed weights, and the trainer restores the checkpoint over them. A GptOss run's sinks keep the from-scratch handling they started with, so `reset_sinks` never neutralizes the trained ones.
 
 Four refusals:
 
@@ -41,7 +41,7 @@ model_init_kwargs:
 
 ### Large models, PP, ETP or dense TP
 
-Where a whole model per rank does not fit in host memory, or under PP, ETP or dense TP, materialize the random-init checkpoint once outside the distributed job, then train with any parallelism:
+Under PP, ETP or dense TP, or where a whole model per rank does not fit in host memory, materialize the random-init checkpoint once outside the distributed job, then train from it. The host memory is saved only by a loader that reads just its rank's part of the checkpoint: lazy EP, PP and dense TP. Data parallelism, CP and attention-only TP on a MoE hold a whole model per rank either way:
 
 ```python
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer

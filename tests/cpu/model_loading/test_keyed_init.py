@@ -4,6 +4,7 @@
 - the draw depends only on the seed and the model, not on the global random state, which it leaves as it found it,
 - an expert drawn alone, as a rank holding a slice of the bank will draw it, equals its slice of the whole draw,
 - no expert or layer starts as a copy of another,
+- a tied pair is drawn once, by the embedding, as ``from_config`` leaves it,
 - every MoE family's draw, through the gathered save's hub layout and back through ``from_pretrained``, is the draw,
 - two gloo ranks that enter ``load_whole_model`` with different global seeds hold the same weights.
 Tiny models on CPU."""
@@ -17,6 +18,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 from safetensors.torch import save_file
+from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.checkpoint.config_export import save_model_config
 from halo.checkpoint.writing import normalize_gathered_state_dict
@@ -30,6 +32,7 @@ from halo.model_loading.parallel.keyed_init import (
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.whole_model import load_whole_model
 from tests.common.gloo import run_gloo_ranks
+from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES
 
 FAMILIES = {**TINY_MOE_FAMILIES, **{f"dense_{name}": family for name, family in TINY_DENSE_FAMILIES.items()}}
@@ -222,6 +225,26 @@ def test_a_gathered_save_of_the_draw_reloads_as_the_draw(name, tmp_path):
     assert not differ, differ[:8]
 
 
+def test_a_tied_pair_is_drawn_once_as_from_config_leaves_it():
+    """``from_config`` draws the embedding (its padding row zeroed), then ties the head to it, so the head's own
+    draw never reaches the pair."""
+    tiny = {**TINY_QWEN3_CONFIG, "pad_token_id": 0}
+    tied = build_keyed_model(
+        Qwen3ForCausalLM,
+        Qwen3Config(**{**tiny, "tie_word_embeddings": True}),
+        torch.float32,
+        seed=SEED,
+        trust_remote_code=False,
+    )
+    untied = build_keyed_model(
+        Qwen3ForCausalLM, Qwen3Config(**tiny), torch.float32, seed=SEED, trust_remote_code=False
+    )
+    embedding = tied.get_input_embeddings().weight
+    assert tied.get_output_embeddings().weight is embedding
+    assert torch.equal(embedding[0], torch.zeros_like(embedding[0])), "the head's draw overwrote the padding row"
+    assert torch.equal(embedding, untied.get_input_embeddings().weight)
+
+
 def _load_with_rank_seed(rank: int, config) -> None:
     """Each rank reseeds its global generators differently, then loads through the whole-model route."""
     torch.manual_seed(1000 + rank)
@@ -234,6 +257,7 @@ def _load_with_rank_seed(rank: int, config) -> None:
         config=config,
         dtype=torch.float32,
         trust_remote_code=False,
+        place_on_device=False,
     )
     digest = torch.tensor(list(bytes.fromhex(_state_hash(model))), dtype=torch.uint8)
     gathered = [torch.empty_like(digest) for _ in range(dist.get_world_size())]

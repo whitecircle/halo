@@ -154,13 +154,19 @@ def _fallback_init(module: nn.Module, init_fn: InitWeights, *, seed: int, name: 
 def keyed_init_(model: nn.Module, seed: int, *, init_weights: InitWeights | None = None, prefix: str = "") -> None:
     """Draw every tensor of ``model`` in place, under transformers' init guards. ``prefix`` is ``model``'s name in
     the full model, so a part built apart (an MTP head) draws what it would draw in place. A fused expert bank never
-    falls back."""
+    falls back. A tied tensor is drawn once, by the first module holding it (the input embedding, before the head),
+    as ``from_config`` draws before it ties; a later holder draws into zeroed scratch in its place."""
     banks = {f"{prefix}.{name}" if prefix else name: n for name, n in fused_expert_banks(model).items()}
+    drawn: set[int] = set()
     with torch.no_grad(), hf_init.guard_torch_init_functions():
         for name, module, init_fn in init_order(model, init_weights, prefix):
-            draw_module(module, init_fn, seed=seed, name=name, num_experts=banks.get(name))
-            if name not in banks:
-                _fallback_init(module, init_fn, seed=seed, name=name)
+            own = {n: p for n, p in module._parameters.items() if p is not None}
+            tied = {n: torch.zeros_like(p) for n, p in own.items() if id(p) in drawn}
+            with _parameters_swapped(module, tied):
+                draw_module(module, init_fn, seed=seed, name=name, num_experts=banks.get(name))
+                if name not in banks:
+                    _fallback_init(module, init_fn, seed=seed, name=name)
+            drawn.update(id(p) for p in own.values())
 
 
 def undrawn_parameters(model: nn.Module) -> list[str]:
@@ -199,11 +205,12 @@ def build_keyed_model(
     seed: int,
     trust_remote_code: bool,
     attn_implementation: str | None = None,
+    revision: str | None = None,
 ) -> nn.Module:
-    """A random-init ``model_class`` on CPU: the config-only meta shell (fp32 pins kept), every parameter given
-    NaN-filled storage, tied pairs re-tied, then :func:`keyed_init_`. A parameter the family's ``_init_weights`` leaves
-    undrawn is still NaN, and is refused by name. The global CPU generator is left as it was, so a from-scratch load
-    shifts none of the run's later draws (shuffles, dropout)."""
+    """A random-init ``model_class`` on CPU: the config-only meta shell (fp32 pins kept, remote code at ``revision``),
+    every parameter given NaN-filled storage, tied pairs re-tied, then :func:`keyed_init_`. A parameter the family's
+    ``_init_weights`` leaves undrawn is still NaN, and is refused by name. The global CPU generator is left as it was,
+    so a from-scratch load shifts none of the run's later draws (shuffles, dropout)."""
     with torch.random.fork_rng(devices=[]):
         return _build_keyed_model(
             model_class,
@@ -212,14 +219,27 @@ def build_keyed_model(
             seed=seed,
             trust_remote_code=trust_remote_code,
             attn_implementation=attn_implementation,
+            revision=revision,
         )
 
 
 def _build_keyed_model(
-    model_class, config, dtype: torch.dtype, *, seed: int, trust_remote_code: bool, attn_implementation: str | None
+    model_class,
+    config,
+    dtype: torch.dtype,
+    *,
+    seed: int,
+    trust_remote_code: bool,
+    attn_implementation: str | None,
+    revision: str | None,
 ) -> nn.Module:
     model = build_config_meta_shell(
-        model_class, config, dtype, trust_remote_code=trust_remote_code, attn_implementation=attn_implementation
+        model_class,
+        config,
+        dtype,
+        trust_remote_code=trust_remote_code,
+        revision=revision,
+        attn_implementation=attn_implementation,
     )
     # named_parameters yields a tied tensor once, and tie_weights then points its alias at the materialized one.
     for name, _ in list(model.named_parameters()):
