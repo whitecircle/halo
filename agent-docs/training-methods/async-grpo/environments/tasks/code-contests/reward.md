@@ -53,8 +53,8 @@ and the notes descriptions under [notes](tools.md#notes)), the run's scratchpad 
 it, so a recipe states only the judge's model, view, price and context. The context comes from a shared
 `context_file` under `examples/grpo/environmental/code-contests-judge/`, one file per chat template, rollout
 backend, scratchpad and harness: `gptoss.txt` (gpt-oss on either engine), `gemma4-vllm.txt`, `gemma4-qwen3.6-sglang.txt`,
-`qwen3.6-vllm.txt`, `qwen3.6-vllm-run-code.txt` for the Python and C++ stages, and `notes-no-thinking.txt` for the
-[notes harness](tools.md#notes) run without a reasoning step. The term's `weight` (−0.7) prices
+`qwen3.6-vllm.txt`, `qwen3.6-vllm-run-code.txt` for the Python and C++ stages, and `notes-no-thinking.txt` and `notes-thinking.txt`
+for the [notes harness](tools.md#notes) run without and with a reasoning step. The term's `weight` (−0.7) prices
 the weighted checks by their check weights, each fired one adding its own price. The check weights are the
 environment's (7 in all), so −0.7 is 0.1 per unit; a recipe of your own that lists `checks: environment` takes the
 same check weights, so its unit is its `weight` / 7.

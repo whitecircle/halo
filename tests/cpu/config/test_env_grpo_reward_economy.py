@@ -323,14 +323,17 @@ def test_every_recipe_states_the_reasoning_economy(subtests):
 
 def test_the_level_budgets_and_prices_are_one_contract_at_every_family(subtests):
     """Every level's free reasoning is the same whichever family the recipe trains (the extra-hard stage's larger
-    output budget gives each level more), and so is its price."""
+    output budget gives each level more), and so is its price within one harness: the notes harness's lower
+    resubmission penalty bounds its length terms lower, and its prices fall with them."""
     for path in _REASONING_RECIPES:
         with subtests.test(_label(path)):
             e = _economy(path)
             budgets = {level: _budget(e, level) for level in VALID_REASONING_EFFORTS}
             expected = _EXTRA_HARD_LEVEL_BUDGETS if "-stage3-" in path.name else _LEVEL_BUDGETS
             assert budgets == expected, f"{path.name} states level budgets {budgets}"
-            shipped = {level: _rate(_economy(_REASONING_RECIPES[0]), level) for level in VALID_REASONING_EFFORTS}
+            notes = _runs_notes(_yaml.load(path)["environment_kwargs"])
+            first = next(p for p in _REASONING_RECIPES if _runs_notes(_yaml.load(p)["environment_kwargs"]) == notes)
+            shipped = {level: _rate(_economy(first), level) for level in VALID_REASONING_EFFORTS}
             assert {level: _rate(e, level) for level in VALID_REASONING_EFFORTS} == shipped
 
 

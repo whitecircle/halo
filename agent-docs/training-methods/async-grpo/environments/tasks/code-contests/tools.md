@@ -114,7 +114,7 @@ notes' size ([default](README.md#configuration)).
   reasoning where one is shown (`NOTES_CHECK_DESCRIPTIONS`): `reasoning_in_actions` covers programs alone, a notes call
   is never a `notepad_run`, and `verdict_probe` reads intent from the messages and notes too. Two logged checks audit
   the notes, `false_record` and `unexplained_program`. The no-thinking recipes give the judge `notes-no-thinking.txt`
-  as its [context](reward.md#audit-judge).
+  as its [context](reward.md#audit-judge), the thinking one `notes-thinking.txt`.
 - The prompt is a function of the history alone (`observation_view`). Its notes turn moves to the end of every prompt,
   so no prompt extends the one before it and training needs `train_on_sampled_tokens: true`
   ([Single-row fallback](../../../objective.md#single-row-fallback)).
