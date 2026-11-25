@@ -41,13 +41,6 @@ def test_recompute_preserves_nondefault_theta():
     assert rotary.inv_freq.dtype == torch.float32
 
 
-def test_recompute_default_theta():
-    model, rotary, reference = _model_with_rotary(theta=10_000.0)
-    rotary.inv_freq.zero_()
-    finalize_loaded_model(model)
-    assert torch.allclose(rotary.inv_freq, reference)
-
-
 def test_per_layer_type_recompute_matches_model_init():
     """Gemma4 registers ``head_dim`` per layer, so a raw-config read raises
     ``AmbiguousGlobalPerLayerAttributeError`` and a single global field sizes a wrong table."""

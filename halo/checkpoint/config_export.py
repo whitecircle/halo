@@ -202,7 +202,7 @@ def _apply_config_changes(source_section: dict, before: dict, after: dict, confi
 
 def export_source_config_schema(config, output_dir: str, *, source: str | None, revision: str | None = None) -> None:
     """Rewrite ``config.json`` into the source checkpoint's schema for families with ``exports_source_config_schema``.
-    transformers 5.20 absorbs the vendor spellings at load and never re-emits them, so the source config is carried
+    transformers 5.23 absorbs the vendor spellings at load and never re-emits them, so the source config is carried
     over with this run's changes applied, plus the modules its ``auto_map`` names."""
     spec = find_moe_family_spec(getattr(config, "model_type", None))
     if not (spec and spec.exports_source_config_schema):

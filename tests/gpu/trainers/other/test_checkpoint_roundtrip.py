@@ -40,7 +40,7 @@ class RoundTripModel:
 
 
 QWEN3 = RoundTripModel(QWEN3_8B, "flash_attention_2", (7e9, 10e9))
-# ~20.7B: the gathered save must carry every expert, not one EP rank's half.
+# ~20.9B: the gathered save must carry every expert, not one EP rank's half.
 GPT_OSS = RoundTripModel(GPT_OSS_20B, "flex_attention", (18e9, 23e9), expert_biases=True)
 
 # mode -> (model, ParallelismConfig kwargs); no kwargs is plain FSDP2 over the stock transformers model.

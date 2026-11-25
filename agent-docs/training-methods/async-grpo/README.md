@@ -117,7 +117,7 @@ python scripts/environments/inference/eval_env.py \
 - [Episodes](episodes.md): sampling, turn and episode budgets, tool calls, unproductive turns
 - [Reasoning Budgets](reasoning.md): effort levels, the engine's reasoning cap, the per-level budget and price
 - [Objective and Stability](objective.md): training rows, importance sampling, advantages, KL
-- [Memory and Throughput](performance.md): the logits wall, chunked log-probs, sizing
+- [Memory and Throughput](performance.md): the logits plane, chunked log-probs, sizing
 - [Monitoring](monitoring.md): logged metrics, saved trajectories, early stop
 - [Evaluation](evaluation.md): eval during training, the offline runner, re-grading
 - [Troubleshooting](troubleshooting.md): symptoms and fixes

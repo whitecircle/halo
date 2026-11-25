@@ -35,6 +35,7 @@ from halo.models.attention.tree_plan import (
     build_tree_attention_plan,
 )
 from halo.models.attention.tree_sparse import reject_unfoldable_tree_options, tree_sparse_forward
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.introspection.config_access import text_config
 from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.models.introspection.unwrapping import base_transformers_model
@@ -460,7 +461,7 @@ def install_tree_attention(model, full_form: FullAttentionForm) -> None:
         for name, wrap in ((family.stateful.conv, _tree_conv), (family.stateful.recurrence, _tree_recurrence)):
             setattr(module, name, wrap(getattr(module, name)))
     if family.sparse is not None:
-        family.sparse.forward = tree_sparse_forward(family.sparse.forward)
+        patch_layer_forward(family.sparse, tree_sparse_forward(family.sparse.forward))
     if is_global_main_process():
         full_layers = f"{family.sparse.__name__} selects on each path" if family.sparse else full_form
         logger.info(f"Installed tree attention on {module.__name__} (full layers: {full_layers})")

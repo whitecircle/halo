@@ -6,10 +6,14 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --arrow-gap: 64px;
+    --card-w: 320px;
+    /* Room between the two backward cards for the dY line that feeds both. */
+    --fork-gap: 76px;
   }
 
   body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
 
   .figure { position: relative; }
 
@@ -32,13 +36,15 @@
     background: var(--hue);
   }
 
-  /* Four matmul and update cards in a row, with a gutter for each arrow. */
+  /* Forward, the two backward matmuls one above the other, and the update, with gutters for what passes between. */
   .steps {
     display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    column-gap: var(--arrow-gap);
-    row-gap: var(--heading-gap);
+    grid-template-columns: var(--card-w) 1fr var(--card-w) 0.6fr var(--card-w);
+    grid-template-rows: auto auto var(--fork-gap) auto;
+    row-gap: 0;
   }
+
+  .steps .group-head { margin-bottom: var(--heading-gap); }
 
   .card {
     border: 1px solid var(--line);
@@ -55,13 +61,15 @@
     padding: 58px 24px 34px;
   }
 
-  .stage .flops {
+  .stage .flops, .stage .name {
     position: absolute;
     top: 18px;
-    right: 24px;
     font-size: 23px;
-    color: var(--text);
   }
+
+  .stage .flops { right: 24px; color: var(--text); }
+
+  .stage .name { left: 24px; color: var(--body); }
 
   .stage .op {
     font-size: 27px;
@@ -84,11 +92,20 @@
 
   .stage.cheap p { color: var(--secondary); }
 
+  /* What happens between this layer's forward and its backward is not drawn: the gap names it. */
+  .between {
+    align-self: center;
+    text-align: center;
+    font-size: 23px;
+    line-height: 1.35;
+    color: var(--secondary);
+  }
+
   /* As tall as the bracket's room and its label, so the next heading's gap is measured from the label. */
   .total {
     position: relative;
     height: calc(20px + 1.3 * 25px);
-    margin-top: 24px;
+    margin-top: 28px;
   }
 
   .total span {
@@ -103,10 +120,10 @@
 
   .memory { margin-top: var(--group-gap); }
 
-  /* The bytes bar and the activations card, each under its caption, in the original's 6.3 : 4.15 split. */
+  /* The bytes bar and the activations card, each under its caption. */
   .bytes {
     display: grid;
-    grid-template-columns: 6.3fr 4.15fr;
+    grid-template-columns: 5.7fr 4.75fr;
     column-gap: 60px;
     row-gap: 14px;
     margin-top: var(--heading-gap);
@@ -128,7 +145,7 @@
     align-items: center;
     justify-content: center;
     gap: 4px;
-    height: 108px;
+    height: 124px;
     border-radius: 10px;
     background: var(--hue);
     color: #000;
@@ -162,6 +179,7 @@
   .acts p {
     font-size: 23px;
     color: var(--body);
+    font-variant-numeric: tabular-nums;
   }
 
   svg.wires {
@@ -175,9 +193,10 @@
 
   .wire-label {
     position: absolute;
-    font-size: 21px;
+    font-size: 23px;
+    line-height: 1.2;
     color: var(--body);
-    transform: translateX(-50%);
+    white-space: nowrap;
   }
 
 </style>
@@ -185,23 +204,24 @@
 <body>
 <div class="canvas">
   <header>
-    <h1>Two backward matmuls make a step cost {total}</h1>
-    <p class="subtitle">Y = X @ W · P = layer parameters</p>
+    <h1>Two backward matmuls make a step cost {total} FLOPs per token</h1>
+    <p class="subtitle">Y = X @ W · P = K × N for this layer, and over all layers P is the model’s parameters</p>
   </header>
 
   <div class="figure" id="figure">
     <div class="steps" id="steps"></div>
-    <div class="total" id="total"><span>Forward {forward} + backward {backward} = {total} FLOPs / step</span></div>
+    <div class="total" id="total"><span>Forward {forward} + backward {backward} = {total} FLOPs per token</span></div>
 
     <div class="memory">
       <div class="group-head">Memory in HBM</div>
       <div class="bytes">
-        <p class="caption">Per parameter: {bytes} B total (bf16 AdamW)</p>
-        <p class="caption">+ Activations: the long-context cost</p>
+        <p class="caption">Per parameter: {bytes} bytes during a step (bf16 moments)</p>
+        <p class="caption">+ Activations, here at {tokens} tokens and hidden size {hidden}</p>
         <div class="bar" id="bar"></div>
         <div class="card cheap acts">
           <b>Activations</b>
-          <p>Scale with batch × seq, not per-parameter</p>
+          <p>Grow with tokens × hidden size × layers</p>
+          <p>{state} for one bf16 hidden state</p>
         </div>
       </div>
     </div>
@@ -211,7 +231,7 @@
 
   <footer>
     <p>
-      <span class="s">Weights, gradients and optimizer state shard with FSDP and EP, activations do not.</span>
+      <span class="s">Part Many GPUs shows which of these each way of splitting a model divides.</span>
       <span class="s">X is saved at the forward and freed after wgrad.</span>
     </p>
   </footer>
@@ -220,52 +240,69 @@
 <script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
   const GROUPS = [
-    { name: "Forward", hue: "--halo-blue" },
-    { name: "Backward", hue: "--halo-violet" },
-    { name: "Update", hue: "--halo-indigo" },
+    { name: "Forward", hue: "--halo-blue", column: 1 },
+    { name: "Backward", hue: "--halo-violet", column: 3 },
+    { name: "Update", hue: "--halo-indigo", column: 5 },
   ];
-  /** One linear layer's step. `flops` counts in units of P, and a step without matmul FLOPs is drawn dashed. */
+  /**
+   * One linear layer's step, each card at its grid column and row. `flops` counts FLOPs per token in units of
+   * P, and a step without matmul FLOPs is drawn dashed.
+   */
   const STEPS = [
-    { group: "Forward", op: "Y = X @ W", role: "Saves X", flops: 2 },
-    { group: "Backward", op: "dX = dY @ W<sup>T</sup>", role: "→ previous layer", flops: 2 },
-    { group: "Backward", op: "dW = X<sup>T</sup> @ dY", role: "Needs saved X", flops: 2 },
-    { group: "Update", op: "W −= lr · m/√v", role: "m, v · elementwise", flops: 0 },
+    { id: "forward", group: "Forward", column: 1, row: 2, op: "Y = X @ W", role: "Saves X", flops: 2 },
+    { id: "wgrad", group: "Backward", column: 3, row: 2, name: "wgrad", op: "dW = X<sup>T</sup> @ dY", role: "Needs saved X", flops: 2 },
+    { id: "dgrad", group: "Backward", column: 3, row: 4, name: "dgrad", op: "dX = dY @ W<sup>T</sup>", role: "Passes the gradient on", flops: 2 },
+    { id: "update", group: "Update", column: 5, row: 2, op: "Update W", role: "Moments · elementwise", flops: 0 },
   ];
-  // Labels on the arrows between consecutive steps.
-  const HANDOFFS = [null, null, "dW"];
-  // Bytes per parameter in HBM.
+  /** What sits between this layer's forward and its backward, named in the gap and not drawn. */
+  const BETWEEN = ["Later layers", "and the loss"];
+  /** The tensors passed in and out of the backward cards. */
+  const FLOWS = { in: "dY, from the layer above", down: "dX, to the layer below", update: "dW" };
+  // Bytes per parameter in HBM during a step, with bf16 weights, gradients and moments.
   const BYTES = [
     { name: "Weights", bytes: 2, hue: "--halo-blue" },
     { name: "Gradients", bytes: 2, hue: "--halo-violet" },
-    { name: "Optimizer m, v", bytes: 4, hue: "--halo-indigo" },
+    { name: "First and second moment", bytes: 4, hue: "--halo-indigo" },
   ];
+  /** One hidden state, to give the activations a scale: tokens × hidden size × bytes per bf16 value. */
+  const HIDDEN_STATE = { tokens: 32768, hidden: 4096, bytesPerValue: 2 };
 
   const flopsOf = (group) => STEPS.filter((s) => s.group === group).reduce((sum, s) => sum + s.flops, 0);
   const totalFlops = STEPS.reduce((sum, s) => sum + s.flops, 0);
   const totalBytes = BYTES.reduce((sum, part) => sum + part.bytes, 0);
-  /** The steps the 6P bracket spans: every one that runs a matmul. */
-  const matmuls = STEPS.filter((s) => s.flops > 0);
+  const fmt = (v) => v.toLocaleString("en-US");
+  const bytesWord = (n) => `${n} ${n === 1 ? "byte" : "bytes"}`;
 
   fillValues({
     forward: `${flopsOf("Forward")}P`,
     backward: `${flopsOf("Backward")}P`,
     total: `${totalFlops}P`,
     bytes: totalBytes,
+    tokens: fmt(HIDDEN_STATE.tokens),
+    hidden: fmt(HIDDEN_STATE.hidden),
+    state: `${Math.round((HIDDEN_STATE.tokens * HIDDEN_STATE.hidden * HIDDEN_STATE.bytesPerValue) / 1e6)} MB`,
   });
 
   const steps = document.getElementById("steps");
 
   for (const group of GROUPS) {
     const head = el("div", "group-head");
-    head.style.gridColumn = `span ${STEPS.filter((s) => s.group === group.name).length}`;
+    head.style.gridColumn = group.column;
+    head.style.gridRow = 1;
     const dot = el("i");
     dot.style.setProperty("--hue", `var(${group.hue})`);
     head.append(dot, group.name);
     steps.append(head);
   }
 
-  const cards = STEPS.map((step) => {
+  const cards = Object.fromEntries(STEPS.map((step) => {
     const card = el("div", step.flops > 0 ? "card stage" : "card stage cheap");
+    card.style.gridColumn = step.column;
+    card.style.gridRow = step.row;
+
+    if (step.name !== undefined) {
+      card.append(el("span", "name", step.name));
+    }
 
     if (step.flops > 0) {
       card.append(el("span", "flops", `${step.flops}P`));
@@ -276,8 +313,14 @@
     card.append(op, el("p", undefined, step.role));
     steps.append(card);
 
-    return card;
-  });
+    return [step.id, card];
+  }));
+
+  const between = el("div", "between");
+  between.style.gridColumn = 2;
+  between.style.gridRow = 2;
+  between.append(...BETWEEN.flatMap((line, i) => (i === 0 ? [line] : [document.createElement("br"), line])));
+  steps.append(between);
 
   const bar = document.getElementById("bar");
 
@@ -286,7 +329,7 @@
     // Widths are proportional to bytes once the 4px gaps between segments are taken out.
     seg.style.width = `calc((100% - ${(BYTES.length - 1) * 4}px) * ${part.bytes / totalBytes})`;
     seg.style.setProperty("--hue", `var(${part.hue})`);
-    seg.append(el("b", undefined, part.name), el("span", undefined, `${part.bytes} B`));
+    seg.append(el("b", undefined, part.name), el("span", undefined, bytesWord(part.bytes)));
     bar.append(seg);
   }
 
@@ -299,27 +342,42 @@
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
   const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+  /** A label at (x, y), placed by `place(label's width, its height)` returning its left and top. */
+  const label = (text, place) => {
+    const node = el("div", "wire-label", text);
+    figure.append(node);
+    const size = node.getBoundingClientRect();
+    const [left, top] = place(size.width, size.height);
+    node.style.left = `${left}px`;
+    node.style.top = `${top}px`;
+  };
 
-  HANDOFFS.forEach((label, i) => {
-    const a = box(cards[i]);
-    const z = box(cards[i + 1]);
-    const y = (a.t + a.b) / 2;
-    arrow(wires, a.r + 12, y, z.l - 12, y, grey);
+  const [forward, wgrad, dgrad, update] = ["forward", "wgrad", "dgrad", "update"].map((id) => box(cards[id]));
 
-    if (label !== null) {
-      const text = el("div", "wire-label", label);
-      text.style.left = `${(a.r + z.l) / 2}px`;
-      figure.append(text);
-      text.style.top = `${y - text.getBoundingClientRect().height - 8}px`;
-    }
-  });
+  // dY comes in from the layer above and feeds both backward matmuls: one line between the two cards, forking
+  // up into wgrad and down into dgrad.
+  const forkX = (wgrad.l + wgrad.r) / 2;
+  const forkY = (wgrad.b + dgrad.t) / 2;
+  const forkStart = forward.r + 24;
+  wires.append(svgEl("line", { x1: forkStart, y1: forkY, x2: forkX, y2: forkY, stroke: grey, "stroke-width": 2 }));
+  arrow(wires, forkX, forkY, forkX, wgrad.b + 3, grey);
+  arrow(wires, forkX, forkY, forkX, dgrad.t - 3, grey);
+  label(FLOWS.in, (w, h) => [forkStart, forkY - h - 10]);
+
+  // dW goes to the update, dX leaves for the layer below.
+  const wgradY = (wgrad.t + wgrad.b) / 2;
+  arrow(wires, wgrad.r + 12, wgradY, update.l - 12, wgradY, grey);
+  label(FLOWS.update, (w, h) => [(wgrad.r + update.l) / 2 - w / 2, wgradY - h - 10]);
+  const dgradY = (dgrad.t + dgrad.b) / 2;
+  const downEnd = (dgrad.r + update.l) / 2;
+  arrow(wires, dgrad.r + 12, dgradY, downEnd, dgradY, grey);
+  label(FLOWS.down, (w, h) => [downEnd + 14, dgradY - h / 2]);
 
   // The bracket spans the matmul cards, with a short tick at each end.
   const total = document.getElementById("total");
-  const first = box(cards[STEPS.indexOf(matmuls[0])]);
-  const last = box(cards[STEPS.indexOf(matmuls.at(-1))]);
-  const x1 = first.l;
-  const x2 = last.r;
+  const matmuls = STEPS.filter((s) => s.flops > 0).map((s) => box(cards[s.id]));
+  const x1 = Math.min(...matmuls.map((b) => b.l));
+  const x2 = Math.max(...matmuls.map((b) => b.r));
   const y = box(total).t + 8;
   wires.append(svgEl("line", { x1, y1: y, x2, y2: y, stroke: grey, "stroke-width": 2 }));
 

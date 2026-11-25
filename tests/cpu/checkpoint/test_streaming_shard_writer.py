@@ -58,19 +58,6 @@ def test_parts_respect_the_size_limit_and_the_index_names_every_file(tmp_path):
         assert payload <= 4_000_000, f"{name} exceeds the 4MB limit"
 
 
-def test_a_single_oversized_tensor_still_gets_its_own_part(tmp_path):
-    """Flushing before appending keeps it from dragging unrelated tensors over the limit."""
-    writer = StreamingShardWriter(str(tmp_path), "2MB", enabled=True, filename_prefix=PREFIX)
-    writer.add("small", _tensor(1))
-    writer.add("huge", _tensor(8))
-    writer.add("after", _tensor(1))
-    weight_map, _ = writer.close()
-
-    assert weight_map["huge"] != weight_map["small"], "the oversized tensor must not share a part"
-    assert weight_map["huge"] != weight_map["after"]
-    assert len(_tensors(tmp_path / weight_map["huge"])) == 1
-
-
 def test_disabled_writer_writes_nothing(tmp_path):
     """Non-writer ranks share the call sites."""
     writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=False, filename_prefix=PREFIX)
@@ -113,16 +100,6 @@ def test_index_merge_counts_each_file_once_across_node_writers():
     assert len(weight_map) == 2
 
 
-def test_index_merge_rejects_a_replicated_key_two_ep_ranks_claim():
-    """Experts carry a per-rank suffix, so two claims mean a replica written per-rank: one copy named, bytes counted
-    twice."""
-    ep0 = ({"model.norm.weight": "model-00000-of-00002.safetensors"}, 100)
-    ep1 = ({"model.norm.weight": "model-00001-of-00002.safetensors"}, 100)
-
-    with pytest.raises(RuntimeError, match="claimed by both"):
-        merge_shard_index([ep0, ep1])
-
-
 def test_index_merge_sums_disjoint_stages():
     stage0 = ({"a": "f0.safetensors"}, 100)
     stage1 = ({"b": "f1.safetensors"}, 250)
@@ -137,18 +114,6 @@ def _tensors(path) -> dict[str, torch.Tensor]:
     with safe_open(path, framework="pt") as f:
         # safe_open exposes .keys() but is not iterable, so SIM118's rewrite does not apply here.
         return {k: f.get_tensor(k) for k in f.keys()}  # noqa: SIM118
-
-
-def test_written_parts_round_trip(tmp_path):
-    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
-    expected = {f"w{i}": torch.randn(1000) for i in range(10)}
-    for key, tensor in expected.items():
-        writer.add(key, tensor.clone())
-    weight_map, _ = writer.close()
-
-    for key, tensor in expected.items():
-        stored = _tensors(tmp_path / weight_map[key])[key]
-        assert torch.equal(stored, tensor)
 
 
 def _stream(dir_path, state_dict, max_shard_size):

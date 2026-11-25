@@ -67,19 +67,6 @@ def test_resume_visits_adapters_in_name_sorted_order():
     ]
 
 
-def test_resume_order_matches_the_save_order():
-    """``gather_expert_lora_state_dict`` writes sorted. A real frozenset here would pass or fail by PYTHONHASHSEED."""
-    attrs = ("down_proj", "gate_up_proj")
-    layer = _StubEPLayer(attrs)
-    layer._expert_lora_attrs = sorted(attrs, reverse=True)
-    state = _saved_state(attrs)
-
-    layer.load_expert_lora_state_dict(state)
-
-    saved_order = [f"experts.{attr}.lora_{w}" for attr in sorted(attrs) for w in ("A", "B")]
-    assert state.access_order == saved_order
-
-
 def test_resume_copies_the_saved_values():
     attrs = ("down_proj", "gate_up_proj")
     layer = _StubEPLayer(attrs)

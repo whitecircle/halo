@@ -24,7 +24,7 @@ Four consequences for a training config:
 - **Set `packing: false`.** Packing off a varlen backend is refused for the whole family ([Attention and packing](#attention-and-packing)), and `padding_free` needs a flash label, so Ling 3.0 trains on padded batches.
 - **`fp32_non_ep_params: true` keeps the KDA state in fp32 (optional).** The modeling file declares `A_log` and `dt_bias` in fp32; without the flag the loaders cast them to the run dtype with every other parameter ([Load precision](README.md#load-precision)). With it they train, with the other non-expert parameters, as fp32 masters from their stored fp32 values (compute stays bf16).
 
-    At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-layer parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group and `ParallelismConfig` refuses the combination at config time. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
+    At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-layer parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group, and the loader refuses the combination when it reads the model's `config.json` (`reject_unsupported_model`), before any weight loads. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
 
 - **Override `rope_scaling`.** The config ships `rope_scaling: null`, which transformers v5 normalizes into a dict carrying no `"factor"`; the MLA layers then read `config.rope_scaling["factor"]` and raise `KeyError`. Pass the minimal replacement and nothing more:
 
@@ -90,15 +90,15 @@ A bare `from_pretrained` of it is not a usable model either: transformers 5 re-m
 
 Every toolkit load path repairs both in `finalize_loaded_model()`. A plain `AutoModelForCausalLM` + `PeftModel` reload of a trained adapter has to call it as well.
 
-Ling 3.0's `modeling_bailing_moe_v3` needs one more: the file copies HF's `eager_attention_forward` helper **without** the `ALL_ATTENTION_FUNCTIONS` dispatch, so `attn_implementation: sdpa` changes the mask format while every MLA layer still materializes the `[B, H, S, S]` score plane plus its fp32 softmax copy — ~190 GiB on an 80k-token row, an instant OOM.
+Ling 3.0's `modeling_bailing_moe_v3` needs one more: the file copies HF's `eager_attention_forward` helper **without** the `ALL_ATTENTION_FUNCTIONS` dispatch, so `attn_implementation: sdpa` changes the mask format while every MLA layer still materializes the `[B, H, S, S]` score plane plus its fp32 softmax copy. On an 80k-token row at 16 heads that is ~570 GiB (190 GiB in bf16, 380 GiB for the fp32 copy), an instant OOM.
 
 The SDPA dispatch shim (bound through the same funnel) wraps the module global with an SDPA route gated on the attention module's own config: `sdpa` runs `F.scaled_dot_product_attention` (linear memory), anything else, including any `output_attentions` call, keeps the file's own eager, and a file carrying a real dispatch is untouched.
 
-The KDA layers run fla's Triton kernels, whose autotuners re-benchmark on shape-derived keys. The causal-conv1d key includes `ceil(tokens/1024)`, so a fresh row width costs that rank tens of seconds of autotuning while its 7 peers spin in the next collective at idle power.
+The KDA layers run fla's Triton kernels, whose autotuners re-benchmark on shape-derived keys. The causal-conv1d key includes `ceil(tokens/1024)`, so a fresh row width makes that rank compile and benchmark every autotune config while its 7 peers spin in the next collective at 100% utilization and the power of an idle process ([GPU Training Theory → Power and utilization](../reference/gpu-training-theory.md#power-and-utilization)).
 
 Measured configs persist in the Triton disk cache, which `configure_training_run` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache. Fresh caches can pick differently, which changes bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)).
 
-On Blackwell the KDA path shares the delta-rule state kernel whose `num_warps=4` configs are excluded there; the Ling 3.0 remote code imports `fla` directly, and the restriction applies when its load finishes ([Qwen3.5 linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)).
+On Blackwell the KDA path shares the delta-rule state kernel, which fla autotunes only over its `num_warps=2` configs there, so the restriction also covers the Ling 3.0 remote code's direct `fla` import ([Qwen3.5 linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)).
 
 ## Router balancing
 

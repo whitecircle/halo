@@ -103,7 +103,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     verify_server_flags,
     verify_turn_deadline,
 )
-from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
+from halo.trainers.grpo.rollout.weight_push import pushes_base, reject_unsyncable_config
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
@@ -172,6 +172,8 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         sampled_token_ids=async_config.train_on_sampled_tokens,
         weight_precision=async_config.rollout_weight_precision,
         candidate_logprobs=async_config.score_centering_top_k or 0,
+        pushes_base=pushes_base(model, adapter_sync=async_config.rollout_adapter_sync),
+        model_types=config_model_types(model.config),
         patches=frozenset(required_patches[t] for t in config_model_types(model.config) if t in required_patches),
     )
 
@@ -356,7 +358,12 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    reject_unsyncable_config(checkpoint_config, async_config.rollout_backend, async_config.rollout_weight_precision)
+    reject_unsyncable_config(
+        checkpoint_config,
+        async_config.rollout_backend,
+        async_config.rollout_weight_precision,
+        adapter_sync=async_config.rollout_adapter_sync,
+    )
 
     # The trainer gets dataset_presharded so it does not re-shard a per-rank load.
     ds, dataset_presharded = load_script_datasets(

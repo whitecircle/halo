@@ -15,6 +15,7 @@ from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from halo.kernels.fused_glu import resolve_fused_glu_mul
 from halo.model_loading.liger.cross_entropy import build_lce_forward
 from halo.model_loading.liger.family_specs import LigerFamilySpec
+from halo.models.gradient_checkpointing import patch_layer_forward
 
 # Marks a class a role swap produced, so a second application (TRL re-applies after the load) is a no-op
 # instead of stacking subclasses.
@@ -215,7 +216,7 @@ def apply_fused_modules(module: ModuleType, spec: LigerFamilySpec, flags: dict) 
     if flags.get("fused_linear_cross_entropy") and spec.causal_lm:
         lce_forward = build_lce_forward(spec.router_aux_loss_in_head, spec.fp32_logits)
         for name in spec.causal_lm:
-            _named_class(module, name, spec).forward = lce_forward
+            patch_layer_forward(_named_class(module, name, spec), lce_forward)
         patched.append(f"FusedLinearCrossEntropy({', '.join(spec.causal_lm)})")
 
     return patched

@@ -38,7 +38,7 @@ The embedding and head are 2D but excluded: their rows index the vocabulary, whe
 
 They are identified from the module tree the model declares (`get_input_embeddings()` / `get_output_embeddings()` plus a pooled `score`/`classifier` head), so a family spelling its embedding `tok_embeddings` or its head `output` is routed correctly. `_is_embedding_or_head`'s name-marker list is a second, always-active exclusion on top of the accessors, catching models that expose none.
 
-The scalar optimizer is [AdamWBF16](bf16-optimizer.md), not `torch.optim.AdamW`: Muon requires bf16 hidden weights, so the scalar params are bf16 too and a nearest-rounding write would truncate every sub-ULP update to zero (norm weights, value ~1 and ULP 3.9e-3, would never move). Stepping each parameter's local shard, it also takes a mix of sharded DTensors and plain tensors under EP/TP, which a foreach/fused AdamW rejects.
+The scalar optimizer is [AdamWBF16](bf16-optimizer.md), not `torch.optim.AdamW`: Muon requires bf16 hidden weights, so the scalar params are bf16 too and a nearest-rounding write would truncate every sub-ULP update to zero (norm weights, value ~1, where the bf16 spacing is 3.9e-3 below 1.0 and 7.8e-3 above, would never move). Stepping each parameter's local shard, it also takes a mix of sharded DTensors and plain tensors under EP/TP, which a foreach/fused AdamW rejects.
 
 Memory per param: ~4 B for 2D (bf16 weight + bf16 momentum), ~6 B for 1D (bf16 weight + bf16 AdamW states), plus transient Newton-Schulz buffers.
 
@@ -77,7 +77,7 @@ Optimizer micro-benchmark on one B300, Halo 1.1.0 or earlier (`tests/gpu/optimiz
 | Muon (Gram–Newton–Schulz) | 82.4 ms | +68% |
 | Muon (standard NS) | 113.7 ms | — |
 
-Muon's step costs 11–15× fused AdamW's here; the script prints no memory row for standard NS. This FFN is worst-case: it is all matrix params, so the Newton-Schulz cost is unamortized. On a real transformer, Newton-Schulz runs on smaller per-layer matrices amortized over a larger fwd+bwd, so the end-to-end slowdown is far smaller; measure on your model.
+Muon's step costs 11–15× fused AdamW's here; the script prints no memory row for standard NS. This FFN is worst-case: it is all matrix params, so the Newton-Schulz cost is unamortized. On a real transformer, Newton-Schulz runs on smaller per-layer matrices beside a larger forward and backward. No whole-step run is recorded, so measure on your model.
 
 The fused Triton kernels replace upstream Muon's per-batch Python loop + `torch.compile`.
 

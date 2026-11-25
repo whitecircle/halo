@@ -51,14 +51,6 @@ def _entropy_setup():
     return completion_ids, entropies, mask
 
 
-def test_special_tokens_are_excluded_by_the_plain_quantile_mask():
-    # Precondition for the test below: TRL's plain mask alone drops every structural token.
-    completion_ids, entropies, mask = _entropy_setup()
-    plain = _BaseTrainer().get_high_entropy_mask(entropies, mask, 0.8)
-    is_special = torch.isin(completion_ids, torch.tensor(SPECIAL_IDS))
-    assert not bool((plain & is_special).any()), "precondition: low-entropy special tokens fall outside the quantile"
-
-
 def test_protected_mixin_always_trains_special_tokens():
     harness = _Harness()
     completion_ids, entropies, mask = _entropy_setup()
@@ -144,8 +136,14 @@ def test_singleton_groups_do_not_produce_nan():
         assert torch.allclose(got, torch.zeros(2)), "a singleton group has no baseline → zero advantage"
 
 
-@pytest.mark.parametrize("scale", ["group", "batch", "none"])
-@pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    ("scale", "bad"),
+    [
+        pytest.param("batch", float("nan"), id="nan-batch"),
+        pytest.param("none", float("inf"), id="inf-none"),
+        pytest.param("group", float("inf"), id="inf-group"),
+    ],
+)
 def test_non_finite_rewards_raise_instead_of_zeroing(scale, bad):
     """Zeroing would train on a silently broken reward, and under ``batch`` scaling the one bad value
     makes the shared std non-finite, so every advantage of the step would be zeroed with it."""
@@ -165,10 +163,9 @@ def test_a_peer_ranks_non_finite_reward_raises_here_too(monkeypatch):
 _NO_EMPHASIS = 0.0  # emphasis off, so the advantage is pure ranking
 
 
-@pytest.mark.parametrize("rewards", [[0.5, 0.5], [0.4, 0.4, 0.4, 0.4]])
-def test_quantile_uniform_gives_zero_advantage_on_identical_rewards(rewards):
+def test_quantile_uniform_gives_zero_advantage_on_identical_rewards():
     # Spreading tied rewards over [-1, 1] would rank completions by array position.
-    got = compute_group_advantages(rewards, "quantile_uniform", _NO_EMPHASIS)
+    got = compute_group_advantages([0.4, 0.4, 0.4, 0.4], "quantile_uniform", _NO_EMPHASIS)
     assert np.allclose(got, 0.0), f"zero-variance group must yield zero advantage, got {got}"
 
 

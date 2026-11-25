@@ -102,10 +102,12 @@ def test_the_production_import_path_pulls_in_every_registration():
     assert set(_IDS) <= registered, f"only {sorted(registered)} reachable from the production import"
 
 
-@pytest.mark.parametrize("model_type", _IDS)
-def test_transformers_still_ships_no_native_head(model_type):
+def test_transformers_still_ships_no_native_head(subtests):
     """Once upstream registers its own head, the registration helper no-ops and the module must be retired."""
-    assert model_type not in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
+    assert _IDS, "the registration table holds no model type"
+    for model_type in _IDS:
+        with subtests.test(model_type):
+            assert model_type not in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
 
 
 @_PARAMETRIZE

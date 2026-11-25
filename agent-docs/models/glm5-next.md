@@ -29,7 +29,7 @@ HF_HOME=$D/hf python scripts/before_training/convert_glm5_bf16.py \
 
 Budget ~330 GB download cache + ~650 GB output; the conversion streams shard-by-shard, so host RAM stays bounded by `--max_shard_size`. Unquantized tensors keep their stored dtype, and the emitted `config.json` drops its `quantization_config`.
 
-The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict` (`e_score_correction_bias`, `conv1d`, `dt_bias`, `A_log`); the `hc_*` tensors are not among them. Every training loader casts the pinned parameters to the run dtype unless `fp32_non_ep_params` keeps them as fp32 masters ([Load precision](README.md#load-precision)), while the `e_score_correction_bias` buffer stays fp32, and every toolkit save keeps each at its trained dtype (`save_dtype_caster`).
+The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict`: `e_score_correction_bias`, `conv1d`, `dt_bias`, `A_log`, and each hyper-connection's `base` and `scale` (`attn_hc.*` and `ffn_hc.*`, the hub's `hc_attn_*` and `hc_ffn_*`). The hyper-connections' `fn` matrices are not among them. Every training loader casts the pinned parameters to the run dtype unless `fp32_non_ep_params` keeps them as fp32 masters ([Load precision](README.md#load-precision)), while the `e_score_correction_bias` buffer stays fp32, and every toolkit save keeps each at its trained dtype (`save_dtype_caster`).
 
 ## Model loading
 
@@ -72,11 +72,11 @@ The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's ex
 
 ## Attention
 
-Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel the toolkit keeps on `num_warps=2` ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
+Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel, which fla autotunes only over its `num_warps=2` configs there ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
 
 The 11 DSA layers keep `config._attn_implementation == "sdpa"` and its boolean `[B, 1, S, S]` mask, but on Blackwell the `sdpa` slot of `modeling_glm5_next` holds `masked_matmul_attention` (`halo/models/attention/masked_matmul.py`, [how it works](../optimization/flash-attention.md#masked-matmul-attention)). Any call it does not serve goes to the library's SDPA. `HALO_DSA_MATMUL` defaults off on other GPUs, and `0` keeps stock SDPA throughout. A [tree](#tree-packing) forward carrying a plan attends in its own forward and never reaches this slot.
 
-A DSA query reads about 1,900 keys, at most 2,051, under a mask as wide as the row. Torch's mem-efficient kernel is a general one: it scores every key of the row, and its backward costs about 7.5× its forward. The matmul kernel runs a forward, its recompute and a backward 4.95× faster at 8k and 5.13× at 16k ([numbers](../optimization/flash-attention.md#masked-matmul-attention)).
+A DSA query reads about 1,900 keys, at most 2,051, under a mask as wide as the row. Torch's mem-efficient kernel is a general one: it scores every key of the row, and its backward costs about 7.4× its forward. The matmul kernel runs a forward, its recompute and a backward 4.95× faster at 8k and 5.13× at 16k ([numbers](../optimization/flash-attention.md#masked-matmul-attention)).
 
 On a 7-layer cut at `ep1` and 32,752 tokens, the per-token gap to an fp32 reference reads 0.0195 with both kernels on and 0.0232 with neither, and top-k disagreement 1.00% against 1.34%. With hyper-connection kernels off, the DSA kernel's forward is bit-identical to SDPA's.
 

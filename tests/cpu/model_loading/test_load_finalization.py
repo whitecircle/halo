@@ -225,14 +225,16 @@ def test_every_dispatched_load_path_reaches_the_seam():
     )
 
 
-@pytest.mark.parametrize("rel,function", TERMINAL_LOADERS, ids=[fn for _, fn in TERMINAL_LOADERS])
-def test_every_terminal_loader_calls_the_seam_directly(rel, function):
+def test_every_terminal_loader_calls_the_seam_directly(subtests):
+    assert TERMINAL_LOADERS, "no terminal loader is pinned"
     graph = _call_graph()
-    assert (rel, function) in graph, f"{function} no longer exists in {rel} — update TERMINAL_LOADERS"
-    assert SEAM in graph[(rel, function)], (
-        f"{rel}:{function} materializes weights but does not call {SEAM} itself. Every terminal "
-        f"loader finalizes directly — reachability through a sibling branch is not coverage."
-    )
+    for rel, function in TERMINAL_LOADERS:
+        with subtests.test(function):
+            assert (rel, function) in graph, f"{function} no longer exists in {rel} — update TERMINAL_LOADERS"
+            assert SEAM in graph[(rel, function)], (
+                f"{rel}:{function} materializes weights but does not call {SEAM} itself. Every terminal "
+                f"loader finalizes directly — reachability through a sibling branch is not coverage."
+            )
 
 
 @functools.cache
@@ -261,15 +263,17 @@ def test_the_tool_roots_hold_every_halo_module_they_import():
     assert not missing, f"the tool roots import {missing} without sweeping them"
 
 
-@pytest.mark.parametrize("rel,function", INFERENCE_TOOL_LOADERS, ids=[fn for _, fn in INFERENCE_TOOL_LOADERS])
-def test_every_inference_tool_loader_finalizes(rel, function):
+def test_every_inference_tool_loader_finalizes(subtests):
     """A bare load returns garbage: a dead RoPE on zeroed pages, NaN on reused ones."""
+    assert INFERENCE_TOOL_LOADERS, "no inference tool loader is pinned"
     loaders = _tool_loaders()
-    assert (rel, function) in loaders, f"{function} no longer loads a model in {rel} — update the pinned sets"
-    assert SEAM in loaders[(rel, function)], (
-        f"{rel}:{function} hands a bare-loaded model to a forward without calling {SEAM}: its rotary "
-        f"inv_freq and any family decay table are uninitialized memory."
-    )
+    for rel, function in INFERENCE_TOOL_LOADERS:
+        with subtests.test(function):
+            assert (rel, function) in loaders, f"{function} no longer loads a model in {rel} — update the pinned sets"
+            assert SEAM in loaders[(rel, function)], (
+                f"{rel}:{function} hands a bare-loaded model to a forward without calling {SEAM}: its rotary "
+                f"inv_freq and any family decay table are uninitialized memory."
+            )
 
 
 def _runs_a_forward(rel: str) -> bool:

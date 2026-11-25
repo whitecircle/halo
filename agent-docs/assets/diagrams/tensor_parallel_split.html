@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tensor parallel split</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    /* A piece takes its rank's colour. A tensor that is whole and equal on both ranks is grey. */
+    --rank0: var(--halo-blue);
+    --rank1: var(--halo-violet);
+    --whole: color-mix(in oklab, var(--body) 62%, var(--bg));
+  }
+
+  body { width: 1600px; }
+
+  sub {
+    position: relative;
+    top: 0.3em;
+    font-size: 0.62em;
+    line-height: 0;
+    vertical-align: baseline;
+  }
+
+  .figure { position: relative; }
+
+  .stage { position: relative; }
+
+  .stage > * { position: absolute; }
+
+  .col-name {
+    transform: translateX(-50%);
+    font-size: 25px;
+    line-height: 1.25;
+    color: var(--text);
+    white-space: nowrap;
+    text-align: center;
+  }
+
+  .col-note {
+    transform: translateX(-50%);
+    font-size: 21px;
+    line-height: 1.3;
+    color: var(--secondary);
+    white-space: nowrap;
+    text-align: center;
+  }
+
+  .frame {
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .rank {
+    transform: translateY(-50%);
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .op {
+    transform: translate(-50%, -50%);
+    font-size: 29px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .block {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    font-size: 21px;
+    white-space: nowrap;
+    color: #000;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .block.rank0 { background: var(--rank0); }
+
+  .block.rank1 { background: var(--rank1); }
+
+  .block.whole { background: var(--whole); }
+
+  .block.absent {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    color: var(--secondary);
+  }
+
+  .reduce {
+    transform: translate(-50%, -100%);
+    font-size: 21px;
+    line-height: 1.3;
+    color: var(--text);
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  svg.wires {
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  .key {
+    display: flex;
+    gap: 36px;
+    margin-top: 40px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .key i {
+    width: 30px;
+    height: 22px;
+    border-radius: 6px;
+    background: var(--fill);
+    border: 1px solid var(--edge, transparent);
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Two ranks split W<sub>1</sub> by columns and W<sub>2</sub> by rows, and one <span class="nw">all-reduce</span> adds their partial outputs</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="stage" id="stage"></div>
+    <div class="key">
+      <span style="--fill: var(--rank0)"><i></i>R0’s piece</span>
+      <span style="--fill: var(--rank1)"><i></i>R1’s piece</span>
+      <span style="--fill: var(--whole)"><i></i>Whole, and the same on both ranks</span>
+      <span style="--fill: var(--surface); --edge: var(--line)"><i></i>Held by the other rank</span>
+    </div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">A schematic of two layers in a row, Y = X @ W<sub>1</sub> then Z = f(Y) @ W<sub>2</sub>, such as the two projections of an MLP.</span>
+      <span class="s">Every rectangle is drawn in proportion to its shape, with N twice K.</span>
+      <span class="s">Both ranks hold the same X, because the ranks of one tensor-parallel group share one batch.</span>
+      <span class="s">Each rank computes its slice of Y from the whole X without communication and applies f to it.</span>
+      <span class="s">The next operation needs the whole Z, so it waits for the <span class="nw">all-reduce</span>.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * The split of the lecture's tensor-parallelism section: Y = X @ W1 then Z = f(Y) @ W2, with X [M, K],
+   * W1 [K, N], Y [M, N], W2 [N, K] and Z [M, K], W1 cut by columns and W2 by rows over the ranks of one group.
+   * `px` is the drawn length of each dimension: only the proportions carry meaning.
+   */
+  const SETUP = { ranks: 2, px: { M: 84, K: 108, N: 216 } };
+  /** Horizontal room in px for the operator between two tensors, and for the all-reduce. */
+  const GAPS = { op: 56, apply: 140, reduce: 172 };
+  /** Padding inside a rank's frame, the rank label's column and the space between the two frames. */
+  const FRAME = { pad: 26, label: 74, between: 28 };
+
+  if (SETUP.ranks !== 2) {
+    throw new Error("this layout names the other rank in each piece it does not hold: two ranks only");
+  }
+
+  const R = SETUP.ranks;
+  const { M, K, N } = SETUP.px;
+  const piece = N / R;
+  const other = (rank) => R - 1 - rank;
+  const sub = (text) => text.replace(/_(\d)/g, "<sub>$1</sub>");
+
+  /**
+   * The tensors of one rank's row, left to right. `w` and `h` are the whole tensor's drawn size, `cut` the
+   * side the ranks divide ("columns", "rows" or none), `own` what the rank's part is: its "piece", a "partial"
+   * of full size, or the "whole" tensor shared by both ranks. `before` is the operator drawn ahead of it.
+   */
+  const TENSORS = [
+    { id: "X", name: "X [M, K]", note: "the same on both ranks", w: K, h: M, own: "whole", holds: "[M, K]" },
+    { id: "W1", name: "W_1 [K, N]", note: "cut by columns", w: N, h: K, cut: "columns", own: "piece", holds: `[K, N/${R}]`, before: ["@", GAPS.op] },
+    { id: "Y", name: "Y [M, N]", note: "one slice per rank", w: N, h: M, cut: "columns", own: "piece", holds: `[M, N/${R}]`, before: ["=", GAPS.op] },
+    { id: "W2", name: "W_2 [N, K]", note: "cut by rows", w: K, h: N, cut: "rows", own: "piece", holds: `[N/${R}, K]`, before: ["f(Y) @", GAPS.apply] },
+    { id: "partial", name: "Partial Z [M, K]", note: "full width", w: K, h: M, own: "partial", holds: "[M, K]", before: ["=", GAPS.op] },
+    { id: "Z", name: "Z [M, K]", note: "the sum", w: K, h: M, own: "whole", holds: "[M, K]", before: [null, GAPS.reduce] },
+  ];
+
+  const stage = document.getElementById("stage");
+  const put = (node, left, top, width, height) => {
+    node.style.left = `${left}px`;
+    node.style.top = `${top}px`;
+
+    if (width !== undefined) {
+      node.style.width = `${width}px`;
+      node.style.height = `${height}px`;
+    }
+
+    stage.append(node);
+
+    return node;
+  };
+  const html = (tag, className, markup) => {
+    const node = el(tag, className);
+    node.innerHTML = markup;
+
+    return node;
+  };
+
+  // Columns: each tensor's left edge, after the rank label and the operator ahead of it.
+  let x = FRAME.pad + FRAME.label;
+
+  for (const tensor of TENSORS) {
+    x += tensor.before ? tensor.before[1] : 0;
+    tensor.x = x;
+    x += tensor.w;
+  }
+
+  const width = x + FRAME.pad;
+  const rowH = Math.max(...TENSORS.map((t) => t.h));
+  const frameH = rowH + 2 * FRAME.pad;
+
+  // The column names sit over the first frame.
+  const names = TENSORS.map((tensor) => put(html("div", "col-name", sub(tensor.name)), tensor.x + tensor.w / 2, 0));
+  const nameH = Math.max(...names.map((n) => n.offsetHeight));
+  const notes = TENSORS.map((tensor) => put(el("div", "col-note", tensor.note), tensor.x + tensor.w / 2, nameH + 2));
+  const headH = nameH + 2 + Math.max(...notes.map((n) => n.offsetHeight)) + 18;
+  const rowTop = (rank) => headH + rank * (frameH + FRAME.between);
+  const rowMid = (rank) => rowTop(rank) + frameH / 2;
+
+  for (let rank = 0; rank < R; rank += 1) {
+    put(el("div", "frame"), 0, rowTop(rank), width, frameH);
+    put(el("div", "rank", `R${rank}`), FRAME.pad, rowMid(rank));
+
+    for (const tensor of TENSORS) {
+      const left = tensor.x;
+      const top = rowMid(rank) - tensor.h / 2;
+
+      if (tensor.before && tensor.before[0] !== null) {
+        put(el("div", "op", tensor.before[0]), left - tensor.before[1] / 2, rowMid(rank));
+      }
+
+      if (tensor.own !== "piece") {
+        const kind = tensor.own === "whole" ? "whole" : `rank${rank}`;
+        put(el("div", `block ${kind}`, tensor.holds), left, top, tensor.w, tensor.h);
+        continue;
+      }
+
+      // One part per rank along the cut side: this rank's is filled, the others' are named and left empty.
+      for (let part = 0; part < R; part += 1) {
+        const mine = part === rank;
+        const node = el("div", `block ${mine ? `rank${rank}` : "absent"}`, mine ? tensor.holds : `on R${part}`);
+
+        if (tensor.cut === "columns") {
+          put(node, left + part * (tensor.w / R), top, tensor.w / R, tensor.h);
+        } else {
+          put(node, left, top + part * (tensor.h / R), tensor.w, tensor.h / R);
+        }
+      }
+    }
+  }
+
+  stage.style.width = `${width}px`;
+  stage.style.height = `${rowTop(R - 1) + frameH}px`;
+
+  // The one all-reduce: each rank's partial runs to a shared line, and the sum comes back to both ranks.
+  const wires = put(svgEl("svg", { class: "wires" }), 0, 0);
+  const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+  const partial = TENSORS.find((t) => t.id === "partial");
+  const total = TENSORS.find((t) => t.id === "Z");
+  const from = partial.x + partial.w + 14;
+  const to = total.x - 14;
+  const join = (from + to) / 2;
+
+  for (let rank = 0; rank < R; rank += 1) {
+    wires.append(svgEl("line", { x1: from, y1: rowMid(rank), x2: join, y2: rowMid(rank), stroke: grey, "stroke-width": 2 }));
+    arrow(wires, join, rowMid(rank), to, rowMid(rank), grey);
+  }
+
+  wires.append(svgEl("line", { x1: join, y1: rowMid(0), x2: join, y2: rowMid(R - 1), stroke: grey, "stroke-width": 2 }));
+  put(el("div", "reduce", "one all-reduce"), join, rowMid(0) - 12);
+
+  if (width > document.getElementById("figure").getBoundingClientRect().width + 0.5) {
+    throw new Error(`the row is ${width}px wide, wider than the figure: lower SETUP.px or GAPS`);
+  }
+</script>
+</body>
+</html>

@@ -1,4 +1,4 @@
-# AI Tooling
+# AI tooling
 
 The training images ship with skills that teach coding agents this codebase's
 configs, limits, and footguns. [Claude Code](https://github.com/anthropics/claude-code)
@@ -14,7 +14,7 @@ From a shell inside the container (bring your own subscription or API key):
 cd /workspace && claude
 ```
 
-Describe the task. Five skills (`parallelism`, `optimize`, `debug`, `docs`, `visuals`) fire on
+Describe the task. Six skills (`parallelism`, `optimize`, `debug`, `docs`, `voice`, `visuals`) fire on
 their own when relevant. The other six are user-invoked only: name them with
 `/launch`, `/checkpoints`, `/data`, `/add-model`, `/rl-setup`, `/write-tests`.
 
@@ -30,6 +30,7 @@ their own when relevant. The other six are user-invoked only: name them with
 | `add-model` | integrates a new model family (EP layer, registries, tests) |
 | `write-tests` | writes CPU/GPU tests that actually fail when behavior breaks |
 | `docs` | maintains `agent-docs/`, this guide and `skills/` under the style charter |
+| `voice` | keeps machine-writing patterns out of text people read (PRs, issues, commits, release notes, this guide), with a pattern catalog and a scanner that counts them |
 | `visuals` | writes a doc figure or a White Circle social graphic as an HTML page in the shared figure style and renders it to a PNG |
 
 ## What the agent reads

@@ -57,15 +57,6 @@ def test_function_id_with_lambda():
     assert len(fid) > len("<lambda>_")
 
 
-def test_function_id_nested_function():
-    def inner_func(y):
-        return y**2
-
-    fid = function_cache_id(inner_func)
-    assert isinstance(fid, str)
-    assert "inner_func" in fid
-
-
 def test_function_id_partial_distinguishes_bound_tokenizer():
     """A partial exposes no source, __code__ or __closure__, so an identifier reading only those collapses to
     ``functools.unknown`` and partials over different tokenizers share one cache file."""

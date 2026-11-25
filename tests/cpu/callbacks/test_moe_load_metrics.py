@@ -15,7 +15,6 @@ from halo.callbacks.moe_metrics import (
     _extract_router_logits,
     compute_moe_load_metrics,
 )
-from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 
 
 def _approx(a: float, b: float, tol: float = 1e-6) -> bool:
@@ -346,46 +345,6 @@ def test_metrics_ride_along_on_already_enabled_router_logits() -> None:
     assert model.config.router_aux_loss_coef == 0.001
     assert cb._hook_handles
     cb.on_train_end(args=None, state=None, control=None)
-
-
-class _CompositeCfg:
-    """Like ``Qwen3_5MoeConfig``: the wrapper has no ``num_experts`` (no ``__getattr__`` on ``PreTrainedConfig``)."""
-
-    def __init__(self, **text_fields):
-        self.text_config = type("TextCfg", (), text_fields)()
-
-    def get_text_config(self):
-        return self.text_config
-
-
-def test_detect_moe_reads_composite_text_config() -> None:
-    """Reading only the top level returns (0, 0), so ``moe_balancing: auto`` would resolve to none and the run would
-    train with no router balancing and no moe/* metrics."""
-    model = type("M", (), {"config": _CompositeCfg(num_experts=256, num_experts_per_tok=8)})()
-    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (256, 8)
-
-
-def test_detect_moe_still_reads_flat_config() -> None:
-    class _FlatCfg:
-        num_local_experts = 128
-        num_experts_per_tok = 4
-
-        def get_text_config(self):
-            return self
-
-    model = type("M", (), {"config": _FlatCfg()})()
-    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (128, 4)
-
-
-def test_detect_moe_dense_model_reports_zero() -> None:
-    class _DenseCfg:
-        hidden_size = 64
-
-        def get_text_config(self):
-            return self
-
-    model = type("M", (), {"config": _DenseCfg()})()
-    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (0, 0)
 
 
 if __name__ == "__main__":

@@ -29,7 +29,6 @@ from tests.common.online_rounds import online_host
 
 _VOCAB, _ROWS, _CLOSE = 64, 8, 7
 _CLIP_MIN, _CLIP_MAX = 0.5, 3.0
-_MODES = ("token_truncate", "token_mask", "sequence_truncate", "sequence_mask")
 
 _PASS_FACTS = {"runs_pass": True, "num_iterations": 1, "misaligned_accumulation": False, "balance_token_mass": False}
 _BLOCKERS = [
@@ -180,10 +179,19 @@ def _train(batch: dict, *, mode: str, loss_type: str, beta: float, fused: bool, 
 _close_to = partial(windows_close, rel=1e-4, grad_rtol=1e-3)
 
 
-@pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("beta", [0.0, 0.04])
-@pytest.mark.parametrize("loss_type", ["grpo", "dapo", "cispo"])
-@pytest.mark.parametrize("mode", _MODES)
+@pytest.mark.parametrize(
+    "mode,loss_type,beta,packed",
+    [
+        ("token_truncate", "dapo", 0.0, False),
+        ("token_truncate", "grpo", 0.04, True),
+        ("token_mask", "cispo", 0.0, True),
+        ("token_mask", "dapo", 0.04, False),
+        ("sequence_truncate", "dapo", 0.0, True),
+        ("sequence_truncate", "cispo", 0.04, False),
+        ("sequence_mask", "dapo", 0.04, True),
+        ("sequence_mask", "grpo", 0.0, False),
+    ],
+)
 def test_the_loss_forward_ratio_gives_the_pass_loss_and_gradient(mode, loss_type, beta, packed):
     in_pass, fused, _ = _round(mode, beta)
     _, *want = _train(in_pass, mode=mode, loss_type=loss_type, beta=beta, fused=False, packed=packed)

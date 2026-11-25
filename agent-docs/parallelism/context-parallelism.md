@@ -2,9 +2,9 @@
 
 CP splits long sequences across GPUs using Ulysses sequence parallelism with all-to-all
 communication in attention layers. Use it when a sequence is too long to fit in single-GPU
-activation memory. CP runs standalone or combined with EP (MoE models). Why sequence length, not
-parameter count, drives that memory:
-[GPU Training Theory §8](../reference/gpu-training-theory.md#activations-the-memory-sharding-doesnt-touch).
+activation memory. CP runs standalone or combined with EP (MoE models). Why activation memory grows
+with the tokens a GPU holds and does not shrink when the parameters are split:
+[GPU Training Theory → Activations](../reference/gpu-training-theory.md#activations).
 
 `data_parallel_size = world_size / cp_size`; gradient sync always spans all `world_size` ranks.
 CP is **not compatible with TP** — both partition the same contiguous rank blocks, and TP has

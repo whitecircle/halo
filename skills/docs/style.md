@@ -1,90 +1,88 @@
-# Style charter — lean, anti-slop
+# Style charter
 
-The Halo docs read like an engineer's note to another engineer: precise,
-measured, no marketing — **and no padding**. The goal of every page is the
-shortest version that still answers the reader's question. Match the voice of the
-leanest existing pages, not the longest. This charter is the gate for every prose
-edit.
+This charter holds the rules that apply to Halo's doc pages alone: what goes on a page, how long it
+runs, how it cites code and the register of each kind of page. How a sentence is written
+is the `voice` skill's subject, for docs and for every other text a person reads. Its working rules are
+in [`../voice/SKILL.md`](../voice/SKILL.md). Its catalog, [`../voice/patterns.md`](../voice/patterns.md),
+lists each writing pattern with its limit and the banned words. Read both before you edit prose, and run
+`skills/voice/scripts/scan.py` on the page when you are done.
 
 ## The one rule
 
-**Cut to what is load-bearing.** A fact is load-bearing if the reader acts
-differently without it: a supported/unsupported combination, a default, a measured
-number with its shape, a command, a known limit. Everything else — the intro that
-restates the page, the third benchmark table, the re-derivation of a point made
-one section up, the path appended to a sentence that does not send the reader to
-code — is padding. Delete it.
+Cut to what is load-bearing. A fact is load-bearing if the reader acts differently without it: a
+supported or unsupported combination, a default, a measured number with its shape, a command, a known
+limit. The rest is padding: the intro that restates the page, the third benchmark table, the
+re-derivation of a point made one section up, the path appended to a sentence that does not send the
+reader to code. Delete it.
 
-## Rules
+## Three kinds of page
 
-- **American English.** color, behavior, optimize. Not colour/optimise.
-- **Active voice, short sentences.** One claim per sentence.
-- **Lead with the answer.** No "Overview" section that restates the page, no "In
-  this section we will…", no closing summary that repeats the body. Open with the
-  fact the reader came for.
-- **Brevity is a rule, not a nicety.** Prefer the shorter form everywhere: a
-  sentence over a paragraph, a short list over a table, one example over three. If
-  a sentence can go without losing a load-bearing fact, it goes. Most reference
-  pages fit in 150–300 lines; a page past ~400 is almost always carrying
-  redundancy or content that belongs on another page.
-- **Cite sparingly — only where it helps the reader act.** Anchor a claim to a
-  `halo/` path, config field, or class name **only when the reader needs to find or
-  set that thing**. One or two pointers to the owning code per topic is enough. Do
-  not append a path to every sentence, and do not enumerate every method of a
-  module — that "Implementation" dump is noise that drifts out of date. Name the
-  owning file once; let the reader open it.
-- **One number, not a table of them.** Quote a single representative measured
-  number with its hardware/model/shape, and state the trend in words. Do not paste
-  three overlapping benchmark tables where one figure plus a sentence carries the
-  point.
-- **Tables only when they earn their space.** A real matrix — model × mode, GPU
-  state × interpretation, config × result — is a table. A two-row relationship is a
-  sentence. Never table what a short list says shorter.
-- **State limits plainly.** Unsupported combinations, known bugs, and measured
-  net-slower results are load-bearing — keep them, in one line, with the reason.
-- **Present-state only — no changelog, no story-telling.** A doc says what the code
-  does *now*. Ban dated verification ("verified 2026-06-10", "re-confirmed"),
-  change framing ("previously X, now Y", "no longer", "used to", "newly enabled",
-  "after the fix"), and anecdote ("turned out to be", "early runs passed"). Rewrite
-  to the current fact. Keep a date only when it *identifies* a thing (a version
-  pin, a CVE, a checkpoint version). History lives in git, never in `agent-docs/`.
-- **One home per fact.** Each fact lives on exactly one authoritative page. A
-  second page that needs it gets a one-line link, never a copy that will drift. A
-  configuration field's type and default are tabled only in
-  `agent-docs/reference/configuration-reference.md`; a feature page explains the
-  behavior and links there (`tests/cpu/conventions/test_docs_restate_no_config_fields.py`).
-- **No deep-dive sprawl.** Keep the unique technical substance; cut the repetition
-  and the re-derivation of a point the linked page already makes. A theory page
-  makes its argument once, tightly.
+Most of `agent-docs/` is reference pages. The reader of one, a person or an agent, came with a question,
+so give the shortest version that still answers it. Most reference pages fit in 150 to 300 lines. One
+past about 400 is almost always carrying redundancy or content that belongs on another page.
 
-## Banned register
+A guide page is a page of `human-docs/`. It is as concise as a reference page and it talks to the
+reader. It says "you", gives each instruction with its reason and says what the mistake looks like when
+you make it.
 
-Never use: delve, leverage, seamless, robust, powerful, cutting-edge, it's worth
-noting, simply. Also banned: marketing adjectives (revolutionary, blazing-fast,
-state-of-the-art-as-a-boast), filler hedges ("essentially", "basically", "in order
-to" → "to"), and emoji in body prose.
+A lecture page teaches a subject to someone new to it. `agent-docs/reference/gpu-training-theory.md` is
+Halo's lecture page, written for a newcomer to GPU training whether or not they use Halo. A lecture
+explains in full sentences, defines a term in the sentence that first uses it and builds each idea on
+the ones before it. It may run long, and the line target for reference pages does not apply to it. The
+one rule applies to it all the same. For a newcomer the steps of an explanation are load-bearing, and a
+point made twice is not.
 
-| Banned | Use instead |
-|---|---|
-| leverage X | use X |
-| robust / powerful | (delete, or state the measured property) |
-| seamless / cutting-edge | (delete, or name the version) |
-| it's worth noting that Y | Y |
-| simply / just call Z | call Z |
-| in order to | to |
+A lecture also shows arithmetic the reader can redo and marks each number as measured, vendor
+specification or computed. It keeps the sentences about Halo's own choices apart from the general ones,
+so a reader who does not use Halo knows which apply to them. Detail that only a Halo user needs stays on
+the page that owns it, and the lecture links there.
 
-## Good vs bad
+## Rules for every page
 
-Two failure modes: slop (vibe-claims, marketing, passive) and bloat (padding,
-redundancy, over-citation). Cut both.
+- Write American English: color, behavior, optimize.
+- Use the active voice.
+- Lead with the answer. Open with the fact the reader came for. Leave out an "Overview" section that
+  restates the page, an opening that announces what the section will do and a closing summary that
+  repeats the body. A lecture may close with one list of checks if it gives an order the body did not.
+- On a reference or guide page, prefer the shorter form: a sentence over a paragraph, a short list over
+  a table, one example over three. If a sentence can go without losing a load-bearing fact, it goes.
+- Cite sparingly. Anchor a claim to a `halo/` path, config field or class name only when the reader
+  needs to find or set that thing. One or two pointers to the owning code per topic is enough. Do not
+  append a path to every sentence or list every method of a module, because such a list drifts out of
+  date. Name the owning file once and let the reader open it.
+- On a reference or guide page, quote one representative measured number with its hardware, model and
+  shape, and state the trend in words. One figure and a sentence carry the point better than three
+  overlapping benchmark tables. A lecture tables the measurements it teaches from, and says after each
+  table what to take from it.
+- Use a table for a real matrix: model by mode, GPU state by interpretation, config by result. A
+  two-row relationship is a sentence. Never table what a short list says shorter.
+- State limits plainly. Unsupported combinations, known bugs and measured results that came out slower
+  are load-bearing. Keep each in one line, with the reason.
+- Describe the present state. A doc says what the code does now. Leave out dated verification
+  ("verified 2026-06-10", "re-confirmed"), change framing ("previously X, now Y", "no longer", "used to",
+  "newly enabled", "after the fix") and anecdote ("turned out to be", "early runs passed"), and rewrite
+  to the current fact. Keep a date only when it identifies a thing: a version pin, a CVE, a checkpoint
+  version. History lives in git.
+- Give each fact one home. A fact lives on one authoritative page, and a second page that needs it gets
+  a one-line link, never a copy that will drift. A guide or a lecture may quote a measured number from
+  the page that owns the run, with its shape and a link to that page. A configuration field's type and
+  default are tabled only in `agent-docs/reference/configuration-reference.md`. A feature page explains
+  the behavior and links there (`tests/cpu/conventions/test_docs_restate_no_config_fields.py`).
+- Make an argument once. On a reference or guide page, keep the unique technical substance and cut the
+  re-derivation of a point the linked page already makes. A lecture derives what its reader needs for
+  the next step, and repeats a main point only on purpose, in its closing checks.
 
-**Slop** — unanchored, banned register, marketing:
+## Good and bad
+
+A page fails in two ways. Slop is a claim with no anchor, in marketing words. Bloat is true and padded:
+an overview, a rule stated twice, a path on every clause.
+
+Slop:
 
 > Halo leverages a powerful, cutting-edge grouped GEMM kernel that
 > seamlessly delivers blazing-fast MoE performance.
 
-**Bloat** — true, but padded with an overview, a redundant rule restatement, and a
-path on every clause:
+Bloat:
 
 > ## Overview
 >
@@ -96,12 +94,12 @@ path on every clause:
 > The toolkit supports three source types… (then a second "Path format rules"
 > section restating the same three formats).
 
-**Lean** — the bar: name the thing, give the one number with its shape, add the
-caveat that protects the reader:
+Lean:
 
 > Grouped GEMM (`torch.nn.functional.grouped_mm`) batches the per-expert matmuls
-> into one kernel launch (SM90+, PyTorch 2.11+). On Qwen3-30B-A3B EP=2 (2× B300,
-> seq 8192, batch 4): **2.45×** over the loop. The win shrinks as batch grows —
-> measure at batch ≥ 4.
+> into one kernel launch (SM90+, PyTorch 2.11+). On Qwen3-30B-A3B at `ep2` it runs
+> 2.45× faster than the loop, measured on 2× B300 with 8,192-token rows at batch 4.
+> The gain shrinks as the batch grows, so measure at batch 4 or more.
 
-That is the bar: one anchor, one number with its shape, one caveat, nothing else.
+The lean passage names the thing, gives one number with its shape and adds the caveat that protects the
+reader.

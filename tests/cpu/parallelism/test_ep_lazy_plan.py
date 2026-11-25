@@ -159,13 +159,6 @@ def test_replicate_loads_full(tmp_path):
     assert torch.equal(model.attn.weight, weight)
 
 
-def test_assign_replaces_parameter():
-    model = nn.Sequential(nn.Linear(4, 8))
-    real_weight = torch.randn(8, 4)
-    assign_tensor_to_model(model, "0.weight", real_weight)
-    assert torch.equal(model[0].weight.data, real_weight)
-
-
 def test_assign_nested_module():
     class Inner(nn.Module):
         def __init__(self):

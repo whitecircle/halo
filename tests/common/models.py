@@ -144,7 +144,7 @@ TINY_COHERE2_MOE_CONFIG = {
 }
 
 # At the hub's attention geometry (sliding vs full ``head_dim`` and KV heads, under ``attention_k_eq_v``), which
-# transformers 5.20 folds into ``per_layer_config``. ``enable_moe_block`` is off by default: no experts to wrap without
+# transformers 5.23 folds into ``per_layer_config``. ``enable_moe_block`` is off by default: no experts to wrap without
 # it.
 TINY_GEMMA4_MOE_CONFIG = {
     "vocab_size": 128,

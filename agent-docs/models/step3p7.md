@@ -31,7 +31,7 @@ Nothing restores that layout from a module-spelled file: `scripts/after_training
 
 The `config.json` beside those weights is the **source checkpoint's own**, not transformers'. vLLM 0.32.0 cannot serve the family through transformers' native `step3p7` config class (its config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it) and reads it only through the release's `config.json` and the modules its `auto_map` names, which spell it in the vendor's keys: `moe_num_experts`, `moe_top_k`, `moe_layers_enum`, `attention_other_setting`, per-layer `rope_theta`.
 
-transformers 5.20 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
+transformers 5.23 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
 
 The family spec therefore declares `exports_source_config_schema`, and every toolkit config write carries the source's config and remote-code modules forward with this run's changed values applied under the source's spellings, a `patch_vocab.py` `vocab_size` included ([Checkpoints](../reference/checkpoints.md#what-gets-saved)). Training is unaffected: this transformers accepts those spellings, so the export reloads to exactly the config that was trained.
 

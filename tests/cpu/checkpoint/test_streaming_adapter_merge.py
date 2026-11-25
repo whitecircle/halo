@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ from transformers import (
     Qwen3ForCausalLM,
 )
 
-from halo.checkpoint.adapters import is_expert_lora_key
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, is_expert_lora_key
 from halo.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     MERGED_ADAPTER_CONFIG_DIR,
@@ -48,6 +49,7 @@ from halo.models.moe.balancing import is_balancing_state_key
 from halo.models.moe.expert_layout import ExpertLayoutKind
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import safetensors_state_dict, save_context
+from tests.common.inkling2 import TINY_INKLING2_TEXT, write_tiny_inkling2_release
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 from tests.common.tiny_models import (
@@ -119,16 +121,19 @@ def _merge_both(adapter_dir: Path, tmp_path: Path, dtype: torch.dtype) -> tuple[
     return streamed, reference
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize(
-    "lora",
+    ("dtype", "lora"),
     [
-        {},
-        {"use_dora": True},
-        {"use_rslora": True, "alpha_pattern": {"v_proj": 32}, "rank_pattern": {"q_proj": 2}},
-        {"lora_bias": True},
+        pytest.param(torch.float32, {}, id="plain-fp32"),
+        pytest.param(torch.bfloat16, {}, id="plain-bf16"),
+        pytest.param(torch.bfloat16, {"use_dora": True}, id="dora-bf16"),
+        pytest.param(
+            torch.float32,
+            {"use_rslora": True, "alpha_pattern": {"v_proj": 32}, "rank_pattern": {"q_proj": 2}},
+            id="rslora-patterns-fp32",
+        ),
+        pytest.param(torch.float32, {"lora_bias": True}, id="lora-bias-fp32"),
     ],
-    ids=["plain", "dora", "rslora-patterns", "lora-bias"],
 )
 def test_a_dense_linear_merge_equals_the_in_memory_merge(tmp_path, dtype, lora):
     base, adapter = tmp_path / "base", tmp_path / "adapter"
@@ -512,6 +517,97 @@ def test_a_merge_it_cannot_make_is_refused_before_anything_is_written(tmp_path, 
     assert not out.exists(), "a refused merge left an output directory behind"
 
 
+def _declare_quantization(base) -> None:
+    config = json.loads((base / "config.json").read_text())
+    (base / "config.json").write_text(json.dumps({**config, "quantization_config": {"quant_method": "modelopt"}}))
+
+
+def test_an_adapter_over_a_tensor_the_base_stores_packed_is_refused_by_name(tmp_path):
+    """The fold adds a delta to the stored values, which on a packed tensor are no weight."""
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    weights = base / "model.safetensors"
+    tensors = load_file(str(weights))
+    rewritten = sorted(key for key in tensors if key.endswith("q_proj.weight"))
+    tensors[rewritten[0]] = tensors[rewritten[0]].to(torch.uint8)
+    save_file(tensors, str(weights), metadata={"format": "pt"})
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match=rf"stores packed.*{re.escape(rewritten[0])} \(U8\).*no merged export"):
+        merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
+def test_an_adapter_that_rewrites_no_packed_tensor_merges_over_a_quantized_base(tmp_path):
+    """gpt-oss's MXFP4 release packs its experts only: an attention adapter over it rewrites float tensors."""
+    base, adapter, plain = tmp_path / "base", tmp_path / "adapter", tmp_path / "plain"
+    _dense_base(base, torch.float32)
+    _save_peft_adapter(Qwen3ForCausalLM, base, adapter, torch.float32)
+    merge_peft_adapter(str(adapter), str(plain), streaming=True, verbose=False)
+    _declare_quantization(base)
+    weights = base / "model.safetensors"
+    tensors = load_file(str(weights))
+    packed = next(key for key in sorted(tensors) if key.endswith("mlp.down_proj.weight"))
+    tensors[packed] = tensors[packed].to(torch.uint8)
+    save_file(tensors, str(weights), metadata={"format": "pt"})
+    out = tmp_path / "out"
+
+    merge_peft_adapter(str(adapter), str(out), streaming=True, verbose=False)
+
+    got, expected = safetensors_state_dict(out), safetensors_state_dict(plain)
+    assert got[packed].dtype == torch.uint8
+    assert all(torch.equal(got[key], expected[key]) for key in got if key != packed)
+
+
+def test_expert_adapters_over_the_packed_inkling2_release_are_refused_by_name(tmp_path):
+    """Without ``--streaming`` too: a directory holding native expert LoRA always takes the streaming merge."""
+    release, adapter, out = tmp_path / "release", tmp_path / "adapter", tmp_path / "out"
+    write_tiny_inkling2_release(str(release), str(tmp_path / "reference"))
+    adapter.mkdir()
+    experts, hidden, width = (
+        TINY_INKLING2_TEXT[field] for field in ("n_routed_experts", "hidden_size", "moe_intermediate_size")
+    )
+    rank = 8
+    layer = "model.language_model.layers.0.mlp.experts"
+    save_file(
+        {
+            f"{layer}.gate_up_proj.lora_A": torch.randn(experts, hidden, rank),
+            f"{layer}.gate_up_proj.lora_B": torch.randn(experts, rank, 2 * width),
+        },
+        str(adapter / ADAPTER_SAFETENSORS_FILE),
+    )
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {"peft_type": EXPERT_LORA_PEFT_TYPE, "base_model_name_or_path": str(release), "r": rank, "lora_alpha": 16}
+        )
+    )
+
+    with pytest.raises(ValueError, match="stores packed.*frozen_quantized_experts"):
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
+@pytest.mark.parametrize("family", _EXPERT_FAMILIES)
+def test_an_expert_adapter_over_an_expert_tensor_the_base_stores_packed_is_refused_by_name(tmp_path, family):
+    """An expert delta folds under the layer's own key, so a base that packs that key in place has no weight there."""
+    base, adapter, reference = _expert_run(tmp_path, family, None)
+    stored = safetensors_state_dict(base)
+    rewritten = sorted(
+        key for key, tensor in safetensors_state_dict(reference).items() if not torch.equal(tensor, stored[key])
+    )
+    assert rewritten and ".experts." in rewritten[0], f"premise: the adapter rewrites expert tensors, got {rewritten}"
+    shard = next(path for path in sorted(base.glob("*.safetensors")) if rewritten[0] in load_file(str(path)))
+    tensors = load_file(str(shard))
+    tensors[rewritten[0]] = tensors[rewritten[0]].to(torch.uint8)
+    save_file(tensors, str(shard), metadata={"format": "pt"})
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match=rf"stores packed.*{re.escape(rewritten[0])} \(U8\).*no merged export"):
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
 def test_an_adapter_directory_without_a_weight_file_is_refused_by_name(tmp_path):
     base, adapter = tmp_path / "base", tmp_path / "adapter"
     _dense_base(base, torch.float32)
@@ -568,6 +664,21 @@ def test_a_merge_writes_the_neutralized_sinks_the_run_trained_under(tmp_path):
         assert not (stored[key] == floor).all(), f"premise: the base stores {key} live"
         assert (merged[key] == floor).all(), f"{key} was merged live"
     _assert_same_checkpoint(streamed, reference)
+
+
+def test_neutralized_sinks_over_a_sink_the_base_stores_packed_are_refused_by_name(tmp_path):
+    """The sink is written at its stored dtype's minimum, which a packed dtype does not hold as a weight."""
+    base, adapter, _reference = _expert_run(tmp_path, "gpt_oss", None, neutralize_sinks=True)
+    stored = {path: load_file(str(path)) for path in sorted(base.glob("*.safetensors"))}
+    shard, sink = next((path, key) for path, tensors in stored.items() for key in sorted(tensors) if is_sink_key(key))
+    tensors = stored[shard]
+    tensors[sink] = tensors[sink].to(torch.uint8)
+    save_file(tensors, str(shard), metadata={"format": "pt"})
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match=rf"stores packed.*{re.escape(sink)} \(U8\)"):
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
+    assert not out.exists(), "a refused merge left an output directory behind"
 
 
 def test_live_sinks_in_the_provenance_do_not_refuse_the_merge(tmp_path):

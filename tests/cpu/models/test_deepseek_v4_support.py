@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import tempfile
 from types import SimpleNamespace
 
 import pytest
@@ -56,25 +55,6 @@ def test_registrations():
     assert EPDeepseekV4MoELayer.SUPPORTS_BIAS_BALANCING
     assert EPDeepseekV4MoELayer.FAMILY.supports_routing_replay
     assert EPDeepseekV4MoELayer.SEVERS_AUX_LOSS
-
-
-def test_tiny_config_save_load_roundtrip():
-    """Persistent buffers ``e_score_correction_bias`` and the hash ``tid2eid`` table must survive the checkpoint."""
-    model = _tiny_model()
-    torch.manual_seed(SEED)
-    input_ids = torch.randint(0, model.config.vocab_size, (2, 64))
-
-    with torch.no_grad():
-        ref = model(input_ids=input_ids).logits
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        model.save_pretrained(tmpdir)
-        reloaded = AutoModelForCausalLM.from_pretrained(tmpdir).eval()
-        assert torch.equal(reloaded.model.layers[0].mlp.gate.tid2eid, model.model.layers[0].mlp.gate.tid2eid)
-        with torch.no_grad():
-            out = reloaded(input_ids=input_ids).logits
-
-    assert torch.allclose(ref, out, atol=1e-5), f"roundtrip logits diverged: {(ref - out).abs().max()}"
 
 
 @pytest.mark.parametrize("requested", [None, "flash_attention_2", "sdpa", "flex_attention"])

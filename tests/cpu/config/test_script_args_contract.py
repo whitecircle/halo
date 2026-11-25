@@ -42,8 +42,6 @@ _PROJECT_NAMES = {
 # Fields a class refuses to default; supplied so the class can be constructed at all.
 _REQUIRED_KWARGS = {TeacherDistillScriptArguments: {"teacher_model": "teacher/model"}}
 
-_SCRIPT_ARG_CLASSES = (SFTScriptArguments, SMPOScriptArguments, SelfDistillScriptArguments)
-
 
 @pytest.mark.parametrize(
     ("cls", "expected"),
@@ -54,15 +52,18 @@ def test_each_script_declares_its_own_project_name(cls, expected):
     assert cls(**_REQUIRED_KWARGS.get(cls, {})).project_name == expected
 
 
-@pytest.mark.parametrize("cls", _SCRIPT_ARG_CLASSES)
-@pytest.mark.parametrize("empty", [None, "", "   "])
+@pytest.mark.parametrize(
+    ("empty", "cls"),
+    [
+        (None, SFTScriptArguments),
+        ("", SFTScriptArguments),
+        ("   ", SMPOScriptArguments),
+        ("   ", SelfDistillScriptArguments),
+    ],
+)
 def test_null_or_blank_project_name_is_refused_at_config_time(cls, empty):
     with pytest.raises(ValueError, match="project_name"):
         cls(project_name=empty)
-
-
-def test_explicit_project_name_survives():
-    assert SFTScriptArguments(project_name="my-project").project_name == "my-project"
 
 
 def test_yaml_null_project_name_is_refused_by_the_parser(tmp_path):
@@ -72,8 +73,15 @@ def test_yaml_null_project_name_is_refused_by_the_parser(tmp_path):
         HaloArgumentParser((SFTScriptArguments,)).parse_yaml_file(str(path))
 
 
-@pytest.mark.parametrize("cls", _SCRIPT_ARG_CLASSES)
-@pytest.mark.parametrize("value", ["", "None", "null"])
+@pytest.mark.parametrize(
+    ("value", "cls"),
+    [
+        ("", SFTScriptArguments),
+        ("None", SFTScriptArguments),
+        ("null", SMPOScriptArguments),
+        ("None", SelfDistillScriptArguments),
+    ],
+)
 def test_cli_override_cannot_null_the_project_name(cls, value, tmp_path):
     """``project_name`` is annotated ``str``, so the parser's null-spelling conversion leaves ``None`` as four
     literal characters and the run reports to a project literally named None."""

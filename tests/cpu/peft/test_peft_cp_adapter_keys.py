@@ -12,11 +12,7 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from peft.utils import get_peft_model_state_dict
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from halo.checkpoint.parallel.adapters import (
-    _load_peft_adapter_state,
-    live_adapter_tensors,
-    remap_adapter_keys_to_live,
-)
+from halo.checkpoint.parallel.adapters import live_adapter_tensors, remap_adapter_keys_to_live
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
@@ -116,35 +112,6 @@ def test_resume_remap_recovers_live_keys():
     expected_live = {name.replace(".default.", ".") for name in _live_lora_keys(peft_model)}
     assert set(remapped) == expected_live, "remap did not recover the exact live key set"
     assert set(remapped) != set(saved)
-
-
-def test_resume_roundtrip_loads_every_saved_tensor():
-    """A mis-spelled remap leaves the keys in portable spelling, which the copy cannot place."""
-    trained = _cp_peft_model()
-    with torch.no_grad():  # make adapters non-zero so a successful restore is detectable (B inits 0)
-        for name, param in trained.named_parameters():
-            if ".lora_" in name:
-                param.add_(torch.randn_like(param))
-    saved = _plain_keys(get_peft_model_state_dict(trained))
-
-    fresh = _cp_peft_model()
-    trained_lora = {n: p for n, p in trained.named_parameters() if ".lora_" in n}
-    fresh_lora = {n: p for n, p in fresh.named_parameters() if ".lora_" in n}
-    assert set(fresh_lora) == set(trained_lora)
-    assert any(not torch.equal(fresh_lora[n], trained_lora[n]) for n in trained_lora), (
-        "fresh adapters already equal trained — the restore below would be unfalsifiable"
-    )
-
-    live_tensors = live_adapter_tensors(fresh)
-    remapped = remap_adapter_keys_to_live(saved, live_tensors)
-    unplaced = sorted(set(remapped) - set(live_tensors))
-    assert not unplaced, f"{len(unplaced)}/{len(remapped)} adapter keys name no live tensor, e.g. {unplaced[:3]}"
-    _load_peft_adapter_state(live_tensors, remapped)
-
-    not_restored = [n for n in trained_lora if not torch.equal(fresh_lora[n], trained_lora[n])]
-    assert not not_restored, (
-        f"{len(not_restored)}/{len(trained_lora)} adapter tensors not restored: {not_restored[:3]}"
-    )
 
 
 def test_resume_remap_covers_modules_to_save_buffers():

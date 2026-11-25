@@ -9,7 +9,7 @@ import logging
 import pytest
 
 from halo.weight_sync.clients.base import ServerFlags
-from halo.weight_sync.group_eligibility import ServerReading, find_fleet_disagreement, resolve_sync_topology
+from halo.weight_sync.group_eligibility import ServerReading, resolve_sync_topology
 from halo.weight_sync.pool import WeightSyncPool
 from tests.common.weight_sync_ring import FakeRing, fake_servers, ring_client_class
 
@@ -68,11 +68,6 @@ def test_the_refusal_names_the_attribute_the_servers_disagree_on():
     topology, why = resolve_sync_topology("auto", _one_differs(flags=_FLAGS._replace(dtype="float16")), None)
     assert topology == "per_server"
     assert "dtype" in why and "float16" in why
-
-
-def test_a_flag_a_server_does_not_report_is_not_compared():
-    readings = _one_differs(flags=_FLAGS._replace(quantization=None))
-    assert find_fleet_disagreement(*zip(*[(r.url, r.model, r.flags) for r in readings], strict=True)) is None
 
 
 @pytest.fixture

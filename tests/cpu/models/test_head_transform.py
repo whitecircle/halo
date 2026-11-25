@@ -22,6 +22,7 @@ from halo.models.head_transform import (
 )
 from halo.models.moe.family_specs import moe_model_types
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
+from tests.common.inkling2 import TINY_INKLING2_TEXT, TINY_INKLING2_VISION
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
     BAILING_MOE_RING_MINI,
@@ -69,6 +70,8 @@ _GEMMA4_TEXT = {**TINY_GEMMA4_MOE_CONFIG, "final_logit_softcapping": 30.0}
 # Random-init logits stay far below 30, where the cap is the identity, so this cap is low enough to act.
 _GEMMA4_SATURATED_TEXT = {**TINY_GEMMA4_MOE_CONFIG, "final_logit_softcapping": 0.02}
 _INKLING_TEXT = {**TINY_INKLING_CONFIG, "unpadded_vocab_size": _UNPADDED_VOCAB}
+# Inkling 2 ships a cap of 30 and a padded vocabulary; the sweep's cap is low enough to act, as Gemma 4's.
+_INKLING2_SATURATED_TEXT = {**TINY_INKLING2_TEXT, "final_logit_softcapping": 0.02}
 
 _REMOTE_ROSTER = (BAILING_MOE_LING_MINI, BAILING_MOE_RING_MINI)
 
@@ -133,6 +136,7 @@ _TINY_MODELS = {
         vision_config=dict(TINY_STEP3P7_VISION_CONFIG),
     ),
     "inkling": lambda: _model("InklingForCausalLM", "InklingTextConfig", **_INKLING_TEXT),
+    "inkling2": lambda: _model("Inkling2ForCausalLM", "Inkling2TextConfig", **_INKLING2_SATURATED_TEXT),
     "cohere2_moe": lambda: _model("Cohere2MoeForCausalLM", "Cohere2MoeConfig", **TINY_COHERE2_MOE_CONFIG),
     "gemma4_text": lambda: _model("Gemma4ForCausalLM", "Gemma4TextConfig", **_GEMMA4_SATURATED_TEXT),
     "gemma4": lambda: _model("Gemma4ForConditionalGeneration", "Gemma4Config", text_config=_GEMMA4_SATURATED_TEXT),
@@ -143,7 +147,7 @@ _TINY_MODELS = {
     "llama4": lambda: _tiny("llama4", {"llama4": TINY_LLAMA4_FAMILY}),
 }
 
-_TRANSFORM_FAMILIES = ("inkling", "cohere2_moe", "gemma4_text", "gemma4", "granite", "minicpm3")
+_TRANSFORM_FAMILIES = ("inkling", "inkling2", "cohere2_moe", "gemma4_text", "gemma4", "granite", "minicpm3")
 
 
 class _ForwardParityHarness(LogprobScoringMixin):
@@ -196,6 +200,7 @@ def test_remote_code_roster_head_paths_verify(repo):
 
 
 _INKLING_TRANSFORM = HeadTransform(hidden_scale=1 / 24, vocab_size=_UNPADDED_VOCAB)
+_INKLING2_TRANSFORM = HeadTransform(softcap=30.0, vocab_size=TINY_INKLING2_TEXT["unpadded_vocab_size"])
 _GRANITE_TRANSFORM = HeadTransform(logit_scale=1 / 8)
 
 
@@ -205,6 +210,13 @@ _GRANITE_TRANSFORM = HeadTransform(logit_scale=1 / 8)
         pytest.param("InklingForCausalLM", _INKLING_TEXT, _INKLING_TRANSFORM, id="inkling"),
         pytest.param(
             "InklingForConditionalGeneration", {"text_config": _INKLING_TEXT}, _INKLING_TRANSFORM, id="inkling_mm"
+        ),
+        pytest.param("Inkling2ForCausalLM", TINY_INKLING2_TEXT, _INKLING2_TRANSFORM, id="inkling2"),
+        pytest.param(
+            "Inkling2ForConditionalGeneration",
+            {"text_config": TINY_INKLING2_TEXT, "vision_config": TINY_INKLING2_VISION},
+            _INKLING2_TRANSFORM,
+            id="inkling2_mm",
         ),
         pytest.param("CohereForCausalLM", {}, HeadTransform(logit_scale=0.0625), id="cohere"),
         pytest.param("Cohere2ForCausalLM", {}, HeadTransform(logit_scale=0.0625), id="cohere2"),

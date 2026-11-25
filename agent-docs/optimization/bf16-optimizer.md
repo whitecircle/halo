@@ -1,18 +1,18 @@
 # BF16 Master Weights with Stochastic Rounding
 
-`AdamWBF16` keeps both model weights and optimizer states in bf16 (6 B/param), matching pure-bf16 memory while avoiding the "stale weights" problem via stochastic rounding (SR). A fused Triton kernel makes the step faster than `adamw_torch_fused`. Owning files: `halo/optimizers/adamw_bf16.py` (`AdamWBF16`, and `adamw_bf16_optimizer_from_args`, which builds it from the training args) and `halo/optimizers/stochastic_rounding.py` (the SR seeds and the bf16 rounding step it shares with Muon); auto-enable lives in `halo/trainers/construction/optimizer_selection.py`. What stays fp32 in a bf16 run, and where master weights fit: [GPU Training Theory §7](../reference/gpu-training-theory.md#bf16-numerics-what-stays-fp32).
+`AdamWBF16` keeps both model weights and optimizer states in bf16 (6 B/param), matching pure-bf16 memory while avoiding the "stale weights" problem via stochastic rounding (SR). A fused Triton kernel makes the step faster than `adamw_torch_fused`. Owning files: `halo/optimizers/adamw_bf16.py` (`AdamWBF16`, and `adamw_bf16_optimizer_from_args`, which builds it from the training args) and `halo/optimizers/stochastic_rounding.py` (the SR seeds and the bf16 rounding step it shares with Muon); auto-enable lives in `halo/trainers/construction/optimizer_selection.py`. What stays fp32 in a bf16 run, and where master weights fit: [GPU Training Theory, What stays fp32 in a bf16 run](../reference/gpu-training-theory.md#what-stays-fp32-in-a-bf16-run).
 
 ## The problem: stale weights in bf16
 
-BF16 has ~0.8% relative precision (7-bit mantissa). When the update `lr * adam_step` is smaller than this threshold relative to the weight magnitude, nearest rounding truncates it to zero and the weight stops moving. The standard fix is fp32 master weights (cast to bf16 for forward/backward), but it doubles optimizer memory:
+BF16 has ~0.8% relative precision (7-bit mantissa). When the update `lr * adam_step` is less than half the gap to the next bf16 value (1/512 to 1/256 of the weight's magnitude), nearest rounding truncates it to zero and the weight stops moving. The standard fix is fp32 master weights (cast to bf16 for forward/backward), but it doubles optimizer memory:
 
 | Approach | Weight | States | Total/param |
 |---|---|---|---|
 | Pure bf16 (small updates lost) | 2B | 4B bf16 | **6B** |
-| FP32 master weights | 4B fp32 | 8B fp32 | **12B** |
+| FP32 master weights | 4B fp32 (+2B bf16 working copy) | 8B fp32 | **12B** (+2B) |
 | **bf16 + SR (AdamWBF16)** | **2B bf16** | **4B bf16** | **6B** |
 
-At 20B params, that is 120 GB vs 240 GB of optimizer memory.
+At 20B params, that is 120 GB vs 240 GB of weights and optimizer state, before the fp32 run's bf16 working copy.
 
 ## Stochastic rounding
 
@@ -21,7 +21,7 @@ SR rounds up or down probabilistically based on the truncated bits (carry probab
 The two moments round differently:
 
 - **`exp_avg` (first moment) — nearest rounding.** Signed, ~zero-mean EMA, so truncation is already unbiased; SR would only add noise.
-- **`exp_avg_sq` (second moment) — SR.** A non-negative accumulator near the bf16 underflow floor; nearest rounding there biases the running variance by tens of percent (the sign depends on the gradient regime; `tests/cpu/optimizers/test_optimizer_sr.py` pins a >15% bias against fp32), which moves `sqrt(v)` and the effective step away from `lr`. SR keeps it unbiased.
+- **`exp_avg_sq` (second moment) — SR.** A non-negative accumulator that changes each step by `1 - beta2` (0.1% at 0.999) of the difference between the squared gradient and its value. Once that change is less than half the gap to the next bf16 value, nearest rounding drops it and the accumulator stalls, biasing the running variance by more than 15% (the sign depends on the gradient regime; `tests/cpu/optimizers/test_optimizer_sr.py` pins it against fp32), which moves `sqrt(v)` and the effective step away from `lr`. SR keeps it unbiased.
 
 The kernel computes both EMAs and the weight update in fp32, truncating only on store-back, so the update always sees the exact fp32 second moment.
 
@@ -39,7 +39,7 @@ Measured on Halo 1.1.0 or earlier, except the fused launch.
 
 **Fused launch (1.2.0, 8× B300, s4096), bitwise against one tensor per launch:** FSDP2 +4.1%, ep1 +2.1%, ep8 +1.5%, ep2 −0.1%. The fixed launch table compiles no variant mid-run, which holds the worst ep8 step to 1.01× the median, against 1.44–1.48× on a table that grows.
 
-**GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (SM103), Blackwell image:** AdamWBF16 (Triton) steps in 31.8 ms vs 62.0 ms for `adamw_torch_fused` (**−49%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
+**GPT-OSS-20B MoE (24 layers, 32 experts, 20.91B params, ~14B trainable with first 8 layers frozen), single B300 (SM103), Blackwell image:** AdamWBF16 (Triton) steps in 31.8 ms vs 62.0 ms for `adamw_torch_fused` (**−49%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
 
 The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element). Each lane owns four consecutive elements and one `tl.randint4x` Philox call, whose 4 × 32 bits give every element its two independent 16-bit SR draws: 6.5 TB/s effective against 3.9 TB/s with one Philox call per element, on a 254M-element expert tensor (one B300). This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.
 
@@ -80,7 +80,7 @@ Direct use: `AdamWBF16(model.named_parameters(), lr=1e-4, betas=(0.9, 0.999), ep
 
 AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR path, fp32 params take standard in-place AdamW (DTensor-aware). It composes with `fp32_router` / `fp32_experts` (those params stay fp32 and get standard AdamW) and with `fp32_non_ep_params`.
 
-`fp32_non_ep_params: true` moves non-expert (dense) params to fp32 storage (12 B/param) for exact updates; experts stay bf16 + SR. Use it for headroom on large-vocab `lm_head`/embeddings. On a MoE at `ep_size: 1` it needs `fsdp_shard_ep1_experts: false` — otherwise the FSDP-managed experts would stay bf16 inside an fp32 shard group and `ParallelismConfig` refuses the pair ([Precision control](../parallelism/expert-parallelism.md#precision-control)).
+`fp32_non_ep_params: true` moves non-expert (dense) params to fp32 storage (12 B/param) for exact updates; experts stay bf16 + SR. Use it for headroom on large-vocab `lm_head`/embeddings. On a MoE at `ep_size: 1` it needs `fsdp_shard_ep1_experts: false` — otherwise the FSDP-managed experts would stay bf16 inside an fp32 shard group and the loader's `reject_unsupported_model` refuses the pair ([Precision control](../parallelism/expert-parallelism.md#precision-control)).
 
 **Measured (gpt-oss-20b EP=2, seq 4096, batch 4, 8× B300, FA4, Blackwell image, Halo 1.1.0 or earlier):**
 

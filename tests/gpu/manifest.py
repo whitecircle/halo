@@ -67,6 +67,7 @@ _TINY_MOE_FAMILY_MARKERS = {
     "glm5_next": "glm5",
     "gpt_oss": "gptoss",
     "inkling_text": "inkling",
+    "inkling2_text": "inkling2",
     "laguna": "laguna",
     "lfm2_moe": "lfm2",
     "mistral4": "mistral4",
@@ -596,6 +597,9 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3", "gptoss"), timeout=900
     ),
     "kernels/test_lowp_production.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "kernels/test_frozen_bank_fused_dequant.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "models/test_inkling2_relative_flex.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "models/test_inkling2_block_residual.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_param_buffer_cuda.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stage_once.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stream_safety.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
@@ -987,7 +991,7 @@ MANIFEST: dict[str, TestSpec] = {
                     markers=("gpu", "full", "4gpu", "ep", "etp", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
                     timeout=900,
                 )
-                for family in ("gpt_oss", "inkling_text", "nemotron_h", "qwen4_exp_text")
+                for family in ("gpt_oss", "inkling_text", "inkling2_text", "nemotron_h", "qwen4_exp_text")
             ),
             # No latent, the shape of Nemotron-H's Lightning release, on the wire and through the expert split.
             Row("--family nemotron_h --no-latent", markers=("gpu", "core", "2gpu", "ep", "moe", "nemotron")),
@@ -1021,6 +1025,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_lazy_load_inkling.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "inkling"), timeout=900
+    ),
+    "parallelism/ep/test_lazy_load_inkling2_frozen.py": TestSpec(
+        nproc=2, markers=("gpu", "full", "2gpu", "ep", "lora", "moe", "inkling2"), timeout=900
     ),
     # A family joins this matrix when transformers' conversion is its own to replay: ``hub_conversion_keys``, or
     # Nemotron-H's level drop and per-expert banks.
@@ -1455,6 +1462,9 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=900,
     ),
     "parallelism/tp/test_tp_correctness.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
+    ),
+    "parallelism/tp/test_tp_untied_bf16_step.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
     ),
     "parallelism/tp/test_tp_attention_norm_grad.py": TestSpec(
@@ -1980,6 +1990,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "trainers/lora/test_lora_ep_experts_resume.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1800
+    ),
+    "trainers/lora/test_lora_frozen_banks_resume.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "inkling2"), timeout=900
     ),
     "trainers/lora/test_lora_ep1_fsdp_experts_resume.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1800
@@ -2948,6 +2961,7 @@ ALL_MARKERS = (
     "zaya",
     "deepseek_v4",
     "inkling",
+    "inkling2",
     "cohere2_moe",
     "glm5",
     "step3p7",
@@ -2967,20 +2981,27 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/bench_ep_arena_headroom.py",
     "profiling/bench_ep_buffer_backends.py",
     "profiling/benchmark_attention_implementations.py",
+    "profiling/benchmark_attention_scaling.py",
     "profiling/benchmark_collators.py",
+    "profiling/benchmark_collectives.py",
     "profiling/benchmark_convergence.py",
+    "profiling/benchmark_first_call.py",
     "profiling/benchmark_gated_residual.py",
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_head_logprobs.py",
     "profiling/benchmark_hyper_connection.py",
+    "profiling/benchmark_loss_head.py",
     "profiling/benchmark_lowp_kernels.py",
+    "profiling/benchmark_matmul_precision.py",
+    "profiling/benchmark_memory_hierarchy.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_roofline.py",
     "profiling/benchmark_sft_dense.py",
     "profiling/benchmark_sft_ep.py",
     "profiling/benchmark_smpo_ep.py",
     "profiling/benchmark_torch_compile.py",
+    "profiling/benchmark_training_step.py",
     "profiling/benchmark_trl_baseline.py",
 }
 

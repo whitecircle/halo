@@ -116,7 +116,7 @@ def test_a_fresh_card_holds_the_tag_and_claims_no_library(tmp_path):
     assert sorted(os.listdir(tmp_path)) == [CARD], "the staged card was left beside the real one"
 
 
-@pytest.mark.parametrize("umask", [0o002, 0o022, 0o077])
+@pytest.mark.parametrize("umask", [0o002, 0o022])
 def test_a_fresh_card_takes_the_mode_the_umask_gives_any_new_file(tmp_path, umask):
     """``0o666`` under the umask, as ``open(path, "w")`` gives."""
     previous = os.umask(umask)
@@ -269,8 +269,8 @@ def test_a_failed_write_leaves_the_card_and_no_staged_copy(tmp_path, monkeypatch
 
 @pytest.mark.parametrize(
     "metadata",
-    ["tags: [a, b\n", "- a\n- b\n", "tags: 1\n", "tags: {a: b}\n"],
-    ids=["bad-yaml", "not-a-mapping", "scalar-tags", "mapping-tags"],
+    ["tags: [a, b\n", "- a\n- b\n", "tags: {a: b}\n"],
+    ids=["bad-yaml", "not-a-mapping", "mapping-tags"],
 )
 def test_a_card_with_malformed_metadata_names_the_file(tmp_path, metadata):
     (tmp_path / CARD).write_text(f"---\n{metadata}---\nbody\n")

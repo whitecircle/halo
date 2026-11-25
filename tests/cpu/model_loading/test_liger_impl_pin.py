@@ -61,16 +61,27 @@ def test_an_empty_value_is_pinned(rope_unset, monkeypatch):
     assert os.environ[ROPE_VAR] == "nvidia-triton"
 
 
-@pytest.mark.parametrize("var", [ROPE_VAR, LEGACY_ROPE_VAR])
-@pytest.mark.parametrize("spelling", ["nvidia-triton", "triton"])
+@pytest.mark.parametrize(
+    ("var", "spelling"),
+    [
+        pytest.param(ROPE_VAR, "nvidia-triton", id="nvidia-triton-LIGER_KERNEL_IMPL_ROPE"),
+        pytest.param(LEGACY_ROPE_VAR, "triton", id="triton-LIGER_KERNEL_BACKEND_ROPE"),
+    ],
+)
 def test_an_explicit_triton_choice_is_kept(rope_unset, monkeypatch, var, spelling):
     monkeypatch.setenv(var, spelling)
     pin_liger_impls()
     assert os.environ[var] == spelling
 
 
-@pytest.mark.parametrize("var", [ROPE_VAR, LEGACY_ROPE_VAR])
-@pytest.mark.parametrize("spelling", ["nvidia-cutedsl", "cutedsl", "nvidia-cutile"])
+@pytest.mark.parametrize(
+    ("var", "spelling"),
+    [
+        pytest.param(ROPE_VAR, "nvidia-cutedsl", id="nvidia-cutedsl-LIGER_KERNEL_IMPL_ROPE"),
+        pytest.param(LEGACY_ROPE_VAR, "cutedsl", id="cutedsl-LIGER_KERNEL_BACKEND_ROPE"),
+        pytest.param(ROPE_VAR, "nvidia-cutile", id="nvidia-cutile-LIGER_KERNEL_IMPL_ROPE"),
+    ],
+)
 def test_another_explicit_choice_raises(rope_unset, monkeypatch, var, spelling):
     monkeypatch.setenv(var, spelling)
     with pytest.raises(ValueError, match=f"{var}={spelling}"):

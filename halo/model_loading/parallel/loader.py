@@ -145,8 +145,8 @@ def _resolve_run_attention(
         elif uses_gpt_oss_sinks(model_config) and sinks_policy is SinksPolicy.NEUTRALIZED:
             patch_flex_attention_compile("FSDP2 + GptOss sinks NaN gradient fix")
 
-    # Gemma 4 builds `sdpa_flex_sliding` for `sdpa`, whose FlexAttention graphs warm_attention_kernels
-    # compiles on every rank before training.
+    # Gemma 4 builds `sdpa_flex_sliding` for `sdpa` and Inkling 2 runs `inkling2_relative_flex`, whose FlexAttention
+    # graphs warm_attention_kernels compiles on every rank before training.
     return apply_family_patches(model_config, attn_implementation)
 
 

@@ -29,7 +29,7 @@ Versions compared: TRL 1.14.2 and Accelerate 1.11.0 (the pinned releases; every 
 | Native `s3://` datasets | **Yes** | No | No | No | Yes | No | No | Via MSC |
 | Multi-node | **Yes** ([verified topologies](../parallelism/multi-node.md#verified-topologies)) | Via Accelerate | Yes | Paid tiers | Yes | Yes | Yes | Yes |
 
-Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself shards a model at load (`from_pretrained(distributed_config=DistributedConfig(...))`) with FSDP2, TP and EP: `ep_size` dispatches tokens through a torch all-to-all (`ep_dispatch_experts`, most MoE families' default plan), and a few families keep a router that all-reduces the full MoE output across `ep_size == tp_size` ranks. On the pinned transformers 5.20.2 and Accelerate 1.11.0, the transformers `Trainer` trains such a model only at `tp_size=1` (FSDP2 plus token dispatch) and without resume; it, and TRL's trainers that subclass it, run neither TP, CP nor the all-reduce EP path: a load-time TP model needs a newer Accelerate, and CP needs Accelerate's `ParallelismConfig` (`TrainingArguments.parallelism_config`), on which that `Trainer` fails at construction under this Accelerate release.
+Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — a separate format from HuggingFace's, so MS-SWIFT, veRL, and Megatron-LM all require an HF↔MCore conversion before EP/CP/TP/PP. This toolkit, Accelerate, TRL, Unsloth, and Axolotl work directly on HuggingFace weights; of those, this toolkit and Axolotl run DeepEP expert parallelism on the upstream HF MoE modules. Two neighbors sit close: NeMo AutoModel keeps HF checkpoints without a conversion step but ships its own implementation of each supported architecture behind the `transformers` API, and transformers itself shards a model at load (`from_pretrained(distributed_config=DistributedConfig(...))`) with FSDP2, TP and EP: `ep_size` runs the `ep_dispatch_experts` rule of the family's plan through `DistributedConfig.ep_implementation`, either a torch all-to-all of the routed tokens or `all_reduce`, which runs every rank's experts on the batch the group shares and sums the outputs (`ep_size == tp_size`). Measured on transformers 5.20.2 and Accelerate 1.11.0, the transformers `Trainer` trains such a model only at `tp_size=1` (FSDP2 plus token dispatch) and without resume; it, and TRL's trainers that subclass it, run neither TP, CP nor the all-reduce EP path: a load-time TP model needs a newer Accelerate, and CP needs Accelerate's `ParallelismConfig` (`TrainingArguments.parallelism_config`), on which that `Trainer` fails at construction under this Accelerate release.
 
 ### When to use which
 
@@ -37,7 +37,7 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 |----------|:-----------:|-----|
 | EP+TP or pure ETP on MoE | **This Toolkit** | Expert shapes other HF-native tools don't compose |
 | Memory-constrained full fine-tuning | **This Toolkit** | AdamWBF16 — ~6 bytes/param |
-| Long-context training (scales with nGPUs) | **This Toolkit** | CP splits sequences; combines with EP |
+| Long-context training (a sequence split across up to one NVLink domain) | **This Toolkit** | CP splits sequences; combines with EP |
 | MoE wider than one NVLink domain, on HF weights | **This Toolkit** | PP across domains, EP inside each stage |
 | SMPO or Offline GRPO | **This Toolkit** | Unique methods |
 | Multi-turn RL with tool environments | **This Toolkit** | Ray actors, NCCL sync, built-in envs |
@@ -68,9 +68,9 @@ gets TP. Advanced parallelism (EP, CP, ETP, PP) needs per-family registration, n
 reimplementation or a checkpoint conversion.
 
 For EP, that is a frozen `MoEFamilySpec` holding the family's facts plus an EP layer under
-`halo/distributed/expert_parallel/families/` (86 lines or fewer; GPT-OSS's is 168) subclassing `EPMoELayerBase`, declaring
+`halo/distributed/expert_parallel/families/` (86 lines or fewer; Inkling 2's is 117 and GPT-OSS's 168) subclassing `EPMoELayerBase`, declaring
 its `HF_MODULE_NAMES` and pointing `FAMILY` at the spec, with `MOE_LAYER_MAP` built from the roster's
-imports; for PP, a validated `PPFamilySpec` in `PP_FAMILY_SPECS`. Eighteen MoE families ship an EP layer;
+imports; for PP, a validated `PPFamilySpec` in `PP_FAMILY_SPECS`. Nineteen MoE families ship an EP layer;
 the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
 procedure. Trainer × parallelism support is separate — see

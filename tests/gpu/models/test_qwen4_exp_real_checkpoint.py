@@ -53,9 +53,10 @@ QSA_TIE_SWAPPED_BLOCKS = 1
 # Fraction of the reference's largest magnitude, in bf16.
 QSA_OUTPUT_REL_MAX = 2e-2
 # Fraction of the alone logits' largest magnitude in fp32, and the positions allowed past it: tokens a near-tie still
-# routes to another expert.
+# routes to another expert, and every later token of the document that reads them. Over 48 seeded rows that is up to
+# 5% of a document; a row without its markers puts 99.7% or more of each later document there.
 ISOLATED_REL_MAX = 2e-2
-ROUTING_FLIP_MAX_FRACTION = 2e-2
+ROUTING_FLIP_MAX_FRACTION = 1e-1
 EP_LOSS_ABS_MAX = 1e-2
 LOSS_TOKENS = 1024
 EXPORT_LR = 1e-3

@@ -18,7 +18,7 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 1
 gradient_accumulation_steps: 8
-gradient_checkpointing: false   # a full 2 x 4,096 pair holds ~33 GB of activations
+gradient_checkpointing: false   # faster while activations fit: agent-docs/optimization/throughput-benchmarks.md
 learning_rate: 1.0e-05
 lr_scheduler_type: cosine
 warmup_steps: 20

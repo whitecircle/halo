@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """An adapter save records the Hub commit its base was read at, and every later read of that base (both merges, the
-bf16 tool's adapter load, the adapter sync's launch base) takes that commit after the repo's default branch moved."""
+bf16 tool's adapter load, the engine export, the adapter sync's launch base) takes that commit after the repo's default
+branch moved."""
 
 from __future__ import annotations
 
@@ -26,6 +27,7 @@ from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
+from halo.entrypoints import engine_adapter_export
 from halo.model_loading import tokenizer_setup
 from halo.model_loading.parallel import loader
 from halo.model_loading.tokenizer_setup import load_processing_class, resolve_tokenizer
@@ -276,6 +278,31 @@ def test_the_bf16_inference_check_reads_the_bases_tokenizer_at_the_recorded_comm
     bf16_conversion.run_test_inference(str(adapter), "causal_lm", is_peft=True)
 
     assert loads == [(str(adapter), None), (REPO, TRAINED)]
+
+
+@pytest.mark.parametrize(
+    ("save", "base_revision"),
+    [(_saved_adapter, None), (_unrecorded_adapter, TRAINED)],
+    ids=["recorded", "--base_revision"],
+)
+def test_the_engine_export_reads_the_bases_config_at_the_adapters_commit(
+    snapshots, tmp_path, monkeypatch, save, base_revision
+):
+    adapter = save(tmp_path / "adapter")
+    reads: list[tuple[str, str | None]] = []
+    resolve = engine_adapter_export.resolve_build_config
+
+    def recording(source, *, revision, trust_remote_code):
+        reads.append((source, revision))
+        return resolve(source, revision=revision, trust_remote_code=trust_remote_code)
+
+    monkeypatch.setattr(engine_adapter_export, "resolve_build_config", recording)
+
+    engine_adapter_export.export_engine_adapter(
+        str(adapter), str(tmp_path / "engine"), rollout_backend="sglang", base_revision=base_revision
+    )
+
+    assert reads == [(REPO, TRAINED)]
 
 
 @pytest.mark.parametrize("processor", [True, False], ids=["processor", "tokenizer fallback"])

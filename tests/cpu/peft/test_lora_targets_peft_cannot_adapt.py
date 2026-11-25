@@ -11,7 +11,7 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
-from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM, DeepseekV4GroupedLinear
+from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 
 import halo.model_loading.parallel.peft_setup as peft_setup
@@ -324,11 +324,6 @@ def test_the_two_reasons_are_reported_separately():
     assert "compute something other than their layer's affine map" in message
     assert any(name.endswith("o_a_proj") for name in peft_config.exclude_modules)
     assert "model.layers.0.self_attn.q_proj" in peft_config.exclude_modules
-
-
-def test_grouped_linear_is_a_linear_subclass():
-    """Grouped projections pass PEFT's ``nn.Linear`` dispatch, so a structural class check alone cannot catch them."""
-    assert issubclass(DeepseekV4GroupedLinear, nn.Linear)
 
 
 if __name__ == "__main__":

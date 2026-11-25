@@ -316,27 +316,35 @@ def test_dpo_vision_run_keeps_the_processor_padding_side(tmp_path):
     assert tokenizer.padding_side == "left"
 
 
-@pytest.mark.parametrize("script", _DISPATCHING_SCRIPTS)
-def test_every_dispatching_script_settles_the_text_path_padding_side(script):
+def test_every_dispatching_script_settles_the_text_path_padding_side(subtests):
     """A script dispatching without the seam hands the text collators a left-padding tokenizer."""
-    tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
-    called = {
-        node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert "apply_text_path_padding_side" in called, (
-        f"{script} dispatches on modality without settling the text path's padding side"
-    )
+    assert _DISPATCHING_SCRIPTS, "no dispatching script is listed"
+    for script in _DISPATCHING_SCRIPTS:
+        with subtests.test(script):
+            tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
+            called = {
+                node.func.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            assert "apply_text_path_padding_side" in called, (
+                f"{script} dispatches on modality without settling the text path's padding side"
+            )
 
 
-@pytest.mark.parametrize("script", _DISPATCHING_SCRIPTS)
-def test_data_dispatch_goes_through_the_shared_seam(script):
+def test_data_dispatch_goes_through_the_shared_seam(subtests):
     """A local ``is_vlm_model`` or column check is a copy that drifts: a checkpoint-keyed one makes the script's
     text recipes unrunnable."""
-    tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
-    called = {
-        node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-    }
-    assert called & _VLM_RUN_SEAMS, f"{script} decides its data path without the shared resolve_vlm_run seam"
+    assert _DISPATCHING_SCRIPTS, "no dispatching script is listed"
+    for script in _DISPATCHING_SCRIPTS:
+        with subtests.test(script):
+            tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
+            called = {
+                node.func.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            }
+            assert called & _VLM_RUN_SEAMS, f"{script} decides its data path without the shared resolve_vlm_run seam"
 
 
 # The modality-aware loader and the preference load built on it, each taking the run's verdict.
@@ -352,31 +360,33 @@ def test_the_loading_script_roster_is_not_vacuous():
     assert set(_DISPATCHING_SCRIPTS) <= set(_LOADING_SCRIPTS), _LOADING_SCRIPTS
 
 
-@pytest.mark.parametrize("script", _LOADING_SCRIPTS)
-def test_every_model_load_takes_the_run_verdict(script):
+def test_every_model_load_takes_the_run_verdict(subtests):
     """A constant or the checkpoint's verdict either refuses the text recipes on a checkpoint shipping no processor
     or hands an image run a bare tokenizer."""
-    tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
-    verdicts = {
-        target.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assign)
-        and isinstance(node.value, ast.Call)
-        and getattr(node.value.func, "id", None) in _VLM_RUN_SEAMS
-        for target in node.targets
-        if isinstance(target, ast.Name)
-    }
-    loads = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) in _POLICY_LOADS
-    ]
-    assert verdicts and loads, f"{script} no longer both decides the run and loads through the shared loader"
-    for call in loads:
-        passed = [kw.value for kw in call.keywords if kw.arg == "vlm_run"]
-        assert len(passed) == 1 and isinstance(passed[0], ast.Name) and passed[0].id in verdicts, (
-            f"{script}: {call.func.id} is not handed the resolve_vlm_run verdict as vlm_run"
-        )
+    assert _LOADING_SCRIPTS, "no script loads its model through the shared loader"
+    for script in _LOADING_SCRIPTS:
+        with subtests.test(script):
+            tree = ast.parse((_TRAINING_DIR / script).read_text(encoding="utf-8"))
+            verdicts = {
+                target.id
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Assign)
+                and isinstance(node.value, ast.Call)
+                and getattr(node.value.func, "id", None) in _VLM_RUN_SEAMS
+                for target in node.targets
+                if isinstance(target, ast.Name)
+            }
+            loads = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, "id", None) in _POLICY_LOADS
+            ]
+            assert verdicts and loads, f"{script} no longer both decides the run and loads through the shared loader"
+            for call in loads:
+                passed = [kw.value for kw in call.keywords if kw.arg == "vlm_run"]
+                assert len(passed) == 1 and isinstance(passed[0], ast.Name) and passed[0].id in verdicts, (
+                    f"{script}: {call.func.id} is not handed the resolve_vlm_run verdict as vlm_run"
+                )
 
 
 if __name__ == "__main__":

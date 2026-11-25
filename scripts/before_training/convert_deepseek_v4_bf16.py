@@ -12,8 +12,8 @@ chain, verified exact against a manual e2m1 LUT dequant) and re-saves it sharded
 Disk budget: ~740 GB total, ~160 GB for the FP8/FP4 download cache (HF_HOME) plus ~580 GB for the
 BF16 output. RAM: the model is materialized on CPU (~580 GB), so use a high-memory host.
 
-The saved checkpoint is uniform BF16: the HC/norm modules transformers pins to fp32
-(``_keep_in_fp32_modules_strict``) upcast to fp32 internally, so bf16 storage is safe.
+The saved checkpoint is uniform BF16, the modules transformers pins to fp32 (``_keep_in_fp32_modules_strict``)
+included; agent-docs/models/deepseek-v4.md#checkpoint-conversion lists them and why bf16 storage is safe.
 
 Usage (inside the training image; point HF_HOME and the output at a large volume):
     HF_HOME=<large-volume>/hf python scripts/before_training/convert_deepseek_v4_bf16.py \\

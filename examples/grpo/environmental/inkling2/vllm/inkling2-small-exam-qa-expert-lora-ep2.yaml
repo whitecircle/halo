@@ -1,0 +1,88 @@
+# Environmental GRPO — Inkling-2-Small on WebInstruct-verified (exam QA, closed-book), LoRA r8 on o_proj and the routed
+# experts, over the release's frozen NVFP4/MXFP8 experts, EP=2. The policy reaches the server as an adapter
+# (rollout_adapter_sync): the server loads the release itself and is never pushed a base.
+# Serve on the Inkling 2 vLLM image (make build-vllm-inkling2) from a local copy of the release, which the trainer loads too:
+#   make up-vllm-inkling2 INKLING2_LORA=expert   # GPUs 2,3, docker-compose.vllm.yml with --tensor-parallel-size 2 --quantization inkling2
+#     --reasoning-parser inkling --enable-auto-tool-choice --tool-call-parser inkling --return-tokens-as-token-ids
+#     --logprobs-mode processed_logprobs --enable-lora --max-loras 2 --max-cpu-loras 4 --max-lora-rank 8
+# Launch: make train-inkling2 INKLING2_LORA=expert, which runs this in the training image. The trainer loads the directory the
+# server serves and publishes adapters where the server reads them, so a direct launch passes both:
+#   CUDA_VISIBLE_DEVICES=0,1 halo launch grpo/environmental <this config> --nproc 2 \
+#     --model_name_or_path=<release dir> --rollout_adapter_dir=<adapter dir>
+# agent-docs/models/inkling2.md#rollouts
+
+# --- Model ---
+model_name_or_path: thinkingmachines/Inkling-2-Small  # at launch, the local release directory the server serves
+pad_token: "<|endoftext|>"  # the release's tokenizer names no pad (nor eos) token; padded batch rows need one
+# train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
+
+# --- Parallelism (2 train GPUs: EP=2, one dispatch group; the experts stay in their shipped precision) ---
+expert_parallel_size: 2
+frozen_quantized_experts: true
+moe_balancing: none
+
+# --- LoRA (r=8: o_proj under PEFT, the routed experts as native grouped adapters at the same rank and scaling, which the
+# server takes as one adapter). A list: a regex string drops the expert targets, and these names stay off the vision
+# tower, whose attention also names q/k/v_proj. ---
+use_peft: true
+lora_r: 8
+lora_alpha: 16
+lora_dropout: 0.0
+lora_target_modules: [o_proj, gate_up_proj, down_proj]
+
+# --- Environment ---
+environment_type: exam_qa
+max_turns: 2
+
+# --- Rollout server (adapter sync; the default backend and URL, vllm at http://localhost:8000) ---
+rollout_adapter_sync: true
+rollout_adapter_dir: /mnt/adapters  # the adapter directory at launch
+rollout_connection_timeout: 600.0
+request_timeout: 300.0
+rollout_actor_budget: 16
+max_concurrent_rollouts: 16
+rollout_temperature: 1.0
+rollout_top_p: 1.0
+rollout_max_tokens: 2048
+enable_prefetch: false
+
+# --- Dataset ---
+dataset:
+- TIGER-Lab/WebInstruct-verified
+test_size: 0.01
+prompt_field: question
+max_prompt_length: null
+
+# --- GRPO ---
+num_generations: 4
+beta: 0.0
+loss_type: dapo
+scale_rewards: batch
+
+# --- Training ---
+# A step's turn rows pack into micro-batches of up to 8,192 attended tokens, at most one per accumulation step, each
+# dequantizing the expert banks in its forward, recompute and backward. One padded micro-batch of all rows under the
+# full-logits scorer ran the attention recipe out of memory on two B300s:
+# agent-docs/models/inkling2.md#memory-on-two-b300s
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4  # 4 trajectories per rank, one group of num_generations
+use_chunked_grpo_logprobs: true  # packing needs it; the full-logits head would hold fp32 [rows, width, 201024] planes
+packed_microbatch_tokens: 8192
+max_train_row_tokens: 4096  # half the budget: any two rows share a micro-batch, so eight turn rows fit the four micro-batches
+loss_forward_importance_weights: true  # the importance weights from the loss forward, not a separate scoring pass
+num_train_epochs: 1.0
+learning_rate: 2.0e-05
+lr_scheduler_type: cosine
+warmup_steps: 10
+gradient_checkpointing_kwargs:
+  use_reentrant: true   # a MoE runs reentrant GC (the trainer force-promotes false)
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-inkling2-small-exam-qa-expert-lora-ep2
+save_steps: 100
+save_total_limit: 3
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+log_phase_times: true   # where each step's time goes: phase_time/<phase>_s

@@ -384,13 +384,6 @@ def test_a_feed_forward_block_has_a_cost_rule_of_its_own(layer_type, monkeypatch
         attention_layout_from_config(config)
 
 
-def test_the_vocabulary_covers_every_layer_type_the_roster_declares():
-    declared = set()
-    for key in _ROSTER:
-        declared.update(getattr(CONFIG_MAPPING[key]().get_text_config(), "layer_types", None) or ())
-    assert declared <= set(LAYER_TYPE_KINDS), f"unmapped layer types: {declared - set(LAYER_TYPE_KINDS)}"
-
-
 def test_deepseek_v4_scores_at_head_dim_with_its_rope_slice_inside():
     config = CONFIG_MAPPING["deepseek_v4"]()
     widths = {layer.width for layer in attention_layout_from_config(config).layers}

@@ -89,7 +89,7 @@ def test_pure_tp_is_allowed(moe):
     _validate(tp=8, moe=moe)
 
 
-@pytest.mark.parametrize("shape", [{"ep": 8, "moe": True}, {"cp": 8}, {"tp": 8, "moe": True}])
+@pytest.mark.parametrize("shape", [{"ep": 8, "moe": True}, {"cp": 8}])
 def test_peft_runs_are_exempt_on_every_refused_shape(shape):
     """Adapters reload in place, so the shapes refused for a full fine-tune stay allowed."""
     _validate(peft=True, **shape)

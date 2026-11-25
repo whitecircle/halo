@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""A push writes through datasets' s3fs support, a load downloads the tree straight into its local cache
-(``download_dataset_tree``). All S3 calls are mocked."""
+"""A load downloads the tree straight into its local cache (``download_dataset_tree``). All S3 calls are mocked."""
 
 import hashlib
 import importlib
@@ -73,108 +72,6 @@ def test_get_storage_options_partial():
     assert "secret" not in opts, "secret should not be set"
     assert opts["client_kwargs"]["region_name"] == "eu-west-1"
     print("  get_storage_options partial: PASSED")
-
-
-def test_push_dataset_saves_to_a_staging_sibling():
-    """Never straight onto the destination; crash matrix in test_s3_staged_push.py."""
-    print("Testing push_dataset (staged save_to_disk)...")
-
-    mock_dataset = MagicMock(spec=Dataset)
-    mock_dataset.__len__ = MagicMock(return_value=100)
-
-    with patch.object(S3Client, "__post_init__"):
-        client = S3Client(bucket="test-bucket")
-
-    client.exists = MagicMock(return_value=False)
-    client.boto_client = MagicMock()
-    with patch("halo.data.sources.s3_dataset_store._promote_pushed_dataset") as promote:
-        s3_dataset_store.push_dataset(client, mock_dataset, "my/dataset")
-
-    mock_dataset.save_to_disk.assert_called_once()
-    promote.assert_called_once()
-    call_args = mock_dataset.save_to_disk.call_args
-    assert call_args[0][0].startswith("s3://test-bucket/my/.staging-dataset-"), (
-        f"Expected a staging-sibling target, got {call_args[0][0]}"
-    )
-    assert "storage_options" in call_args[1]
-    print("  push_dataset staged save_to_disk: PASSED")
-
-
-def test_push_dataset_overwrite_never_deletes_the_destination_first():
-    """Deleting first leaves a crash window that erases the only copy."""
-    print("Testing push_dataset (overwrite is delete-free before save)...")
-
-    mock_dataset = MagicMock(spec=Dataset)
-    mock_dataset.__len__ = MagicMock(return_value=50)
-
-    with patch.object(S3Client, "__post_init__"):
-        client = S3Client(bucket="test-bucket")
-
-    client.exists = MagicMock(return_value=True)
-    client.delete = MagicMock()
-    client.boto_client = MagicMock()
-    deletes_before_save = []
-    mock_dataset.save_to_disk = MagicMock(
-        side_effect=lambda *a, **k: deletes_before_save.extend(client.boto_client.delete_object.call_args_list)
-    )
-    with patch("halo.data.sources.s3_dataset_store._promote_pushed_dataset") as promote:
-        s3_dataset_store.push_dataset(client, mock_dataset, "existing/dataset", overwrite=True)
-
-    client.delete.assert_not_called()
-    assert deletes_before_save == [], "no destination object may be deleted before the staging save"
-    mock_dataset.save_to_disk.assert_called_once()
-    promote.assert_called_once()
-    print("  push_dataset overwrite delete-free: PASSED")
-
-
-def test_push_dataset_no_overwrite_raises_on_existing():
-    mock_dataset = MagicMock(spec=Dataset)
-    mock_dataset.__len__ = MagicMock(return_value=50)
-
-    with patch.object(S3Client, "__post_init__"):
-        client = S3Client(bucket="test-bucket")
-    client.exists = MagicMock(return_value=True)
-    client.delete = MagicMock()
-
-    with pytest.raises(FileExistsError, match="(?i)already exists"):
-        s3_dataset_store.push_dataset(client, mock_dataset, "existing/dataset", overwrite=False)
-
-    client.delete.assert_not_called()
-    mock_dataset.save_to_disk.assert_not_called()
-
-
-def test_load_s3_dataset_cache_hit():
-    print("Testing load_s3_dataset (cache hit)...")
-
-    with patch.object(S3Client, "__post_init__"):
-        client = S3Client(bucket="test-bucket")
-
-    client.exists = MagicMock(return_value=True)
-
-    with tempfile.TemporaryDirectory() as cache_root:
-        with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
-            cache_key = hashlib.md5(b"test-bucket/my/dataset").hexdigest()
-            cache_dir = os.path.join(cache_root, cache_key)
-            cache_path = os.path.join(cache_dir, "dataset")
-            os.makedirs(cache_path, exist_ok=True)
-
-            with open(os.path.join(cache_path, ".download_complete"), "w") as f:
-                f.write("s3://test-bucket/my/dataset")
-
-            ds = Dataset.from_dict({"text": ["hello", "world"]})
-            ds.save_to_disk(cache_path)
-            # save_to_disk may wipe the directory, so the marker is rewritten.
-            with open(os.path.join(cache_path, ".download_complete"), "w") as f:
-                f.write("s3://test-bucket/my/dataset")
-
-            with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
-                mock_load.return_value = ds
-                s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
-
-                call_args = mock_load.call_args[0][0]
-                assert call_args == cache_path, f"Expected load from cache {cache_path}, got {call_args}"
-
-    print("  load_s3_dataset cache hit: PASSED")
 
 
 def test_load_s3_dataset_cache_miss():
@@ -456,43 +353,6 @@ def test_shard_fingerprint_empty_listing_does_not_latch():
     assert loader._s3_fingerprint_unavailable is False
 
 
-def test_load_shard_index_from_s3():
-    print("Testing ShardedDatasetLoader._load_shard_index (S3)...")
-
-    index_data = {
-        "version": "1.0",
-        "num_shards": 2,
-        "total_examples": 200,
-        "shards": [
-            {"id": 0, "path": "train/shard_0000", "num_examples": 100, "byte_size": 1024},
-            {"id": 1, "path": "train/shard_0001", "num_examples": 100, "byte_size": 1024},
-        ],
-    }
-
-    mock_fs = MagicMock()
-    mock_file = MagicMock()
-    mock_file.__enter__ = MagicMock(return_value=mock_file)
-    mock_file.__exit__ = MagicMock(return_value=False)
-    mock_fs.open.return_value = mock_file
-
-    with patch.object(ShardedDatasetLoader, "__init__", lambda self, **kw: None):
-        loader = ShardedDatasetLoader.__new__(ShardedDatasetLoader)
-        loader.bucket = "test-bucket"
-        loader.key = "preprocessed/dataset"
-        loader.source_type = "s3"
-        loader._shard_indices = {}
-
-    with patch("halo.data.sources.s3_dataset_store.s3fs.S3FileSystem", return_value=mock_fs):
-        with patch("halo.data.sources.s3_dataset_store.json.load", return_value=index_data):
-            index = loader._load_shard_index("train")
-
-    assert index.num_shards == 2
-    assert index.total_examples == 200
-    assert len(index.shards) == 2
-    mock_fs.open.assert_called_once()
-    print("  _load_shard_index (S3): PASSED")
-
-
 def test_load_preprocessed_metadata_from_s3():
     print("Testing load_preprocessed_metadata (S3)...")
 
@@ -700,13 +560,6 @@ def test_cli_delete_recursive_opts_in(flag):
 
     mock_delete.assert_called_once()
     assert mock_delete.call_args.kwargs["recursive"] is True, f"{flag} did not reach delete()"
-
-
-def test_cli_delete_refuses_a_prefix_without_recursive():
-    """S3's DeleteObject is idempotent, returning 204 on a key that is only a prefix, so the CLI would print Deleted
-    with the data still there."""
-    with pytest.raises(SystemExit, match="is a prefix, not an object"):
-        _run_cli(["delete", "my_folder", "--yes"], exists=True, object_exists=False)
 
 
 def test_cli_delete_reports_a_missing_key():

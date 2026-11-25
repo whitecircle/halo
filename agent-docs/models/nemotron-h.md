@@ -1,6 +1,6 @@
 # Nemotron-H
 
-`model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.20. The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`), which [`mtp_loss_weight`](#mtp-head) builds and a stock class does not. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
+`model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.23 (the version the image pins). The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`), which [`mtp_loss_weight`](#mtp-head) builds and a stock class does not. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
 
 Nemotron 3.5 Lightning (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`) is that text class alone, with no composite around it and no latent ([Lightning](#lightning)). Everywhere else on this page, "the release" means Super VL.
 
@@ -80,7 +80,7 @@ The conv runs `causal_conv1d`, which takes `seq_idx` on CUDA. Under reentrant ch
 
 ![A forward and backward at EP8 and 8,192 tokens per rank, split by block kind: Super VL takes 2.54 s at 3,226 tok/s per rank, 64.8% Mamba and 32.6% MoE; Lightning takes 0.766 s at 10,694 tok/s per rank, 58.0% Mamba and 36.2% MoE; attention and the head take the rest](../assets/benchmarks/nemotron_block_time.png)
 
-At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and the head 1.0%. By arithmetic the scan is 2–2.5% of the FLOPs, as a B300's fp32 GEMM runs at 32.5T MAC/s against 726T for bf16. No native scan kernel ships. TF32 would take the step to 1.13× of upstream's body at 3e-4 output error per layer, and stays off. MFU costs a Mamba layer by its parameters (`6N`), with no term for the scan, so a low MFU here means the scan. A whole training step adds the optimizer and the reduce: [Memory](#memory) gives those rates.
+At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and the head 1.0%. The scan runs in fp32, and a full-precision fp32 GEMM runs at about 69 TFLOP/s against about 1,400 TFLOP/s sustained in bf16 (measured on one B300, [GPU Training Theory, The arithmetic rate](../reference/gpu-training-theory.md#the-arithmetic-rate)). No native scan kernel ships. TF32 would take the step to 1.13× of upstream's body at 3e-4 output error per layer, and stays off. MFU costs a Mamba layer by its parameters (`6N`), with no term for the scan, so a low MFU here means the scan. A whole training step adds the optimizer and the reduce: [Memory](#memory) gives those rates.
 
 ## EP layer
 
@@ -90,11 +90,11 @@ At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and
 - **Experts.** `up_proj` and `down_proj` with no gate, on the grouped kernel: two calls per layer. Autocast is off around `relu2`, which it would return in fp32 where `grouped_mm` casts nothing back. Keep `use_grouped_gemm` on: the stock per-expert loop's backward takes 2.0–2.2 s per layer at every length, against 14 ms grouped at 8,192.
 - **Layouts.** `ep8` is the production shape on 8 GPUs, 64 experts per rank. `ep4` on 8 GPUs is rejected by the [single-domain rule](../parallelism/README.md#supported-combinations). By arithmetic `ep2` fits LoRA only. A dispatch tops out at 8,192 tokens per rank across domains and has no ceiling within one. Pure ETP and EP+ETP (`up_proj` split on its intermediate axis) run on tiny models; on one node EP+ETP's expert share equals `ep8`'s.
 
-FSDP2 alone cannot hold the model: about 241 GB gathered plus 93 GB of sharded gradients and moments per GPU.
+FSDP2 alone, at its default ZeRO-2 analog, cannot hold the model: about 241 GB gathered plus 93 GB of sharded gradients and moments per GPU.
 
 ## Memory
 
-Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at the lengths below. Size a run by reserved memory against the device's 288 GB (275,040 MiB). Reserved differs by rank, so each cell is the range across ranks, and tok/s per rank includes the optimizer and the FSDP2 reduce.
+Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at the lengths below. Size a run by reserved memory against the 287.4 GB (267.7 GiB) that a B300's driver reports; NVIDIA lists 288 GB. Reserved differs by rank, so each cell is the range across ranks, and tok/s per rank includes the optimizer and the FSDP2 reduce.
 
 | Recipe | Tokens per rank | tok/s per rank | Peak allocated | Reserved |
 |---|---:|---:|---:|---:|
@@ -108,9 +108,9 @@ Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at t
 | SMPO, its Tulu rows | up to 2 × 4,096 | | 157–161 GB | 165–170 GB |
 | Offline GRPO | the recipe's rows | | 164–165 GB | 169–179 GB |
 
-![Peak allocated and reserved memory per GPU for each recipe against the device's 288 GB: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 185–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
+![Peak allocated and reserved memory per GPU for each recipe against a line at 288 GB, NVIDIA's figure for the device: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 185–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
 
-The full fine-tune at 8,192 takes 21.28 s a step over 20 steps. The 32,000 and frozen 50,000 rows are at the limit: their top ranks reached 99.4% and 99% of the device over 5 steps, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
+The full fine-tune at 8,192 takes 21.28 s a step over 20 steps. The 32,000 and frozen 50,000 rows are at the limit, with 283 GB reserved on their top ranks against the 287.4 GB the driver reports, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
 
 The tower's forward and backward alone, with frozen experts and no optimizer state, at exact lengths:
 
@@ -194,4 +194,4 @@ The transport preflight's default parameter does not exist on this family: pass 
 
 - **CP:** the scan is a recurrence along the sequence axis.
 - **TP:** `NemotronHAttention` is not in `TP_SHARDABLE_ATTENTION_CLASSES`. Attention is 0.24% of the parameters, and two KV heads would cap it at 2.
-- **HSDP:** refused with EP, and pure DP cannot hold the model.
+- **HSDP:** refused with EP, and pure DP at the default ZeRO-2 analog cannot hold the model ([EP layer](#ep-layer)).

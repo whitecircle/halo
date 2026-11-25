@@ -82,9 +82,11 @@ def test_a_tiny_family_resolves_to_its_spec_or_a_named_refusal(name):
             require_mtp_head_spec(config)
 
 
-@pytest.mark.parametrize("family", MOE_FAMILY_SPECS, ids=lambda family: family.model_types[0])
-def test_every_moe_family_is_on_the_tiny_roster_the_sweep_reads(family):
-    assert set(family.model_types) & set(_TINY_ROSTER), family.model_types
+def test_every_moe_family_is_on_the_tiny_roster_the_sweep_reads(subtests):
+    assert MOE_FAMILY_SPECS, "no MoE family spec is registered"
+    for family in MOE_FAMILY_SPECS:
+        with subtests.test(family.model_types[0]):
+            assert set(family.model_types) & set(_TINY_ROSTER), family.model_types
 
 
 def test_the_families_a_design_decision_refuses_keep_their_named_reason():
@@ -92,9 +94,13 @@ def test_the_families_a_design_decision_refuses_keep_their_named_reason():
     assert not set(NEMOTRON_H.model_types) & set(MTP_REFUSALS)
 
 
-@pytest.mark.parametrize("family", MOE_FAMILY_SPECS, ids=lambda family: family.model_types[0])
-def test_no_family_on_the_roster_is_refused_as_outside_it(family):
-    assert not [name for name in family.model_types if MTP_REFUSALS.get(name) == UNSURVEYED_TAIL], family.model_types
+def test_no_family_on_the_roster_is_refused_as_outside_it(subtests):
+    assert MOE_FAMILY_SPECS, "no MoE family spec is registered"
+    for family in MOE_FAMILY_SPECS:
+        with subtests.test(family.model_types[0]):
+            assert not [name for name in family.model_types if MTP_REFUSALS.get(name) == UNSURVEYED_TAIL], (
+                family.model_types
+            )
 
 
 @pytest.mark.parametrize("release", [nemotron_h_lightning_config(), nemotron_h_release_config()["llm_config"]])

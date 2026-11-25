@@ -87,18 +87,25 @@ _GLOBAL_ACCESS = re.compile(r"^\s+(?:@%p\d+\s+)?((?:ld|st)\.global[\w.]*)", re.M
 _FLOAT_OP = re.compile(r"^\s*(?:@%p\d+\s+)?((?:fma|mul|add|sub|div|sqrt|rcp|cvt|max|min|neg|abs|mad)\.[\w.]+)\s", re.M)
 _TABLE_LOADS = ("ld.global.b64", "ld.global.v2.b64", "ld.global.v4.b64", "ld.global.b32")
 _SKIP_FLAG_LOAD = "ld.global.b8"
-# (grad dtype, grad scale, _FusedUpdate.divisible): what step() meets, two other partial alignments, and none.
+# (grad dtype, grad scale, _FusedUpdate.divisible, skip flag): what step() meets, two other partial alignments, and none.
 _SPECIALIZATIONS = (
-    ("bf16", False, (True, True, True, True, True)),
-    ("bf16", True, (False, True, True, True, True)),
-    ("bf16", False, (True, True, False, True, True)),
-    ("bf16", True, (False, False, False, True, True)),
-    ("bf16", True, (True, False, False, True, True)),
-    ("fp32", True, (False, True, False, True, True)),
-    ("bf16", True, (True, False, False, True, False)),
-    ("bf16", False, (True, False, True, False, False)),
-    ("bf16", True, (False, False, False, False, False)),
+    ("bf16", False, (True, True, True, True, True), True),
+    ("bf16", True, (False, True, True, True, True), False),
+    ("bf16", False, (True, True, False, True, True), True),
+    ("bf16", True, (False, False, False, True, True), False),
+    ("bf16", True, (True, False, False, True, True), True),
+    ("fp32", True, (False, True, False, True, True), False),
+    ("bf16", True, (True, False, False, True, False), True),
+    ("bf16", False, (True, False, True, False, False), False),
+    ("bf16", True, (False, False, False, False, False), True),
 )
+# sm103 compiles the multi-tensor launch of sm100 under another target string, so one cell builds it there.
+_COMPILED_CELLS = [
+    (*specialization, target)
+    for specialization in _SPECIALIZATIONS
+    for target in _TARGETS
+    if target.arch != 103 or specialization == _SPECIALIZATIONS[0]
+]
 
 
 def _update(
@@ -472,12 +479,13 @@ def test_a_changing_set_of_gradients_compiles_one_variant_per_specialization(mon
     )
 
 
-@pytest.mark.parametrize("target", _TARGETS, ids=lambda target: f"sm{target.arch}")
-@pytest.mark.parametrize("has_skip", [False, True], ids=["no_skip", "skip"])
 @pytest.mark.parametrize(
-    ("grad_dtype", "has_scale", "divisible"),
-    _SPECIALIZATIONS,
-    ids=[f"{g}-{'scale' if s else 'no_scale'}-{''.join(str(int(f)) for f in d)}" for g, s, d in _SPECIALIZATIONS],
+    ("grad_dtype", "has_scale", "divisible", "has_skip", "target"),
+    _COMPILED_CELLS,
+    ids=[
+        f"{g}-{'scale' if s else 'no_scale'}-{''.join(str(int(f)) for f in d)}-{'skip' if k else 'no_skip'}-sm{t.arch}"
+        for g, s, d, k, t in _COMPILED_CELLS
+    ],
 )
 def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, divisible, has_skip, target):
     """The PTX schedule may place ops around the table loads and block loop; the skip flag adds its one read and

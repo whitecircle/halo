@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from transformers.models.glm5_next import modeling_glm5_next
 
 from halo.models.attention import tree_sparse
+from halo.models.gradient_checkpointing import patch_layer_forward
 
 _stock_forward = modeling_glm5_next.Glm5NextTextIndexer.forward
 
@@ -70,4 +71,4 @@ def _forward(indexer, hidden_states, q_resid, attention_mask, past_key_values):
 
 def patch_glm5_next_indexer() -> None:
     """Idempotent."""
-    modeling_glm5_next.Glm5NextTextIndexer.forward = _forward
+    patch_layer_forward(modeling_glm5_next.Glm5NextTextIndexer, _forward)

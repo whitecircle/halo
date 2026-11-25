@@ -7,9 +7,9 @@ Fine-tune a text encoder for retrieval, semantic similarity, deduplication or cl
 ## Data
 
 The collator reads columns **by position**, not by name: the label is the first of `label`, `labels`,
-`score`, `scores` that exists, and every other column is one text input. The table's shape picks the
-loss: anchor-positive pairs train `mnrl` (the default) or `cached_mnrl`, a third negative column adds
-`triplet`, a float score trains `cosent` or `angle`, and a 0/1 label the contrastive losses
+`score`, `scores` that exists, and every other column is one text input. The table's shape decides which
+`loss_type` fits: anchor-positive pairs train `mnrl` (the default) or `cached_mnrl`, a third negative
+column adds `triplet`, a float score trains `cosent` or `angle`, and a 0/1 label the contrastive losses
 ([shapes and losses](../../agent-docs/training-methods/embedding.md#dataset-formats) ↗). Embedding
 training is text-only.
 

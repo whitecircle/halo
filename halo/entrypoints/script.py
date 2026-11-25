@@ -18,7 +18,10 @@ from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.callbacks.factory import build_run_callbacks, reorder_integration_callbacks_last
 from halo.callbacks.gradient_checkpointing_plan import build_gradient_checkpointing_plan_callback
 from halo.config_validation import differs_from_default
-from halo.configs.parallelism_arguments import parallelism_config_from_args
+from halo.configs.parallelism_arguments import (
+    parallelism_config_from_args,
+    reject_frozen_experts_without_peft_adapters,
+)
 from halo.configs.parser import HaloArgumentParser, expand_strftime_directives
 from halo.data.pipeline.coordinated_map import datasets_cache_dir
 from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
@@ -147,6 +150,7 @@ def init_training_script(
     # here) and after the device bind (the gather runs over NCCL).
     agree_rank_uniform_env()
 
+    reject_frozen_experts_without_peft_adapters(dist_args, model_config)
     # Peeled first: __post_init__ validates expert_lora (PP rejects it) and ep_config caches its EPConfig, so a later
     # assignment would not reach the layers.
     parallelism_config = parallelism_config_from_args(

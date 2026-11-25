@@ -123,7 +123,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
 |---|---|---|
 | SFT | `2e-6` – `2e-5` | `1e-4` |
 | SMPO / DPO | `5e-7` – `5e-6` | `5e-7` (the two shipped DPO LoRA recipes) |
-| GRPO | `1e-6` – `5e-6` | `3e-6` (every shipped LoRA async GRPO recipe under `examples/grpo/environmental/`) |
+| GRPO | `1e-6` – `5e-6` | `3e-6` (the shipped LoRA code-contests recipes under `examples/grpo/environmental/`; the two Inkling 2 exam-QA LoRA recipes run `2e-5`) |
 
 The effective-batch formula is unchanged by LoRA — see
 [SFT](../training-methods/sft.md#learning-rate-and-global-batch-size).
@@ -288,8 +288,8 @@ dominates the step, and only memory grows with rank.
 QLoRA saves ~10 GiB more than bf16 all-linear LoRA at ~5% lower throughput. It is the path onto a smaller
 GPU, since plain LoRA needs ~34 GiB at this shape even at the minimum rank.
 
-MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq 4096, r=64 (full
-fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchmarks.md#ep-only-batch-scaling)):
+MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at `ep2`, seq 4096, r=64 (full
+fine-tuning at this shape, Halo 1.1.0: [Throughput Benchmarks → 1.2.0 against 1.1.0](throughput-benchmarks.md#120-against-110)):
 
 | Config | Trainable | tokens/s/GPU | Peak memory |
 |---|---|---|---|
@@ -302,7 +302,7 @@ state, so every variant peaks at 30–32 GiB against full fine-tuning's 79.0 GiB
 every variant runs faster than its 12,121 tok/s/GPU. Experts-only is 5% faster than attention-only, since
 the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either alone.
 
-On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
+On `qwen3-30b-a3b` (128 experts) at `ep2`, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
 46.7 GiB. At batch 1 tok/s/GPU varies ±10% run-to-run.
 
 ## Reference model handling
@@ -339,7 +339,7 @@ model, and the disabled adapter is the reference) or set `beta: 0` to hold none.
 
 Online and Async GRPO with Environments generate rollouts from a separate rollout server — vLLM or SGLang
 ([Rollout Servers](../infrastructure/rollout-servers.md#weight-sync)) — which loads **no adapter** unless
-`rollout_adapter_sync` serves the policy as one on SGLang ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)).
+`rollout_adapter_sync` serves the policy as one, on SGLang or, for Inkling 2, on vLLM ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)).
 
 Otherwise each NCCL weight sync forwards every base weight with its adapter folded in, under base-model param names
 (PEFT prefixes stripped, `lora_*` params skipped). Without the fold, the server would generate from the
@@ -464,7 +464,7 @@ A changed LoRA scaling raises too: resume compares the scaling inputs the saved 
 `use_rslora`) with the live run's, since names and shapes would still match and the delta would silently
 rescale. A missing `adapter_config.json` raises too.
 
-Under CP `remap_cp_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
+Under CP `remap_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
 spelling, read off the same PEFT selection the save made, so every adapter-name spelling PEFT writes
 (`lora_A.default.weight`, `modules_to_save.default.weight`, `lora_embedding_A.default`, a DoRA magnitude) maps
 back; a key it does not produce fails the check above. A mixed run's expert keys keep the CP wrapper's `model.`
@@ -572,6 +572,10 @@ The tool resolves everything it rewrites against the base before the first write
 - base experts outside the family's export layout, or a stored tensor the run resized (a grown vocabulary);
 - embedding LoRA, or a `training_provenance.json` recording neutralized GptOss sinks over a base that stores no
   sink tensor;
+- a tensor the base stores packed (a non-float stored dtype, such as NVFP4 nibbles or MXFP8 bytes): a delta folded
+  into the stored values gives no weight ([Inkling 2](../models/inkling2.md#frozen-quantized-experts)). An adapter
+  over a quantized base merges when every tensor it rewrites is stored as a float, as an attention adapter over
+  gpt-oss's MXFP4 release is;
 - a balancing sidecar naming a module the base lacks, at another expert count, or in a config-gated slot the base
   does not build (LFM-2 under `use_expert_bias: false`).
 

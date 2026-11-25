@@ -77,9 +77,9 @@ off. Serve MoE models with the compose default `--moe-backend triton`
   rewards are all zero: usually the policy never emits `\boxed{}`.
 
 `packed_microbatch_tokens`, `balance_rank_tokens` and `log_phase_times` speed up and time a step: see
-[Packed micro-batches](../../agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches),
-[Rank balance](../../agent-docs/training-methods/async-grpo/performance.md#rank-balance) and
-[Phase times](../../agent-docs/training-methods/async-grpo/monitoring.md#phase-times).
+[Packed micro-batches](../../agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches) ↗,
+[Rank balance](../../agent-docs/training-methods/async-grpo/performance.md#rank-balance) ↗ and
+[Phase times](../../agent-docs/training-methods/async-grpo/monitoring.md#phase-times) ↗.
 
 Every knob, the weight-sync refusals, LoRA and batch geometry:
 [Online GRPO reference](../../agent-docs/training-methods/grpo/online.md) ↗.

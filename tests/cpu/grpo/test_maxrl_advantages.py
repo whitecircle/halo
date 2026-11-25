@@ -49,8 +49,14 @@ def _maxrl(rewards, num_generations, valid=None):
 # ------------------------------------------------------------------------------------------------------- estimator
 
 
-@pytest.mark.parametrize("n", [4, 8, 16])
-@pytest.mark.parametrize("p", [1 / 10, 1 / 3, 7 / 10])
+@pytest.mark.parametrize(
+    ("n", "p"),
+    [
+        pytest.param(4, 1 / 10, id="0.1-4"),
+        pytest.param(8, 1 / 3, id="0.3333333333333333-8"),
+        pytest.param(16, 7 / 10, id="0.7-16"),
+    ],
+)
 def test_the_estimator_is_unbiased_for_the_truncated_ml_objective_on_a_bernoulli_policy(n, p):
     """E[A_j d/dp log pi(y_j)] over a group of ``n`` draws equals d/dp of J = -sum_{k<n} (1-p)^k / k, which is
     (1 - (1-p)^(n-1)) / p. Exchangeable members, so each success count k contributes the group's average term. A

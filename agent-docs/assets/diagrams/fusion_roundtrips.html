@@ -8,12 +8,14 @@
 
   body { width: 1600px; }
 
+  h1 { font-variant-numeric: lining-nums; }
+
   .figure { position: relative; }
 
-  /* Two columns in the original's 6.1 : 4.1 split: three naive kernels on the left, the fused one on the right. */
+  /* Two columns: the two eager kernels on the left, the fused one on the right. */
   .columns {
     display: grid;
-    grid-template-columns: 6.1fr 4.1fr;
+    grid-template-columns: 5.4fr 4.1fr;
     column-gap: 92px;
   }
 
@@ -65,8 +67,8 @@
     text-align: center;
   }
 
-  /* The fused kernel spans the original's 2.8 of its column's 4.1. */
-  .column.fused .kernel { flex: 0 0 68%; }
+  /* The fused kernel is as wide as one eager kernel. */
+  .column.fused .kernel { flex: 0 0 var(--kernel-w); }
 
   .kernel .name {
     font-size: 27px;
@@ -91,6 +93,14 @@
     font-size: 23px;
     line-height: 1.4;
     color: var(--body);
+  }
+
+  .time {
+    margin-top: 10px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+    font-variant-numeric: tabular-nums;
   }
 
   .why em {
@@ -120,7 +130,8 @@
 <body>
 <div class="canvas">
   <header>
-    <h1>Fusion turns {naive} HBM passes into {fused}</h1>
+    <h1>Fusion turns {eager} HBM passes into {fused}</h1>
+    <p class="subtitle">y = silu(a) × b on {side} × {side} bf16 tensors of {tensor} each, timed on one B300</p>
   </header>
 
   <div class="figure" id="figure">
@@ -134,21 +145,26 @@
   const PASS = "var(--halo-blue)";
   const INTERMEDIATE = "var(--halo-violet)";
   /** Tensors that exist only to be re-read by the next kernel. */
-  const THROWAWAY = ["s", "t"];
+  const THROWAWAY = ["s"];
+  /** Side of the square bf16 tensors a, b and y in the measured run. */
+  const SIDE = 8192;
+  const BF16_BYTES = 2;
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py with its default sections: in its output,
+  // sections.fusion.variants[], the entries with variant "eager" (F.silu(a) * b) and "liger" (one fused kernel). Fields
+  // kernels_per_call, tensor_passes, bytes_moved and seconds_summary.median (7 repeats).
   const COLUMNS = [
     {
-      head: "Naive",
-      sub: "3 kernels",
+      head: "Eager",
+      measured: { kernels: 2, passes: 5, bytes: 671088640, seconds: 0.00011586560249328613 },
       kernels: [
-        { name: "s = sigmoid(a)", reads: ["a"], writes: ["s"] },
-        { name: "t = a · s", reads: ["a", "s"], writes: ["t"] },
-        { name: "y = t · b", reads: ["t", "b"], writes: ["y"] },
+        { name: "s = silu(a)", reads: ["a"], writes: ["s"] },
+        { name: "y = s × b", reads: ["s", "b"], writes: ["y"] },
       ],
     },
     {
       head: "Fused",
-      sub: "1 kernel, Liger or torch.compile",
-      kernels: [{ name: "y = silu(a) · b", reads: ["a", "b"], writes: ["y"] }],
+      measured: { kernels: 1, passes: 3, bytes: 402653184, seconds: 0.00006001023769378662 },
+      kernels: [{ name: "y = silu(a) × b", reads: ["a", "b"], writes: ["y"] }],
     },
   ];
 
@@ -156,33 +172,53 @@
     (sum, k) => ({ reads: sum.reads + k.reads.length, writes: sum.writes + k.writes.length }),
     { reads: 0, writes: 0 },
   );
-  const [naive, fused] = COLUMNS.map(passes);
+  const [eager, fused] = COLUMNS.map(passes);
   const total = (p) => p.reads + p.writes;
+  const tensorBytes = SIDE * SIDE * BF16_BYTES;
 
-  fillValues({ naive: total(naive), fused: total(fused) });
+  // What is drawn must be what was timed: the kernels, the passes and the bytes of each column.
+  for (const column of COLUMNS) {
+    const drawn = total(passes(column));
 
-  /** The line under each column's total. The naive one names the throwaway tensors in their arrows' colour. */
+    if (column.kernels.length !== column.measured.kernels || drawn !== column.measured.passes || drawn * tensorBytes !== column.measured.bytes) {
+      throw new Error(`${column.head}: the drawn kernels and passes differ from the measured run`);
+    }
+  }
+
+  const megabytes = (bytes) => `${Math.round(bytes / 1e6).toLocaleString("en-US")} MB`;
+  const milliseconds = (seconds) => `${(seconds * 1e3).toFixed(3)} ms`;
+  const kernelCount = (n) => `${n} ${n === 1 ? "kernel" : "kernels"}`;
+  const [eagerRun, fusedRun] = COLUMNS.map((column) => column.measured);
+
+  fillValues({ eager: total(eager), fused: total(fused), side: SIDE.toLocaleString("en-US"), tensor: megabytes(tensorBytes) });
+
+  /** The line under each column's total, naming the throwaway tensors in their arrows' colour. */
+  const one = THROWAWAY.length === 1;
   const why = [
-    () => {
-      const line = el("p", "why", `${naive.reads} reads + ${naive.writes} writes: `);
-      const names = el("em", undefined, `${THROWAWAY.join(" and ")}`);
-      names.style.setProperty("--hue", INTERMEDIATE);
-      line.append(names, " exist only to be re-read by the next kernel");
+    [`${eager.reads} reads + ${eager.writes} writes: `, ` ${one ? "exists" : "exist"} only to be re-read by the next kernel`],
+    ["Same math, same FLOPs: ", ` never ${one ? "leaves" : "leave"} registers`],
+  ].map(([before, after]) => () => {
+    const line = el("p", "why", before);
+    const names = el("em", undefined, THROWAWAY.join(" and "));
+    names.style.setProperty("--hue", INTERMEDIATE);
+    line.append(names, after);
 
-      return line;
-    },
-    () => el("p", "why", "Same math, same FLOPs, intermediates never leave registers"),
-  ];
+    return line;
+  });
   const totals = [
-    `${total(naive)} tensor passes over HBM`,
-    `${total(fused)} tensor passes, ~${(total(naive) / total(fused)).toFixed(1)}× less traffic`,
+    `${total(eager)} tensor passes over HBM, ${megabytes(eagerRun.bytes)}`,
+    `${total(fused)} tensor passes, ${megabytes(fusedRun.bytes)}: ${(eagerRun.bytes / fusedRun.bytes).toFixed(1)} times less traffic`,
+  ];
+  const times = [
+    `${milliseconds(eagerRun.seconds)} measured`,
+    `${milliseconds(fusedRun.seconds)} measured, ${(eagerRun.seconds / fusedRun.seconds).toFixed(1)} times faster`,
   ];
 
   const columns = document.getElementById("columns");
   const built = COLUMNS.map((column, i) => {
     const node = el("div", i === 0 ? "column" : "column fused");
     const head = el("div", "column-head", column.head);
-    head.append(el("span", undefined, column.sub));
+    head.append(el("span", undefined, kernelCount(column.kernels.length)));
     const hbm = el("div", "card hbm", "HBM");
     const row = el("div", "kernels");
     const cards = column.kernels.map((k) => {
@@ -192,11 +228,14 @@
 
       return card;
     });
-    node.append(head, hbm, row, el("div", "total", totals[i]), why[i]());
+    node.append(head, hbm, row, el("div", "total", totals[i]), why[i](), el("p", "time", times[i]));
     columns.append(node);
 
     return { column, hbm, cards };
   });
+
+  // The fused kernel's card takes the width of an eager one.
+  columns.style.setProperty("--kernel-w", `${built[0].cards[0].getBoundingClientRect().width}px`);
 
   const figure = document.getElementById("figure");
   const wires = document.getElementById("wires");

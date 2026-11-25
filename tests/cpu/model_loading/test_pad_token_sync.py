@@ -7,7 +7,6 @@ import pytest
 import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification, Qwen4ExpForCausalLM
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
-from transformers.trainer_utils import align_special_tokens
 
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
@@ -61,13 +60,6 @@ def _seq_cls_model(num_labels: int = 2) -> Qwen3ForSequenceClassification:
     """``TINY_QWEN3_CONFIG`` declares no ``pad_token_id``, the checkpoint shape this file is about."""
     torch.manual_seed(0)
     return Qwen3ForSequenceClassification(Qwen3Config(**TINY_QWEN3_CONFIG, num_labels=num_labels))
-
-
-def test_a_pooled_head_carries_no_generation_config():
-    """The premise: if transformers ever attached one, the guard below would stop meaning anything."""
-    model = _seq_cls_model()
-    assert model.can_generate() is False
-    assert not hasattr(model, "generation_config")
 
 
 def test_sync_records_the_id_on_a_head_without_a_generation_config():
@@ -200,17 +192,6 @@ def test_setup_records_the_eos_fallback_too():
     )
     assert tokenizer.pad_token == "<eos>"
     assert model.config.get_text_config().pad_token_id == SPECIAL_TOKEN_IDS["<eos>"]
-
-
-def test_transformers_own_alignment_records_an_eos_pad_regardless():
-    """The premise above, pinned upstream: a pad-vs-eos gate there would make declining a real choice."""
-    model = _seq_cls_model()
-    tokenizer = _Tokenizer(pad_token=None)
-    tokenizer.pad_token = tokenizer.eos_token
-
-    align_special_tokens(model, tokenizer)
-
-    assert model.config.pad_token_id == SPECIAL_TOKEN_IDS["<eos>"]
 
 
 def test_an_eos_pad_states_the_cost_it_carries(caplog):

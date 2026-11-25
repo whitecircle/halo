@@ -35,6 +35,7 @@ def make_layer():
         gate_proj_lora_B=torch.randn(E, R, N, device=DEV, dtype=torch.bfloat16) * 0.05,
     )
     stub._grouped_mm = MethodType(EPMoELayerBase._grouped_mm, stub)
+    stub._expert_base_proj = MethodType(EPMoELayerBase._expert_base_proj, stub)
     stub._expert_proj = MethodType(EPMoELayerBase._expert_proj, stub)
     return stub
 

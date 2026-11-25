@@ -9,9 +9,11 @@ SHELL := /bin/bash
 
 IMAGE        ?= halo:blackwell
 # SemVer for the versioned image tags the push targets publish alongside the moving tags.
-VERSION      ?= 1.3.0rc1
+VERSION      ?= 1.3.0rc2
 # The engine release a server image builds, read off its Dockerfile ARG (the one place it is pinned).
+# Dockerfile.vllm builds two tags: vLLM $(VLLM_VERSION) for every family but Inkling 2, and vLLM's Inkling 2 build.
 VLLM_VERSION   := $(shell sed -n 's/^ARG VLLM_VERSION=//p' Dockerfile.vllm)
+VLLM_INKLING2_VERSION := $(shell sed -n 's/^ARG VLLM_INKLING2_VERSION=//p' Dockerfile.vllm)
 SGLANG_VERSION := $(shell sed -n 's/^ARG SGLANG_VERSION=//p' Dockerfile.sglang)
 NPROC        ?= 8
 # Training method name for `make train` (any `halo launch --list` entry).
@@ -96,9 +98,9 @@ EQUIVALENCE_DOCKER_FLAGS =
 
 .DEFAULT_GOAL := help
 .PHONY: help check-lock lint format precommit test-cpu seed-hf-cache test-gpu-core test-gpu-full test-gpu-vllm test-gpu-sglang bench bench-band \
-        verify-move verify-artifacts verify-ep verify-cp verify-efficiency docs diagrams build-blackwell build-hopper build-vllm build-sglang build-all \
-        ecr-public-login push-public-blackwell push-public-hopper push-public-vllm \
-        push-public-sglang push-public-all train clean
+        verify-move verify-artifacts verify-ep verify-cp verify-efficiency docs diagrams build-blackwell build-hopper build-vllm build-vllm-inkling2 \
+        build-sglang build-all ecr-public-login push-public-blackwell push-public-hopper push-public-vllm push-public-vllm-inkling2 \
+        push-public-sglang push-public-all train up-vllm-inkling2 train-inkling2 clean
 
 help: ## Show this help
 	@grep -hE '^[a-zA-Z0-9_-]+:.*?## ' $(MAKEFILE_LIST) | \
@@ -286,12 +288,17 @@ build-vllm: ## build the vLLM inference image halo:vllm-$(VLLM_VERSION) (credent
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
+build-vllm-inkling2: ## build the Inkling 2 vLLM image halo:vllm-$(VLLM_INKLING2_VERSION), the only tag that serves Inkling 2 (same Dockerfile, VLLM_ENGINE=inkling2)
+	docker build -f Dockerfile.vllm -t halo:vllm-$(VLLM_INKLING2_VERSION) --build-arg VLLM_ENGINE=inkling2 \
+	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
+	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
+
 build-sglang: ## build the SGLang inference image halo:sglang-$(SGLANG_VERSION) (NCCL pinned from uv.lock, matching the training images)
 	docker build -f Dockerfile.sglang -t halo:sglang-$(SGLANG_VERSION) \
 	  --build-arg VERSION=$(VERSION) --build-arg BUILD_DATE=$(BUILD_DATE) \
 	  --build-arg SOURCE_REVISION=$(SOURCE_REVISION) .
 
-build-all: build-blackwell build-hopper build-vllm build-sglang ## build all four images
+build-all: build-blackwell build-hopper build-vllm build-vllm-inkling2 build-sglang ## build all five images
 
 # --- Publishing to Amazon ECR Public (gallery.ecr.aws) ----------------------------------
 # Amazon ECR Public images are world-readable.
@@ -329,11 +336,60 @@ push-public-sglang: ecr-public-login ## publish halo:sglang-$(SGLANG_VERSION) ->
 	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)
 	docker push $(ECR_PUBLIC):sglang-$(SGLANG_VERSION)-$(VERSION)
 
-push-public-all: push-public-blackwell push-public-hopper push-public-vllm push-public-sglang ## publish all four to ECR Public
+push-public-vllm-inkling2: ecr-public-login ## publish halo:vllm-$(VLLM_INKLING2_VERSION) -> ECR Public (vllm-$(VLLM_INKLING2_VERSION) + -$(VERSION))
+	docker tag halo:vllm-$(VLLM_INKLING2_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)
+	docker tag halo:vllm-$(VLLM_INKLING2_VERSION) $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)-$(VERSION)
+	docker push $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)
+	docker push $(ECR_PUBLIC):vllm-$(VLLM_INKLING2_VERSION)-$(VERSION)
+
+push-public-all: push-public-blackwell push-public-hopper push-public-vllm push-public-vllm-inkling2 push-public-sglang ## publish all five to ECR Public
 
 train: ## run a training config: make train CONFIG=... [METHOD=sft] NPROC=8 EXTRA="--expert_parallel_size=8"
 	$(DOCKER_RUN) bash -lc "python -m halo.cli launch $(strip $(METHOD)) $(CONFIG) \
 	  --nproc $(NPROC) -- $(EXTRA)"
+
+# Inkling 2 under rollout_adapter_sync, on the Inkling 2 vLLM image (make build-vllm-inkling2): one release directory
+# and one adapter directory per server port under HALO_SCRATCH, which the server and the trainer mount at the same
+# path. A run's first sync deletes every halo-adapter-* directory in its adapter directory, so two stacks on one host,
+# which the shared host network keeps on distinct ports, need one each. INKLING2_LORA picks LoRA on the text tower's
+# attention or on o_proj and the routed experts; agent-docs/models/inkling2.md#rollouts.
+INKLING2_VLLM_IMAGE      ?= halo:vllm-$(VLLM_INKLING2_VERSION)
+INKLING2_DIR             ?= $(scratch_dir)/models/Inkling-2-Small
+INKLING2_ADAPTER_DIR     ?= $(scratch_dir)/adapters-vllm-$(VLLM_PORT)
+INKLING2_LORA            ?= attention
+INKLING2_SERVER_DEVICES  ?= 2,3
+INKLING2_TRAINER_DEVICES ?= 0,1
+# The server's tensor-parallel size and the trainer's process count are the lengths of their device lists.
+comma := ,
+device_count = $(words $(subst $(comma), ,$(1)))
+INKLING2_CONFIG           = examples/grpo/environmental/inkling2/vllm/inkling2-small-exam-qa-$(INKLING2_LORA)-lora-ep2.yaml
+# Attention LoRA leaves the experts unwrapped, which spares their LoRA kernels.
+INKLING2_LORA_ARGS        = --enable-lora --max-loras 2 --max-cpu-loras 4 \
+  $(if $(filter attention,$(INKLING2_LORA)),--max-lora-rank 16 --lora-target-modules qkvr wo_ud,--max-lora-rank 8)
+
+up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve it from INKLING2_VLLM_IMAGE on INKLING2_SERVER_DEVICES (2,3), port VLLM_PORT, for train-inkling2
+	mkdir -p $(INKLING2_ADAPTER_DIR)
+	$(DOCKER_RUN) bash -lc "hf download thinkingmachines/Inkling-2-Small --local-dir $(INKLING2_DIR) --quiet"
+	HALO_SCRATCH=$(scratch_dir) VLLM_IMAGE=$(INKLING2_VLLM_IMAGE) VLLM_MODEL=$(INKLING2_DIR) \
+	  VLLM_TP=$(call device_count,$(INKLING2_SERVER_DEVICES)) \
+	  VLLM_PORT=$(VLLM_PORT) VLLM_CUDA_DEVICES=$(INKLING2_SERVER_DEVICES) \
+	  VLLM_TOOL_PARSER=inkling VLLM_REASONING_PARSER=inkling \
+	  VLLM_EXTRA_ARGS="--quantization inkling2 --max-model-len 16384 $(INKLING2_LORA_ARGS)" \
+	  docker compose -f docker-compose.vllm.yml up -d vllm-server
+
+train-inkling2: EXTRA_DOCKER_ENV = -e CUDA_VISIBLE_DEVICES=$(INKLING2_TRAINER_DEVICES)
+train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2 at VLLM_SERVER_URL, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
+	$(if $(and $(filter file,$(origin INKLING2_ADAPTER_DIR)),$(filter-out http://localhost:$(VLLM_PORT),$(VLLM_SERVER_URL))),$(error \
+	  VLLM_SERVER_URL=$(VLLM_SERVER_URL) is not http://localhost:$(VLLM_PORT), the server whose adapter directory \
+	  INKLING2_ADAPTER_DIR defaults to, and the trainer's first sync deletes every halo-adapter-* directory in the one it \
+	  publishes into: for a server on this host pass its VLLM_PORT and leave VLLM_SERVER_URL unset, for any other pass \
+	  the INKLING2_ADAPTER_DIR its up-vllm-inkling2 was given))
+	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No Inkling 2 server at $(VLLM_SERVER_URL): make \
+	  up-vllm-inkling2 INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
+	$(DOCKER_RUN) bash -lc "halo launch grpo/environmental $(INKLING2_CONFIG) \
+	  --nproc $(call device_count,$(INKLING2_TRAINER_DEVICES)) \
+	  --model_name_or_path=$(INKLING2_DIR) --rollout_adapter_dir=$(INKLING2_ADAPTER_DIR) \
+	  --rollout_server_url=$(VLLM_SERVER_URL) $(EXTRA)"
 
 # clean does not remove checkpoints/: it is the default output_dir of every shipped example.
 clean: ## prune wandb/, the ruff/pytest caches and $(HALO_SCRATCH) test scratch (leaves checkpoints/)

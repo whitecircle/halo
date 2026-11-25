@@ -6,7 +6,7 @@
 - the `swe` environment's `run_code`, `run_bash_command` and file tools;
 - checker verification in `scripts/environments/preparation/prepare_code_dataset.py`.
 
-`calculate` and a standalone `python` / `python_repl` tool with no `sandbox=` executor run instead in the in-process restricted REPL (`inprocess.py`): restricted builtins, no imports, no OS isolation.
+`calculate`, and a standalone `python` / `python_repl` tool with no `sandbox=` executor while `HALO_SANDBOX_REPL` is off, run instead in the in-process restricted REPL (`inprocess.py`): restricted builtins, no imports, no OS isolation.
 
 ## Choosing a backend
 
@@ -37,7 +37,7 @@ A confined program cannot write the host filesystem or reach the network, but ca
 - On `local` the program can rewrite what grades it, fetch a solution, and read the trainer's `--env-file` secrets from `/proc/<pid>/environ`.
 - `swe` and `code_contests` log a warning when built on an executor that does not confine.
 
-Use `bubblewrap` without network, or `remote`, for RL on untrusted code and whenever the trainer's environment carries secrets.
+Use `bubblewrap` without network, `remote` or `modal` for RL on untrusted code and whenever the trainer's environment carries secrets.
 
 Only `bubblewrap` lets a compile error show under code contests' `verdict_detail: outcome` (`COMPILES_WITHOUT_TEST_INPUT`): its build runs before any test and its program cannot force a rebuild ([Grading rules](tasks/code-contests/grading.md#grading-rules)).
 
@@ -116,7 +116,7 @@ World-writable directories of the image, such as `/tmp`, stay shared between ses
 | Modal ended the sandbox (5 minutes idle, or its lifetime) before the call | Nothing: a new sandbox takes the call |
 | The sandbox cannot be created | `error` |
 | The connection drops after the program may have started | `error`; the call is not sent again |
-| The call passes its deadline (run timeout + compile timeout + 30 s) | `error` |
+| The call passes its deadline (run timeout + 30 s, plus the compile timeout for a compiled language) | `error` |
 
 A new sandbox starts without the open sessions' directories. A session that had written a file with `write_file` raises `SandboxInfraError` on every later call, so an episode that depended on its files is voided and not graded. Any other session continues with an empty directory and rebuilds what it had compiled. Files a program created or changed while it ran are not tracked: a session that holds only such files continues without them, and its next call returns an ordinary result. An environment whose programs edit files the episode depends on must put at least one of them there with `write_file`.
 
@@ -158,7 +158,7 @@ The flag works on `halo launch` and `halo run` and sets `HALO_SANDBOX_BACKEND=ba
 - `run()` is a throwaway session: it creates and deletes a sandbox per call.
 - A sandbox answers its first call about 4 s after the session's first use; a later call adds about 0.3 s to the program's own time.
 - Limits and verdicts are `local`'s. The program's clock starts inside the sandbox, so network latency is not charged to it.
-- The Python REPL tools (`native_coding`, `native_math`, `native_combined`, ReAct `python`) do not run on Baseten: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox, so they run in the environment's process on the training host. Set `HALO_SANDBOX_REPL=1` to run them on Baseten.
+- The Python REPL tools (`native_coding`, `native_math`, `native_combined`, ReAct `python`, and `qa_search`'s `python` under `include_python_tools`) do not run on Baseten: the flag does not set `HALO_SANDBOX_REPL`, since each of their calls would create a sandbox, so they run in the environment's process on the training host. Set `HALO_SANDBOX_REPL=1` to run them on Baseten.
 - The API key only mints a 2-hour sandbox access token, renewed after 90 minutes. Sandbox calls carry the token; the key is never logged.
 
 **Sandbox limit**
@@ -203,7 +203,7 @@ A Baseten sandbox keeps its outbound network, so a program can fetch from the in
 |---|---|
 | A connection error, 429 or 5xx on a call that runs no program | Nothing if a retry succeeds (`max_retries` 4, exponential backoff honoring `Retry-After`), otherwise `error` |
 | 429 or 5xx on the call that runs the program | `error`; the call is not sent again, so a program never runs twice |
-| The service does not answer within the deadline (run timeout + compile timeout + 30 s + `request_overhead`) | `error`; the call is not sent again, so a program never runs twice |
+| The service does not answer within the deadline (run timeout + 30 s + `request_overhead`, plus the compile timeout for a compiled language) | `error`; the call is not sent again, so a program never runs twice |
 | A success answer whose body is not the JSON object the API documents | `error`; a sandbox the call created or ran in is deleted |
 | Baseten deleted the sandbox (`idle_ttl`, default 10 minutes idle) | `error` once; the next call creates a new sandbox. A session that only ran programs continues empty; one that had written a file with `write_file` raises `SandboxInfraError` on every later call |
 
@@ -238,7 +238,7 @@ sandbox = build_sandbox(backend="bubblewrap")   # args beat HALO_SANDBOX_*
 result = sandbox.run("print(input())", stdin="hi\n", language="python", timeout=15.0)
 ```
 
-`run()` is one-shot: a throwaway working directory, so a compiled program rebuilds every call. On `local` / `bubblewrap` a session keeps the directory across calls; a `remote` session resends only what `write_file` wrote and rebuilds every call:
+`run()` is one-shot: a throwaway working directory, so a compiled program rebuilds every call. On `local` / `bubblewrap` a session keeps the directory across calls, and on `modal` / `baseten` it keeps it while its sandbox lives; a `remote` session resends only what `write_file` wrote and rebuilds every call:
 
 ```python
 with sandbox.open_session() as session:
@@ -319,7 +319,7 @@ Frequent faults bias the batch: the episodes that call the sandbox most drop mos
 | `cpp` | `c++`, `cxx`, `cc` | `g++ -O2 -pipe -std=c++17` | `./main` |
 | `c` | — | `gcc -O2 -pipe -std=c11` | `./main` |
 
-`SandboxExecutor.toolchain(language)` describes how a backend builds or runs a language (compile flags, `CPython 3.12`) for a tool description to name; `remote` returns nothing.
+`SandboxExecutor.toolchain(language)` describes how a backend builds or runs a language (compile flags, `CPython 3.12`) for a tool description to name; `remote`, `modal` and `baseten` return nothing.
 
 ## Limits
 

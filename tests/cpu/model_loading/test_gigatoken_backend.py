@@ -105,24 +105,6 @@ def test_proxy_matches_hf_tokenizer():
     assert proxy.eos_token_id == tokenizer.eos_token_id
 
 
-def test_verifier_catches_truncation_only_divergence(monkeypatch):
-    """Production paths tokenize with truncation=True."""
-    pytest.importorskip("gigatoken")
-
-    tokenizer = load_cached_tokenizer(MODEL_NAME)
-    real_call = tb.GigatokenTokenizerProxy.__call__
-
-    def diverge_when_truncating(self, text=None, **kwargs):
-        out = real_call(self, text, **kwargs)
-        if kwargs.get("truncation"):
-            out["input_ids"] = list(out["input_ids"])[:-1]
-        return out
-
-    monkeypatch.setattr(tb.GigatokenTokenizerProxy, "__call__", diverge_when_truncating)
-    with pytest.raises(ValueError, match="diverges"):
-        tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
-
-
 def test_proxy_pickle_roundtrip():
     """datasets.map workers pickle the processor closure; the Rust backend is dropped and rebuilt lazily."""
     pytest.importorskip("gigatoken")

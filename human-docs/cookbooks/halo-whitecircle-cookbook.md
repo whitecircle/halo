@@ -21,6 +21,9 @@ every reply: a security set, a quality set and a repetition check. Two recipes r
 
 ## 1. Prepare the prompts
 
+Run steps 1 and 2 in the [training container](README.md#start-the-training-container), from the repo root, where
+the recipes read `data/baxbench/train.jsonl`.
+
 ```bash
 halo run prepare-baxbench-prompts --output-dir data/baxbench
 ```
@@ -66,9 +69,10 @@ rewards:
     policies: [<id>]
 ```
 
-Paste it into the recipe and keep or change each term's `weight`. A term with `policies:` scores the fraction of
-its policies the completion did not violate, and reads only its own: another term's policy on the same reply costs
-it nothing. A term with neither `policies:` nor `checklist:` scores 1 unless any policy flags the completion.
+Copy each term's `environment_id` and `policies` into the recipe's `rewards:` block, and `region` when the tool prints
+one. Keep or change the `weight` and `max_concurrency` the recipe sets on each term. A term with `policies:` scores
+the fraction of its policies the completion did not violate, and reads only its own: another term's policy on the
+same reply costs it nothing. A term with neither `policies:` nor `checklist:` scores 1 unless any policy flags the completion.
 Rerunning the tool reuses each policy whose rules match the file and replaces one whose rules changed.
 
 ### A checklist term
@@ -96,18 +100,21 @@ one fault trips one item.
 
 ## 3. Train
 
-Start the vLLM server on GPU 0:
+On the host, run the setup in [Serve from the host](README.md#serve-from-the-host) once, then start the vLLM server
+on GPU 0:
 
 ```bash
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 VLLM_CUDA_DEVICES=0 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
 
-For Gemma, set `VLLM_MODEL=google/gemma-4-26B-A4B-it`. A server launched outside compose starts outside a checkout
-of this repo: from a directory holding the repo's `halo/` package, its weight sync imports that package in place of
-the image's own and fails at the first sync.
+For Gemma, set `VLLM_MODEL=google/gemma-4-26B-A4B-it`. If you launch a server without compose, start it from a
+directory outside this repo's checkout. From a directory that holds the repo's `halo/` package, its weight sync
+imports that package in place of the image's own and fails at the first sync.
 
-Then, in the [training container](README.md#start-the-training-container):
+Give the trainer the server's NCCL transport, or the weight sync hangs at its first collective
+([Before a GRPO run](README.md#before-a-grpo-run)). Then, in the
+[training container](README.md#start-the-training-container):
 
 ```bash
 # Qwen3-4B: one trainer GPU
@@ -118,6 +125,10 @@ WHITECIRCLE_API_KEY=wc-... CUDA_VISIBLE_DEVICES=1 \
 WHITECIRCLE_API_KEY=wc-... CUDA_VISIBLE_DEVICES=1,2 \
   halo launch grpo/online examples/grpo/online/whitecircle/gemma4-26b-a4b-code-whitecircle.yaml -n 2
 ```
+
+The recipes set `save_strategy: "no"`, so a run as shipped saves no checkpoint. Add
+`--save_strategy=steps --save_steps=200` to keep the trained model, which lands in `checkpoint-200` under the recipe's
+`output_dir`.
 
 The launch probe checks a one-line conversation against every term first, so a wrong key, environment or
 policy id fails before the first step. Each term logs its reward as `rewards/<name>/mean`, `whitecircle/<name>/flagged`
@@ -139,7 +150,7 @@ every reply.
 
 | | Qwen3-4B base | Qwen3-4B trained | Gemma 4 base | Gemma 4 trained |
 |---|---|---|---|---|
-| **Replies with a security violation** (temperature 1.0) | 28.1 % | **20.3 %** | 12.8 % | **8.7 %** |
+| Replies with a security violation (temperature 1.0) | 28.1 % | 20.3 % | 12.8 % | 8.7 % |
 | Replies with a security violation (greedy) | 32.5 % | 20.0 % | 11.3 % | 7.5 % |
 | SQL injection | 7 % | 5 % | 5 % | 4 % |
 | OS command injection | 4 % | 1 % | 3 % | 1 % |

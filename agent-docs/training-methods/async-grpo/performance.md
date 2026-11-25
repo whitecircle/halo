@@ -1,8 +1,10 @@
 # Memory and Throughput
 
-Async GRPO is rollout-bound at the step level and logits-bound inside the training forward.
+An async GRPO step is usually limited by generation, and its training forward's memory by the logits plane.
 
-## The logits wall
+<a id="the-logits-wall"></a>
+
+## The logits plane
 
 TRL's GRPO computes per-token log-probs from a full `[B, T, vocab]` logits tensor. At gpt-oss's ~201k vocab, a 24k-token trajectory is ~9 GiB of bf16 logits, roughly doubled by the log-softmax saved for the backward.
 
@@ -21,10 +23,10 @@ The estimate is a floor: it covers one forward chunk, a single-row fallback traj
 
 ## Chunked log-probs
 
-`use_chunked_grpo_logprobs: true` (default off) removes the wall: log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul (`halo/kernels/head_logprobs.py`, driven by `halo/trainers/grpo/logprob_scoring.py`), so peak follows the tile size. Every code-contests recipe sets it; online and offline GRPO take the same flag.
+`use_chunked_grpo_logprobs: true` (default off) removes the logits plane: log-probs come from the backbone's `last_hidden_state` through a chunked (sequence × vocab) matmul (`halo/kernels/head_logprobs.py`, driven by `halo/trainers/grpo/logprob_scoring.py`), so peak follows the tile size. Every code-contests recipe sets it; online and offline GRPO take the same flag.
 
 - **Precision.** Logits and log-probs stay fp32 (the backward takes bf16 operands, fp32 accumulation), within 5e-3 nats of an fp64 reference. A caller's autocast is off inside the sweep, so fp32 activations (QLoRA's) take fp32 head GEMMs in both directions, on the CUDA cores. The full path rounds logits to bf16, and so do both engines by default: on one hidden state that is 0.014 to 0.035 nats mean absolute by family (0.006 to 0.016 on tokens above p 0.1), with signed means of at most 0.005, and up to 0.08 to 0.20 nats at the largest logits ([fp32 heads on the engines](../../infrastructure/rollout-servers.md#throughput)).
-- **Cost.** A recompute backward at about the full path's cost. Measured on 1.1.0, whose tiles ran eagerly: Qwen3-8B head at 8k tokens, 51 ms forward+backward on a B300; offline GRPO on 8× B300, Qwen3-8B at 8,192 tokens 18,367 tok/s/GPU against 19,266 on full logits, gpt-oss-20b EP8 at 4,096 tokens 9,042 against 8,980. `tests/gpu/profiling/benchmark_head_logprobs.py` times the head alone at the Qwen3-8B, gpt-oss-20b and Gemma 4 26B-A4B shapes, a cold compile included.
+- **Cost.** A recompute backward at about the full path's cost. Measured on 1.1.0, whose tiles ran eagerly: Qwen3-8B head at 8k tokens, 51 ms forward+backward on a B300; offline GRPO on 8 B300s, Qwen3-8B at 8,192 tokens 18,367 tokens/s per GPU against 19,266 on full logits, gpt-oss-20b `ep8` at 4,096 tokens 9,042 against 8,980. `tests/gpu/profiling/benchmark_head_logprobs.py` times the head alone at the Qwen3-8B, gpt-oss-20b and Gemma 4 26B-A4B shapes, a cold compile included.
 - **Support.** FSDP2, ep1/EP and attention-only TP. A multimodal batch takes the full path. A PEFT adapter on `lm_head` raises at the first chunked forward.
 - **Candidate targets.** `targets` may also be `(..., m)`: column 0 the sampled token, the rest the sampler's candidate ids, each negative id masked (log-prob `-inf`, no gradient). The `m` log-probs of a position share its one `log Z`, the forward gathers them per vocab tile and the backward scatter-adds their gradients with the softmax term weighted by their sum, so no `[rows, vocab]` plane or `[rows, m, vocab]` one-hot exists. The form compiles its own forward and backward graph at its first call, which a run with `score_centering_top_k` makes at construction ([Score centering](objective.md#score-centering)).
 - **Compiled tiles.** On CUDA everything a tile does after its GEMM runs as one `torch.compile`d graph per direction: the head transform, the online softmax, the target pick and the entropy forward; the softmax gradient, already in the GEMM dtype, backward. The compile is `fullgraph` with dynamic shapes, in-process on one compile thread, under inductor's `deterministic` mode, so ranks that see the same tiles (TP and ETP replicas) and reruns get the same kernels. A compile failure raises. `TORCHDYNAMO_DISABLE=1` runs the same tile functions eagerly, at a few 256 MiB tiles more peak memory and more memory traffic, and turns off every other `torch.compile` in the process with them, FlexAttention's included.
@@ -34,7 +36,7 @@ The sweep applies the family's head transform (Gemma's softcap, Cohere's `logit_
 
 Under FA4, at `per_device_train_batch_size: 1`, or on an offline GRPO [row-position family](../grpo/offline.md#row-positions), rows are trimmed to their real span before the backbone forward, one forward per row, and one head sweep then covers every row's real completion tokens.
 
-One forward per row means one backward recomputes each checkpointed decoder layer once per row. FSDP2's hooks catch only one of those recomputes, so the rest are reduced after the backward, by torch's final callback for a two-layer ZeRO-2 unit and by the trainer for a one-layer group: one extra reduce-scatter per decoder-layer shard group per microbatch, the same size as the one FSDP2 already issues but exposed after the backward, or one per window under `fsdp_defer_grad_sync`. Until the backward returns, every layer it has recomputed twice stays gathered with an unsharded gradient, ZeRO-3 included ([Layers recomputed more than once per backward](../../parallelism/data-parallelism.md#layers-recomputed-more-than-once-per-backward)). With one EP group the experts' divide waits for the optimizer step for the same reason ([Gradient synchronization](../../parallelism/expert-parallelism.md#gradient-synchronization)).
+One forward per row means one backward recomputes each checkpointed decoder layer once per row. Each forward registers FSDP2's post-backward hook, so every row's gradient is reduce-scattered inside the backward: one reduce-scatter per decoder-layer shard group per row, overlapping the backward, or one per window under `fsdp_defer_grad_sync` ([Layers recomputed more than once per backward](../../parallelism/data-parallelism.md#layers-recomputed-more-than-once-per-backward)). With one EP group the experts' divide waits for the optimizer step ([Gradient synchronization](../../parallelism/expert-parallelism.md#gradient-synchronization)).
 
 ## Context budget
 
@@ -50,14 +52,14 @@ One turn's reasoning counts once, not `max_turns` times (twice under `carry_reas
 
 ## Throughput levers
 
-Each step is generate → train → NCCL sync, serial on one server unless it prefetches, so idle trainer GPUs during generation are expected there. In priority order:
+Each step is NCCL sync → generate → train, serial on one server unless it prefetches, so idle trainer GPUs during generation are expected there. In priority order:
 
 1. **Prefetch**, the only way to overlap generation with training. It is on by default with two or more servers; a single server needs `enable_prefetch: true`. At the default `prefetch_depth: 1`, **step time = sync + max(round, update)**, at one step of IS-corrected staleness, and the servers drain at each round's tail while its longest episodes finish. `prefetch_depth: 2` collects the next round beside it to fill that tail, at the cost of one more step of staleness and of engine KV ([Prefetch](setup.md#multiple-servers-and-prefetch)).
 2. **Saturate the servers.** The optimizer step's row count sets the rollouts in flight; `max_concurrent_rollouts` only throttles them. Grow the batch with `gradient_accumulation_steps` (no per-forward memory cost), then raise the cap to match. `Waiting: > 0` or timeouts means you overshot.
 3. **Speed generation.** Server-side levers are on [Rollout Servers](../../infrastructure/rollout-servers.md#throughput). Trainer-side, keep `rollout_max_tokens` and `rollout_max_thinking_tokens` no larger than the task needs; `sync_weights_every_n_steps > 1` amortizes the sync.
 4. **Cut `max_turns`.** Turns are sequential, so halving them roughly halves rollout time. If `episode/turns` is pinned at the cap, raise it; well below, lower it.
 
-`nvidia-smi dmon`, `EfficiencyCallback` or `async/prefetch_hit_rate` shows which phase bounds the step ([Prefetch](setup.md#multiple-servers-and-prefetch)).
+`nvidia-smi dmon`, [`log_phase_times`](monitoring.md#phase-times) or `async/prefetch_hit_rate` shows which phase bounds the step ([Prefetch](setup.md#multiple-servers-and-prefetch)).
 
 ## Length-ordered micro-batches
 
@@ -93,7 +95,7 @@ Online GRPO only. The rollout hands each rank a contiguous slice of the round, s
 
 - **Objective.** Row-mean and token-global losses (`grpo`, `sapo`, `dr_grpo`, `luspo`, `dapo`, `cispo`) sum the same rows whichever rank holds them, and every rank keeps its row count, so the loss and the gradient equal the unbalanced round's. Other losses, `top_entropy_quantile < 1`, `entropy_coef != 0` and misaligned accumulation are refused, as under the [length-ordered deal](#length-ordered-micro-batches).
 - **Refusals.** TP and ETP (the group's ranks share one batch) and a single rank. SDPG deals: its teacher prompts are built before the deal and move with their rows, and a row weighs its prompt, its teacher prompt and the completion twice (once per forward). A round with an image tensor on any rank raises on every rank: only text rows move.
-- **Cost.** The gather holds one row tensor across the world at a time, so its peak is the world's rows of the widest key, tens of MiB per 1,000 rows of 16k tokens. It adds no step to rounds it leaves in place.
+- **Cost.** The gather holds one row tensor across the world at a time, so its peak is the world's rows of the widest key, about 125 MiB per 1,000 rows where that key is 16k tokens wide (int64 ids, 8 B a token). It adds no step to rounds it leaves in place.
 - **Environmental GRPO** does not take the knob: its rows are built per rank from that rank's episodes, with trajectory-keyed diagnostics, routing masks and groups kept rank-local, none of which follows a row to another rank.
 
 ## Weight from the loss forward
@@ -115,7 +117,7 @@ The loss forward must score exactly once with entropy, and TRL must read the wei
 
 ## Host work per step
 
-The loss and no-grad loops run once per row at `per_device_train_batch_size: 1`, so a host read or collective inside them recurs 32 or more times per optimizer step, each draining the launch queue the next op was queued behind. A sync only costs the overlap between the host launching ahead and the device still running, so the gain is bounded by the smaller of the loop's launch time and its device time; on EP lanes DeepEP's own host reads inside each layer already drain the stream. [`log_phase_times`](monitoring.md#phase-times) shows where a step goes.
+The loss and no-grad loops run once per row at `per_device_train_batch_size: 1`, so a host read inside them (a collective included when the host reads its result) recurs 32 or more times per optimizer step, each draining the launch queue the next op was queued behind. A sync only costs the overlap between the host launching ahead and the device still running, so the gain is bounded by the smaller of the loop's launch time and its device time; on EP lanes DeepEP's own host reads inside each layer already drain the stream. [`log_phase_times`](monitoring.md#phase-times) shows where a step goes.
 
 - **Row spans.** The dense path trims each row to its attended span, which takes one device-to-host copy of the mask. The no-grad pass reads the spans of its whole batch once, not once per row chunk, and under routing replay the replay layout and the scorer share that read. The round's build also reads them once and attaches them as `row_spans`, a host table riding TRL's shuffle, split and the length-ordered deal with the other row-aligned keys, so no loss forward copies a mask. The environmental trainer's no-grad capture (`step_batch`) still reads the spans once per call. Every loss forward recomputes its micro-batch's spans on the device and tallies disagreements without a host read; the stash is always on where rows forward densely and no TP or ETP group exists (no knob), and the window's last micro-step reads the tally (one all-reduce and one host read per optimizer step) and raises on every rank if any row read spans built from another mask, naming the stage to rebuild after (`_with_row_spans`). Under TP and ETP each micro-batch is re-broadcast from the group leader, so the table is not attached and each forward reads its own spans (logged once at startup).
 - **Image consensus.** A composite's scoring forwards agree across ranks whether any batch carries images, since mixed full and chunked paths would deadlock FSDP2. The environmental trainer's batches are text-only, so its scoring skips that all-reduce and host read (a modality input reaching it raises on that rank alone, a code-invariant bug trap); online GRPO and SDPG keep one per scoring forward.
@@ -124,10 +126,10 @@ TRL's loss forward reduces six metrics across the ranks per micro-step (entropy,
 
 ## Long trajectories
 
-A row's training cost grows with its length as attention FLOPs do, and its memory linearly. The update pass on 8 B300s,
+A row's attention FLOPs per token grow linearly with its length, so its training cost per token grows with its length too, and its memory grows linearly. The update pass on 8 B300s,
 one row per micro-step (4 per rank), chunked log-probs and gradient checkpointing on:
 
-| Row tokens | Qwen3-8B FSDP2, FA4: s per 1k loss tokens | Qwen3-8B, FA2 | Qwen3.5-35B-A3B EP1 ZeRO-3, sdpa | Peak GiB, 8B / 35B |
+| Row tokens | Qwen3-8B FSDP2, FA4: s per 1k loss tokens | Qwen3-8B, FA2 | Qwen3.5-35B-A3B `ep1`, ZeRO-3 analog, sdpa | Peak GiB, 8B / 35B |
 |---|---:|---:|---:|---:|
 | 16k | | 0.261 | 0.193 | 17.0 / 32.5 |
 | 32k | | 0.368 | 0.202 | 25.6 / 38.9 |
@@ -158,7 +160,7 @@ For a new model, environment or GPU, size in order:
 - **Timeouts from the per-turn cap**, the turn's total ([Reasoning cap](reasoning.md#reasoning-cap)): `rollout_max_tokens`, or the engine's reasoning cap plus `rollout_max_answer_tokens` where that is smaller.
     - `request_timeout ≥ 2 × cap ÷ speed(n_peak)` (default `120`).
     - `episode_timeout ≥ min(max_turns × cap, rollout_max_episode_tokens) ÷ speed(n_peak) + tool time` (default `1200`); over the NCCL watchdog it raises at startup.
-- **KV capacity.** bf16 KV per token = `2 × full-attention layers × kv_heads × head_dim × 2 B`, 20 KB on Qwen3.6-35B-A3B. Check `n_peak × mean context × that` against the pool the server reports at startup.
+- **KV capacity.** bf16 KV per token = `2 × full-attention layers × kv_heads × head_dim × 2 B`, 20,480 B on Qwen3.6-35B-A3B. Check `n_peak × mean context × that` against the pool the server reports at startup.
 - **Step time.** The round is the batch's slowest episode. The update is `per-rank episodes × per-episode train time`, read off a short run, and hides inside the round while shorter.
 - **Serving against training.** A trainer GPU absorbs about `3600 ÷ per-episode train time` episodes per hour. Keep the two within 2×: roughly one serving GPU per trainer GPU, each running one TP=1 engine while the model and its KV fit.
 
@@ -169,4 +171,4 @@ Worked shape, the 4-rank code-contests recipe (Qwen3.6-35B-A3B, 2 servers, `grad
 | Episodes per step | 96 (12 prompts), 48 per server; an eval round (`eval_rollout_batch_size: 50`) opens with 100 per server |
 | Per-turn cap | The 30,000-token `rollout_max_tokens`. The engine closes a normal turn's reasoning at 21,808 at every level, leaving the 8,192-token answer room |
 | Timeouts | `request_timeout: 1200`, `episode_timeout: 2700` |
-| KV | 48 × 13k × 20 KB ≈ 12 GB at a 13k mean context; 48 × 30k × 20 KB ≈ 29 GB once every request holds a whole turn; about twice both in an eval round |
+| KV | 48 × 13k × 20,480 B ≈ 13 GB at a 13k mean context; 48 × 30k × 20,480 B ≈ 29 GB once every request holds a whole turn; about twice both in an eval round |

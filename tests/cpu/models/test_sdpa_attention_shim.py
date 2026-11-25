@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """``modeling_bailing_moe_v3`` (Ling 3.0) copies HF's ``eager_attention_forward`` without its dispatch, so
-``attn_implementation: sdpa`` still materializes the ``[B, H, S, S]`` score plane, ~190 GiB on a packed 80k row."""
+``attn_implementation: sdpa`` still materializes the ``[B, H, S, S]`` score plane: 190 GiB in bf16 for one 80k-token
+row at 16 heads, before its fp32 softmax copy."""
 
 import pathlib
 import sys

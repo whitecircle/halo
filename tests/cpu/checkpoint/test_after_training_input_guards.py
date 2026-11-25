@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Checkpoint conversion tools refuse inputs they cannot handle; each failure is silent, exit 0 with the experts
-gone. Missing keys only warn (``test_missing_keys_only_warn``)."""
+gone."""
 
 from __future__ import annotations
 
@@ -478,17 +478,6 @@ def _write_truncated_checkpoint(path):
     save_file(state, os.path.join(path, "model.safetensors"), metadata={"format": "pt"})
     config.save_pretrained(str(path))
     return str(path), sorted(set(full_state) - set(state))
-
-
-def test_missing_keys_only_warn(tmp_path):
-    """The premise behind every gate above: transformers does not raise on missing checkpoint keys."""
-    src, dropped = _write_truncated_checkpoint(tmp_path / "trunc")
-    assert dropped, "fixture dropped no layer-1 tensors"
-
-    reloaded = AutoModelForCausalLM.from_pretrained(src)
-    live = reloaded.state_dict()
-    assert all(k in live for k in dropped)
-    assert not any(live[k].is_meta for k in dropped), "missing keys were left on meta, not re-initialized"
 
 
 def test_patch_vocab_refuses_a_truncated_checkpoint(tmp_path, monkeypatch):

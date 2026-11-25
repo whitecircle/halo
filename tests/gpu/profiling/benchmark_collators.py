@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""Standard vs packing vs padding-free collators on variable-length data, where avg length << max_length exposes
-padding."""
+"""Standard vs packing vs padding-free collators on variable-length data. The trainer gets no collator, so every mode
+runs TRL's ``DataCollatorForLanguageModeling``, and standard pads each batch to its longest row, not to max_length."""
 
 import gc
 import sys
@@ -166,15 +166,11 @@ def run_collator_mode(
 def print_summary(all_results: list[dict], args, model_cfg: dict, avg_tokens: int):
     model_name = args.model_path or model_cfg["hf_name"]
     ep_size = getattr(args, "ep", 1)
-    padding_pct = (1.0 - args.avg_ratio) * 100
 
     print(f"\n{'=' * 80}")
     print("  COLLATOR COMPARISON")
     print(f"  Model: {model_name}")
-    print(
-        f"  EP={ep_size}, max_length={args.seq}, avg_tokens≈{avg_tokens} "
-        f"({args.avg_ratio:.0%} of max → {padding_pct:.0f}% padding waste)"
-    )
+    print(f"  EP={ep_size}, max_length={args.seq}, avg_tokens≈{avg_tokens} ({args.avg_ratio:.0%} of max_length)")
     print(f"{'=' * 80}")
 
     print(f"\n  {'Collator':<14} {'MFU%':>6} {'TFLOPS':>7} {'TPS/GPU':>8} {'Step(s)':>8} {'Mem GB':>7}")
@@ -233,7 +229,6 @@ def main():
     model_name = args.model_path or model_cfg["hf_name"]
     ep_size = args.ep
     avg_tokens = int(args.seq * args.avg_ratio)
-    padding_pct = (1.0 - args.avg_ratio) * 100
 
     if rank == 0:
         print(f"\n{'#' * 70}")
@@ -241,7 +236,7 @@ def main():
         print(f"  Model: {model_name} ({model_cfg['full_params'] / 1e9:.1f}B params)")
         print(f"  EP={ep_size}, max_length={args.seq}, batch_size={args.batch_size}")
         print(f"  Avg tokens/sample: ~{avg_tokens} ({args.avg_ratio:.0%} of max_length)")
-        print(f"  Padding waste (standard): ~{padding_pct:.0f}%")
+        print("  Standard pads each batch to its longest row, not to max_length")
         print(f"  Steps={args.steps}, Warmup={args.warmup}")
         print(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
         print(f"{'#' * 70}")

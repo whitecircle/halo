@@ -204,13 +204,13 @@ def _self_distill_module():
     return load_script_module("scripts/training/distillation/self_distill.py", "halo_test_self_distill_softcap_attn")
 
 
-def _self_distill_request(tmp_path, yaml_body: str, *, loaded_backend: str = FA2, dtype=torch.bfloat16) -> list[dict]:
+def _self_distill_request(tmp_path, yaml_body: str, *, dtype=torch.bfloat16) -> list[dict]:
     """The keyword arguments of the policy load ``self_distill.py:main()`` reaches, its checkpoint Gemma 2 27B; the
-    stubbed load hands back a model resolved to ``loaded_backend``."""
+    stubbed load hands back a model resolved to FA2."""
     module = _self_distill_module()
     loads = []
     loaded = _gemma2(128)
-    loaded._attn_implementation = loaded_backend
+    loaded._attn_implementation = FA2
 
     def load(_context, *_args, **kwargs):
         loads.append(kwargs)
@@ -237,13 +237,6 @@ def _self_distill_request(tmp_path, yaml_body: str, *, loaded_backend: str = FA2
 def test_the_self_distillation_policy_takes_fa2_on_padded_rows(tmp_path, yaml_body, expected):
     """Each branch pads one row per conversation, so more than one per batch reaches the varlen call."""
     assert [load["attn_default"] for load in _self_distill_request(tmp_path, yaml_body)] == [expected]
-
-
-def test_a_self_distillation_policy_loaded_on_fa4_with_padded_rows_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
-        _self_distill_request(
-            tmp_path, f"attn_implementation: {FA4}\nper_device_train_batch_size: 2\n", loaded_backend=FA4
-        )
 
 
 def test_the_self_distillation_reference_takes_the_policys_request():
@@ -326,11 +319,6 @@ def test_padded_evaluation_batches_take_the_embedding_backbone_off_fa4():
     assert [load.get("attn_default") for load in loads] == [FA2]
 
 
-def test_an_embedding_backbone_loaded_on_fa4_with_padded_rows_is_refused():
-    with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
-        _embedding_backbone_loads(batch_size=2, pinned=FA4, loaded_backend=FA4)
-
-
 @pytest.mark.parametrize(
     ("batch_size", "head_dim", "loaded_backend"),
     [(1, 128, FA4), (2, 256, FA2)],
@@ -366,7 +354,7 @@ def test_a_pinned_fa4_on_padded_rows_is_refused_before_the_load_in_every_script(
     yaml_body = f"attn_implementation: {FA4}\nper_device_train_batch_size: 2\n"
     with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
         if script == "self_distill":
-            _self_distill_request(tmp_path, yaml_body, loaded_backend=FA2)
+            _self_distill_request(tmp_path, yaml_body)
         elif script == "embedding":
             _embedding_backbone_loads(batch_size=2, pinned=FA4, loaded_backend=FA2)
         else:

@@ -316,15 +316,16 @@ def run_resume(ctx, source: str, args) -> dict:
 
 
 class _BlockClock:
-    """Seconds per block kind over one reentrant step, off a pre-hook on every block: a forward's interval ends at the
-    next block's start, and a recompute runs its block's own graph back before the next recompute starts. Each stamp
-    syncs, so only the shares are read off this step, never its total."""
+    """Seconds per block kind over one reentrant step, off a pre-hook on every block's first norm, inside the
+    checkpointed body the block's own hooks run outside of: a forward's interval ends at the next block's start, and a
+    recompute runs its block's own graph back before the next recompute starts. Each stamp syncs, so only the shares
+    are read off this step, never its total."""
 
     def __init__(self, blocks, final_norm):
         self.seconds: dict[str, float] = {}
         self.block_starts = 0
         self._open: tuple[str, float] | None = None
-        self._handles = [block.register_forward_pre_hook(self._block_hook(block.block_type)) for block in blocks]
+        self._handles = [block.norm.register_forward_pre_hook(self._block_hook(block.block_type)) for block in blocks]
         self._handles.append(final_norm.register_forward_pre_hook(lambda _module, _args: self.stamp("head")))
 
     def _block_hook(self, kind: str):

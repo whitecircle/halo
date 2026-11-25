@@ -34,7 +34,7 @@ gradient_accumulation_steps: 8
 learning_rate: 5.0e-06             # the shipped recipes' value; the config default is 1e-6
 max_length: 4096
 max_prompt_length: 2048
-gradient_checkpointing: false      # a 2 × 4,096 pair holds ~33 GB of activations
+gradient_checkpointing: false
 output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 ```
 

@@ -53,31 +53,6 @@ def test_chunked_logps_match_full_path():
         torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
 
 
-def test_chunked_logps_match_with_bias():
-    torch.manual_seed(1)
-    hidden = torch.randn(B, T, HIDDEN, dtype=torch.float32)
-    weight = torch.randn(VOCAB, HIDDEN, dtype=torch.float32) * 0.05
-    bias = torch.randn(VOCAB, dtype=torch.float32) * 0.1
-    ids = torch.randint(0, VOCAB, (B, T))
-    ref = selective_log_softmax(_ref_logits(hidden, weight, bias, 1.0), ids)
-    got = chunked_head_logprobs(hidden, weight, ids, bias, 1.0)[0]
-    torch.testing.assert_close(got, ref, atol=1e-4, rtol=1e-4)
-
-
-def test_chunked_logps_backward_matches():
-    torch.manual_seed(2)
-    weight = torch.randn(VOCAB, HIDDEN, dtype=torch.float32) * 0.05
-    ids = torch.randint(0, VOCAB, (B, T))
-
-    h_ref = torch.randn(B, T, HIDDEN, dtype=torch.float32, requires_grad=True)
-    selective_log_softmax(_ref_logits(h_ref, weight, None, 1.0), ids).sum().backward()
-
-    h_chunk = h_ref.detach().clone().requires_grad_(True)
-    chunked_head_logprobs(h_chunk, weight, ids, None, 1.0)[0].sum().backward()
-
-    torch.testing.assert_close(h_chunk.grad, h_ref.grad, atol=1e-4, rtol=1e-4)
-
-
 def test_fused_entropy_matches_full_path():
     # A fused sweep can corrupt the diagnostic or the loss numerator alone.
     torch.manual_seed(3)

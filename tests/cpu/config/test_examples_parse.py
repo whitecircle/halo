@@ -102,6 +102,10 @@ def script_for(config: Path) -> str | None:
     return max(matches, key=lambda match: len(match[0]))[1]
 
 
+def example_id(config: Path) -> str:
+    return config.relative_to(EXAMPLES_ROOT).as_posix()
+
+
 ENV_GRPO_SCRIPT = "grpo/environmental.py"
 ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == ENV_GRPO_SCRIPT]
 
@@ -170,7 +174,7 @@ def _bf16_capable(monkeypatch):
 
 
 def test_examples_tree_is_not_empty():
-    """A glob that stops matching would make every parametrized case vanish silently."""
+    """A glob that stops matching would leave the sweeps over it looping nothing, and passing."""
     assert len(_EXAMPLES) > 50, f"expected the shipped examples tree, found {len(_EXAMPLES)} configs"
 
 
@@ -182,31 +186,34 @@ def test_every_example_is_mapped():
     )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
-def test_example_config_parses(config):
-    parser_for(script_for(config)).parse_yaml_file(str(config))
+def test_example_config_parses(subtests):
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            parser_for(script_for(config)).parse_yaml_file(str(config))
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
-def test_example_output_dir_is_repo_relative(config):
+def test_example_output_dir_is_repo_relative(subtests):
     """``/mnt`` is not guaranteed large, and only the repo-relative spelling is what ``.gitignore`` and ``make
     clean`` know about."""
-    output_dir = yaml.safe_load(config.read_text(encoding="utf-8"))["output_dir"]
-    assert not output_dir.startswith("/"), (
-        f"{config.name}: output_dir={output_dir!r} hardcodes an absolute host path — ship checkpoints/<run>"
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            output_dir = yaml.safe_load(config.read_text(encoding="utf-8"))["output_dir"]
+            assert not output_dir.startswith("/"), (
+                f"{config.name}: output_dir={output_dir!r} hardcodes an absolute host path — ship checkpoints/<run>"
+            )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
-def test_example_sets_no_key_that_changes_nothing(config):
+def test_example_sets_no_key_that_changes_nothing(subtests):
     """A line restating the parser's default reads as a choice and goes stale when the default moves; only
     ``_INTENT_KEYS`` may stand at it."""
-    noop = noop_keys(parser_for(script_for(config)), _load_yaml(str(config)))
-    idle = [key for key in noop if key not in _INTENT_KEYS]
-    assert not idle, (
-        f"{config.name} sets {idle} to what the parser gives them anyway: drop the lines, or add a key that states "
-        "the run's intent to _INTENT_KEYS"
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            noop = noop_keys(parser_for(script_for(config)), _load_yaml(str(config)))
+            idle = [key for key in noop if key not in _INTENT_KEYS]
+            assert not idle, (
+                f"{config.name} sets {idle} to what the parser gives them anyway: drop the lines, or add a key that "
+                "states the run's intent to _INTENT_KEYS"
+            )
 
 
 def test_a_cross_node_ep_example_exists():
@@ -216,29 +223,30 @@ def test_a_cross_node_ep_example_exists():
     )
 
 
-@pytest.mark.parametrize("config", _CROSS_NODE_EP_EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
-def test_cross_node_ep_example_fits_the_gin_dispatch_ceiling(config):
+def test_cross_node_ep_example_fits_the_gin_dispatch_ceiling(subtests):
     """Cross-node dispatch wedges above ``HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK``, so the dispatcher rejects a buffer
     past it. The larger of train and eval batch x ``max_length`` is the most one MoE forward can present."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    max_length = parsed_field(parsed, "max_length")
-    assert max_length, (
-        f"{config.name} declares cross-node EP but pins no max_length, leaving its per-rank token "
-        f"budget unknown until the model loads; set it at or below {GIN_MAX_TOKENS_PER_RANK}"
-    )
-    eval_rows = evaluation_batch_size(
-        SimpleNamespace(
-            per_device_eval_batch_size=parsed_field(parsed, "per_device_eval_batch_size"),
-            eval_strategy=parsed_field(parsed, "eval_strategy"),
-        )
-    )
-    tokens_per_rank = max(parsed_field(parsed, "per_device_train_batch_size"), eval_rows) * max_length
-    assert tokens_per_rank <= GIN_MAX_TOKENS_PER_RANK, (
-        f"{config.name} presents {tokens_per_rank} tokens/rank per MoE forward "
-        f"(the larger of its train and eval batch × max_length), over the validated cross-node ceiling "
-        f"{GIN_MAX_TOKENS_PER_RANK}. Lower either, or move the example to node-local EP "
-        f"(ep_scope: node), which dispatches over NVLink and is not bound by it."
-    )
+    for config in _CROSS_NODE_EP_EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            max_length = parsed_field(parsed, "max_length")
+            assert max_length, (
+                f"{config.name} declares cross-node EP but pins no max_length, leaving its per-rank token "
+                f"budget unknown until the model loads; set it at or below {GIN_MAX_TOKENS_PER_RANK}"
+            )
+            eval_rows = evaluation_batch_size(
+                SimpleNamespace(
+                    per_device_eval_batch_size=parsed_field(parsed, "per_device_eval_batch_size"),
+                    eval_strategy=parsed_field(parsed, "eval_strategy"),
+                )
+            )
+            tokens_per_rank = max(parsed_field(parsed, "per_device_train_batch_size"), eval_rows) * max_length
+            assert tokens_per_rank <= GIN_MAX_TOKENS_PER_RANK, (
+                f"{config.name} presents {tokens_per_rank} tokens/rank per MoE forward "
+                f"(the larger of its train and eval batch × max_length), over the validated cross-node ceiling "
+                f"{GIN_MAX_TOKENS_PER_RANK}. Lower either, or move the example to node-local EP "
+                f"(ep_scope: node), which dispatches over NVLink and is not bound by it."
+            )
 
 
 def test_an_unknown_key_is_rejected(tmp_path):

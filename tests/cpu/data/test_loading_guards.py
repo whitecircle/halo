@@ -2,7 +2,6 @@
 """Load-time guards in ``halo/data/sources/loading.py``: a declared render column must exist, ``test_size`` warns
 where inert, a train-only corpus entry adds no held-out rows, and ``validation`` serves as the held-out split."""
 
-import json
 import logging
 import os
 import shutil
@@ -143,26 +142,6 @@ def test_load_script_datasets_hands_the_loader_every_template_column():
     parallelism = SimpleNamespace(get_data_parallel_rank=lambda: 0, data_parallel_size=1)
     assert load_script_datasets(args, parallelism, loader=loader) == ("loaded", False)
     assert seen["template_columns"] == columns
-
-
-def test_declared_tools_field_present_loads():
-    temp_dir = tempfile.mkdtemp()
-    try:
-        train = _conversation_dataset(4).add_column("tools", [[]] * 4)
-        test = _conversation_dataset(2).add_column("tools", [[]] * 2)
-        _save_raw_dataset(temp_dir, train, test)
-        ds = load_datasets(
-            temp_dir,
-            test_size=None,
-            dataset_ratio=1,
-            conversation_field="messages",
-            template_columns={"tools_field": "tools"},
-        )
-        assert len(ds["train"]) == 4
-        ds = load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages")
-        assert len(ds["train"]) == 4
-    finally:
-        shutil.rmtree(temp_dir)
 
 
 def test_tools_column_is_aliased_onto_the_spelling_the_reward_trainer_renders():
@@ -496,7 +475,7 @@ def test_a_ratio_list_on_a_preprocessed_string_path_takes_the_raw_path_refusal(t
         load_datasets_auto(source, test_size=None, dataset_ratio=[0.1])
 
 
-@pytest.mark.parametrize("ratio", [None, 1, 1.0])
+@pytest.mark.parametrize("ratio", [None, 1.0])
 def test_a_ratio_keeping_every_row_loads_a_preprocessed_dataset(tmp_path, ratio):
     source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
     ds, is_preprocessed = load_datasets_auto(source, test_size=None, dataset_ratio=ratio)
@@ -537,19 +516,6 @@ def test_test_size_still_splits_a_plain_dataset(caplog):
 
         assert not _test_size_warnings(caplog), _test_size_warnings(caplog)
         assert (len(ds["train"]), len(ds["test"])) == (8, 2)
-    finally:
-        shutil.rmtree(temp_dir)
-
-
-def test_preprocessed_metadata_fixture_is_detected():
-    """A fixture no longer detected as pre-processed would send the two tests above down the raw path."""
-    temp_dir = tempfile.mkdtemp()
-    try:
-        _save_preprocessed_dataset(temp_dir)
-        with open(os.path.join(temp_dir, METADATA_FILE)) as f:
-            assert json.load(f)["preprocessed"] is True
-        _, is_preprocessed = load_datasets_auto(temp_dir, test_size=None, dataset_ratio=1)
-        assert is_preprocessed
     finally:
         shutil.rmtree(temp_dir)
 

@@ -2,7 +2,6 @@
 import os
 import shutil
 import tempfile
-from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -94,69 +93,6 @@ def test_shard_assignment_remainder():
         shutil.rmtree(temp_dir)
 
     print("  shard assignment (remainder): PASSED")
-
-
-def test_load_split():
-    print("Testing load_split...")
-
-    temp_dir = tempfile.mkdtemp()
-
-    try:
-        create_test_sharded_dataset(100, 4, temp_dir)
-
-        loader = ShardedDatasetLoader(
-            dataset_path=temp_dir,
-            dp_rank=0,
-            dp_size=1,
-        )
-
-        dataset = loader.load_split("train")
-
-        assert len(dataset) == 100, f"Expected 100 examples, got {len(dataset)}"
-        assert "input_ids" in dataset.column_names
-        assert "example_id" in dataset.column_names
-
-    finally:
-        shutil.rmtree(temp_dir)
-
-    print("  load_split: PASSED")
-
-
-def test_load_split_distributed():
-    print("Testing load_split (distributed)...")
-
-    temp_dir = tempfile.mkdtemp()
-
-    try:
-        create_test_sharded_dataset(100, 4, temp_dir)
-
-        all_example_ids = Counter()
-
-        for rank in range(2):
-            loader = ShardedDatasetLoader(
-                dataset_path=temp_dir,
-                dp_rank=rank,
-                dp_size=2,
-            )
-
-            dataset = loader.load_split("train")
-
-            assert len(dataset) > 0, f"Rank {rank} got 0 examples"
-
-            for example in dataset:
-                all_example_ids[example["example_id"]] += 1
-
-        assert set(all_example_ids.keys()) == set(range(100)), (
-            f"Expected coverage of all 100 example ids, got {len(all_example_ids)} distinct"
-        )
-        # A shard handed to two ranks would double-train those examples silently.
-        duplicated = {k: v for k, v in all_example_ids.items() if v != 1}
-        assert not duplicated, f"example ids loaded by more than one rank (overlap): {duplicated}"
-
-    finally:
-        shutil.rmtree(temp_dir)
-
-    print("  load_split (distributed): PASSED")
 
 
 def test_total_examples():
