@@ -83,7 +83,7 @@
 
   <footer>
     <p>
-      <span class="s">Each point is the median of 7 samples of back-to-back calls.</span>
+      <span class="s">Each value is the median of 7 samples of back-to-back calls.</span>
       <span class="s">The roof is the sustained rate of an 8192³ bf16 GEMM, and the memory line the rate of a copy, read plus write.</span>
     </p>
   </footer>
@@ -150,16 +150,16 @@
 
     return svg;
   };
-  const MARKS = {
-    device: (x, y) => svgEl("circle", { cx: x, cy: y, r: 5.5, fill: "var(--text)" }),
-    eager: (x, y) => svgEl("circle", { cx: x, cy: y, r: 5, fill: "var(--bg)", stroke: "var(--secondary)", "stroke-width": 1.75 }),
-  };
-  const rule = (attrs) => (svg) => svg.append(svgEl("line", { x1: 2, y1: 12, x2: 34, y2: 12, ...attrs }));
+  /** The two ceilings are the grey frame the rate sits under. */
+  const FRAME = "var(--secondary)";
+  /** One hue per way of timing the call. */
+  const HUES = { device: "var(--halo-blue)", eager: "var(--halo-violet)" };
+  const stroke = (x1, y1, x2, y2, hue) => (svg) => svg.append(svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2.5, "stroke-linecap": "round" }));
   const SWATCHES = {
-    device: (svg) => svg.append(MARKS.device(18, 12)),
-    eager: (svg) => svg.append(MARKS.eager(18, 12)),
-    memory: rule({ stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" }),
-    roof: rule({ stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" }),
+    device: stroke(2, 12, 34, 12, HUES.device),
+    eager: stroke(2, 12, 34, 12, HUES.eager),
+    memory: stroke(6, 22, 30, 2, FRAME),
+    roof: stroke(2, 12, 34, 12, FRAME),
     crossover: (svg) => svg.append(svgEl("line", { x1: 18, y1: 1, x2: 18, y2: 23, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" })),
   };
 
@@ -213,7 +213,7 @@
     const sx = (m) => plot.l + 24 + ((Math.log2(m) - first) / (last - first)) * (plot.r - plot.l - 48);
     const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
 
-    return { chart, plot, sx, add, height };
+    return { plot, sx, add, height };
   }
 
   /** Draws a panel's frame: gridlines and labels at the y ticks, x tick marks, its axis lines and its rotated title. */
@@ -236,28 +236,30 @@
     add("line", { x1: sx(crossover), x2: sx(crossover), y1: plot.t, y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
   }
 
+  /** Draws one line through `value(m)` at each of `ms`. */
+  function trace({ sx, add }, sy, ms, value, hue) {
+    add("polyline", { points: ms.map((m) => `${sx(m)},${sy(value(m))}`).join(" "), fill: "none", stroke: hue, "stroke-width": 2.5, "stroke-linejoin": "round", "stroke-linecap": "round" });
+  }
+
+  const sweep = points.map((q) => q.m);
+  const at = Object.fromEntries(points.map((q) => [q.m, q]));
+
   // The time panel: a linear axis from zero.
   {
     const p = panel("time", 400, 8, 8);
-    const { chart, plot, sx, add } = p;
+    const { plot } = p;
     const axis = niceAxis(Math.max(...points.flatMap((q) => [q.device, q.eager])) * 1.04);
     const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
     frame(p, axis.ticks, sy, "Time per call, µs");
-    add("polyline", { points: points.map((q) => `${sx(q.m)},${sy(q.device)}`).join(" "), fill: "none", stroke: "var(--text)", "stroke-width": 1.5 });
-
-    for (const q of points) {
-      chart.append(MARKS.eager(sx(q.m), sy(q.eager)));
-    }
-
-    for (const q of points) {
-      chart.append(MARKS.device(sx(q.m), sy(q.device)));
-    }
+    // The device line lies over the PyTorch one where the two times meet.
+    trace(p, sy, sweep, (m) => at[m].eager, HUES.eager);
+    trace(p, sy, sweep, (m) => at[m].device, HUES.device);
   }
 
   // The rate panel: a log axis over whole decades, on the same M axis, which it labels.
   {
     const p = panel("rate", 420, 8, 84);
-    const { chart, plot, sx, add, height } = p;
+    const { plot, sx, add, height } = p;
     const low = Math.floor(Math.log10(Math.min(...points.map((q) => q.rate))) + 1e-9);
     const high = Math.ceil(Math.log10(SUSTAINED_PEAK) - 1e-9);
     const sy = (v) => plot.b - ((Math.log10(v) - low) / (high - low)) * (plot.b - plot.t);
@@ -271,13 +273,8 @@
 
     // The ceiling over the sweep's range of M: the memory line up to the crossover, the roof past it.
     const steps = Array.from({ length: 97 }, (_, i) => 2 ** (first + ((last - first) * i) / 96));
-    const curve = (ms) => ms.map((m) => `${sx(m)},${sy(ceiling(m))}`).join(" ");
-    add("polyline", { points: curve([...steps.filter((m) => m < crossover), crossover]), fill: "none", stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" });
-    add("polyline", { points: curve([crossover, ...steps.filter((m) => m > crossover)]), fill: "none", stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" });
-
-    for (const q of points) {
-      chart.append(MARKS.device(sx(q.m), sy(q.rate)));
-    }
+    trace(p, sy, [...steps.filter((m) => m < crossover), crossover, ...steps.filter((m) => m > crossover)], ceiling, FRAME);
+    trace(p, sy, sweep, (m) => at[m].rate, HUES.device);
   }
 </script>
 </body>
