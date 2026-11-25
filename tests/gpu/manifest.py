@@ -599,6 +599,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_lowp_production.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_frozen_bank_fused_dequant.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "models/test_inkling2_relative_flex.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "models/test_inkling2_block_residual.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_param_buffer_cuda.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stage_once.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stream_safety.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),

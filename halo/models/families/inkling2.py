@@ -1,5 +1,6 @@
 """Inkling 2's patched forwards: the router at the run dtype, the compact relative logits
-``inkling2_relative_flex`` reads, and short convolutions whose taps stop at the start of each packed document."""
+``inkling2_relative_flex`` reads, short convolutions whose taps stop at the start of each packed document, and the block
+attention residual as plain matmuls."""
 
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ _TOPK_WEIGHT_NORM_EPS = 1e-20
 UPSTREAM_RELATIVE_LOGITS_FORWARD = inkling2_modeling.Inkling2RelativeLogits.forward
 UPSTREAM_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2ShortConvolution.forward
 UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2DynamicShortConvolution.forward
+UPSTREAM_BLOCK_ATTENTION_RESIDUAL_FORWARD = inkling2_modeling.Inkling2BlockAttentionResidual.forward
 
 _DECODER_LAYER_CLASSES = (inkling2_modeling.Inkling2SlidingDecoderLayer, inkling2_modeling.Inkling2FullDecoderLayer)
 
@@ -40,6 +42,19 @@ def _router_forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, to
     weights = scores.gather(1, indices)
     weights = weights / (weights.sum(dim=-1, keepdim=True) + _TOPK_WEIGHT_NORM_EPS)
     return logits, weights * self.routed_scaling_factor, indices
+
+
+def _block_attention_residual_forward(self, block_states, partial_block_states):
+    """Each position's queries attend over its block states. Upstream hands that to SDPA with every position an fp32
+    head of the hidden width, which selects the memory-efficient kernel, whose backward holds a gradient tile of a
+    whole query block per position: three times the peak of these two matmuls at Inkling-2-Small's width."""
+    stacked_states = torch.cat([block_states, partial_block_states.unsqueeze(-2)], dim=-2).float()
+    stacked_states = self.norm(stacked_states)
+    hidden_size = stacked_states.shape[-1]
+    queries = self.query.float().view(-1, hidden_size)
+    # [..., blocks, queries], normalized over the blocks
+    weights = (stacked_states @ queries.T * hidden_size**-0.5).softmax(dim=-2)
+    return (weights.transpose(-1, -2) @ stacked_states).unbind(-2)
 
 
 def _relative_logits_forward(self, relative_states, query_positions, key_positions):
@@ -199,7 +214,13 @@ def apply_inkling2_patches() -> None:
         ("self", "hidden_states", "dynamic_input", "past_key_values", "conv_mask", "kwargs"),
         "_dynamic_short_convolution_forward",
     )
+    verify_upstream_parameters(
+        UPSTREAM_BLOCK_ATTENTION_RESIDUAL_FORWARD,
+        ("self", "block_states", "partial_block_states"),
+        "_block_attention_residual_forward",
+    )
     patch_layer_forward(router, _router_forward)
+    patch_layer_forward(inkling2_modeling.Inkling2BlockAttentionResidual, _block_attention_residual_forward)
     patch_layer_forward(inkling2_modeling.Inkling2RelativeLogits, _relative_logits_forward)
     patch_layer_forward(inkling2_modeling.Inkling2ShortConvolution, _short_convolution_forward)
     patch_layer_forward(inkling2_modeling.Inkling2DynamicShortConvolution, _dynamic_short_convolution_forward)
