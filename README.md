@@ -100,7 +100,8 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     adapter records whether its run neutralized the attention sinks, and the streaming merge repeats it.
     A PEFT wrap that leaves no trainable adapter parameter is refused when the trainer is built.
   - **Docs:** [GPU Training Theory](agent-docs/reference/gpu-training-theory.md) is now a lecture for newcomers to
-    GPU training, with every number measured on a B300, specified or computed, and the scripts that reproduce it.
+    GPU training. Each number says where it comes from, and scripts under `tests/gpu/profiling/` reproduce most of
+    its B300 measurements.
   - **Also:** Transformers 5.23 and flash-linear-attention 0.6, DPO/KTO reference log-probs swept after the FSDP2
     wrap, SGLang turns requeued at a weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
