@@ -589,20 +589,18 @@ def test_every_mtp_spelling_rejects_a_live_tail(field):
         reject_unsupported_pp_model(model)
 
 
-@pytest.mark.parametrize("field", ["num_nextn_predict_layers"])
-def test_mtp_field_declared_but_not_built_is_accepted(field):
+def test_mtp_field_declared_but_not_built_is_accepted():
     """Several hub configs declare MTP tail layers as metadata while the load drops the weights."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
-    setattr(model.config, field, 3)
+    model.config.num_nextn_predict_layers = 3
     assert len(model.model.layers) == model.config.num_hidden_layers, "premise: no tail was built"
     reject_unsupported_pp_model(model)
 
 
-@pytest.mark.parametrize("field", ["num_nextn_predict_layers"])
-def test_mtp_field_declared_at_zero_is_accepted(field):
+def test_mtp_field_declared_at_zero_is_accepted():
     """The gate reads the count, since Ling-mini-2.0 ships the field at 0."""
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
-    setattr(model.config, field, 0)
+    model.config.num_nextn_predict_layers = 0
     reject_unsupported_pp_model(model)
 
 

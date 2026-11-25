@@ -151,16 +151,11 @@ def test_expert_lora_without_expert_tp_still_folds():
     )
 
 
-@pytest.mark.parametrize("expert_tp_size", [2])
-@pytest.mark.parametrize("expert_lora", [True])
-def test_guard_raises_only_on_a_real_fold_under_expert_tp(expert_tp_size, expert_lora):
-    layer = _EPLayerStub(expert_tp_size=expert_tp_size, expert_lora=expert_lora)
+def test_guard_raises_on_a_real_fold_under_expert_tp():
+    layer = _EPLayerStub(expert_tp_size=2, expert_lora=True)
 
     layer.gather_expert_state_dict(merge_lora=False)
-    if expert_lora and expert_tp_size > 1:
-        with pytest.raises(NotImplementedError):
-            layer.gather_expert_state_dict(merge_lora=True)
-    else:
+    with pytest.raises(NotImplementedError):
         layer.gather_expert_state_dict(merge_lora=True)
 
 

@@ -78,13 +78,13 @@ print("FAILURES:" + "|".join(failures))
 
 def test_real_toolkit_applier_rejections_reach_the_caller(subtests):
     """``cross_entropy`` and ``fused_linear_cross_entropy`` both patch the loss, so accepting both must raise."""
-    assert dispatch._TOOLKIT_LIGER_APPLIERS, "no toolkit Liger applier is registered"
-    for model_type in sorted(dispatch._TOOLKIT_LIGER_APPLIERS):
-        applier = dispatch._TOOLKIT_LIGER_APPLIERS[model_type]
-        params = set(inspect.signature(applier).parameters)
-        if not {"cross_entropy", "fused_linear_cross_entropy"} <= params:
-            continue
-
+    both_losses = [
+        model_type
+        for model_type, applier in sorted(dispatch._TOOLKIT_LIGER_APPLIERS.items())
+        if {"cross_entropy", "fused_linear_cross_entropy"} <= set(inspect.signature(applier).parameters)
+    ]
+    assert both_losses, "no toolkit Liger applier accepts both loss options"
+    for model_type in both_losses:
         with subtests.test(model_type):
             with pytest.raises((ValueError, NotImplementedError)):
                 _run_resolved_applier(model_type, {"cross_entropy": True, "fused_linear_cross_entropy": True})
@@ -93,13 +93,13 @@ def test_real_toolkit_applier_rejections_reach_the_caller(subtests):
 def test_rope_false_appliers_refuse_an_explicit_rope_override(subtests):
     """``rope=False`` means Liger's rotary cannot serve this family; dispatch only forces it off when not asked, so
     a YAML request reaches the applier."""
-    assert dispatch._TOOLKIT_LIGER_APPLIERS, "no toolkit Liger applier is registered"
-    for model_type in sorted(dispatch._TOOLKIT_LIGER_APPLIERS):
-        applier = dispatch._TOOLKIT_LIGER_APPLIERS[model_type]
-        rope_param = inspect.signature(applier).parameters.get("rope")
-        if rope_param is None or rope_param.default is not False:
-            continue
-
+    rope_off = [
+        model_type
+        for model_type, applier in sorted(dispatch._TOOLKIT_LIGER_APPLIERS.items())
+        if (rope := inspect.signature(applier).parameters.get("rope")) is not None and rope.default is False
+    ]
+    assert rope_off, "no toolkit Liger applier declares rope=False"
+    for model_type in rope_off:
         with subtests.test(model_type):
             with pytest.raises(NotImplementedError, match="rope"):
                 _run_resolved_applier(model_type, {"rope": True})

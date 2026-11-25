@@ -59,14 +59,13 @@ def test_unnormalized_kl_stays_non_negative_elementwise_on_bf16_logits():
     assert unnormalized_kl_loss(student, teacher, 1.0).min().item() >= -1e-6
 
 
-@pytest.mark.parametrize("count", [12345])
-def test_masked_mean_token_count_is_exact_for_bf16_losses(count):
+def test_masked_mean_token_count_is_exact_for_bf16_losses():
     """12345 is not bf16-representable (-> 12352).
     A denominator rounded to bf16 rescales the mean ~0.3%; one exact nonzero token isolates it from the numerator."""
-    loss = torch.zeros(1, count, dtype=torch.bfloat16)
+    loss = torch.zeros(1, 12345, dtype=torch.bfloat16)
     loss[0, 0] = 1024.0
-    mask = torch.ones(1, count, dtype=torch.bfloat16)
-    assert masked_token_mean(loss, mask).item() == pytest.approx(1024.0 / count, rel=1e-6)
+    mask = torch.ones(1, 12345, dtype=torch.bfloat16)
+    assert masked_token_mean(loss, mask).item() == pytest.approx(1024.0 / 12345, rel=1e-6)
 
 
 if __name__ == "__main__":

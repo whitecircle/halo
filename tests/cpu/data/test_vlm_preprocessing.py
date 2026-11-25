@@ -561,8 +561,7 @@ def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch
     assert not probe_checkpoint("Qwen/Qwen3-4B")[1]
 
 
-@pytest.mark.parametrize("trust_remote_code", [True])
-def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch, trust_remote_code):
+def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch):
     """The probe is a run's first hub contact, so it must not run a checkpoint's config code under
     ``trust_remote_code: false``, nor refuse a config the run trusted."""
     seen = []
@@ -572,9 +571,9 @@ def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch,
         return SimpleNamespace(model_type="qwen3")
 
     monkeypatch.setattr(model_source.AutoConfig, "from_pretrained", _record)
-    probe_checkpoint("org/checkpoint", trust_remote_code=trust_remote_code)
+    probe_checkpoint("org/checkpoint", trust_remote_code=True)
     probe_checkpoint("org/checkpoint")
-    assert seen == [trust_remote_code, False]
+    assert seen == [True, False]
 
 
 if __name__ == "__main__":

@@ -259,12 +259,11 @@ def _assert_stock_step(family: str, shape: str, use_reentrant: bool | None, row:
         assert _bytes(grad) == _bytes(stock_grads[name]), (family, shape, row, name)
 
 
-@pytest.mark.parametrize("use_reentrant", [True], ids=["reentrant"])
 @pytest.mark.parametrize("row", ["image", "text"])
 @pytest.mark.parametrize("shape", _NOTHING_TRAINED_IN_THE_TOWER)
 @pytest.mark.parametrize("family", FAMILIES)
-def test_a_tower_nothing_reaches_is_bit_for_bit_the_stock_step(family, shape, row, use_reentrant):
-    _assert_stock_step(family, shape, use_reentrant, row)
+def test_a_tower_nothing_reaches_is_bit_for_bit_the_stock_step(family, shape, row):
+    _assert_stock_step(family, shape, True, row)
 
 
 @pytest.mark.parametrize("row", ["image", "text"])

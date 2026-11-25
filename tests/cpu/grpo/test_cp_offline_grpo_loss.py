@@ -180,9 +180,8 @@ def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
             assert abs(float(wrong_loss.detach() - expected.detach())) > 1e-4
 
 
-@pytest.mark.parametrize("cp_size", [4])
-def test_cp_kl_reference_rank_slice_matches_full_loss_and_gradient_and_rejects_mutation(cp_size):
-    run_gloo_ranks(_ranked_kl_oracle, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
+def test_cp_kl_reference_rank_slice_matches_full_loss_and_gradient_and_rejects_mutation():
+    run_gloo_ranks(_ranked_kl_oracle, 4, 4, pg_timeout=datetime.timedelta(seconds=30))
 
 
 def _cp_sum_count_worker(rank: int) -> None:

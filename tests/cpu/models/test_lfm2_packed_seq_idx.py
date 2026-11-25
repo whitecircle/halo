@@ -97,14 +97,13 @@ def _doc_b_drift(
 
 
 @pytest.mark.parametrize("sparse_ffn", [False, True], ids=["dense-logits", "moe-conv"])
-@pytest.mark.parametrize("token_shift", [17])
-def test_seq_idx_isolates_the_conv(sparse_ffn, token_shift):
+def test_seq_idx_isolates_the_conv(sparse_ffn):
     # A's routing changes expert GEMM batch sizes, so MoE logits can differ by rounding alone; check its conv exactly.
     model = _tiny_model(sparse_ffn=sparse_ffn)
     position_ids = torch.cat([torch.arange(6), torch.arange(6)]).unsqueeze(0)
     seq_idx = ((position_ids == 0).cumsum(dim=1) - 1).to(torch.int32)
 
-    check = {"conv_only": sparse_ffn, "token_shift": token_shift}
+    check = {"conv_only": sparse_ffn, "token_shift": 17}
     assert _doc_b_drift(model, None, **check) > 0.0, (
         "LFM2 conv isolated packed documents without seq_idx — transformers now derives segments "
         "model-side; retire the collator's seq_idx emission for the family"

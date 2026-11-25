@@ -263,11 +263,10 @@ def test_a_dry_run_neither_writes_nor_sweeps(tmp_path):
         assert torch.equal(unchanged[name], tensor), f"a dry run rewrote {name}"
 
 
-@pytest.mark.parametrize("sharded", [False], ids=["single_file"])
-def test_a_dry_run_needs_no_output_dir(tmp_path, sharded):
+def test_a_dry_run_needs_no_output_dir(tmp_path):
     """The destination requirement exists to stop a writing run defaulting onto its own input."""
     source = tmp_path / "src"
-    sinks = _build_source(source, sharded=sharded)
+    sinks = _build_source(source, sharded=False)
 
     assert reset_sinks(str(source), dry_run=True) == len(sinks)
 
@@ -284,12 +283,11 @@ def test_a_writing_run_still_requires_an_output_dir(tmp_path):
         reset_sinks(str(source))
 
 
-@pytest.mark.parametrize("sharded", [False], ids=["single_file"])
-def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, caplog, sharded):
+def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, caplog):
     """Silence means the tool stopped calling the helper."""
     monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
     source, out = tmp_path / "src", tmp_path / "out"
-    sinks = _build_source(source, sharded=sharded)
+    sinks = _build_source(source, sharded=False)
 
     assert reset_sinks(str(source), str(out)) == len(sinks)
 

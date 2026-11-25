@@ -482,18 +482,16 @@ def test_a_spawn_option_refuses_a_transport_that_spawns_nothing(spawn_option):
         NativeMCPClientEnvironment(transport="sse", server_url="http://x/sse", **spawn_option)
 
 
-@pytest.mark.parametrize("config", [{}], ids=["default-preset"])
-def test_a_server_url_off_sse_raises_instead_of_spawning_a_preset(config, monkeypatch):
+def test_a_server_url_off_sse_raises_instead_of_spawning_a_preset(monkeypatch):
     """Off ``transport: sse`` the URL would be dropped and the default filesystem preset spawned in its place."""
     monkeypatch.setattr(mcp_module, "stdio_client", lambda *_: pytest.fail("a server was spawned"))
     with pytest.raises(ValueError, match="set on the stdio transport"):
-        build_environment("mcp", {"server_url": "http://mcp.example:9000/sse", **config})
+        build_environment("mcp", {"server_url": "http://mcp.example:9000/sse"})
 
 
-@pytest.mark.parametrize("config", [{}], ids=["scratch-preset"])
-def test_an_unknown_transport_raises_at_construction_not_at_the_first_reset(config):
+def test_an_unknown_transport_raises_at_construction_not_at_the_first_reset():
     with pytest.raises(ValueError, match=r"transport must be one of \('stdio', 'sse'\), got 'bogus'"):
-        build_environment("mcp", {"transport": "bogus", **config})
+        build_environment("mcp", {"transport": "bogus"})
 
 
 @pytest.mark.parametrize("flag", ["scratch_allowlist", "episode_scratch"])

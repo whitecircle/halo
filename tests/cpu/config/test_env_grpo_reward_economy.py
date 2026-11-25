@@ -297,10 +297,6 @@ def _label(path):
     return str(path.relative_to(REPO_ROOT / "examples" / "grpo" / "environmental"))
 
 
-def _ids(paths):
-    return [_label(p) for p in paths]
-
-
 def test_the_scan_finds_the_code_contests_recipes():
     assert len(RECIPES) >= 20, f"only {len(RECIPES)} code-contests recipes found — the glob is broken"
     assert len(_REASONING_RECIPES) >= 20, "the reasoning filter dropped the recipes the length-term relations read"
@@ -356,12 +352,14 @@ def test_the_episode_output_budget_binds_below_what_the_turn_caps_alone_allow(su
             )
 
 
-@pytest.mark.parametrize("path", _GPT_OSS_RECIPES, ids=_ids(_GPT_OSS_RECIPES))
-def test_a_gpt_oss_worst_case_episode_fits_the_served_window(path):
+def test_a_gpt_oss_worst_case_episode_fits_the_served_window(subtests):
     """The window is the model's own, so a budget at the whole of it warns at every launch of a shipped recipe."""
-    e = _economy(path)
-    worst_case = min(e["max_turns"] * e["max_tokens"], e["episode_tokens"])
-    assert worst_case + _GPT_OSS_PREAMBLE_TOKENS <= _GPT_OSS_SERVED_WINDOW
+    assert _GPT_OSS_RECIPES, "no code-contests recipe trains gpt-oss"
+    for path in _GPT_OSS_RECIPES:
+        with subtests.test(_label(path)):
+            e = _economy(path)
+            worst_case = min(e["max_turns"] * e["max_tokens"], e["episode_tokens"])
+            assert worst_case + _GPT_OSS_PREAMBLE_TOKENS <= _GPT_OSS_SERVED_WINDOW
 
 
 def test_on_vllm_the_reasoning_cap_is_the_turn_less_its_answer_room(subtests):
@@ -434,22 +432,24 @@ def test_a_higher_level_is_priced_lower_and_given_more_free_reasoning(subtests):
             assert _budgets_rise_with_level(e), f"the per-level budgets do not rise low < medium < high: {budgets}"
 
 
-@pytest.mark.parametrize("curriculum", _CURRICULA)
-def test_the_curriculum_stages_run_one_economy_and_one_set_of_limits(curriculum):
-    stages = [p for p in _STAGE_RECIPES if p.name.split("-stage")[0] == curriculum]
-    assert len(stages) == 3, f"expected the three curriculum stages, found {[p.name for p in stages]}"
-    stated = [{key: _yaml.load(p).get(key) for key in _STAGE_SHARED_KEYS} for p in stages]
-    assert stated[0] == stated[1] == stated[2], dict(zip([p.name for p in stages], stated, strict=True))
-    economies = [_economy(p) for p in stages]
-    prices = [{level: _rate(e, level) for level in VALID_REASONING_EFFORTS} for e in economies]
-    assert prices[0] == prices[1] == prices[2]
-    for earlier, later in zip(economies, economies[1:], strict=False):
-        assert later["episode_tokens"] >= earlier["episode_tokens"]
-        assert all(
-            later["profiles"][level].get(REASONING_BUDGET_KEY, 0)
-            >= earlier["profiles"][level].get(REASONING_BUDGET_KEY, 0)
-            for level in VALID_REASONING_EFFORTS
-        )
+def test_the_curriculum_stages_run_one_economy_and_one_set_of_limits(subtests):
+    assert _CURRICULA, "no code-contests recipe is a curriculum stage"
+    for curriculum in _CURRICULA:
+        with subtests.test(curriculum):
+            stages = [p for p in _STAGE_RECIPES if p.name.split("-stage")[0] == curriculum]
+            assert len(stages) == 3, f"expected the three curriculum stages, found {[p.name for p in stages]}"
+            stated = [{key: _yaml.load(p).get(key) for key in _STAGE_SHARED_KEYS} for p in stages]
+            assert stated[0] == stated[1] == stated[2], dict(zip([p.name for p in stages], stated, strict=True))
+            economies = [_economy(p) for p in stages]
+            prices = [{level: _rate(e, level) for level in VALID_REASONING_EFFORTS} for e in economies]
+            assert prices[0] == prices[1] == prices[2]
+            for earlier, later in zip(economies, economies[1:], strict=False):
+                assert later["episode_tokens"] >= earlier["episode_tokens"]
+                assert all(
+                    later["profiles"][level].get(REASONING_BUDGET_KEY, 0)
+                    >= earlier["profiles"][level].get(REASONING_BUDGET_KEY, 0)
+                    for level in VALID_REASONING_EFFORTS
+                )
 
 
 def test_a_recovered_cut_costs_less_than_the_attempt_bonus_and_no_more_than_an_overflow(subtests):
@@ -506,23 +506,25 @@ def test_running_out_costs_more_than_one_more_failed_submission(subtests):
 _NOTES_RECIPES = [p for p in RECIPES if _runs_notes(_yaml.load(p)["environment_kwargs"])]
 
 
-@pytest.mark.parametrize("path", _NOTES_RECIPES, ids=_ids(_NOTES_RECIPES))
-def test_under_notes_a_failure_spends_its_submissions_rather_than_run_out(path):
+def test_under_notes_a_failure_spends_its_submissions_rather_than_run_out(subtests):
     """A turn of text never ends a notes episode, so a failure with submissions left ends by spending them or by
     running out. Spending them honestly, the resubmission price per submission left plus the failure-only checks once
     (a check fires once per episode), must cost less than the overflow, or stalling to the cut is the cheapest failure;
     and the overflow less than one more submission caught as a probe (its resubmission price, the submission bonus its
     veto zeroes and the verdict_probe price), or a guess is."""
-    e = _economy(path)
-    probe = _check_price(_audit(path), "verdict_probe")
-    for level in VALID_REASONING_EFFORTS:
-        for left in range(1, e["profiles"][level]["max_submissions"]):
-            honest = e["resubmission"] * left + _failure_only_price(e)
-            caught = e["resubmission"] + e["submission"] + probe
-            assert honest < e["turn_overflow"] < caught, (
-                f"{level}, {left} submission(s) left: spending them costs {honest}, running out {e['turn_overflow']}, "
-                f"one more caught probe {caught}"
-            )
+    assert _NOTES_RECIPES, "no code-contests recipe runs the notes harness"
+    for path in _NOTES_RECIPES:
+        with subtests.test(_label(path)):
+            e = _economy(path)
+            probe = _check_price(_audit(path), "verdict_probe")
+            for level in VALID_REASONING_EFFORTS:
+                for left in range(1, e["profiles"][level]["max_submissions"]):
+                    honest = e["resubmission"] * left + _failure_only_price(e)
+                    caught = e["resubmission"] + e["submission"] + probe
+                    assert honest < e["turn_overflow"] < caught, (
+                        f"{level}, {left} submission(s) left: spending them costs {honest}, running out "
+                        f"{e['turn_overflow']}, one more caught probe {caught}"
+                    )
 
 
 def test_the_failure_only_process_checks_are_defined_on_failed_episodes(subtests):

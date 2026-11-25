@@ -128,18 +128,22 @@ def test_every_roster_family_resolves_an_applier(subtests):
 def test_a_listed_wrapper_can_only_wrap_the_family_it_is_listed_under(subtests):
     """A wrapper pinned to the wrong sibling patches classes the model never instantiates and reports every kernel
     as applied."""
-    assert LIGER_FAMILY_SPECS, "no Liger family spec is declared"
-    for spec in LIGER_FAMILY_SPECS:
-        with subtests.test(spec.model_types[0]):
-            for model_type in spec.model_types:
-                config_cls = CONFIG_MAPPING.get(model_type)
-                if config_cls is None or "text_config" not in (getattr(config_cls, "sub_configs", None) or {}):
-                    continue
-                tower = config_cls().text_config.model_type
-                assert tower in spec.model_types, (
-                    f"{model_type} is a composite wrapper whose default text tower is {tower!r}, outside this "
-                    f"spec's {spec.model_types}; drop it and let dispatch resolve it through text_config"
-                )
+    # Item access: transformers' lazy mapping resolves a type on ``[]`` only, and its ``get`` answers None.
+    wrappers = [
+        (spec, model_type)
+        for spec in LIGER_FAMILY_SPECS
+        for model_type in spec.model_types
+        if model_type in CONFIG_MAPPING
+        and "text_config" in (getattr(CONFIG_MAPPING[model_type], "sub_configs", None) or {})
+    ]
+    assert wrappers, "no listed model type is a composite wrapper"
+    for spec, model_type in wrappers:
+        with subtests.test(f"{spec.model_types[0]}:{model_type}"):
+            tower = CONFIG_MAPPING[model_type]().text_config.model_type
+            assert tower in spec.model_types, (
+                f"{model_type} is a composite wrapper whose default text tower is {tower!r}, outside this "
+                f"spec's {spec.model_types}; drop it and let dispatch resolve it through text_config"
+            )
 
 
 @pytest.mark.parametrize(

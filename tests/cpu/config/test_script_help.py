@@ -129,8 +129,8 @@ def test_every_tool_help_renders_and_documents_every_flag(subtests):
 
 
 def test_the_script_scan_is_not_vacuous():
-    """Both parametrizations come from a tree scan, so a scan matching nothing would report green while covering no
-    script."""
+    """Both rosters come from a tree scan, so a scan that stopped matching would skip the per-script cases or leave
+    the tool sweep covering a few tools, and still report green."""
     assert len(_SCRIPTS) >= 10, f"only {len(_SCRIPTS)} parse_script_args scripts found under {_SCRIPTS_DIR}"
     assert len(_TOOLS) >= 20, f"only {len(_TOOLS)} argparse tools found under {_SCRIPTS_DIR}"
 

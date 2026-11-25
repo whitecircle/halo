@@ -206,7 +206,7 @@ _DEVICE_MAP_TOOLS = tuple(path for path in _tool_paths() if "--device_map" in _t
 
 
 def test_the_derived_rosters_cover_the_tool_tree():
-    """Anti-vacuity: a sweep that stopped finding tools would leave the parametrizations empty and passing."""
+    """Anti-vacuity: a scan that stopped finding tools would leave the flag sweeps looping nothing, and passing."""
     paths = _tool_paths()
 
     assert len(paths) >= 10, sorted(paths)

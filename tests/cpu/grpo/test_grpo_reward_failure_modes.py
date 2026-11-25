@@ -163,10 +163,9 @@ def test_a_peer_ranks_non_finite_reward_raises_here_too(monkeypatch):
 _NO_EMPHASIS = 0.0  # emphasis off, so the advantage is pure ranking
 
 
-@pytest.mark.parametrize("rewards", [pytest.param([0.4, 0.4, 0.4, 0.4], id="rewards1")])
-def test_quantile_uniform_gives_zero_advantage_on_identical_rewards(rewards):
+def test_quantile_uniform_gives_zero_advantage_on_identical_rewards():
     # Spreading tied rewards over [-1, 1] would rank completions by array position.
-    got = compute_group_advantages(rewards, "quantile_uniform", _NO_EMPHASIS)
+    got = compute_group_advantages([0.4, 0.4, 0.4, 0.4], "quantile_uniform", _NO_EMPHASIS)
     assert np.allclose(got, 0.0), f"zero-variance group must yield zero advantage, got {got}"
 
 

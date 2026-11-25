@@ -130,9 +130,9 @@ def test_only_the_attention_term_moves_with_tp_size(tp_size):
     )
 
 
-@pytest.mark.parametrize("tp_size", [4])
-def test_the_callback_applies_tp_size_to_both_estimates(tp_size):
+def test_the_callback_applies_tp_size_to_both_estimates():
     """Dense and active are computed at two call sites; dividing at only one leaves MFU or S-MFU over-reporting."""
+    tp_size = 4
     baseline = _callback_state(1)
     state = _callback_state(tp_size)
 

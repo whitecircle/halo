@@ -1620,14 +1620,13 @@ def test_exam_qa_hands_a_scorer_the_letter_not_the_index():
     env.cleanup([mc_id, open_id])
 
 
-@pytest.mark.parametrize("answer", ["1"])
-def test_exam_qa_digit_string_answer_is_refused_not_read_as_an_index(answer):
+def test_exam_qa_digit_string_answer_is_refused_not_read_as_an_index():
     """ARC's ``answerKey`` labels some rows ``"1"``-``"4"``, 1-based, so a 0-based reading misgrades; a digit string
     raises at episode start."""
     env = ExamQAEnvironment(max_turns=3)
     choices = ["Mars", "Jupiter", "Saturn", "Neptune"]
     with pytest.raises(ValueError, match="is a digit string"):
-        env.reset(["Which is the largest planet?"], [{"answer": answer, "choices": choices}])
+        env.reset(["Which is the largest planet?"], [{"answer": "1", "choices": choices}])
 
 
 def test_exam_qa_letter_answers_pass_through_and_bad_shapes_fail_loud():

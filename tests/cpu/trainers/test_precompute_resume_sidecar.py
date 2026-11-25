@@ -108,16 +108,15 @@ def test_the_swept_columns_are_persisted_as_training_reads_them(kind, tmp_path):
         assert torch.equal(entry["columns"][name], column(prepared, name))
 
 
-@pytest.mark.parametrize("umask", [0o002])
-def test_a_fresh_reference_sidecar_takes_the_umask_mode(kind, tmp_path, umask):
-    previous = os.umask(umask)
+def test_a_fresh_reference_sidecar_takes_the_umask_mode(kind, tmp_path):
+    previous = os.umask(0o002)
     try:
         _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     finally:
         os.umask(previous)
 
     path = tmp_path / REFERENCE_LOGPS_FILE
-    assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~umask
+    assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~0o002
     assert torch.load(path, weights_only=True)["train"]["num_rows"] == N_ROWS
 
 

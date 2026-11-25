@@ -174,7 +174,7 @@ def _bf16_capable(monkeypatch):
 
 
 def test_examples_tree_is_not_empty():
-    """A glob that stops matching would make every parametrized case vanish silently."""
+    """A glob that stops matching would leave the sweeps over it looping nothing, and passing."""
     assert len(_EXAMPLES) > 50, f"expected the shipped examples tree, found {len(_EXAMPLES)} configs"
 
 

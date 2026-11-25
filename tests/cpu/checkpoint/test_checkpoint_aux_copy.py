@@ -189,11 +189,10 @@ def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
 
 
 @pytest.mark.parametrize("include_resume_sidecars", [True, False], ids=["resume-source", "n-way-merge"])
-@pytest.mark.parametrize("sidecar", [REFERENCE_LOGPS_FILE], ids=lambda name: name)
-def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, include_resume_sidecars, sidecar):
-    target = checkpoint_dir / sidecar
+def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, include_resume_sidecars):
+    target = checkpoint_dir / REFERENCE_LOGPS_FILE
     atomic_torch_save(str(target), lambda: {"values": torch.tensor([-1.0, -2.0])})
-    stage = create_staged_file(checkpoint_dir, sidecar)
+    stage = create_staged_file(checkpoint_dir, REFERENCE_LOGPS_FILE)
     stage.write_bytes(b"an interrupted sidecar, not a complete one")
     (checkpoint_dir / ".gitattributes").write_text("*.safetensors filter=lfs\n")
     out = tmp_path / "merged"

@@ -78,9 +78,8 @@ def _reassembly_worker(rank, cp_size):
     )
 
 
-@pytest.mark.parametrize("cp_size", [4])
-def test_reference_scores_reassemble_in_token_order_and_reject_reversed_shards(cp_size):
-    run_gloo_ranks(_reassembly_worker, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
+def test_reference_scores_reassemble_in_token_order_and_reject_reversed_shards():
+    run_gloo_ranks(_reassembly_worker, 4, 4, pg_timeout=datetime.timedelta(seconds=30))
 
 
 def _ragged_batch(cp_size):
@@ -130,9 +129,8 @@ def _local_mask_worker(rank, cp_size):
         assert torch.equal(got, scores[valid])
 
 
-@pytest.mark.parametrize("cp_size", [4])
-def test_reference_sweep_mask_matches_the_gathered_shard_targets(cp_size):
-    run_gloo_ranks(_local_mask_worker, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
+def test_reference_sweep_mask_matches_the_gathered_shard_targets():
+    run_gloo_ranks(_local_mask_worker, 4, 4, pg_timeout=datetime.timedelta(seconds=30))
 
 
 if __name__ == "__main__":

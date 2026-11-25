@@ -465,12 +465,11 @@ def test_the_fingerprinted_replica_size_is_what_the_dedup_actually_writes(topolo
     assert live.expert_replica_size == expected
 
 
-@pytest.mark.parametrize("live_groups", [2])
-def test_a_pre_dedup_meta_is_compatible_with_every_replica_size(live_groups):
+def test_a_pre_dedup_meta_without_the_replica_size_is_compatible():
     """Those shards hold the expert moments on every rank, so an absent field reads as compatible with any replica
     size."""
     saved = {k: v for k, v in _fingerprint(2).to_dict().items() if k != "expert_replica_size"}
-    assert not _fingerprint(live_groups).mismatches(saved)
+    assert not _fingerprint(2).mismatches(saved)
 
 
 if __name__ == "__main__":

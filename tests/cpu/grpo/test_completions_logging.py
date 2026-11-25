@@ -278,11 +278,10 @@ def _logging_host(tmp_path, step=9) -> _MetricsHost:
     return host
 
 
-@pytest.mark.parametrize("shared_fs", [True], ids=["shared"])
-def test_every_rank_keeps_and_writes_only_its_own_rows_with_no_collective(tmp_path, monkeypatch, shared_fs):
+def test_every_rank_keeps_and_writes_only_its_own_rows_with_no_collective(tmp_path, monkeypatch):
     """Gathered, the rendered trajectories would stage the world's text through a device and leave every writer holding
     every rank's record."""
-    _fake_world(monkeypatch, world=16, rank=9, shared_fs=shared_fs)
+    _fake_world(monkeypatch, world=16, rank=9, shared_fs=True)
     host = _logging_host(tmp_path)
 
     host._populate_completion_logs(_rollouts("p9"), torch.tensor([1.0]), torch.tensor([0.25]), "train")

@@ -148,7 +148,6 @@ def test_the_family_gate_reads_gated_delta_net_layers_not_the_model_type(config,
 
 
 @pytest.mark.usefixtures("determinism")
-@pytest.mark.parametrize("padding_free", [pytest.param(False, id="packing")])
 @pytest.mark.parametrize(
     "config",
     [
@@ -158,9 +157,9 @@ def test_the_family_gate_reads_gated_delta_net_layers_not_the_model_type(config,
     ],
     ids=["olmo_hybrid", "qwen3_next_head_dim_128", "qwen3_5_text_head_dim_128"],
 )
-def test_a_gated_delta_net_decoder_off_the_head_dim_256_kernel_keeps_the_loader_pick(config, padding_free):
+def test_a_gated_delta_net_decoder_off_the_head_dim_256_kernel_keeps_the_loader_pick(config):
     assert has_gated_delta_net_layers(config) and not selection.uses_fa4_dedicated_head_dim(config)
-    assert _default_for(config, "b300", padding_free=padding_free) is None
+    assert _default_for(config, "b300", padding_free=False) is None
 
 
 @pytest.mark.parametrize("model_type", _MROPE_GDN_MODEL_TYPES)

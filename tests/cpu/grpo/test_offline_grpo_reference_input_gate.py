@@ -44,8 +44,7 @@ def test_string_policy_with_kl_reaches_the_model_loader_without_a_peft_probe_cra
     assert calls == ["local-or-hub-policy"]
 
 
-@pytest.mark.parametrize("presharded", [True])
-def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tmp_path, monkeypatch, presharded):
+def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tmp_path, monkeypatch):
     def stop_at_loader(*args, **kwargs):
         raise RuntimeError("model loader reached")
 
@@ -60,7 +59,7 @@ def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tm
             train_dataset=offline_grpo_dataset(2),
             processing_class=make_offline_tokenizer(),
             parallelism_config=ParallelismConfig(),
-            dataset_presharded=presharded,
+            dataset_presharded=True,
         )
 
 

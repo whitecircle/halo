@@ -602,13 +602,12 @@ def test_a_reset_refused_after_the_restore_leaves_the_entry(monkeypatch):
         assert "left.txt" in session.list_files()
 
 
-@pytest.mark.parametrize("denial", [errno.EPERM])
-def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(denial, monkeypatch):
+def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(monkeypatch):
     """Every run waits on its program through a pidfd; refused, each would fail as a backend error and
     void its episode, so construction raises instead."""
 
     def refused(pid, flags=0):
-        raise OSError(denial, os.strerror(denial))
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
 
     monkeypatch.setattr(os, "pidfd_open", refused)
     with pytest.raises(RuntimeError, match="pidfd_open"):

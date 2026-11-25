@@ -40,7 +40,6 @@ class OutputDirConfig:
 
 @dataclass
 class ExtraConfig:
-    batch_size: int = 8
     tags: list[str] = field(default_factory=list)
     verbose: bool = True
 

@@ -137,7 +137,7 @@ def test_every_assistant_turn_of_a_multi_turn_row_carries_the_marker(subtests):
             except TemplateError as e:
                 if _SINGLE_TURN_REFUSAL not in str(e):
                     raise
-                continue
+                pytest.skip(f"{template} refuses multi-turn data by design ({e})")
             assert rendered.count(marker) == _TURNS, (
                 f"{source}: {template} renders the marker {rendered.count(marker)}x on a {_TURNS}-turn row, "
                 f"so completion-only masking trains {rendered.count(marker)} of {_TURNS} assistant turns and "

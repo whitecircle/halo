@@ -118,11 +118,10 @@ def test_the_backend_per_gemma2_size_row_shape_and_gpu(size, arch, rows):
     assert resolved == _EXPECTED[(size, arch, rows)]
 
 
-@pytest.mark.parametrize("rows", ["packed"])
-def test_fa4_keeps_every_row_shape_without_a_softcap(rows):
+def test_fa4_keeps_packed_rows_and_the_padded_scripts_without_a_softcap():
     for config in (_gemma2("27b", attn_logit_softcapping=None), Qwen3Config()):
         with _on("blackwell"):
-            assert _sft_backend(config, rows) == FA4
+            assert _sft_backend(config, "packed") == FA4
             assert _padded_script_backend(config) == FA4
 
 
@@ -229,11 +228,10 @@ def test_padded_evaluation_batches_take_a_softcapped_run_off_fa4():
     assert (trains_only, evaluates) == (None, FA2)
 
 
-@pytest.mark.parametrize("size", ["2b"])
-def test_a_head_dim_256_softcap_without_flash_attention_2_is_refused_with_the_remedy(size):
+def test_a_head_dim_256_softcap_without_flash_attention_2_is_refused_with_the_remedy():
     """FA4 cannot run 2B/9B at all, and falling through would reach a label the model build refuses."""
     with _on("blackwell", fa2=False), pytest.raises(ValueError, match="no FlashAttention-2 build") as error:
-        _resolve(_gemma2(size), None)
+        _resolve(_gemma2("2b"), None)
     assert "attention logit softcapping" in str(error.value)
     assert "flex_attention or eager" in str(error.value)
 

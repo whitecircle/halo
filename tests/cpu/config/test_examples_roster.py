@@ -44,7 +44,7 @@ from halo.trainers.sft_rules import reject_unsupported_mtp_options
 from tests.common.hub_seed import is_hub_repo
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint, word_level_tokenizer
-from tests.common.tokenizers import load_cached_config, try_cached_config, try_cached_tokenizer
+from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     ENV_GRPO_EXAMPLES,
@@ -232,11 +232,6 @@ def build_parallelism_config(config: Path, *, train_batch: int | None = None):
         return parsed, built[0]
 
 
-def try_model_config_for(parsed: tuple):
-    """The example's model config from the local HF cache, or None when this host cannot resolve it."""
-    return try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
-
-
 def model_config_for(config: Path, parsed: tuple):
     """The example's model config from the local HF cache, or a skip when this host cannot resolve it."""
     return load_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
@@ -297,8 +292,7 @@ def test_example_allocator_setting_follows_expert_parallelism(subtests):
             if script not in _EXPANDABLE_SEGMENTS_SCRIPTS:
                 continue
             parsed = parser_for(script).parse_yaml_file(str(config))
-            model_config = try_model_config_for(parsed)
-            if model_config is None or has_routed_experts(model_config):
+            if has_routed_experts(model_config_for(config, parsed)):
                 continue
             bare = [line for line in commands if not _EXPANDABLE_SEGMENTS_PREFIX.search(line)]
             assert commands and not bare, (
@@ -342,9 +336,7 @@ def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(subtests):
             parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
             if parsed_field(parsed, "rollout_backend") == "sglang":
                 continue
-            tokenizer = try_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
-            if tokenizer is None:
-                continue
+            tokenizer = load_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
             resolve_reasoning_end_ids(tokenizer, parsed_field(parsed, "rollout_reasoning_end_token"))
 
 
@@ -417,10 +409,7 @@ def test_moe_weight_sync_example_names_the_triton_moe_backend(subtests):
     for config in _WEIGHT_SYNC_EXAMPLES:
         with subtests.test(example_id(config)):
             parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-            model_config = try_model_config_for(parsed)
-            if model_config is None:
-                continue
-            layer_classes = ep_layer_classes_for_config(model_config)
+            layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
             if not layer_classes:
                 continue
             # Only the environmental script declares the field.
@@ -445,7 +434,7 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(subtests):
             if (raw.get("pipeline_parallel_size") or 1) > 1:
                 continue
             parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-            model_config = try_model_config_for(parsed)
+            model_config = try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
             if not uses_expert_parallelism(raw) and not has_routed_experts(model_config):
                 continue
             declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
@@ -506,7 +495,7 @@ def test_example_eval_batch_fits_the_dispatch_budget(subtests):
             parsed, parallelism = build_parallelism_config(config)
             row_length = bounded_row_length(*parsed)
             if parallelism.ep_size <= 1 or row_length is None:
-                continue
+                pytest.skip("no expert dispatch, or a run that declares no row length")
             for trainer_cls in script_trainer_classes(script_for(config)):
                 tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length
                 reject_oversized_dispatch(ep_dispatch_capacity(tokens), spans_domains=parallelism.requires_rdma)
@@ -585,10 +574,7 @@ def test_example_balancing_mode_matches_the_family_export_contract(subtests):
             mode = parsed_field(parsed, "moe_balancing")
             if mode not in BIAS_UPDATE_MODES:
                 continue
-            model_config = try_model_config_for(parsed)
-            if model_config is None:
-                continue
-            layer_classes = ep_layer_classes_for_config(model_config)
+            layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
             transient = sorted(
                 cls.__name__ for cls in layer_classes if cls.SUPPORTS_BIAS_BALANCING and not cls.FAMILY.balancing_slot
             )
@@ -618,10 +604,7 @@ def test_example_max_length_fits_the_model_context_window(subtests):
             ]
             if not any(is_bounded_length(value) for _, value in declared):
                 continue
-            model_config = try_model_config_for(parsed)
-            if model_config is None:
-                continue
-            decoder = text_config(model_config)
+            decoder = text_config(model_config_for(config, parsed))
             window = next(
                 (
                     int(getattr(decoder, attr))
@@ -631,7 +614,7 @@ def test_example_max_length_fits_the_model_context_window(subtests):
                 None,
             )
             if window is None:
-                continue
+                pytest.skip("model config states no position budget; the tokenizer resolves it at load")
             for name, value in declared:
                 if is_bounded_length(value):
                     assert value <= window, f"{name}={value} exceeds the model's context window ({window})"
@@ -643,9 +626,7 @@ def test_example_parallelism_fits_the_model_shape(subtests):
     for config in _EXAMPLES:
         with subtests.test(example_id(config)):
             parsed, parallelism = build_parallelism_config(config)
-            model_config = try_model_config_for(parsed)
-            if model_config is None:
-                continue
+            model_config = model_config_for(config, parsed)
             reject_unsupported_model(
                 parallelism,
                 model_config,
@@ -680,8 +661,8 @@ def test_example_attention_carries_the_sinks_it_keeps_live(subtests):
             attn_implementation = parsed_field(parsed, "attn_implementation")
             if attn_implementation is None:
                 continue  # unset: the resolver picks a sink-carrying candidate itself
-            model_config = try_model_config_for(parsed)
-            if model_config is None or not uses_gpt_oss_sinks(model_config):
+            model_config = model_config_for(config, parsed)
+            if not uses_gpt_oss_sinks(model_config):
                 continue
             if is_flash_attn_implementation(attn_implementation):
                 try:
@@ -706,10 +687,7 @@ def test_weight_sync_example_keeps_a_pushable_sink_parameter(subtests):
                 parsed, "reset_sinks"
             ):
                 continue
-            model_config = try_model_config_for(parsed)
-            if model_config is None:
-                continue
-            assert not uses_gpt_oss_sinks(model_config), (
+            assert not uses_gpt_oss_sinks(model_config_for(config, parsed)), (
                 "weight-sync RL with the flash_attention_2 reset_sinks reset removes the sinks parameter, so "
                 "the sync never pushes it and the generator stays on the pretrained sinks. Set reset_sinks: "
                 "false with a sink-carrying implementation (flash_attention_4 on Blackwell; eager or "
@@ -722,13 +700,14 @@ def test_each_mtp_scope_a_recipe_ships_is_on_a_family_with_a_head():
     assert scopes == {"joint", "head_only"}
 
 
-@pytest.mark.parametrize("config", _MTP_EXAMPLES, **_ID)
-def test_mtp_example_meets_what_a_head_requires(config):
+def test_mtp_example_meets_what_a_head_requires(subtests):
     """Through the entry script's own gate, on the checkpoint's config."""
-    args, sft_config, model_config, dist_args = parser_for(script_for(config)).parse_yaml_file(str(config))
-    checkpoint = load_cached_config(model_config.model_name_or_path)
-    reject_unsupported_mtp_options(args, sft_config, model_config, dist_args, checkpoint)
-    assert args.gates_mtp_acceptance == (args.mtp_train_scope == "head_only")
+    for config in _MTP_EXAMPLES:
+        with subtests.test(example_id(config)):
+            args, sft_config, model_config, dist_args = parser_for(script_for(config)).parse_yaml_file(str(config))
+            checkpoint = load_cached_config(model_config.model_name_or_path)
+            reject_unsupported_mtp_options(args, sft_config, model_config, dist_args, checkpoint)
+            assert args.gates_mtp_acceptance == (args.mtp_train_scope == "head_only")
 
 
 def test_the_gate_on_mtp_examples_is_live():
@@ -743,15 +722,16 @@ def test_a_batch_rebalance_example_exists():
     assert _BATCH_REBALANCE_EXAMPLES, "no shipped example sets train_sampling_strategy: batch_rebalance"
 
 
-@pytest.mark.parametrize("config", _BATCH_REBALANCE_EXAMPLES, **_ID)
-def test_batch_rebalance_example_keeps_the_base_loader(config):
+def test_batch_rebalance_example_keeps_the_base_loader(subtests):
     """HF's rebalance sampler shards over every process, so the toolkit refuses it on its DP-sharded loader
     (TP/CP/ETP/PP), after every rank has loaded the model."""
-    _, parallelism = build_parallelism_config(config)
-    assert not uses_dp_sharded_loader(parallelism, dataset_presharded=False), (
-        "this config asks for batch_rebalance on a shape that shards batches over data-parallel replicas, where "
-        "the trainer refuses it; drop the line or run pure EP / DDP"
-    )
+    for config in _BATCH_REBALANCE_EXAMPLES:
+        with subtests.test(example_id(config)):
+            _, parallelism = build_parallelism_config(config)
+            assert not uses_dp_sharded_loader(parallelism, dataset_presharded=False), (
+                "this config asks for batch_rebalance on a shape that shards batches over data-parallel replicas, "
+                "where the trainer refuses it; drop the line or run pure EP / DDP"
+            )
 
 
 @pytest.mark.parametrize("config", _BATCH_REBALANCE_EXAMPLES, **_ID)

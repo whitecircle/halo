@@ -297,18 +297,17 @@ def test_a_last_exit_whose_wait_timed_out_still_deletes_the_failure_slots(monkey
     assert server.num_keys() == 2, "the timed-out last exit left the failure slot behind"
 
 
-@pytest.mark.parametrize("world", [64])
-def test_a_clean_join_costs_each_participant_constant_key_operations(monkeypatch, world):
+def test_a_clean_join_costs_each_participant_constant_key_operations(monkeypatch):
     """A join where every participant reads every peer's key is O(world²) for the one store server (seconds per join
     at 1024 ranks)."""
 
     def clean_join(rank: int) -> None:
         store_reject_across_ranks("clean", None, WHAT, timeout=WAIT_TIMEOUT)
 
-    _, stores, _ = _run_thread_world(monkeypatch, world, clean_join, wrap=lambda rank, store: _OpLog(store))
+    _, stores, _ = _run_thread_world(monkeypatch, 64, clean_join, wrap=lambda rank, store: _OpLog(store))
 
     key_ops = [store.key_ops for store in stores]
-    assert max(key_ops) <= CLEAN_JOIN_KEY_OPS, f"key operations per participant at world {world}: {key_ops}"
+    assert max(key_ops) <= CLEAN_JOIN_KEY_OPS, f"key operations per participant at world 64: {key_ops}"
 
 
 @pytest.fixture()

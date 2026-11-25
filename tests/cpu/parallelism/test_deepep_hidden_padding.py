@@ -45,9 +45,8 @@ def test_a_non_conforming_hidden_takes_the_padding_branch(hidden):
     assert _backend(hidden)._needs_pad is True
 
 
-@pytest.mark.parametrize("hidden", [256])
-def test_a_conforming_hidden_skips_the_padding_branch(hidden):
-    assert _backend(hidden)._needs_pad is False
+def test_a_conforming_hidden_skips_the_padding_branch():
+    assert _backend(256)._needs_pad is False
 
 
 def test_pad_then_slice_returns_the_original_tensor_exactly():

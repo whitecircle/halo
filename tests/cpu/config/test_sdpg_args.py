@@ -105,10 +105,9 @@ def test_an_unfilled_placeholder_is_refused_by_name(arm, template, named):
 
 
 @pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)
-@pytest.mark.parametrize("template", ["answer: {answer"])
-def test_a_malformed_template_is_refused(arm, template):
+def test_a_malformed_template_is_refused(arm):
     with pytest.raises(ValueError, match="not a valid str.format template"):
-        arm(sdpg_hint_template=template)
+        arm(sdpg_hint_template="answer: {answer")
 
 
 @pytest.mark.parametrize(

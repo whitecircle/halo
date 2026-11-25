@@ -393,10 +393,10 @@ def test_a_tp_follower_issues_no_rollout_request_and_trains_the_leaders_rows(dep
     assert follower.reject_calls == leader.reject_calls == 12
 
 
-@pytest.mark.parametrize("depth", [2])
-def test_a_resume_under_tp_replays_the_leaders_pending_rounds_and_the_follower_none(tmp_path, monkeypatch, depth):
+def test_a_resume_under_tp_replays_the_leaders_pending_rounds_and_the_follower_none(tmp_path, monkeypatch):
     """Each rank has its sidecar file, or the resume's presence check raises; a follower's holds no rounds, so it
     submits nothing, and the leader's replay trains what an uninterrupted run does."""
+    depth = 2
     batches = [f"b{i}" for i in range(depth + 4)]
     uninterrupted, _ = _tp_pair(depth)
     _run(uninterrupted, batches)

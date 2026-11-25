@@ -44,10 +44,9 @@ def _reject_unsupported_model(config: ParallelismConfig, model_config) -> None:
     reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
 
 
-@pytest.mark.parametrize("hidden", [7168])
-def test_a_long_budget_within_a_domain_is_accepted(hidden):
+def test_a_long_budget_within_a_domain_is_accepted():
     """No wire-offset ceiling bounds a single-domain dispatch, at any hidden width."""
-    model = _Cfg(128, hidden_size=hidden, num_experts_per_tok=8)
+    model = _Cfg(128, hidden_size=7168, num_experts_per_tok=8)
     _reject_unsupported_model(_config(world_size=8, gpus_per_node=8, ep_size=8, budget=_LONG_BUDGET), model)
 
 

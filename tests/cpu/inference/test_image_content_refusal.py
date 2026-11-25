@@ -97,10 +97,9 @@ def test_the_generation_prompt_refuses_every_media_part(part):
         render_generation_prompt(_RendersAnything(), messages)
 
 
-@pytest.mark.parametrize("part", [{"type": "image_url", "image_url": {"url": "x"}}], ids=_ids)
-def test_a_json_string_conversation_is_refused_too(part):
-    conversation = json.dumps([{"role": "user", "content": [part]}])
-    with pytest.raises(ValueError, match=part["type"]):
+def test_a_json_string_conversation_is_refused_too():
+    conversation = json.dumps([{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]}])
+    with pytest.raises(ValueError, match="image_url"):
         reject_image_content(conversation, "field")
 
 

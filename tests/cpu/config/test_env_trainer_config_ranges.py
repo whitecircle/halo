@@ -157,12 +157,11 @@ def test_skip_update_masked_frac_in_range_passes(ok):
     assert AsyncRolloutConfig(skip_update_masked_frac=ok).skip_update_masked_frac == ok
 
 
-@pytest.mark.parametrize("cap", [1000])
-def test_a_row_cap_at_or_below_the_per_turn_budget_is_refused(cap):
+def test_a_row_cap_at_the_per_turn_budget_is_refused():
     with pytest.raises(
         ValueError, match=r"max_train_row_tokens must be an integer > 1000 \(above rollout_max_tokens\)"
     ):
-        AsyncRolloutConfig(rollout_max_tokens=1000, max_train_row_tokens=cap)
+        AsyncRolloutConfig(rollout_max_tokens=1000, max_train_row_tokens=1000)
 
 
 def test_a_row_cap_above_the_per_turn_budget_passes():

@@ -403,14 +403,13 @@ def test_program_past_its_time_limit_is_a_timeout_verdict(fake):
     assert time.monotonic() - start < 15
 
 
-@pytest.mark.parametrize("status", ["killed"])
-def test_runner_that_did_not_complete_is_an_error_not_a_verdict(fake, status):
+def test_runner_that_did_not_complete_is_an_error_not_a_verdict(fake):
     """The service kills a runner past the exchange deadline; that is never the program's timeout."""
-    fake.process_status = status
+    fake.process_status = "killed"
 
     result = _sandbox(fake).run("print(1)")
 
-    assert result.error is not None and status in result.error and not result.timed_out
+    assert result.error is not None and "killed" in result.error and not result.timed_out
 
 
 @pytest.mark.parametrize("status", [502, 429])
@@ -575,8 +574,8 @@ def test_compile_error_is_a_compile_verdict(fake):
     assert result.compile_failed and result.error is None and result.stderr
 
 
-@pytest.mark.parametrize("name", ["bad\0.txt"])
-def test_name_no_filesystem_takes_is_refused_before_a_sandbox_exists(fake, name):
+def test_name_no_filesystem_takes_is_refused_before_a_sandbox_exists(fake):
+    name = "bad\0.txt"
     with _sandbox(fake).open_session() as session:
         assert "unsafe auxiliary file path" in session.run("print(1)", files={name: "x"}).error
         with pytest.raises(ValueError):

@@ -95,7 +95,7 @@ def _in_process_sandbox(monkeypatch):
 
 
 def test_environmental_examples_tree_is_not_empty():
-    """A glob that stops matching would make every parametrized case vanish silently."""
+    """A glob that stops matching would leave the sweeps over it looping nothing, and passing."""
     assert len(_EXAMPLES) > 10, f"expected the shipped environmental examples, found {len(_EXAMPLES)}"
 
 

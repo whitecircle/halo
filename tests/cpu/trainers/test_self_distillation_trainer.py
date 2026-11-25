@@ -239,10 +239,9 @@ def _loop_opd(student_logits, student_labels, teacher_logits, teacher_labels, we
     return (torch.stack(per_sample) * weights).mean()
 
 
-@pytest.mark.parametrize("seed", [0])
-def test_the_masked_gather_matches_a_per_row_reference_loop(seed):
+def test_the_masked_gather_matches_a_per_row_reference_loop():
     """Random logits and offsets, an EOS-only row (no OPD tokens) and an empty one: value and gradient."""
-    generator = torch.Generator().manual_seed(seed)
+    generator = torch.Generator().manual_seed(0)
     rows = [([1, 2], [3, 4, EOS]), ([5], [EOS]), ([6, 7, 8], [9, 3, 3, 4, EOS]), ([5, 5], [])]
     _, _, labels = _branch(rows, hinted=False)
     _, _, teacher_labels = _branch(rows, hinted=True)

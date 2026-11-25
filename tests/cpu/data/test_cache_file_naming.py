@@ -668,12 +668,11 @@ def _edit_source_of(helper, monkeypatch):
     monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
 
 
-@pytest.mark.parametrize("caller", [_through_a_nested_def], ids=lambda caller: caller.__name__)
-def test_a_helper_called_from_nested_code_keys_its_caller(caller, monkeypatch):
+def test_a_helper_called_from_nested_code_keys_its_caller(monkeypatch):
     """Nested code holds its own names, so such a helper is absent from the caller's ``co_names``."""
-    before = function_cache_id(caller)
+    before = function_cache_id(_through_a_nested_def)
     _edit_source_of(tokenize_rendered, monkeypatch)
-    assert function_cache_id(caller) != before
+    assert function_cache_id(_through_a_nested_def) != before
 
 
 def _tree_row_processor(tokenizer, eos_token_ids):

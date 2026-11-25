@@ -210,6 +210,8 @@ reportMissingModuleSource = false   # host runs may not have the torch env insta
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "--strict-markers -ra"
+# At 0 pytest drops a skipped subtest from the report altogether, so a sweep row that skipped would read as checked.
+verbosity_subtests = 1
 norecursedirs = ["*.egg", ".*", "build", "dist"]
 
 [build-system]
