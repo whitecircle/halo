@@ -261,7 +261,7 @@ RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
     fi
 
 # The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh owns the pins and
-# the reason all three images must match): the installer's rdma-core and libfabric over the
+# the reason the builds must match): the installer's rdma-core and libfabric over the
 # NGC-bundled MOFED ones, plus a GIN-capable aws-ofi-nccl (DeepEP V2 cross-node EP over AWS EFA; the
 # NGC-bundled plugin exports no ncclGin symbol). GDRCopy >= 2.5 backs proxy GIN, whose host gdrdrv
 # module must be loaded at runtime.

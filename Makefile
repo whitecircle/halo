@@ -349,11 +349,13 @@ train: ## run a training config: make train CONFIG=... [METHOD=sft] NPROC=8 EXTR
 	  --nproc $(NPROC) -- $(EXTRA)"
 
 # Inkling 2 under rollout_adapter_sync, on the Inkling 2 vLLM image (make build-vllm-inkling2): one release directory
-# and one adapter directory under HALO_SCRATCH, which the server and the trainer mount at the same path. INKLING2_LORA
-# picks LoRA on the text tower's attention or on o_proj and the routed experts; agent-docs/models/inkling2.md#rollouts.
+# and one adapter directory per server port under HALO_SCRATCH, which the server and the trainer mount at the same
+# path. A run's first sync deletes every halo-adapter-* directory in its adapter directory, so two stacks on one host,
+# which the shared host network keeps on distinct ports, need one each. INKLING2_LORA picks LoRA on the text tower's
+# attention or on o_proj and the routed experts; agent-docs/models/inkling2.md#rollouts.
 INKLING2_VLLM_IMAGE      ?= halo:vllm-$(VLLM_INKLING2_VERSION)
 INKLING2_DIR             ?= $(scratch_dir)/models/Inkling-2-Small
-INKLING2_ADAPTER_DIR     ?= $(scratch_dir)/adapters
+INKLING2_ADAPTER_DIR     ?= $(scratch_dir)/adapters-vllm-$(VLLM_PORT)
 INKLING2_LORA            ?= attention
 INKLING2_SERVER_DEVICES  ?= 2,3
 INKLING2_TRAINER_DEVICES ?= 0,1
@@ -377,6 +379,11 @@ up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve
 
 train-inkling2: EXTRA_DOCKER_ENV = -e CUDA_VISIBLE_DEVICES=$(INKLING2_TRAINER_DEVICES)
 train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2 at VLLM_SERVER_URL, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
+	$(if $(and $(filter file,$(origin INKLING2_ADAPTER_DIR)),$(filter-out http://localhost:$(VLLM_PORT),$(VLLM_SERVER_URL))),$(error \
+	  VLLM_SERVER_URL=$(VLLM_SERVER_URL) is not http://localhost:$(VLLM_PORT), the server whose adapter directory \
+	  INKLING2_ADAPTER_DIR defaults to, and the trainer's first sync deletes every halo-adapter-* directory in the one it \
+	  publishes into: for a server on this host pass its VLLM_PORT and leave VLLM_SERVER_URL unset, for any other pass \
+	  the INKLING2_ADAPTER_DIR its up-vllm-inkling2 was given))
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No Inkling 2 server at $(VLLM_SERVER_URL): make \
 	  up-vllm-inkling2 INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "halo launch grpo/environmental $(INKLING2_CONFIG) \

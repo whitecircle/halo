@@ -6,6 +6,7 @@ on the other tag is refused before training."""
 import ast
 import dataclasses
 import importlib.util
+import os
 import re
 import subprocess
 import sys
@@ -92,21 +93,77 @@ def test_the_inkling2_targets_serve_and_dial_one_port():
     assert "rollout_server_url" in {field.name for field in dataclasses.fields(AsyncRolloutConfig)}
 
 
+def _make_dry_run(
+    target: str, *overrides: str, check: bool = True, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """``make -n`` of one target on the scratch root ``/scratch``, with ``env`` in place of the caller's ``VLLM_*`` and
+    ``INKLING2_*`` variables (the compose trainer exports ``VLLM_SERVER_URL``)."""
+    inherited = {name: value for name, value in os.environ.items() if not name.startswith(("VLLM_", "INKLING2_"))}
+    return subprocess.run(
+        ["make", "-n", "-C", str(REPO_ROOT), target, "HALO_SCRATCH=/scratch", *overrides],
+        capture_output=True,
+        text=True,
+        check=check,
+        env={**inherited, **(env or {})},
+    )
+
+
+def _dry_run_inkling2(*overrides: str) -> tuple[str, str]:
+    """The commands ``make -n`` prints for ``up-vllm-inkling2`` and ``train-inkling2``."""
+    serve, train = (_make_dry_run(target, *overrides).stdout for target in ("up-vllm-inkling2", "train-inkling2"))
+    return serve, train
+
+
 @pytest.mark.parametrize(("server", "trainer"), [("2,3", "0,1"), ("4,5,6,7", "0,1,2,3"), ("7", "0,1,2,3,4,5")])
 def test_the_inkling2_targets_size_the_server_and_trainer_by_their_device_lists(server, trainer):
     """A fixed tensor-parallel size or process count beside an overridden device list launches a server or trainer
     that disagrees with the GPUs it sees."""
-    overrides = [f"INKLING2_SERVER_DEVICES={server}", f"INKLING2_TRAINER_DEVICES={trainer}", "HALO_SCRATCH=/scratch"]
-    serve, train = (
-        subprocess.run(
-            ["make", "-n", "-C", str(REPO_ROOT), target, *overrides], capture_output=True, text=True, check=True
-        ).stdout
-        for target in ("up-vllm-inkling2", "train-inkling2")
-    )
+    serve, train = _dry_run_inkling2(f"INKLING2_SERVER_DEVICES={server}", f"INKLING2_TRAINER_DEVICES={trainer}")
     assert re.findall(r"VLLM_TP=(\d+)", serve) == [str(len(server.split(",")))]
     assert re.findall(r"VLLM_CUDA_DEVICES=(\S+)", serve) == [server]
     assert re.findall(r"--nproc (\d+)", train) == [str(len(trainer.split(",")))]
     assert re.findall(r"-e CUDA_VISIBLE_DEVICES=(\S+)", train) == [trainer]
+
+
+def _adapter_directories(*overrides: str) -> tuple[list[str], list[str]]:
+    """The adapter directory ``up-vllm-inkling2`` creates and the one ``train-inkling2`` publishes into."""
+    serve, train = _dry_run_inkling2(*overrides)
+    return re.findall(r"^mkdir -p (\S+)$", serve, re.MULTILINE), re.findall(r"--rollout_adapter_dir=(\S+)", train)
+
+
+def test_each_inkling2_stack_on_a_host_publishes_into_its_own_adapter_directory():
+    """A run's first adapter sync deletes every ``halo-adapter-*`` directory in its ``rollout_adapter_dir``, so two
+    stacks on one host, on distinct ports, that defaulted to one directory would delete each other's versions."""
+    first, second = (_adapter_directories(f"VLLM_PORT={port}") for port in (8000, 8001))
+    assert first[0] == first[1] and second[0] == second[1], "the server target creates another directory"
+    [first_dir], [second_dir] = first[1], second[1]
+    assert first_dir != second_dir
+    # A parent one user's mkdir creates refuses another user's directory under it.
+    assert os.path.dirname(first_dir) == os.path.dirname(second_dir) == "/scratch"
+    assert _adapter_directories("VLLM_PORT=8001", "INKLING2_ADAPTER_DIR=/scratch/run-a") == (
+        ["/scratch/run-a"],
+        ["/scratch/run-a"],
+    )
+
+
+def test_a_trainer_dialing_another_server_than_the_one_on_its_port_names_its_adapter_directory():
+    """The default adapter directory belongs to the server on ``VLLM_PORT``: a trainer that dials another server would
+    publish into it and, on its first sync, delete that stack's versions."""
+    url = "VLLM_SERVER_URL=http://localhost:8001"
+    refused = _make_dry_run("train-inkling2", url, check=False)
+    assert refused.returncode != 0
+    assert "VLLM_SERVER_URL=http://localhost:8001 is not http://localhost:8000" in refused.stderr
+    assert "INKLING2_ADAPTER_DIR" in refused.stderr and "--rollout_adapter_dir" not in refused.stdout
+    accepted = {
+        "port": _make_dry_run("train-inkling2", url, "VLLM_PORT=8001"),
+        "directory": _make_dry_run("train-inkling2", url, "INKLING2_ADAPTER_DIR=/scratch/run-a"),
+        "exported directory": _make_dry_run("train-inkling2", url, env={"INKLING2_ADAPTER_DIR": "/scratch/run-a"}),
+    }
+    assert {case: re.findall(r"--rollout_adapter_dir=(\S+)", run.stdout) for case, run in accepted.items()} == {
+        "port": ["/scratch/adapters-vllm-8001"],
+        "directory": ["/scratch/run-a"],
+        "exported directory": ["/scratch/run-a"],
+    }
 
 
 def test_each_tag_carries_its_own_engine_specifics():

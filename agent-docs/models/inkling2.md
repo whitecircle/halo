@@ -70,7 +70,13 @@ make up-vllm-inkling2      # download the release once, serve it on GPUs 2,3
 make train-inkling2        # the trainer on GPUs 0,1, through halo launch
 ```
 
-`INKLING2_LORA=expert` on `up-vllm-inkling2` and `train-inkling2` trains and serves LoRA on the routed experts too. The release and the adapters live under `HALO_SCRATCH` (`INKLING2_DIR`, `INKLING2_ADAPTER_DIR`); `INKLING2_SERVER_DEVICES` and `INKLING2_TRAINER_DEVICES` pick the GPUs, and their lengths set the server's tensor-parallel size and the trainer's process count; `VLLM_PORT` (default 8000) moves the server's port and the URL the trainer dials together. The runs are the examples under `examples/grpo/environmental/inkling2/vllm/`:
+`INKLING2_LORA=expert` on `up-vllm-inkling2` and `train-inkling2` trains and serves LoRA on the routed experts too. The release and the adapters live under `HALO_SCRATCH` (`INKLING2_DIR`, `INKLING2_ADAPTER_DIR`); `INKLING2_SERVER_DEVICES` and `INKLING2_TRAINER_DEVICES` pick the GPUs, and their lengths set the server's tensor-parallel size and the trainer's process count; `VLLM_PORT` (default 8000) moves the server's port and the URL the trainer dials together.
+
+The adapter directory defaults to `$HALO_SCRATCH/adapters-vllm-<VLLM_PORT>`, one per server port, because a run's first sync deletes every `halo-adapter-*` directory in its `rollout_adapter_dir` ([Adapter sync](../infrastructure/rollout-servers.md#adapter-sync)). `INKLING2_ADAPTER_DIR` on both targets names another directory, which has to sit under `HALO_SCRATCH`, the one volume the server and the trainer mount at the same path. `train-inkling2` stops when `VLLM_SERVER_URL` is anything but `http://localhost:<VLLM_PORT>` and `INKLING2_ADAPTER_DIR` is left at its default. Two hosts that share one `HALO_SCRATCH` volume share the default at the same port: give one its own `INKLING2_ADAPTER_DIR`.
+
+A second stack on the same host passes its own `VLLM_PORT` to both targets and its own `INKLING2_SERVER_DEVICES` and `INKLING2_TRAINER_DEVICES`. Its `train-inkling2` also takes `EXTRA="--port <free port>"`: both trainers run on the host network, and the first holds torchrun's default rendezvous port, 29500. Started from the same checkout with the same `INKLING2_LORA`, it adds `--output_dir=<its own>` to `EXTRA`, since the example's `output_dir` is relative to the checkout. From a checkout directory named like the first stack's (the same checkout, or another clone named `halo`), it runs `up-vllm-inkling2` under its own `COMPOSE_PROJECT_NAME`, since compose names the project after the directory. Without it, the second `up` recreates the first stack's server.
+
+The runs are the examples under `examples/grpo/environmental/inkling2/vllm/`:
 
 | Example | LoRA | Server LoRA modules |
 |---|---|---|
