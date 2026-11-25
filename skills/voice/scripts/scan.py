@@ -26,6 +26,8 @@ _FENCE = re.compile(r"^(`{3,}|~{3,})")
 _HEADING = re.compile(r"^#{1,6} ")
 _RULE = re.compile(r"^(?:-{3,}|\*{3,}|_{3,})$")
 _LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+(.*)$")
+# A code span is matched only to be stepped over: a comment marker inside one is code.
+_CODE_OR_COMMENT = re.compile(r"(?P<code>`+).*?(?P=code)|<!--.*?(?P<closed>-->)|<!--.*")
 # A sentence may close on a bracket or bold mark and open on anything: a number, a tilde, a lower-case name.
 _SENTENCE_END = re.compile(r"(?<!\be\.g)(?<!\bi\.e)(?<!\bvs)(?<!\bcf)[.!?][)*\]]*\s+(?=\S)")
 _SENTENCE_START = r"(?:^|(?<=[.!?] )|(?<=[.!?]\) )|(?<=[.!?]\*\* ))"
@@ -36,6 +38,7 @@ _MENTION = r"(?:CODE|QUOTE)"
 _ASIDE = re.compile(
     rf"\((?!(?:{_MENTION}(?:(?:,\s*|\s*/\s*|\s+)(?:(?:or|and)\s+)?{_MENTION})*|§\d+|\d+|[a-z])\))[^()]+\)"
 )
+_CONTRAST = re.compile(r"(?:,|—|;)\s+not\s+|\brather than\b")
 # Applied in order. Code and quoted text are mentions, so a page can name a pattern without using it. A
 # parenthesis that holds only links is a citation, and an arrow in a link's text is the house form for
 # Page → Section.
@@ -55,10 +58,11 @@ _ANNOUNCED = (
 )
 
 Kind = Literal["strong", "density", "read"]
-Where = Literal["prose", "text", "heading", "rule", "comment"]
+Where = Literal["prose", "prose_or_heading", "text", "heading", "rule", "comment"]
 
 _BLOCK_KINDS: dict[Where, tuple[str, ...]] = {
     "prose": ("paragraph", "item"),
+    "prose_or_heading": ("paragraph", "item", "heading"),
     "text": ("paragraph", "item", "heading", "table"),
     "heading": ("heading",),
     "rule": ("rule",),
@@ -153,7 +157,7 @@ PATTERNS = (
         "banned word",
         "strong",
         r"(?i)\b(?:delv\w+|leverag\w+|seamless\w*|robust|powerful|cutting-edge|it'?s worth noting|simply|"
-        r"essentially|basically|in order to|revolutionary|blazing-fast|state-of-the-art)\b",
+        r"just call|essentially|basically|in order to|revolutionary|blazing-fast|state-of-the-art)\b",
         "text",
         note="The banned words of patterns.md.",
     ),
@@ -198,15 +202,31 @@ PATTERNS = (
     Pattern(
         "emoji",
         "strong",
-        r"[\U0001F300-\U0001FAFF☀-✒✕✖✙-➿]",
-        note="The plain check mark and cross are left out, and table rows are not searched: a support matrix "
-        "and its legend use them.",
+        r"[\U0001F300-\U0001FAFF☀-✒✕✖✙-➿](?!\ufe0f? ?=)",
+        "prose_or_heading",
+        note="The plain check mark and cross are left out, table rows are not searched, and a mark followed by = "
+        "is a legend entry in prose (a check mark = patched) and is not counted. Headings are searched.",
     ),
-    Pattern("em dash", "density", "—", per_1000=2, note="A dash inside a bold label counts."),
+    Pattern(
+        "em dash",
+        "density",
+        "—",
+        per_1000=2,
+        note="A dash inside a bold label counts. A dash in a heading is counted under heading with a tagline, and "
+        "one right after a bold or code label under dash after a label.",
+    ),
+    Pattern(
+        "dash after a label",
+        "density",
+        r"^(?:\*\*[^*]+\*\*|CODE)\s*—",
+        cap=0,
+        note="Takes a bold span or code span that opens a paragraph or a list item, then a dash. A label in plain "
+        "words is left to the em dash rate.",
+    ),
     Pattern(
         "is why",
         "density",
-        r"\b(?:is|are|was) why\b|\bthat's why\b|\bwhich is why\b|\b[Tt]he corollary\b",
+        r"\b(?:is|are|was) why\b|\b[Tt]hat's why\b|\bwhich is why\b|\b[Tt]he corollary\b",
         per_1000=0.5,
         cap=3,
         note="None of 18 hits was false.",
@@ -214,7 +234,7 @@ PATTERNS = (
     Pattern(
         "contrast",
         "density",
-        r"(?:,|—|;)\s+not\s+|\brather than\b",
+        _CONTRAST.pattern,
         per_1000=2,
         note="None of 71 hits was false, and the count cannot tell a contrast that states a limit from a foil. "
         "Human-docs runs at 1.6 per 1,000 words, nearly all of the first kind.",
@@ -265,9 +285,9 @@ PATTERNS = (
         "density",
         r"\b(?:(?<![Yy]ou )wants?|eats?|races? ahead|fights?|hides?|rides?|leans? on|tolerates?|survives?|survivable|"
         r"straw|slides?|resurfaces?|swamps?|crush(?:es)?|outruns?|wobbl\w+|fires?|(?<!the )feeds?|fed|carves?|"
-        r"hands|nudges?|absorbs?|wins big|pull on)\b",
+        r"hands|nudges?|absorbs?|pull on)\b",
         per_1000=1,
-        note="3 of 54 hits were plain: a skill that fires, a fallback that hides an error, a person who wants. "
+        note="3 of 53 hits were plain: a skill that fires, a fallback that hides an error, a person who wants. "
         "Sits, lands, lives in, owns and climbs are ordinary engineer English and are not searched.",
     ),
     Pattern(
@@ -304,7 +324,7 @@ PATTERNS = (
         note="Takes a span that opens in lower case, which leaves out the titles of a reading list and misses "
         "stress on a capitalized word. None of 12 hits was false.",
     ),
-    Pattern("heading with a tagline", "density", r"^#{1,4} .+(?: — |: ).+", "heading", cap=0, note="No false hit."),
+    Pattern("heading with a tagline", "density", r"^#{1,6} .*(?:—|: ).+", "heading", cap=0, note="No false hit."),
     Pattern("section sign", "density", r"§\d+", "text", cap=0),
     Pattern(
         "pointer into the page",
@@ -459,10 +479,30 @@ PATTERNS = (
 )
 
 
+def _cut_comments(line: str, in_comment: bool) -> tuple[str, list[str], bool]:
+    """``line`` with its HTML comments cut out, the comments that open on it, and whether one is open at its end.
+
+    ``in_comment`` says the line starts inside a comment an earlier line opened.
+    """
+    if in_comment:
+        end = line.find("-->")
+        if end < 0:
+            return "", [], True
+        line = line[end + 3 :].strip()
+    comments = [match for match in _CODE_OR_COMMENT.finditer(line) if match["code"] is None]
+    if not comments:
+        return line, [], False
+    kept = line
+    for match in reversed(comments):
+        kept = f"{kept[: match.start()].rstrip()} {kept[match.end() :].lstrip()}"
+    return kept.strip(), [match.group() for match in comments], comments[-1]["closed"] is None
+
+
 def parse_blocks(text: str) -> list[Block]:
     """The paragraphs, list items, headings, table rows, rules and HTML comments of ``text``, each with its line.
 
-    Front matter, fenced code, blockquotes, image lines, raw HTML lines and the body of a comment are left out.
+    A comment is cut out of the line it sits in and listed on its own. Front matter, fenced code, blockquotes,
+    image lines, raw HTML lines and the body of a comment are left out.
     """
     lines = text.removeprefix("\ufeff").split("\n")
     first = 0
@@ -470,6 +510,7 @@ def parse_blocks(text: str) -> list[Block]:
         closing = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), None)
         first = 0 if closing is None else closing + 1
     blocks: list[Block] = []
+    comments: list[Block] = []
     fence = ""
     in_comment = False
     flowing = False
@@ -480,11 +521,10 @@ def parse_blocks(text: str) -> list[Block]:
         if fence:
             if line.startswith(fence) and not line.strip(fence[0]):
                 fence = ""
-        elif in_comment or line.startswith("<!--"):
-            if not in_comment:
-                blocks.append(Block("comment", number, [line]))
-            in_comment = "-->" not in line
-        elif opening := _FENCE.match(line):
+            continue
+        line, opened, in_comment = _cut_comments(line, in_comment)
+        comments += [Block("comment", number, [comment]) for comment in opened]
+        if opening := _FENCE.match(line):
             fence = opening.group(1)
         elif not line or line.startswith((">", "![")) or (line.startswith("<") and line.endswith(">")):
             continue
@@ -503,7 +543,7 @@ def parse_blocks(text: str) -> list[Block]:
             else:
                 blocks.append(Block("paragraph", number, [line]))
             flowing = True
-    return blocks
+    return sorted([*blocks, *comments], key=lambda block: block.line)
 
 
 def _keep_newlines(match: re.Match[str], replacement: str) -> str:
@@ -587,6 +627,15 @@ def scan(text: str, message: bool = False) -> Scan:
             math.ceil(CROWDED_SENTENCES_PER_1000 * max(words, SHORT_TEXT_WORDS) / 1000),
             f"{CROWDED_SENTENCES_PER_1000} per 1,000 words",
             "A list item is a block of its own, so two items are never read as one sentence.",
+        ),
+        Row(
+            "paragraph with two contrasts",
+            "density",
+            [block.line for block, body in prose if len(_CONTRAST.findall(body.replace("\n", " "))) >= 2],
+            0,
+            "none",
+            "A paragraph or list item that the contrast expression hits twice or more. Human-docs has one, with two "
+            "corrective contrasts.",
         ),
         Row(
             f"paragraph over {LONG_PARAGRAPH_WORDS} words",

@@ -16,20 +16,20 @@ larger one where the expression misses cases. A text under 500 words gets the al
 The limits are fitted to five of our own texts: the 42 pages of `human-docs/`, the README, one draft of
 release notes, 16 PR comments and the theory page. "The theory page" is
 `agent-docs/reference/gpu-training-theory.md` as it read at commit `b83a5761f`, before it was rewritten as
-a lecture. It is over the limit on 24 rows, and 29 of the 42 `human-docs/` pages are over on none. Treat
+a lecture. It is over the limit on 26 rows, and 29 of the 42 `human-docs/` pages are over on none. Treat
 a limit as a prompt to read the hits.
 
-Quoted lines are from those texts as they read when the patterns were counted, and some have been fixed
-since.
+Quoted lines are from those texts, from `agent-docs/reference/why-this-framework.md` and from a draft of
+the lecture, as they read when the patterns were counted; some have been fixed since.
 
 ## Sentence constructions
 
 ### Em dash
 
-Density, 2 per 1,000 words, and none in a heading or between a list label and its text. The pattern is a
-dash that joins two clauses where a comma, parentheses or a new sentence would do. `human-docs/`, the
-release notes and the PR comments carry none in 29,400 words of prose, and the theory page had 80. From
-`agent-docs/reference/why-this-framework.md`:
+Density, 2 per 1,000 words. None in a heading, and none after a bold or code label that opens a paragraph
+or a list item. The pattern is a dash that joins two clauses where a comma, parentheses or a new sentence
+would do. `human-docs/`, the release notes and the PR comments carry none in 29,400 words of prose, and
+the theory page had 80. From `agent-docs/reference/why-this-framework.md`:
 
 > Built on HuggingFace Transformers, Accelerate, and TRL — every distributed trainer subclasses a TRL,
 > Transformers, or SentenceTransformers trainer.
@@ -59,8 +59,9 @@ Fine once or twice on a page, where the reader has just wondered why anyone woul
 
 ### Contrast
 
-Density, 2 per 1,000 words, counting `, not Y` and `rather than` together. Never two in one paragraph and
-never the same rejected half twice. `human-docs/` runs at 1.6 and the theory page ran at 4.2.
+Density, 2 per 1,000 words, counting `, not Y` and `rather than` together. Never two in one paragraph or
+list item. Never the same rejected half twice, which you find by reading. `human-docs/` runs at 1.6 and
+the theory page ran at 4.2.
 
 There are two kinds. A corrective contrast names what the reader would otherwise assume, and it stays:
 "A row longer than `max_length` is dropped, not truncated", "run one torchrun per node, not one per GPU".
@@ -219,7 +220,7 @@ convention.
 ### Wishes and appetites
 
 Density, 1 per 1,000 words. Hardware and software are given a will: a tile `wants`, a host `races`, a
-kernel `eats`. The theory page had 64 such verbs by reading, and the scanner finds 42. From the theory
+kernel `eats`. The theory page had 64 such verbs by reading, and the scanner finds 41. From the theory
 page:
 
 > The CPU enqueues each kernel into a **stream** that the GPU drains asynchronously, and the host races
@@ -361,7 +362,9 @@ A plain conversational heading is welcome: "Rules that save you a wasted run", "
 
 - A horizontal rule before each section. The heading already marks the break. Limit none.
 - Curly quotes. Limit none; this repository uses straight quotes.
-- Emoji as formatting. A strong tell. The check mark and the cross of a support matrix are not counted.
+- Emoji as formatting, in a heading or in prose. A strong tell. The plain marks `✓` and `✗` are not
+  counted, table rows are not searched, and a mark followed by `=`, as in a legend written
+  `✅ = supported`, is not counted.
 - Title case in section headings. Use sentence case.
 
 ## Pointers and structure

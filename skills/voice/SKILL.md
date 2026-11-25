@@ -8,10 +8,6 @@ description: >-
   machine-writing patterns out of Halo's text, the pattern catalog with a limit
   for each pattern, and a scanner that counts them.
 allowed-tools: [Read, Edit, Write, Grep, Glob, Bash]
-paths:
-  - human-docs/**
-  - agent-docs/reference/gpu-training-theory.md
-  - README.md
 ---
 
 # Voice
@@ -66,8 +62,9 @@ in three groups:
 Every row lists the line numbers of its hits. `--notes` adds what reading the hits of that expression
 showed: how many were false, and what the expression misses. `--message` is for a PR or issue comment, a
 commit message and release notes. It allows no bold and does not report words about change such as "no
-longer", which are what such a text is about. A file the scanner cannot read ends the run with status 2
-before any report is printed.
+longer", which are what such a text is about. On a PR body the template's checklist lines and its
+AI-disclosure labels are counted too, and their bold, dashes and asides are not yours to fix. A file the
+scanner cannot read ends the run with status 2 before any report is printed.
 
 ### Reading aloud
 
@@ -91,7 +88,7 @@ The scanner finds none of these, and they decide whether a page reads well:
 - Say what the thing is and stop. Keep a contrast only where the reader would otherwise act on the
   rejected half, and never bring the same rejected half back.
 - Put the cause first and join with "so", or the effect first and join with "because". Keep
-  "which is why" for the two or three places where the reader has just wondered why anyone would do
+  "which is why" for the one or two places where the reader has just wondered why anyone would do
   that.
 - A colon introduces a list, a formula, a definition or an example. If the words before it can be
   deleted with nothing lost, they were a drumroll: fold them into the claim. Do the same with a sentence
