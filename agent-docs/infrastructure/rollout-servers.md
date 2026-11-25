@@ -266,7 +266,7 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   IPC handle, which works on one host only. A per-version directory needs the same mount in the trainer and every
   engine and cannot be used where containers forbid bind mounts. A path load of a 7 to 27 MB adapter took 0.03 to
   0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row. With `rollout_adapter_dir` set, rank 0 writes
-  each version there as a PEFT directory (staged under a temporary name, then renamed) and the servers load it by path:
+  each version there as a PEFT directory (staged under a temporary name, then renamed; readable by every user) and the servers load it by path:
   `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`: the preflight refuses a vLLM server that reports the variable off, whose load route would answer 404.
   A version's directory is removed when the version leaves the servers: at its retirement, when a load fails on any
   server, and at the first sync of a `train()` (**First sync**). A load a server refuses names
@@ -276,7 +276,7 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   round keep the version they started on. A request with no version published raises, since the engine would serve the
   base. The `isr_engine_reference` re-score names the newest version the same way.
 - **Base no push carries.** A family whose `weight_sync_refusal` is set is never pushed, and runs only on a backend
-  its spec lists in `adapter_sync_backends`: Inkling 2 (frozen NVFP4/MXFP8 experts; attention or expert LoRA) on vLLM. Every
+  its spec lists in `adapter_sync_backends`: Inkling 2 (frozen NVFP4/MXFP8 experts; attention LoRA, with or without expert LoRA) on vLLM. Every
   server must serve the trainer's launch base from the start, by the match under **Restart**; the preflight skips its
   quantization and MoE-runner checks, and the trainer forms no weight-sync group. A server that serves another base
   fails the sync.
@@ -332,6 +332,10 @@ already refused by every weight sync. `tests/gpu/trainers/grpo/test_adapter_sync
 the pinned 0.5.22, Qwen3-0.6B, on a server that already holds someone else's adapter and a dead trainer's version: over
 four runs the served adapter's log-probs sat 0.0001 to 0.0007 nats (mean) from the trainer's, the served base 0.03 from
 the trainer's base, and a merged push 0.0004 to 0.04 from the served adapter.
+
+A saved adapter takes the same form offline: `export_engine_adapter.py` writes the version directory a sync would
+publish for it, through `build_engine_adapter`, and refuses what the engine cannot serve through the same checks
+(`reject_unsyncable_config`, `engine_adapter_refusal`, `unservable_adapter_reasons`) ([Scripts](../reference/scripts-reference.md#post-training-scripts)).
 
 ### Served weights stay in checkpoint layout
 

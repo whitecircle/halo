@@ -25,6 +25,7 @@ from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
 from halo.checkpoint.tools import adapter_merge, bf16_conversion, deepseek_v4_dequant, vocab_patch
 from halo.data.preprocessed import prepare_dataset_tool, tokenization
+from halo.entrypoints import engine_adapter_export
 from scripts.cli_arguments import (
     HUB_SOURCE_HELP,
     add_device_map_arg,
@@ -38,6 +39,7 @@ from tests.common.repo import REPO_ROOT, load_script_module
 # safetensors load no model code and expose no flag.
 _TOOLS = (
     ("scripts/after_training/convert_to_bf16.py", None),
+    ("scripts/after_training/export_engine_adapter.py", None),
     ("scripts/after_training/merge_models.py", True),
     ("scripts/after_training/merge_peft_adapters.py", None),
     ("scripts/after_training/reattach_vision_tower.py", False),
@@ -121,6 +123,22 @@ _LOAD_SITES = (
         _adapter_on_a_local_base,
         adapter_merge,
         "merge_adapter_into_base",
+        True,
+    ),
+    (
+        "scripts/after_training/export_engine_adapter.py",
+        "--adapter_dir",
+        _adapter_on_a_hub_base,
+        engine_adapter_export,
+        "resolve_build_config",
+        False,
+    ),
+    (
+        "scripts/after_training/export_engine_adapter.py",
+        "--adapter_dir",
+        _adapter_on_a_local_base,
+        engine_adapter_export,
+        "resolve_build_config",
         True,
     ),
     (

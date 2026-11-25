@@ -3,6 +3,8 @@ its mount when a server cannot read it."""
 
 import json
 import logging
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,18 @@ def test_a_published_version_is_a_whole_peft_directory_and_leaves_no_stage(tmp_p
     assert sorted(path.name for path in tmp_path.iterdir()) == ["v1"], "the stage was renamed, not left beside it"
     remove_adapter_directories(tmp_path, ["v1", "never-published"])
     assert not published.exists()
+
+
+def test_a_published_version_is_readable_by_a_server_running_as_another_user(tmp_path):
+    """Under a umask that keeps new files to their owner, as safetensors keeps its file even under umask 022."""
+    previous = os.umask(0o077)
+    try:
+        published = publish_adapter_directory(tmp_path, "v1", {"x.lora_A.weight": torch.zeros(2, 3)}, {"r": 2})
+    finally:
+        os.umask(previous)
+
+    modes = {path.name: stat.S_IMODE(path.stat().st_mode) for path in (published, *published.iterdir())}
+    assert modes == {"v1": 0o755, ADAPTER_SAFETENSORS_FILE: 0o644, ADAPTER_CONFIG_FILE: 0o644}
 
 
 def test_a_version_that_cannot_be_removed_is_logged_and_the_rest_still_go(tmp_path, monkeypatch, caplog):

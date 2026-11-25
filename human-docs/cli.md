@@ -78,6 +78,7 @@ tool's help, not the launcher's.
 | `convert-to-bf16` / `quantize-to-lowp` / `unfuse-moe-experts` / `reset-sinks` / `reattach-vision-tower` | checkpoint post-processing: bf16 export, low-precision export, per-expert layout, GPT-OSS sink reset, the vision tower back on a text-only export |
 | `patch-vocab` | add tokens to a model's vocabulary before training |
 | `export-block-fp8` | write the block-FP8 checkpoint a rollout server boots from under `rollout_weight_precision: fp8_block`; see [Rollout Servers](rollout-servers.md) |
+| `export-engine-adapter` | write a saved LoRA adapter as the directory a rollout server loads by path; see [Checkpoints](checkpoints.md) |
 | `convert-glm5-bf16` / `convert-mistral4-bf16` / `convert-deepseek-v4-bf16` | convert that family's low-precision Hub release to bf16, required before training it |
 | `prepare-dataset` / `s3` | tokenize SFT or pretraining data offline, optionally packed and sharded; move datasets to and from S3 |
 | `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then build prompts, pack tests and checker, and publish rating bands |

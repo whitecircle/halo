@@ -82,6 +82,20 @@ def test_every_peft_key_spelling_resolves_to_its_module(tmp_path):
     assert adapter_module_paths(adapter) == set(_KEY_TO_MODULE.values())
 
 
+def test_a_native_expert_adapter_addresses_its_ep_layer(tmp_path):
+    """Its ``experts.<attr>`` slot names the EP layer's expert weight, which the base's own class need not hold (Qwen3
+    MoE's fuses the ``gate_proj`` and ``up_proj`` its EP layer adapts), while the layer is a module of both; PEFT's
+    adapter on one expert's linear still addresses that linear."""
+    layer = "model.layers.0.mlp"
+    keys = [
+        f"{_PREFIX}{layer}.experts.gate_up_proj.lora_A",
+        f"{_PREFIX}{layer}.experts.down_proj.lora_B",
+        f"{_PREFIX}{layer}.experts.3.gate_proj.lora_A.weight",
+    ]
+
+    assert adapter_module_paths(_adapter(tmp_path, keys)) == {layer, f"{layer}.experts.3.gate_proj"}
+
+
 def test_an_adapter_the_wrapper_carries_loads_once(tmp_path):
     adapter = _adapter(tmp_path, [f"{_PREFIX}model.language_model.layers.0.self_attn.q_proj.lora_A.weight"])
     load, requests = _loader(_text_only())

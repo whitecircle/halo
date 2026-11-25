@@ -55,9 +55,9 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-25 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention or its
-  routed experts while the released NVFP4/MXFP8 expert weights stay frozen, and environmental GRPO serves each
-  adapter version to vLLM ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
+- **2026-11-25 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention, alone or
+  beside its routed experts, while the released NVFP4/MXFP8 expert weights stay frozen, and environmental GRPO
+  serves each adapter version to vLLM ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
   - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
     weights to, such as Inkling 2, is served from its release with no NCCL group.
   - **Inkling 2 vLLM image:** a second tag, `:vllm-0.1.dev25249` on vLLM's Inkling 2 build, with expert LoRA on the
@@ -67,6 +67,9 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     train with it in SFT and GRPO ([Inkling 2](agent-docs/models/inkling2.md#measured)).
   - **Commands:** `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2` build the image, serve
     and train.
+  - **Saved adapters on an engine:** `halo run export-engine-adapter` writes a saved LoRA adapter, such as an SFT
+    checkpoint, as the directory a vLLM or SGLang server loads by path
+    ([Scripts](agent-docs/reference/scripts-reference.md#post-training-scripts)).
   - **Rollouts without reasoning:** `rollout_thinking: false` samples environmental GRPO with no reasoning block
     ([Thinking off](agent-docs/training-methods/async-grpo/reasoning.md#thinking-off)), and code contests give
     such a policy a `notes` tool that holds its working between turns
@@ -96,6 +99,8 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     tools read the base at that commit (`--base_revision` for an adapter that records none). An expert-only
     adapter records whether its run neutralized the attention sinks, and the streaming merge repeats it.
     A PEFT wrap that leaves no trainable adapter parameter is refused when the trainer is built.
+  - **Docs:** [GPU Training Theory](agent-docs/reference/gpu-training-theory.md) is now a lecture for newcomers to
+    GPU training, with every number measured on a B300, specified or computed, and the scripts that reproduce it.
   - **Also:** Transformers 5.23 and flash-linear-attention 0.6, DPO/KTO reference log-probs swept after the FSDP2
     wrap, SGLang turns requeued at a weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.

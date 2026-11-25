@@ -68,7 +68,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹⁶ [Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) restrictions apply.
 
-¹⁷ The release ships its routed experts only as NVFP4/MXFP8, so it trains as LoRA (attention, expert or both) over frozen quantized experts at `expert_parallel_size` ≥ 2 ([Inkling 2](inkling2.md#frozen-quantized-experts)), where ETP is refused; full fine-tuning and ETP run on tiny bf16 models only.
+¹⁷ The release ships its routed experts only as NVFP4/MXFP8, so it trains as LoRA (attention, alone or beside the experts) over frozen quantized experts at `expert_parallel_size` ≥ 2 ([Inkling 2](inkling2.md#frozen-quantized-experts)), where ETP is refused; full fine-tuning and ETP run on tiny bf16 models only.
 
 ## MoE knobs
 

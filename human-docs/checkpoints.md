@@ -86,6 +86,7 @@ flags.
 | `merge-ep-shards` | make a sharded EP save loadable |
 | `merge-pp-stages` | merge the per-node directories of a PP save into one checkpoint |
 | `merge-peft-adapters` | merge a LoRA adapter into its base as one checkpoint |
+| `export-engine-adapter` | write a saved LoRA adapter as the directory a vLLM or SGLang server loads by path, as adapter sync publishes it |
 | `merge-models` | combine models in weight space (linear, SLERP, task arithmetic, TIES) |
 | `convert-to-bf16` | cast an fp32 or mixed checkpoint to bf16 for serving |
 | `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights under Halo's manifest, which serving engines do not load, or with `--export_format compressed-tensors` in the layout vLLM loads |
@@ -107,9 +108,10 @@ only where the pinned engine reads that family's layout:
   their architecture), and Zaya on SGLang, whose loader reads a layout the export
   does not carry.
 - **Adapters only:** an Inkling 2 run over the packed release saves adapters and
-  has no gathered export; environmental GRPO serves them to vLLM's Inkling 2
-  image through `rollout_adapter_sync`
-  ([Inkling 2](../agent-docs/models/inkling2.md#frozen-quantized-experts) ↗).
+  has no gathered export. `export-engine-adapter` writes a saved adapter
+  (attention, or attention and experts) as the directory vLLM's Inkling 2 image
+  loads by path over the release
+  ([Inkling 2 → Serving a saved adapter](../agent-docs/models/inkling2.md#serving-a-saved-adapter) ↗).
 - **Untested:** Zaya on vLLM's generic transformers backend, Ling 3.0, Inkling,
   and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The
   exports use the hub's names, but no engine has served one.

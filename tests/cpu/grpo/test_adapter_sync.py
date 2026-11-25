@@ -13,6 +13,7 @@ import requests
 import torch
 from huggingface_hub import constants
 from peft import LoraConfig, get_peft_model
+from peft.tuners.lora.layer import Linear as LoraLinear
 from safetensors.torch import load_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
@@ -1002,6 +1003,14 @@ def test_rslora_scales_by_the_square_root_of_the_rank():
     assert resolve_adapter_serving(_peft_model(use_rslora=True)).scaling == pytest.approx(24 / 8**0.5)
 
 
+def test_a_lora_layer_of_another_class_than_pefts_plain_linear_is_refused_on_a_served_name():
+    model = _peft_model()
+    model.base_model.model.model.layers[0].self_attn.q_proj.__class__ = type("OtherLinear", (LoraLinear,), {})
+
+    with pytest.raises(ValueError, match=r"layers\.0\.self_attn\.q_proj' is not one SGLang 0\.5\.22 serves"):
+        reject_unadaptable_model(model, _NO_PARALLELISM, SGLangWeightSyncClient)
+
+
 def _config(**overrides):
     fields = {
         "rollout_backend": "sglang",
@@ -1234,12 +1243,19 @@ def test_inkling2_attention_adapters_reach_the_release_names_vllm_packs(family):
     assert all(".model.llm.layers." in key for key in hub), "the release's layer path"
 
 
+def test_an_adapted_module_the_hub_layout_fuses_or_splits_is_refused():
+    model = _inkling2_peft("step3p7", ("k_proj",))
+
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, SGLangWeightSyncClient)
+
+    assert any("fused or split in the hub layout" in each for each in reasons), reasons
+
+
 class _ExpertLoraLayer:
     """An EP layer with native expert LoRA at rank 8 and the given scaling."""
 
     def __init__(self, scaling: float):
-        self.ep_config = SimpleNamespace(expert_lora=SimpleNamespace(r=8))
-        self.expert_lora_scaling = scaling
+        self.ep_config = SimpleNamespace(expert_lora=ExpertLoraSpec(r=8, alpha=8 * scaling))
 
 
 @pytest.mark.parametrize(
@@ -1247,12 +1263,18 @@ class _ExpertLoraLayer:
     [
         ("inkling2_text", VLLMWeightSyncClient, 2.0, None),
         ("inkling2_text", VLLMWeightSyncClient, 1.0, "another rank or scaling"),
-        ("inkling2_text", SGLangWeightSyncClient, 2.0, "serves no routed-expert adapter"),
-        ("qwen3_moe", VLLMWeightSyncClient, 2.0, "serves no routed-expert adapter"),
+        (
+            "inkling2_text",
+            SGLangWeightSyncClient,
+            2.0,
+            f"{SGLangWeightSyncClient.ENGINE_RELEASE} serves no routed-expert adapter",
+        ),
+        ("qwen3_moe", VLLMWeightSyncClient, 2.0, f"{VLLMWeightSyncClient.IMAGE.tag} serves no routed-expert adapter"),
     ],
 )
 def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, client_cls, scaling, reason, monkeypatch):
-    """vLLM's Inkling 2 experts take an adapter (with Halo's source patch); one config carries every module's rank."""
+    """vLLM's Inkling 2 experts take an adapter (with Halo's source patch); one config carries every module's rank. A
+    refusal names the server the model needs, as the module refusal does."""
     model = _inkling2_peft(family, ("q_proj", "o_proj"))
     monkeypatch.setattr(adapter_sync, "expert_lora_layers", lambda _: [("mlp", _ExpertLoraLayer(scaling))])
     reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)

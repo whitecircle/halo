@@ -27,9 +27,9 @@ bf16 experts take the base fused-GLU storage, gather and sharded merge. That inc
 
 `frozen_quantized_experts: true` keeps each rank's slice of the release's packed experts in their shipped precision as a frozen base, with or without expert LoRA over it. Each expert GEMM dequantizes its bank to bf16, forward and backward; no bf16 copy persists between GEMMs.
 
-Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, `merge_expert_lora_on_save: false`, `use_peft: true`, and `lowp_precision: bf16` or `lowp_apply_moe_experts: false` (a bank's GEMM reads the packed weights, so the expert fake-quant would never run). MFU and S-MFU count the banks as frozen expert weights. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
+Requirements, enforced at config time: `expert_parallel_size` ≥ 2, `expert_tensor_parallel_size: 1`, `ep_lazy_loading: true`, `merge_expert_lora_on_save: false`, `use_peft: true` with a LoRA target outside the routed experts, and `lowp_precision: bf16` or `lowp_apply_moe_experts: false` (a bank's GEMM reads the packed weights, so the expert fake-quant would never run). MFU and S-MFU count the banks as frozen expert weights. Every family other than Inkling 2 is refused off `config.json`, before the process groups (`reject_unsupported_model`); the loader refuses bf16 expert tensors.
 
-A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. These adapters resume a Halo run and have no merged export: `merge_peft_adapters.py` refuses an adapter that rewrites a tensor the base stores packed (the release's `w13_weight` / `w2_weight`), as a delta folded into packed values gives no weight. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
+A frozen layer refuses every expert gather — merged save, weight sync, gathered export — so a run saves its adapters. These adapters resume a Halo run and serve on vLLM over the release ([Serving a saved adapter](#serving-a-saved-adapter)); they have no merged export: `merge_peft_adapters.py` refuses an adapter that rewrites a tensor the base stores packed (the release's `w13_weight` / `w2_weight`), as a delta folded into packed values gives no weight. The bank buffers are non-persistent: checkpoints never carry them, and every load reads them from the release.
 
 The release layout, per layer and projection (`w13_weight` is the interleaved gate/up, `w2_weight` the down projection):
 
@@ -51,6 +51,7 @@ The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]`
 - **Packing.** On a packed row (`position_ids` restarting at 0) the family's patches stop every short-convolution tap at its document's start, and `inkling2_relative_flex` reads the documents off `position_ids`, so the on-policy GRPO trainers' `packed_microbatch_tokens` and SFT's `packing` train it ([Document isolation](../data/collators.md#document-isolation-under-packing)). The convolutions isolate one `[1, N]` row: a `[B > 1, N]` `position_ids` that restarts inside a row raises. `padding_free` is refused: it needs a varlen flash kernel.
 - **MTP.** The release ships a five-layer draft head under its own `mtp_config`, which transformers' class does not build; `mtp_loss_weight` refuses the family ([MTP heads](../optimization/mtp-heads.md)).
 - **Full fine-tuning of the release.** No save exports the frozen banks, so `frozen_quantized_experts` requires `use_peft: true`.
+- **Expert LoRA alone on the release.** Expert adapters with no PEFT adapter beside them are served by no engine and cannot merge into the packed experts, so `frozen_quantized_experts` refuses a `lora_target_modules` that names only expert projections: add `o_proj`.
 - **Online GRPO, and environmental GRPO with a weight push.** The spec's `weight_sync_refusal`: no full-weight push into either pinned engine has been validated. Environmental GRPO runs on vLLM with [adapter sync](#rollouts), which pushes no weights; SGLang is refused. Offline GRPO needs no server.
 
 ## LoRA
@@ -91,6 +92,18 @@ The configs set four things for this model:
 - The training shape ([Memory on two B300s](#memory-on-two-b300s)): `per_device_train_batch_size: 1` and `gradient_accumulation_steps: 4`, four trajectories per rank and step, one group of `num_generations: 4`; `packed_microbatch_tokens: 8192`, which packs the step's turn rows into at most four micro-batches; `max_train_row_tokens: 4096`, half that budget, so any two rows share a micro-batch and a rank's eight rows fit the four within it (a row over the cap leaves the batch; uncapped, a round needing more than four is rebalanced into four past the budget); and `use_chunked_grpo_logprobs: true`, which the packing requires.
 - Attention LoRA targets the text tower alone (`'.*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)'`), since the vision tower's attention also names `q_proj` / `k_proj` / `v_proj`. vLLM packs `wq_du` / `wk_dv` / `wv_dv` / `wr_du` into its `qkvr` layer and serves `wo_ud` apart.
 - Expert LoRA lists its targets, `[o_proj, gate_up_proj, down_proj]`: a regex string drops the expert targets, and these names stay off the vision tower. Expert and attention adapters share one rank and scaling.
+
+### Serving a saved adapter
+
+A run's saved adapter (an SFT checkpoint, or an environmental GRPO save) is not the form the server loads: it keys each module by the live tree (`model.language_model.layers.N.self_attn.q_proj`) where vLLM reads the release's names (`model.llm.layers.N.attn.wq_du`), and stores the experts as Halo's grouped `gate_up_proj` / `down_proj` adapters (`[E, in, r]` / `[E, r, out]`) where vLLM reads `w13_weight` / `w2_weight` (`[E, r, in]` / `[E, out, r]`). `export_engine_adapter.py` writes the directory adapter sync would publish for the same adapters, through the same code ([Scripts](../reference/scripts-reference.md#post-training-scripts)):
+
+```bash
+halo run export-engine-adapter --adapter_dir <run>/checkpoint-500 --output_dir <adapter dir>/sft-500
+curl -X POST http://localhost:8000/v1/load_lora_adapter -H 'Content-Type: application/json' \
+  -d '{"lora_name": "sft-500", "lora_path": "<adapter dir>/sft-500"}'
+```
+
+The server is the one [above](#rollouts): launched on the release the adapter was trained on, with `--enable-lora` and a `--max-lora-rank` at least the adapter's, `--lora-target-modules qkvr wo_ud` for attention adapters and no target list for expert ones, and the output directory readable at the path the request names (`make up-vllm-inkling2` mounts `HALO_SCRATCH` at its own path). A request then names `sft-500` as its model. On Inkling-2-Small, the adapter a 30-step SFT run saved (r8 on `o_proj` and the experts) loads only once converted: the saved directory is refused (HTTP 500, `...experts.down_proj.lora_A is unsupported LoRA weight`), and the converted one moves the log-probs of a 137-token text by 0.16 nats per token on average against the base, and by 0.045 against the same adapter with its expert B zeroed. After a refused load, a server at `--tensor-parallel-size 2` answers the next load with the refused one's error: restart it before loading again. The tool refuses, before any write, an adapter of expert targets alone, which adapter sync serves only beside an attention adapter (train `o_proj` with the experts), and expert adapters at another rank or scaling than the attention ones.
 
 ### Memory on two B300s
 

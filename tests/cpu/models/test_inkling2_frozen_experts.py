@@ -13,7 +13,7 @@ from transformers.models.inkling2.configuration_inkling2 import Inkling2Config, 
 from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
 from halo.callbacks.model_flops import estimate_rank_flops
-from halo.configs.parallelism_arguments import reject_frozen_experts_without_adapters
+from halo.configs.parallelism_arguments import reject_frozen_experts_without_peft_adapters
 from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes, frozen_bank_families
 from halo.entrypoints import script
@@ -238,34 +238,70 @@ def test_frozen_quantized_experts_names_each_missing_requirement(override, named
         make_parallelism_config(world_size=2, gpus_per_node=2, **{**_FROZEN_OK, **override})
 
 
+_EXPERTS_ALONE = "frozen_quantized_experts needs a LoRA target outside the routed experts"
+
+
 @pytest.mark.parametrize(
-    ("frozen", "use_peft", "refused"),
-    [(True, False, True), (True, True, False), (False, False, False)],
-    ids=["full-fine-tune", "adapters", "bf16-experts"],
+    ("frozen", "use_peft", "targets", "refused"),
+    [
+        (True, False, None, "frozen_quantized_experts needs use_peft: true"),
+        (True, True, ["o_proj"], None),
+        (True, True, ["o_proj", "gate_up_proj", "down_proj"], None),
+        (True, True, r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)", None),
+        (True, True, ["gate_up_proj", "down_proj"], _EXPERTS_ALONE),
+        (True, True, ["experts"], _EXPERTS_ALONE),
+        (True, True, "down_proj", _EXPERTS_ALONE),
+        (False, False, None, None),
+        (False, True, ["gate_up_proj", "down_proj"], None),
+    ],
+    ids=[
+        "full-fine-tune",
+        "attention",
+        "attention-and-experts",
+        "attention-regex",
+        "expert-projections",
+        "expert-container",
+        "one-expert-projection-string",
+        "bf16-experts-full-fine-tune",
+        "bf16-experts-expert-lora",
+    ],
 )
-def test_frozen_quantized_experts_trains_adapters_alone(frozen, use_peft, refused):
-    """No save exports the banks, so a full fine-tune over them would fail at its first checkpoint."""
-    dist_args, model_config = SimpleNamespace(frozen_quantized_experts=frozen), SimpleNamespace(use_peft=use_peft)
-    if not refused:
-        reject_frozen_experts_without_adapters(dist_args, model_config)
+def test_frozen_quantized_experts_trains_a_peft_adapter(frozen, use_peft, targets, refused):
+    """No save exports the banks, so a full fine-tune over them would fail at its first checkpoint; expert adapters
+    alone build no PEFT model, which no engine serves, and no merge folds into the packed experts."""
+    dist_args = SimpleNamespace(frozen_quantized_experts=frozen)
+    model_config = SimpleNamespace(use_peft=use_peft, lora_target_modules=targets)
+    if refused is None:
+        reject_frozen_experts_without_peft_adapters(dist_args, model_config)
         return
-    with pytest.raises(ValueError, match="frozen_quantized_experts needs use_peft: true"):
-        reject_frozen_experts_without_adapters(dist_args, model_config)
+    with pytest.raises(ValueError, match=refused):
+        reject_frozen_experts_without_peft_adapters(dist_args, model_config)
 
 
-def test_a_training_script_refuses_a_full_fine_tune_over_frozen_banks_before_it_builds_its_config(monkeypatch):
+@pytest.mark.parametrize(
+    ("model_config", "refused"),
+    [
+        (SimpleNamespace(use_peft=False), "frozen_quantized_experts needs use_peft: true"),
+        (SimpleNamespace(use_peft=True, lora_target_modules=["gate_up_proj", "down_proj"]), _EXPERTS_ALONE),
+    ],
+    ids=["full-fine-tune", "expert-adapters-alone"],
+)
+def test_a_training_script_refuses_frozen_banks_without_a_peft_adapter_before_it_builds_its_config(
+    monkeypatch, model_config, refused
+):
     def reached(*args, **kwargs):
         raise AssertionError("the parallelism config was built")
 
     monkeypatch.setattr(script, "agree_rank_uniform_env", lambda: None)
     monkeypatch.setattr(script, "_pin_single_process_to_bound_gpu", lambda training_config: None)
+    monkeypatch.setattr(script, "split_expert_lora_targets", reached)
     monkeypatch.setattr(script, "parallelism_config_from_args", reached)
 
-    with pytest.raises(ValueError, match="frozen_quantized_experts needs use_peft: true"):
+    with pytest.raises(ValueError, match=refused):
         script.init_training_script(
             SimpleNamespace(),
             SimpleNamespace(),
-            SimpleNamespace(use_peft=False),
+            model_config,
             SimpleNamespace(frozen_quantized_experts=True),
             script_prefix="sft",
             trainer_cls=object,

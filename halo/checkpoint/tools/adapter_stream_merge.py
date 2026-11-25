@@ -327,7 +327,8 @@ def _classify_adapter_tensors(
     return linear, experts, replacements
 
 
-def _expert_spec(config: dict) -> ExpertLoraSpec:
+def resolve_expert_lora_spec(config: dict) -> ExpertLoraSpec:
+    """The native expert adapters' recipe a saved ``adapter_config.json`` records; raises for one that records none."""
     peft_type = config.get("peft_type")
     if peft_type == MIXED_EXPERT_LORA_PEFT_TYPE:
         config = config[EXPERT_LORA_CONFIG_KEY]
@@ -356,7 +357,7 @@ def _expert_layers(
             f"there is no expert layout to fold its expert adapters through. Supported: "
             f"{', '.join(sorted(moe_model_types()))}."
         )
-    scaling = _expert_spec(config).scaling
+    scaling = resolve_expert_lora_spec(config).scaling
     return {name: _ExpertLayer(name, spec, scaling, attrs) for name, attrs in experts.items()}
 
 

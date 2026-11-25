@@ -12,6 +12,7 @@ from datasets import Dataset
 
 from halo.checkpoint.tools import adapter_merge, model_merge, sink_reset
 from halo.checkpoint.tools.adapter_merge import DEFAULT_NUM_LABELS
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.data import deduplication
 from tests.common.repo import load_script_module
 
@@ -260,6 +261,27 @@ def test_merge_hands_on_the_base_revision_it_was_given(monkeypatch, flags, revis
     module.main()
 
     assert seen == [revision]
+
+
+@pytest.mark.parametrize(
+    ("flags", "handed"),
+    [
+        ((), {"rollout_backend": AsyncRolloutConfig.rollout_backend, "base_revision": None}),
+        (
+            ("--rollout_backend", "sglang", "--base_revision", "c0ffee"),
+            {"rollout_backend": "sglang", "base_revision": "c0ffee"},
+        ),
+    ],
+    ids=["defaults", "stated"],
+)
+def test_the_engine_export_hands_on_the_engine_and_base_revision_it_was_given(monkeypatch, flags, handed):
+    seen: list[dict] = []
+    module = load_script_module("scripts/after_training/export_engine_adapter.py", "halo_test_export_engine_adapter")
+    monkeypatch.setattr(module, "export_engine_adapter", lambda *paths, **kwargs: seen.append(kwargs))
+    monkeypatch.setattr(sys, "argv", ["export_engine_adapter.py", "--adapter_dir", "a", "--output_dir", "o", *flags])
+    module.main()
+
+    assert [{key: kwargs[key] for key in handed} for kwargs in seen] == [handed]
 
 
 def test_merge_refuses_a_label_count_without_a_classification_head(monkeypatch, capsys):

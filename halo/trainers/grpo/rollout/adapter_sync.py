@@ -1,13 +1,13 @@
 """Adapter-only weight sync for LoRA runs: the engine keeps the frozen base the first push (and any restart) gave it, and
 each sync loads the trainer's adapter under a new name that new requests select. What the engine cannot serve as an
-adapter is refused here, before the run, with the reason."""
+adapter is refused here, before the run or a saved adapter's export, with the reason."""
 
 from __future__ import annotations
 
 import logging
 import os
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Collection, Iterable, Mapping
 from functools import partial
 from typing import NamedTuple
 
@@ -123,14 +123,20 @@ def resolve_live_versions(async_config: AsyncRolloutConfig) -> int:
     return (async_config.prefetch_depth if async_config.prefetch_active() else 0) + 2
 
 
-def reject_unadaptable_config(async_config: AsyncRolloutConfig, model_config=None) -> None:
-    """Refuses what the rollout config and the model's family (``model_config``) settle. An engine with an
-    ``ADAPTER_SYNC_REFUSAL`` serves only the families validated as adapters on it."""
-    backend = async_config.rollout_backend
+def engine_adapter_refusal(backend: str, model_config) -> str | None:
+    """Why ``backend``'s engine serves no adapter of ``model_config``'s family, ``None`` where it does: an engine with
+    an ``ADAPTER_SYNC_REFUSAL`` serves only the families validated as adapters on it."""
     client_cls = resolve_weight_sync_client(backend)
-    reasons = []
     if client_cls.ADAPTER_SYNC_REFUSAL is not None and not serves_family_as_adapter(model_config, backend):
-        reasons.append(f"rollout_backend={backend!r}: {client_cls.ADAPTER_SYNC_REFUSAL}")
+        return f"rollout_backend={backend!r}: {client_cls.ADAPTER_SYNC_REFUSAL}"
+    return None
+
+
+def reject_unadaptable_config(async_config: AsyncRolloutConfig, model_config=None) -> None:
+    """Refuses what the rollout config and the model's family (``model_config``) settle."""
+    client_cls = resolve_weight_sync_client(async_config.rollout_backend)
+    family_refusal = engine_adapter_refusal(async_config.rollout_backend, model_config)
+    reasons = [family_refusal] if family_refusal is not None else []
     if client_cls.ADAPTER_NEEDS_DIRECTORY and async_config.rollout_adapter_dir is None:
         reasons.append(
             f"rollout_backend={async_config.rollout_backend!r} loads an adapter only from a directory: set "
@@ -173,22 +179,72 @@ def _build_hub_respeller(model: torch.nn.Module) -> Callable[[str], str | None]:
     return respell
 
 
-def _unservable_expert_lora(model: torch.nn.Module, peft_config, client_cls) -> list[str]:
+def _attention_lora_spec(config: Mapping) -> ExpertLoraSpec:
+    return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=config["use_rslora"])
+
+
+def _resolve_server_name(model_types: tuple[str, ...], client_cls) -> str:
+    """The image ``client_cls`` serves a model of ``model_types`` from, or its engine release where it names none."""
+    image = client_cls.image_for(model_types)
+    return image.tag if image else client_cls.ENGINE_RELEASE
+
+
+def _unservable_expert_lora(model: torch.nn.Module, config: Mapping, expert: ExpertLoraSpec, client_cls) -> list[str]:
     """Native grouped expert adapters ride beside the attention ones, so they need the engine's routed-expert LoRA for
     the model and the attention adapters' rank and scaling: one adapter config carries both."""
-    layers = expert_lora_layers(model)
-    if not layers:
-        return []
     reasons = []
     model_types = config_model_types(getattr(base_transformers_model(model), "config", None))
     if not client_cls.ADAPTER_EXPERT_MODEL_TYPES.intersection(model_types):
         reasons.append(
-            f"native expert LoRA: {client_cls.ENGINE_RELEASE} serves no routed-expert adapter on this model"
+            f"native expert LoRA: {_resolve_server_name(model_types, client_cls)} serves no routed-expert adapter on "
+            f"this model"
         )
-    attention = ExpertLoraSpec(r=peft_config.r, alpha=peft_config.lora_alpha, use_rslora=peft_config.use_rslora)
-    _name, layer = layers[0]
-    if layer.ep_config.expert_lora.r != peft_config.r or layer.expert_lora_scaling != attention.scaling:
+    attention = _attention_lora_spec(config)
+    if expert.r != attention.r or expert.scaling != attention.scaling:
         reasons.append("native expert LoRA at another rank or scaling than the attention adapters: one is served")
+    return reasons
+
+
+def _unservable_module_reason(name: str, model: torch.nn.Module, client_cls) -> str:
+    model_types = config_model_types(getattr(base_transformers_model(model), "config", None))
+    return (
+        f"the adapted module {name!r} is not one {_resolve_server_name(model_types, client_cls)} serves "
+        f"({', '.join(client_cls.ADAPTER_SERVABLE_MODULES)} as plain linears)"
+    )
+
+
+def unservable_adapter_reasons(
+    config: Mapping,
+    module_names: Collection[str],
+    model: torch.nn.Module,
+    client_cls,
+    expert: ExpertLoraSpec | None = None,
+) -> list[str]:
+    """Why the engine of ``client_cls`` cannot serve the LoRA that ``config`` (a ``LoraConfig``'s fields) puts on the
+    modules ``module_names`` of ``model``, with ``expert``'s native grouped expert adapters beside it: what the
+    adapters declare, whether a live trainer or a saved adapter directory holds them."""
+    reasons = _unservable_expert_lora(model, config, expert, client_cls) if expert is not None else []
+    for flag, why in (
+        ("use_dora", "DoRA: the engine refuses it"),
+        ("lora_bias", "lora_bias: the engine refuses it"),
+        ("modules_to_save", "modules_to_save: the engine has no route for a fully trained module, so it would drift"),
+        ("rank_pattern", "rank_pattern: the engine reads one rank"),
+        ("alpha_pattern", "alpha_pattern: the engine reads one alpha"),
+        ("target_parameters", "target_parameters: PEFT's fused-parameter route has no engine counterpart"),
+    ):
+        if config.get(flag):
+            reasons.append(why)
+    unservable = next(
+        (name for name in module_names if name.rsplit(".", 1)[-1] not in client_cls.ADAPTER_SERVABLE_MODULES), None
+    )
+    if unservable is not None:
+        reasons.append(_unservable_module_reason(unservable, model, client_cls))
+    respell = _build_hub_respeller(model)
+    unspelled = next((name for name in module_names if respell(name) is None), None)
+    if unspelled is not None:
+        reasons.append(
+            f"the adapted module {unspelled!r} is fused or split in the hub layout, which no adapter follows"
+        )
     return reasons
 
 
@@ -198,6 +254,7 @@ def _unadaptable_reasons(model: torch.nn.Module, parallelism_config: Parallelism
     if peft_model is None:
         return ["the model carries no PEFT adapter (use_peft: true with a LoRA config)"]
     config = peft_model.peft_config["default"]
+    adapted = _adapted_modules(model)
     if has_packed_quantized_params(model):
         reasons.append("QLoRA: the engine serves the unquantized base the trainer's quantized one is not")
     for mode, active in (
@@ -213,17 +270,9 @@ def _unadaptable_reasons(model: torch.nn.Module, parallelism_config: Parallelism
     ):
         if active:
             reasons.append(mode)
-    reasons.extend(_unservable_expert_lora(model, config, client_cls))
-    for flag, why in (
-        ("use_dora", "DoRA: the engine refuses it"),
-        ("lora_bias", "lora_bias: the engine refuses it"),
-        ("modules_to_save", "modules_to_save: the engine has no route for a fully trained module, so it would drift"),
-        ("rank_pattern", "rank_pattern: the engine reads one rank"),
-        ("alpha_pattern", "alpha_pattern: the engine reads one alpha"),
-        ("target_parameters", "target_parameters: PEFT's fused-parameter route has no engine counterpart"),
-    ):
-        if getattr(config, flag, None):
-            reasons.append(why)
+    layers = expert_lora_layers(model)
+    expert = layers[0][1].ep_config.expert_lora if layers else None
+    reasons.extend(unservable_adapter_reasons(config.to_dict(), list(adapted), model, client_cls, expert))
     if vocabulary_grown(model):
         reasons.append("a grown vocabulary: the engine's is fixed and refuses added-token adapters")
     adapter_ids = tuner_adapter_param_ids(model)
@@ -247,22 +296,9 @@ def _unadaptable_reasons(model: torch.nn.Module, parallelism_config: Parallelism
             f"adapters in {wrong_dtype}: the engine stores {ADAPTER_WIRE_DTYPE}, so it would score a rounded copy of "
             f"what the trainer trains (fp32_non_ep_params)"
         )
-    image = client_cls.image_for(config_model_types(getattr(base_transformers_model(model), "config", None)))
-    for name, module in _adapted_modules(model).items():
-        suffix = name.rsplit(".", 1)[-1]
-        if type(module) is not Linear or suffix not in client_cls.ADAPTER_SERVABLE_MODULES:
-            reasons.append(
-                f"the adapted module {name!r} is not one {image.tag if image else client_cls.ENGINE_RELEASE} serves "
-                f"({', '.join(client_cls.ADAPTER_SERVABLE_MODULES)} as plain linears)"
-            )
-            break
-    respell = _build_hub_respeller(model)
-    for name in _adapted_modules(model):
-        if respell(name) is None:
-            reasons.append(
-                f"the adapted module {name!r} is fused or split in the hub layout, which no adapter follows"
-            )
-            break
+    not_linear = next((name for name, module in adapted.items() if type(module) is not Linear), None)
+    if not_linear is not None and _unservable_module_reason(not_linear, model, client_cls) not in reasons:
+        reasons.append(_unservable_module_reason(not_linear, model, client_cls))
     return reasons
 
 
@@ -278,12 +314,15 @@ def reject_unadaptable_model(model: torch.nn.Module, parallelism_config: Paralle
         )
 
 
+def build_adapter_serving(config: Mapping, module_names: Iterable[str]) -> AdapterServing:
+    """How the engine serves the LoRA that ``config`` (a ``LoraConfig``'s fields) puts on the modules ``module_names``."""
+    modules = tuple(sorted({name.rsplit(".", 1)[-1] for name in module_names}))
+    return AdapterServing(rank=config["r"], scaling=_attention_lora_spec(config).scaling, modules=modules)
+
+
 def resolve_adapter_serving(model: torch.nn.Module) -> AdapterServing:
     peft_model = find_peft_model(unwrap_framework_wrappers(model))
-    config = peft_model.peft_config["default"]
-    scaling = ExpertLoraSpec(r=config.r, alpha=config.lora_alpha, use_rslora=config.use_rslora).scaling
-    modules = tuple(sorted({name.rsplit(".", 1)[-1] for name in _adapted_modules(peft_model)}))
-    return AdapterServing(rank=config.r, scaling=scaling, modules=modules)
+    return build_adapter_serving(peft_model.peft_config["default"].to_dict(), _adapted_modules(peft_model))
 
 
 def build_adapter_requirements(serving: AdapterServing, async_config: AsyncRolloutConfig) -> AdapterRequirements:
@@ -321,6 +360,19 @@ def _engine_expert_adapters(model: torch.nn.Module, experts: dict[str, torch.Ten
         weight, matrix = to_w13_w2_expert_adapter(attr, side, tensor)
         engine[f"{PEFT_BASE_MODEL_PREFIX}{path}.experts.{weight}.lora_{side}.weight"] = matrix
     return engine
+
+
+def build_engine_adapter(
+    model: torch.nn.Module, serving: AdapterServing, state: dict[str, torch.Tensor], experts: dict[str, torch.Tensor]
+) -> tuple[dict[str, torch.Tensor], dict]:
+    """The tensors and ``adapter_config.json`` the engine loads: ``state`` (keyed as PEFT saves an adapter) and
+    ``experts`` (keyed as :func:`gather_expert_lora_adapters` returns them and an adapter save writes them) under the
+    hub's names and the engine's expert layout, the scaling folded into B in the wire dtype. ``model`` supplies the
+    hub spelling: the live model, or the base's class built without weights. Raises on a tensor with no hub
+    spelling."""
+    engine_state = {**_hub_adapter_state(model, state), **_engine_expert_adapters(model, experts)}
+    wire = wire_adapter_tensors(engine_state, serving.scaling)
+    return wire, build_adapter_config(rank=serving.rank, target_modules=serving.modules)
 
 
 def _union(gathered: list[list[str]]) -> frozenset[str]:
@@ -509,9 +561,7 @@ class AdapterSync:
     def _send(
         self, model: torch.nn.Module, name: str, state: dict[str, torch.Tensor], experts: dict[str, torch.Tensor]
     ) -> None:
-        engine_state = {**_hub_adapter_state(model, state), **_engine_expert_adapters(model, experts)}
-        wire = wire_adapter_tensors(engine_state, self.serving.scaling)
-        config = build_adapter_config(rank=self.serving.rank, target_modules=self.serving.modules)
+        wire, config = build_engine_adapter(model, self.serving, state, experts)
         if self.adapter_dir is None:
             payload = serialize_adapter_tensors(wire)
         else:

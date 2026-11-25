@@ -284,7 +284,7 @@ def resolve_adapter_base_revision(base_path: str, recorded: str | None, override
         logger.warning(
             f"The adapter records no revision of its base {base_path}, so the base is read at the repo's default "
             f"branch. That is not the commit the adapter was trained on if the run pinned model_revision or the repo "
-            f"has moved since; merge_peft_adapters.py --base_revision names the commit for a merge."
+            f"has moved since; --base_revision of merge_peft_adapters.py and export_engine_adapter.py names the commit."
         )
     return recorded
 

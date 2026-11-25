@@ -19,13 +19,16 @@ logger = logging.getLogger(__name__)
 
 def publish_adapter_directory(root: str | Path, name: str, tensors: Mapping[str, torch.Tensor], config: dict) -> Path:
     """``tensors`` and ``config`` as the PEFT adapter directory ``root/name``, staged beside it and renamed into place, so
-    an engine never reads a half-written one. A write that raises leaves no staging directory."""
+    an engine never reads a half-written one. Every user may read it, as a server may run as another user. A write that
+    raises leaves no staging directory."""
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
     staged = Path(tempfile.mkdtemp(prefix=f".{name}.", dir=root))
     try:
         save_file(dict(tensors), staged / ADAPTER_SAFETENSORS_FILE)
         (staged / ADAPTER_CONFIG_FILE).write_text(json.dumps(config))
+        for written in staged.iterdir():
+            written.chmod(0o644)
         staged.chmod(0o755)
         published = root / name
         os.rename(staged, published)
