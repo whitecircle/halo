@@ -1,19 +1,19 @@
 # Troubleshooting
 
-The failures people hit most, with the fix. The full symptom → cause list is
+The failures people hit most, with the fix. The full list of symptoms and causes is
 [Troubleshooting](../agent-docs/reference/troubleshooting.md) ↗ in the
 reference.
 
 ## First things to check
 
-- **You are inside the right Docker image.** `halo:blackwell` for B200/B300,
+- You are inside the right Docker image. `halo:blackwell` for B200/B300,
   `halo:hopper` for H100/H200. The host has no usable Python, and an import
   error for `flash_attn` or `deep_ep` almost always means the wrong image.
-- **The container got `--gpus all` and `--env-file .env`.** Halo never loads
+- The container got `--gpus all` and `--env-file .env`. Halo never loads
   `.env` itself. The GPU `make` targets (`train`, `test-gpu-*`) and the compose
   `training` service pass it; a container you start by hand needs the flag. A
   missing `HF_TOKEN` or `WANDB_API_KEY` usually means it is missing.
-- **Caches point at a disk with space.** Run `df -h` on wherever `HF_HOME`,
+- Caches point at a disk with space. Run `df -h` on wherever `HF_HOME`,
   `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` resolve.
 
 ## Single-node
@@ -72,7 +72,7 @@ tool parsers, reasoning caps and port binding.
 | `ncclP2pImportShareableBuffer ... invalid argument` in the SGLang log on the first update | cuMem differs between the containers. Keep the compose default `NCCL_CUMEM_ENABLE=1` on the server and restart it, since it holds a half-written model. |
 | `… cannot serve this run: it serves no tool parser …` at startup, with `could not detect tool-call parser from chat template` in the SGLang log | The default `auto` turned the parser off on this template (the Qwen3 2507 releases, Ling-mini-2.0). Set `SGLANG_TOOL_PARSER=qwen25` for Qwen3, `hermes` for Ling ([Rollout Servers](rollout-servers.md#sglang-instead)). |
 | `… cannot serve this run: routing_replay: rollout needs the routed experts …` | Start the server with `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1`. `--enable-torch-compile` on SGLang is refused with it too, since it returns corrupt rows. |
-| `… does not support weight sync …` right after launch | No engine takes an online update for this family. Train it with [Offline GRPO](training-methods/offline-grpo.md) ([Rollout engines](supported-matrix.md#rollout-engines)). |
+| `… does not support weight sync …` right after launch | No engine takes a weight push for this family. Train it with [Offline GRPO](training-methods/offline-grpo.md) ([Rollout engines](supported-matrix.md#rollout-engines)). Where the message names `rollout_adapter_sync` (Inkling 2 on vLLM), environmental GRPO trains its LoRA with `rollout_adapter_sync: true` ([Rollout Servers](rollout-servers.md#what-weight-sync-does)). |
 | Rollout server restarts forever with `VLLM_ENABLE_R3` or `SGLANG_ENABLE_R3` set | Routed-experts capture is MoE-only; the engine exits on a dense model and the compose `restart` policy loops it. Unset the variable for a dense model. |
 | SGLang exits at start with "Unsupported head dimensions" | GLM-4 MoE Lite on Blackwell. Start the server with `--attention-backend triton` (`SGLANG_ATTENTION_BACKEND=triton` for compose). |
 | `GENERATION is paused or wedged` at startup | A previous trainer died attached to the engine. Lift the pause (`POST /resume` on vLLM, `/continue_generation` on SGLang), or restart the container if that sync had started sending. |

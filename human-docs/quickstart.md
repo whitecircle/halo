@@ -51,6 +51,9 @@ To change a field without editing the file, add it after the config path:
 every method. See [The `halo` CLI](cli.md) and
 [Writing a config](configuration.md).
 
+The three recipes above set `report_to: wandb`. If your `.env` holds no
+`WANDB_API_KEY`, add `--report_to=none` to the command.
+
 For a long run, detach the container. In the `docker run` command, replace `-it`
 with `-d --name myrun` and pass `bash -lc "halo launch ..."` as the command.
 

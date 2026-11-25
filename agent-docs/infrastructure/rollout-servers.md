@@ -3,7 +3,8 @@
 A rollout server is a **separate inference container**, vLLM 0.32.0 or SGLang 0.5.22, that generates
 the rollouts during RL. The trainer sends prompts over HTTP and pushes updated weights back over a
 per-server NCCL group through the clients in `halo/weight_sync/`; it never imports either engine
-(ABI-incompatible stacks). [Online GRPO](../training-methods/grpo/online.md) is vLLM-only;
+(ABI-incompatible stacks). Inkling 2 is served from a second vLLM tag, `halo:vllm-0.1.dev25249`, and
+takes adapters by path in place of a weight push ([Adapter sync](#adapter-sync)). [Online GRPO](../training-methods/grpo/online.md) is vLLM-only;
 [Async GRPO with Environments](../training-methods/async-grpo/README.md) selects the engine with
 `rollout_backend`. Every other server knob is engine-neutral:
 
@@ -1178,7 +1179,7 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 | Symptom | Cause → fix |
 |---|---|
 | Every completion hangs after a trainer died mid-sync, with vLLM's `/health` still 200 and SGLang's hanging too | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model. vLLM's update session unloads the model when it opens, and `/resume` then takes the engine down: restart it |
-| A server dies mid-run and the trainer goes on for minutes | Rollouts and the sync run out their timeouts first: a killed engine (`docker kill`, one server) raises after about 4 minutes on either engine, naming the server, and a frozen one (`docker pause`, SGLang at 2 ranks) after about 20 → let it raise or stop the run, then restart the server |
+| A server dies mid-run and the trainer goes on for minutes | Rollouts and the sync run out their timeouts first: a killed engine (`docker kill`, one server) raises 253–258 s after the fault on either engine at `rollout_connection_timeout: 180`, naming the server, and a frozen one (`docker pause`, SGLang at 2 ranks) after about 20 minutes → let it raise or stop the run, then restart the server |
 | Group formation times out, "1/2 clients joined" | A bridge network hides the rendezvous port → `network_mode: host` on both containers |
 | First sync takes minutes, `/health` unanswered | One-time NCCL group init per server; the engine pauses mid-update → wait |
 | 400 on every rollout (vLLM) | A reasoning cap without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |

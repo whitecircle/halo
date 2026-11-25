@@ -24,7 +24,7 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
   MoE route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP,
   ep1 and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower
   tok/s than the clock these rows used. Their per-GPU rates count a shared batch once ([Metrics](#metrics)).
-- **cuBLAS pin**: the image's pinned cuBLAS ([Docker](../infrastructure/docker.md)) leaves SFT throughput unchanged: 38,939 against 39,183 tok/s/GPU on one GPU (steps 3–20) and 17,279 against 17,286 at EP8 (steps 3–10), so the 1.2.0 SFT rates below stand for this release.
+- **cuBLAS pin**: the image's pinned cuBLAS ([Docker](../infrastructure/docker.md)) leaves SFT throughput unchanged: 38,939 against 39,183 tok/s/GPU on one GPU (steps 3–20) and 17,279 against 17,286 at EP8 (steps 3–10), so the pin did not move the 1.2.0 SFT rates below (measured on 1.3.0rc1).
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.
 - **Cold compiles**: on a fresh `TRITON_CACHE_DIR` a recipe's first ~20 steps run about 40% of its steady rate while one-off kernels compile, once per kernel shape: Qwen3.5-35B-A3B's recipe reads about 7,100 tok/s/GPU cold against 17,225 warm. Read a rate on a warm cache.

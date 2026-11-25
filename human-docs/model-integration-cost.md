@@ -5,8 +5,8 @@ model, not as a fork of it, so a new family costs little code. For what is
 already supported, see [Supported models](models.md).
 
 Plain FSDP2 needs no code. Any `AutoModelForCausalLM` trains as is, multimodal
-checkpoints included (loaded through the full vision-and-text class). Code comes
-in only for parallelism:
+checkpoints included (loaded through the full vision-and-text class). You write
+code only for parallelism:
 
 ```txt
 HuggingFace model load
@@ -17,7 +17,7 @@ HuggingFace model load
 
 ## What an EP layer costs
 
-Each MoE family adds one file under `halo/distributed/expert_parallel/families/`
+To add a MoE family you write one file under `halo/distributed/expert_parallel/families/`
 naming the HF MoE class it claims, one frozen `MoEFamilySpec` holding its config
 `model_type` spellings and capabilities (`halo/models/moe/family_specs.py`), and
 one import line in the family roster.
@@ -46,7 +46,7 @@ On a MoE model it shards attention only, and the one list to edit is
 
 ## Vendoring
 
-A model that transformers doesn't ship yet can be vendored under
+You can vendor a model that transformers doesn't ship yet under
 `halo/models/<name>/`: its `configuration_*.py` and `modeling_*.py`, registered on
 import, with a CPU test that proves the registration. Remove the copy once
 upstream ships the model.

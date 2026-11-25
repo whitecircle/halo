@@ -1,7 +1,7 @@
 # Docker Guide
 
 The host has no usable Python: PyTorch, DeepEP and Flash Attention live only inside the images, so
-anything that executes runs inside one.
+everything but the host-runnable gates ([Contributing → Ground rules](../contributing/README.md#ground-rules)), the voice scanner and `scripts/profiling/nvlink_health.py` runs inside one.
 
 - `halo:hopper` — H100/H200 (SM90): FA2 + FA3 + DeepEP.
 - `halo:blackwell` — B200 (SM100) / B300 (SM103): FA2 + FA4 + DeepEP (no FA3).

@@ -1,4 +1,4 @@
-# AI Tooling
+# AI tooling
 
 The training images ship with skills that teach coding agents this codebase's
 configs, limits, and footguns. [Claude Code](https://github.com/anthropics/claude-code)

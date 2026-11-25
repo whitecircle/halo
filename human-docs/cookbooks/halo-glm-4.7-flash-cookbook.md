@@ -48,8 +48,10 @@ Fit the tail the release ships over a frozen trunk, so a server can draft with i
 copies, which vLLM's loader requires ([MTP heads](../../agent-docs/optimization/mtp-heads.md) ↗).
 
 This recipe's own fit is not measured. A separate fit at its learning rate, on first-turn rows rather than the recipe's,
-fell from 0.7685 to 0.7649 acceptance, which the gate stops, and that export served at 0.7317 on vLLM against the release
-head's 0.7450. No served gain is measured.
+fell from 0.7685 to 0.7649 acceptance, and its export served at 0.7317 on vLLM against the release head's 0.7450. No
+served gain is measured. The run scores held-out rows before its first step and at its last, and exits non-zero if
+acceptance fell, as it may here. Its last checkpoint then holds the rejected head, so serve `zai-org/GLM-4.7-Flash`
+instead.
 
 ```bash
 halo launch sft examples/sft/glm4/glm-4.7-flash-mtp-head-only.yaml -n 8 \
@@ -65,7 +67,7 @@ RL uses `jinja-templates/glm/glm-native.jinja`, the upstream template with tool 
 template renders no tools. The server must serve the same file. On the host:
 
 ```bash
-VLLM_MODEL=/data/checkpoints/glm-4.7-flash-sft VLLM_CHAT_TEMPLATE=/jinja-templates/glm/glm-native.jinja \
+VLLM_MODEL=/data/checkpoints/glm-4.7-flash-sft/checkpoint-<step> VLLM_CHAT_TEMPLATE=/jinja-templates/glm/glm-native.jinja \
 VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
 VLLM_TOOL_PARSER=glm47 VLLM_ATTENTION_BACKEND=CUTLASS_MLA \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
@@ -78,7 +80,7 @@ non-thinking render. To keep rollouts non-thinking, also add `rollout_thinking: 
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml glm47-grpo.yaml
 CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental glm47-grpo.yaml -n 4 \
-  --model_name_or_path=/data/checkpoints/glm-4.7-flash-sft \
+  --model_name_or_path=/data/checkpoints/glm-4.7-flash-sft/checkpoint-<step> \
   --chat_template=jinja-templates/glm/glm-native.jinja --force_chat_template=true \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/glm-4.7-flash-grpo
@@ -121,7 +123,7 @@ Smoke-test with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpo
 [host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/glm-4.7-flash-sft" SGLANG_ATTENTION_BACKEND=triton \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/glm-4.7-flash-sft/checkpoint-<step>" SGLANG_ATTENTION_BACKEND=triton \
   docker compose -f docker-compose.sglang.yml up -d
 ```
 

@@ -86,8 +86,10 @@ Each server tier runs **one pass per served model**: the tests broadcast the tra
 the served model and assert the served policy moved, so server and trainer hold the same checkpoint.
 `SERVER_TIER` defaults to `not moe` (serve `Qwen/Qwen3-0.6B`); the MoE passes restart the vLLM server on
 `Qwen/Qwen3-30B-A3B-Instruct-2507` for `SERVER_TIER='moe and not gptoss'` and on
-`unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE tests are gpt-oss only
-(`SERVER_TIER=moe`). The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
+`unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE pass serves gpt-oss alone
+(`SERVER_TIER=moe`). On either engine the `moe` marker also selects the per-family rows of
+`trainers/grpo/test_weight_push_exact.py`, which skip unless `HALO_TEST_PUSH_EXACT_FRESH` is set and the
+server serves the row's checkpoint. The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
 per-effort CoT budget, which draws a 400 without a reasoning parser (the target's health guard prints
 the compose line). The env-GRPO rows on `Qwen/Qwen3-30B-A3B-Instruct-2507` need a server launched without
 it: that checkpoint does not think, and on vLLM 0.32.0 the `qwen3` parser returns its plain answer after a
@@ -101,8 +103,8 @@ compose line), and they replace the `qwen3` reasoning parser. A per-family pass
 (`HALO_TEST_ENV_GRPO_MODEL`) takes its family's row of that table. Under a wrong parser every call stays
 text, so each env-GRPO row on the draw task (all but the one-process `react_math` rows, which send no tool schema)
 raises by its second round.
-SGLang's default parser (`auto`) reads it off the chat template where it can and disables it elsewhere: the
-Qwen3-30B pass needs `SGLANG_TOOL_PARSER=qwen25`
+SGLang's default parser (`auto`) reads it off the chat template where it can and disables it elsewhere: a per-family
+Qwen3-30B pass (`HALO_TEST_ENV_GRPO_SGLANG_MODEL`) needs `SGLANG_TOOL_PARSER=qwen25`
 ([Tool parsers on SGLang](../infrastructure/rollout-servers.md#tool-parsers-on-sglang)).
 
 ```bash
@@ -515,7 +517,7 @@ a change that adds, drops or renames a family still compares the rest against it
 out is logged by the tree whose roster lacks it and listed under `skipped`
 (`tests/cpu/conventions/test_harness_family_rosters.py`). Every verdict also fails on an unexpected raise.
 The EP, CP and efficiency harnesses run a negative control: the head tree reruns one case with a
-deliberate perturbation, and the verdict fails when that record matches its base or raised.
+planted perturbation, and the verdict fails when that record matches its base or raised.
 
 - **Checkpoint artifacts** (`make verify-artifacts`, `tests/common/equivalence/checkpoint_artifacts.py`)
   saves a tiny model of every family (the dense roster, every EP family and its multimodal wrappers) at
@@ -572,7 +574,7 @@ link, anchor and code-reference check that blocks a merge
 ([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)). Each figure under
 `agent-docs/assets/` is rendered from the HTML page beside it, which holds its data and draws it in the
 `visuals` skill's style (`skills/visuals/SKILL.md`). Every page links the skill's shared kit
-(`skills/visuals/kit/`: the colour tokens, type scale and page skeleton, and the element, arrow and axis
+(`skills/visuals/kit/`: the color tokens, type scale and page skeleton, and the element, arrow and axis
 helpers), so a change there reaches every figure on the next render. Edit the page or the kit, run
 `make diagrams` on a host with Chrome, the skill's fonts and OptiPNG, and commit the page, the PNG,
 `agent-docs/assets/figures.sha256` and any alt-text change together. Every render is optimized
@@ -603,7 +605,7 @@ too, with the reason.
 
 ## Where to look next
 
-- [Development Environment](development-environment.md) — host `.venv`, dev container, env vars
-- [Trainer Architecture](../reference/trainer-architecture.md) — how trainers compose with the mixin
+- [Development Environment](development-environment.md): host `.venv`, dev container, env vars
+- [Trainer Architecture](../reference/trainer-architecture.md): how trainers compose with the mixin
 - [Troubleshooting](../reference/troubleshooting.md) · [Debugging](../reference/debugging.md)
 - [Adding a New Model](../models/adding-a-model.md)

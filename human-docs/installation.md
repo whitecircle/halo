@@ -69,15 +69,19 @@ The first build is slow: DeepEP, DeepGEMM (Blackwell) and Flash Attention
 Put your secrets in `.env` at the repo root. `.env.example` is a template:
 
 ```bash
-HF_TOKEN=hf_...            # gated models and datasets on the HuggingFace Hub
-WANDB_API_KEY=...          # Weights & Biases logging
-AWS_ACCESS_KEY_ID=...      # only for s3:// datasets
+# gated models and datasets on the HuggingFace Hub
+HF_TOKEN=hf_...
+# Weights & Biases logging
+WANDB_API_KEY=...
+# only for s3:// datasets
+AWS_ACCESS_KEY_ID=...
 AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=...
 ```
 
 Leave out any key you don't need. A run on a public model with no tracking works
-with an empty file.
+with an empty file. Keep each comment on a line of its own, because
+`docker run --env-file` reads everything after `=` as the value.
 
 Halo never loads `.env` itself. A `docker run` you type needs `--env-file .env`.
 `make train` and the `training` service in `docker-compose.vllm.yml` pass it for
@@ -94,9 +98,11 @@ df -h                             # find the volume with real space
 findmnt -T /mnt -no TARGET,AVAIL  # the filesystem that actually holds /mnt
 ```
 
-The container takes that volume through four variables: `HF_HOME` (model
-cache), `HF_DATASETS_CACHE` (dataset cache), `TMPDIR` (temp files) and
-`HALO_DATA_ROOT` (Halo's scratch: S3 dataset cache, profiler output).
+The container takes that volume through `HF_HOME`, `HF_DATASETS_CACHE`,
+`TMPDIR` and `HALO_DATA_ROOT` ([what each holds](environment-variables.md#paths)).
+Checkpoints go to the recipe's `output_dir` instead, which is relative to the
+repo root (`checkpoints/<run>`). Clone the repo onto that volume, or pass
+`--output_dir=/path/to/large-volume/checkpoints/<run>` at launch.
 
 ## 5. Start a container
 

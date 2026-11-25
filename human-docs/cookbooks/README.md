@@ -5,7 +5,7 @@ Each cookbook takes one MoE family from an empty host to a trained, served check
 
 | Cookbook | Recipe model | GPUs | RL engines |
 | --- | --- | --- | --- |
-| [GPT-OSS](halo-gpt-oss-cookbook.md) | `unsloth/gpt-oss-20b-BF16` | 8 | vLLM, SGLang |
+| [GPT-OSS](halo-gpt-oss-cookbook.md) | `openai/gpt-oss-20b` for SFT, `unsloth/gpt-oss-20b-BF16` for the other recipes | 8 | vLLM, SGLang |
 | [Qwen3 MoE](halo-qwen3-moe-cookbook.md) | `Qwen/Qwen3-30B-A3B-Instruct-2507` | 4 | vLLM, SGLang |
 | [Qwen3.5 / Qwen3.6 MoE](halo-qwen3.5-qwen3.6-moe-cookbook.md) | `Qwen/Qwen3.5-35B-A3B`, `Qwen/Qwen3.6-35B-A3B` | 8 | vLLM, SGLang |
 | [GLM-4.7-Flash](halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | 8 | vLLM, SGLang |
@@ -19,7 +19,7 @@ Each cookbook takes one MoE family from an empty host to a trained, served check
 
 Rewards: [White Circle policy rewards](halo-whitecircle-cookbook.md) trains `Qwen/Qwen3-4B-Instruct-2507` (two GPUs) and `google/gemma-4-26B-A4B-it` (three GPUs) with online GRPO to write BaxBench backend apps, rewarded by three terms of your own White Circle policies.
 
-Every cookbook has the same sections: Support, Recipes, Settings that matter, Limits, Export and serve,
+Every model cookbook has the same sections: Support, Recipes, Settings that matter, Limits, Export and serve,
 and Reference. The GPU counts are the ones the recipes are written for, B300s unless a page says otherwise. On
 H100 or H200, use the Hopper image. Those GPUs have far less memory than a B300, so a recipe may need
 more GPUs or a shorter `max_length` there.
@@ -40,14 +40,15 @@ speed unmeasured, so try a short run first.
 ## Start the training container
 
 Every training, inference and conversion command runs inside the training container: start it as in
-[Installation → Start a container](../installation.md#5-start-a-container), with two changes. Mount your
-large volume at `/data` (`-v "$HALO_SCRATCH":/data`, with `HF_HOME=/data/hf`,
-`HF_DATASETS_CACHE=/data/hf/datasets`, `TMPDIR=/data/tmp` and `HALO_DATA_ROOT=/data`), and add
-`--network host` so the trainer reaches the rollout servers. `/mnt` is not always large, so check with
-`df -h` first. Load-bearing flags: [Docker](../../agent-docs/infrastructure/docker.md#standard-training-launch) ↗.
+[Installation → Start a container](../installation.md#5-start-a-container), with two changes. Set
+`HALO_SCRATCH` to the large volume that step calls `D`, and mount it at `/data` in place of `-v "$D:$D"`
+(`-v "$HALO_SCRATCH":/data`, with `HF_HOME=/data/hf`, `HF_DATASETS_CACHE=/data/hf/datasets`,
+`TMPDIR=/data/tmp` and `HALO_DATA_ROOT=/data`). Then add `--network host` so the trainer reaches the
+rollout servers. `/mnt` is not always large, so check with `df -h` first. Load-bearing flags: [Docker](../../agent-docs/infrastructure/docker.md#standard-training-launch) ↗.
 
 Inside the container, `/data` is `$HALO_SCRATCH`. A run that writes `/data/checkpoints/<run>` leaves its
-output in `$HALO_SCRATCH/checkpoints/<run>` on the host.
+output in `$HALO_SCRATCH/checkpoints/<run>` on the host. A run saves its model in step directories under
+`output_dir`, so a checkpoint path ends in `checkpoint-<step>`.
 
 The recipes override config fields on the command line, so the shipped YAML files stay untouched. Write
 each override as `--field=value`, and separate list items with commas
@@ -67,7 +68,7 @@ cookbook names the model class to load it with. The rest is the same for every f
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-path = "/data/checkpoints/<run>"
+path = "/data/checkpoints/<run>/checkpoint-<step>"
 tokenizer = AutoTokenizer.from_pretrained(path)
 model = AutoModelForCausalLM.from_pretrained(path, dtype=torch.bfloat16, device_map="auto")
 
@@ -103,11 +104,12 @@ export HF_HOME="$HALO_SCRATCH/hf"         # both servers share the training cont
 ```
 
 Both servers mount `jinja-templates/` at `/jinja-templates`, the path a chat template takes. SGLang takes
-host paths for checkpoints (`$HALO_SCRATCH/checkpoints/<run>`). The vLLM service mounts only the Hugging
-Face cache for them. Add `- ${HALO_SCRATCH}:/data:ro` under the `vllm-server` service's `volumes:` in
-`docker-compose.vllm.yml`, then give vLLM the same `/data` paths the trainer uses. vLLM answers a
-request for any other model name with a 404, so the served path must match the trainer's `model_name`,
-which defaults to its `model_name_or_path`.
+host paths for checkpoints (`$HALO_SCRATCH/checkpoints/<run>/checkpoint-<step>`). The vLLM service mounts `$HALO_SCRATCH`
+at its host path too, but the trainer names a checkpoint by its `/data` path. Add
+`- ${HALO_SCRATCH}:/data:ro` under the `vllm-server` service's `volumes:` in `docker-compose.vllm.yml`,
+then give vLLM the same `/data` paths the trainer uses. vLLM answers a request for any other model name
+with a 404, so the served path must match the trainer's `model_name`, which defaults to its
+`model_name_or_path`.
 
 The compose files already pass the MoE backend that weight sync needs (`--moe-backend triton` and
 `--moe-runner-backend triton`), so leave it alone. A run with `routing_replay: rollout` (experimental) also needs
@@ -118,7 +120,9 @@ are in [Rollout Servers](../rollout-servers.md).
 ## Before a GRPO run
 
 GRPO in these cookbooks is async GRPO with environments. Ray actors run episodes against a rollout
-server, and the trainer pushes new weights into that server after each step.
+server, and the trainer pushes new weights into that server after each step. Start the server from a host
+shell set up as in [Serve from the host](#serve-from-the-host); the cookbooks' vLLM commands name `/data`
+paths, which need that section's mount.
 
 - **Split the GPUs.** The server and the trainer can't share a GPU. Fence the trainer with
   `CUDA_VISIBLE_DEVICES` and give the server the rest.

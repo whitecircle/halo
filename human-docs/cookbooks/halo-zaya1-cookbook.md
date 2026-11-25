@@ -81,7 +81,7 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - No pipeline parallelism: a stage cut would sever the fp32 residual stream and the router state each
   layer passes to the next.
 - No online RL. vLLM 0.32.0 has no native ZAYA1 class, and SGLang 0.5.22's loader reads only the legacy
-  per-expert layout, so Halo refuses weight sync to either engine when it builds the trainer.
+  per-expert layout, so Halo refuses weight sync to either engine at startup, before it loads the model.
 - No routing replay.
 - The legacy checkpoint `Zyphra/ZAYA1-8B-legacy` doesn't load. Start from hub `main`.
 

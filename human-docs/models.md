@@ -28,7 +28,7 @@ of them are MoE.
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only; LoRA fits one 8-GPU machine, a full fine-tune takes two |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |
 | [Qwen3-Next](../agent-docs/models/qwen3-next.md) ↗ | `Qwen/Qwen3-Next-80B-A3B-Instruct` | MoE | hybrid linear attention; tiny-model GPU tests only |
-| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: text tower under EP, ETP and PP; 95 GiB n-gram table in host memory; online and async GRPO on vLLM, and on SGLang from the toolkit's image; offline GRPO CPU-checked only |
+| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: text tower under EP, ETP and PP; 95 GiB n-gram table in host memory; online GRPO on vLLM and async GRPO on vLLM or SGLang (this repo's image only), where only a weight push on tiny models has run; offline GRPO CPU-checked only |
 | [Qwen3.8-27B](../agent-docs/models/qwen3_5.md#qwen38-27b) ↗ | `Qwen/Qwen3.8-27B` | dense | the Qwen3.5 dense path; no recipe and no GPU run |
 | [Qwen3 dense](../agent-docs/models/qwen3.md) ↗ | `Qwen/Qwen3-4B-Instruct-2507` | dense | the reference dense family |
 | Any other HF causal LM | Llama, Mistral, Phi, … | dense | FSDP2 by default; TP needs a `tp_plan` |
@@ -45,9 +45,9 @@ LoRA and RL variants the family supports. If your family has one, start there.
 
 ## Multimodal checkpoints
 
-Gemma 4, Mistral 4, Command A+, Inkling, GLM-5 Next, Step-3.7 Flash, Nemotron 3.5
-Super VL, Qwen3.5/3.6, Qwen3.8-Flash-Next and Qwen3-VL are natively multimodal.
-Halo loads the full vision-and-text model and picks the data path from your
+Gemma 4, Mistral 4, Command A+, Inkling, Inkling 2, GLM-5 Next, Step-3.7 Flash,
+Nemotron 3.5 Super VL, Qwen3.5/3.6, Qwen3.8-Flash-Next and Qwen3-VL are natively
+multimodal. Halo loads the full vision-and-text model and picks the data path from your
 dataset, not the checkpoint:
 
 - Rows with images train through the VLM pipeline, with standard padding.
@@ -68,7 +68,7 @@ GRPO trainers and embedding are text-only.
 
 ## Adding a family
 
-A family that trains under plain FSDP2 needs no code. Context parallelism takes
+If your family trains under plain FSDP2, you write no code. Context parallelism takes
 one wrapper class that registers itself; expert parallelism takes one EP layer
 file, the family's spec and a roster import.
 [Model integration cost](model-integration-cost.md) shows what an EP layer costs,

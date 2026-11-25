@@ -100,7 +100,9 @@ learning_rate: 1.0e-06
 `examples/grpo/environmental/environmental-grpo-template.yaml` is the annotated starting point. GPT-OSS,
 Qwen3.5/3.6, Gemma 4, Qwen3.8-Flash-Next and Inkling 2 ship recipes under
 `examples/grpo/environmental/<family>/{vllm,sglang}/`; the SGLang ones are `ep1` only, and Qwen3.8-Flash-Next
-and Inkling 2 have vLLM recipes only.
+and Inkling 2 have vLLM recipes only. Inkling 2 trains LoRA that its own vLLM tag loads as an adapter, with
+no weight push, so it starts with `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2`
+instead of the commands under Run ([Inkling 2 → Rollouts](../../agent-docs/models/inkling2.md#rollouts) ↗).
 
 - **Sampling** goes through the `rollout_*` fields. TRL's `top_p`, `top_k`, `min_p`,
   `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one raises at startup.
@@ -119,7 +121,7 @@ Three decisions matter more than the rest:
   how much the model should think. The model sees the level only through a chat template that renders it:
   pin one with `chat_template:` plus `force_chat_template: true`, and serve the same file
   ([Reasoning Budgets](../../agent-docs/training-methods/async-grpo/reasoning.md) ↗).
-- **Tool budgets.** `tool_success_reward`, `tool_error_penalty` and `tool_reward_cap` price tool calls. Keep
+- **Tool rewards.** `tool_success_reward`, `tool_error_penalty` and `tool_reward_cap` price tool calls. Keep
   them small beside the objective, or calling tools pays better than finishing the task.
 
 A turn the engine cut at its cap, an empty turn, or one whose every tool call was invalid earns no reward.
@@ -173,7 +175,7 @@ A native-tool environment needs the server started with the family's
 (`VLLM_TOOL_CALLING_FLAGS=`, as above).
 
 Before a long run, put the config through a few rows, which exercises the parser, the template and the
-sandbox or judge backend in a minute:
+sandbox or judge backend:
 
 ```bash
 halo run eval-env --training_config <config>.yaml --dataset <hub-id-or-path> --split train \
@@ -195,7 +197,8 @@ the same loop: set `eval_strategy`, and `num_generations_eval: 1` for a fast pas
   `sampling/degenerate_group_frac` counts them.
 - `sampling/logratio_mean` drifting steadily negative means the weight sync is broken and the policy
   trains on stale rollouts. If `advantage/net_token_mass` also stays negative and `entropy` climbs, a
-  KL-free run is drifting instead: arm the early stop (`balance_token_mass` cancels the net push, whose measured
+  KL-free run is drifting instead: arm the early stop with `early_stop_entropy_band` or
+  `early_stop_logratio_gap` (`balance_token_mass` cancels the net push, whose measured
   entropy effect is small).
 - `episode/reward_scored` below 1 means a judge or reward model is failing; `<source>/<name>/scored`
   names which one. Under `on_error: invalid` those episodes also leave training, and

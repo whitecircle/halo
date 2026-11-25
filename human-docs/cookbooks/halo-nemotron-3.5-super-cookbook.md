@@ -9,8 +9,8 @@ Each MoE layer routes 512 experts at top-22 on a 1024-wide latent.
 Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
-- **Checkpoint:** `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, loaded through transformers' own
-  classes with no conversion step.
+- **Checkpoint:** `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, which this page calls the release, loaded
+  through transformers' own classes with no conversion step.
 - **GPUs:** EP8 on eight B300s, 64 experts per GPU.
 - **Lightning:** `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` is the same text class with no vision tower. Its
   recipe, `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`, ran 20 steps at EP8 and 8,192 tokens at 9,986
@@ -58,8 +58,8 @@ halo launch sft examples/sft/nemotron_h/nemotron-3.5-super-vl-ep8-lora.yaml -n 8
   --output_dir=/data/checkpoints/nemotron-lora
 ```
 
-These targets adapt attention, the Mamba projections and the experts. Every save folds the adapters into a full
-checkpoint, 251 GB with its adapter state, so raise `save_steps` when disk is tight.
+The recipe's `lora_target_modules` adapt attention, the Mamba projections and the experts. Every save folds the
+adapters into a full checkpoint, 251 GB with its adapter state, so raise `save_steps` when disk is tight.
 
 ### SMPO
 
@@ -125,20 +125,21 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
 
 ## Export and serve
 
-Smoke-test a text-only export with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
+A run saves its model in step directories under `output_dir`, so the text-only export is the run's last
+`checkpoint-<step>`. Smoke-test it with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
 transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so its loss on real text reads
 0.05–0.09 nats higher than under the run's limit. To serve the export, rebuild the composite, which also streams back the
 vision tower and, unless the run trained one with `mtp_loss_weight`, the `mtp.*` head at the release's weights:
 
 ```bash
-halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft \
+halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft/checkpoint-<step> \
   --model_id nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --output_dir /data/checkpoints/nemotron-sft-vl
 ```
 
-Serve from the [host](README.md#serve-from-the-host). vLLM started this way needs `--trust-remote-code` and
-`--mamba-ssm-cache-dtype float32`, which `docker-compose.vllm.yml` takes as `VLLM_TRUST_REMOTE_CODE=1` and
-`VLLM_EXTRA_ARGS`:
+Serve from the [host](README.md#serve-from-the-host). vLLM needs `--trust-remote-code` and
+`--mamba-ssm-cache-dtype float32`. This command starts the image directly, and `docker-compose.vllm.yml` takes the two
+flags as `VLLM_TRUST_REMOTE_CODE=1` and `VLLM_EXTRA_ARGS`:
 
 ```bash
 docker run -d --rm --name nemotron-vllm --gpus '"device=0,1"' --ipc=host --network host \

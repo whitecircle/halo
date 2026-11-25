@@ -34,8 +34,8 @@ More shapes:
 [Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗.
 
 GLM-5.3-Flash runs two kernels of its own. DeepSeek sparse attention runs as a tiled
-matmul over the keys a query can reach. Hyper-connections run as one kernel launch per
-step (normalize and project, Sinkhorn, collapse, mix), so a hyper-connection and its mix
+matmul over the keys a query can reach. Hyper-connections run each operation (normalize
+and project, Sinkhorn, collapse, mix) as one kernel launch. A hyper-connection and its mix
 take 16 launches forward and 14 backward, against upstream's 143 and 306. DeepSeek-V4 shares the
 hyper-connection kernels. LoRA at `ep8` reaches 2,840 at 8,192 tokens
 and 2,390 at 16,384, against 1,282 and 893 without them; a full fine-tune on two
@@ -91,7 +91,8 @@ Grouped GEMM for MoE experts, Flash Attention 4 on Blackwell, Liger and
 atomic-free expert permute, its sync-free routing sort and the fused MoE path.
 TP linears run on their local shards, an FSDP2 shard group holds two decoder
 layers under ZeRO-2, and CP runs one Ulysses all-to-all for Q, K and V. Gemma 4
-and Step-3.7 run `sdpa_flex_sliding`. Each lever's page carries its measurements:
+and Step-3.7 run `sdpa_flex_sliding`, and Qwen3.8-Flash-Next runs its block-sparse
+attention and gated residual on Triton kernels. Each lever's page carries its measurements:
 [Optimization](../agent-docs/optimization/README.md) ↗.
 
 ## Levers that do not help here
