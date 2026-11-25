@@ -161,7 +161,7 @@
   // The runs, each named by its --output:
   //   python tests/gpu/profiling/benchmark_training_step.py --experiment activations --output step-act-4b.json
   // step-act-4b.json, the two rows[] with batch 1 and seq 16384, in GiB of PyTorch's allocated memory:
-  // allocated_before_step_bytes, backbone_saved_bytes (what a forward of the decoder stack alone keeps),
+  // allocated_before_step_bytes, backbone_saved.bytes (what a forward of the decoder stack alone keeps),
   // saved_by_forward_bytes (allocated after the forward minus before it), peak_allocated_bytes, and
   // step_seconds_summary.median in ms (7 steps).
   const TOKENS = 16384;

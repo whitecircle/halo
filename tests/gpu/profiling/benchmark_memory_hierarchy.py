@@ -8,14 +8,17 @@ second GPU visible, a one-way copy from GPU 0 to GPU 1 (``peer_copy``).
 
 import argparse
 import time
+from collections.abc import Callable
 
 import torch
 import triton
 import triton.language as tl
 
 from tests.gpu.profiling.measurement import (
+    GUESS_BYTES_PER_S,
     calls_per_repeat,
     gpu_state,
+    guarded,
     run_record,
     summarize,
     time_device,
@@ -26,7 +29,6 @@ SECTIONS = ("bandwidth", "latency", "host_copy", "peer_copy")
 DEFAULT_SECTIONS = ("bandwidth", "latency", "host_copy")
 MIB = 2**20
 REPEAT_SECONDS = 0.05
-GUESS_BYTES_PER_S = 6e12
 CHASE_STEPS = 200_000
 STORE_BLOCK = 8192
 MAX_CYCLE_ENTRIES = 2**30
@@ -47,9 +49,10 @@ def _load_kernel(in_ptr, out_ptr, numel, BLOCK: tl.constexpr):
     tl.store(out_ptr + tl.program_id(0), tl.sum(values.to(tl.float32), axis=0))
 
 
-def _bandwidth_at(nbytes: int, repeats: int) -> list[dict]:
+def _bandwidth_at(nbytes: int, repeats: int, rows: list[dict]) -> None:
     """Copy (read plus write), an elementwise copy, read-only sums and write-only fills (PyTorch's and plain Triton load
-    and store kernels) over ``nbytes`` buffers, bytes counted once per pass."""
+    and store kernels) over ``nbytes`` buffers, bytes counted once per pass; each pattern's row is appended to ``rows``
+    as it completes."""
     src = torch.ones(nbytes // 2, device="cuda", dtype=torch.bfloat16)
     dst = torch.empty_like(src)
     grid = (triton.cdiv(dst.numel(), STORE_BLOCK),)
@@ -67,7 +70,6 @@ def _bandwidth_at(nbytes: int, repeats: int) -> list[dict]:
             nbytes,
         ),
     }
-    rows = []
     for pattern, (fn, moved) in patterns.items():
         iters = calls_per_repeat(moved / GUESS_BYTES_PER_S, REPEAT_SECONDS, floor=2)
         samples = time_device(fn, iters=iters, repeats=repeats, warmup=2)
@@ -85,7 +87,17 @@ def _bandwidth_at(nbytes: int, repeats: int) -> list[dict]:
             }
         )
         print(f"  {pattern:>16} {nbytes / MIB:>8.0f} MiB  {moved / stats['median'] / 1e12:6.3f} TB/s", flush=True)
-    return rows
+
+
+def _bandwidth(args, rows: list[dict], flush: Callable[[], None]) -> None:
+    """Every ``--bandwidth_mib`` size, the output rewritten after each; a size whose two buffers do not fit adds
+    ``{"buffer_bytes", "oom"}`` and the next size still runs."""
+    for mib in args.bandwidth_mib:
+        oom = guarded(_bandwidth_at, mib * MIB, args.repeats, rows)
+        if oom is not None:
+            rows.append({"buffer_bytes": mib * MIB, **oom})
+            print(f"  {mib:>8} MiB  OOM", flush=True)
+        flush()
 
 
 @triton.jit
@@ -208,7 +220,7 @@ def _peer_copy(args) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--output", required=True, help="JSON file, rewritten after each section")
+    parser.add_argument("--output", required=True, help="JSON file, rewritten after each section and bandwidth size")
     parser.add_argument("--sections", nargs="+", choices=SECTIONS, default=DEFAULT_SECTIONS)
     parser.add_argument("--repeats", type=int, default=7, help="Timed repeats per point; each is one sample")
     parser.add_argument(
@@ -226,16 +238,22 @@ def main() -> None:
 
     torch.cuda.set_device(0)
     record = {**run_record(), "sections": {}}
+
+    def flush() -> None:
+        write_record(args.output, record)
+
     runners = {
-        "bandwidth": lambda: [row for mib in args.bandwidth_mib for row in _bandwidth_at(mib * MIB, args.repeats)],
         "latency": lambda: _latency(args),
         "host_copy": lambda: _host_copy(args),
         "peer_copy": lambda: _peer_copy(args),
     }
     for section in args.sections:
         print(f"\n## {section}", flush=True)
-        record["sections"][section] = runners[section]()
-        write_record(args.output, record)
+        if section == "bandwidth":
+            _bandwidth(args, record["sections"].setdefault(section, []), flush)
+        else:
+            record["sections"][section] = runners[section]()
+        flush()
 
 
 if __name__ == "__main__":

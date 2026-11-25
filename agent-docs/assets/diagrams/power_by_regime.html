@@ -168,7 +168,7 @@
   //   python tests/gpu/profiling/benchmark_roofline.py --sustain gemm --seconds 20 --output power-p1-gemm.json
   //   python tests/gpu/profiling/benchmark_training_step.py --experiment trainable --scopes full --shapes 1x8192
   //     --gc off --repeats 60 --output step-power-full8k.json
-  //   python tests/gpu/profiling/benchmark_collectives.py --wait_probe 30 --output wait-probe-2.json
+  //   torchrun --nproc_per_node=2 tests/gpu/profiling/benchmark_collectives.py --wait_probe 30 --output wait-probe-2.json
   // One entry per workload, from the samples inside its run's 20 s window (199 or 200 of them): the means of
   // power.draw (W), utilization.gpu (%) and clocks.current.sm (MHz), and whether the clock-event reasons hold the
   // driver's software power cap (0x4). A whole training step is the same three means over the 60 measured steps

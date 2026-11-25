@@ -50,16 +50,16 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.cuda.set_device(0)
-    record = {
-        **run_record(),
-        "cache_dirs": {var: os.environ.get(var) for var in CACHE_VARS},
-        "cache_files_before": {
-            var: sum(len(files) for _, _, files in os.walk(os.environ[var])) if os.environ.get(var) else None
-            for var in CACHE_VARS
-        },
-        "rows": [],
+    record = run_record()
+    # Read after the build: the FA4 kernel lookup sets FLASH_ATTENTION_CUTE_DSL_CACHE_DIR when it is unset.
+    kernels = _kernels()
+    record["cache_dirs"] = {var: os.environ.get(var) for var in CACHE_VARS}
+    record["cache_files_before"] = {
+        var: sum(len(files) for _, _, files in os.walk(os.environ[var])) if os.environ.get(var) else None
+        for var in CACHE_VARS
     }
-    for name, fn in _kernels().items():
+    record["rows"] = []
+    for name, fn in kernels.items():
         first, second, third = _wall(fn), _wall(fn), _wall(fn)
         record["rows"].append({"kernel": name, "first_s": first, "second_s": second, "third_s": third})
         print(

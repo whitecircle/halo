@@ -150,7 +150,7 @@
 <script>
   // GB/s per GPU and per direction. `measured` lists what runs recorded, and `spec` is the vendor's figure (null
   // when there is none).
-  // HBM measured: tests/gpu/profiling/benchmark_roofline.py with its default sections, in its output
+  // HBM measured: tests/gpu/profiling/benchmark_memory_hierarchy.py with its default sections, in its output
   // sections.bandwidth[], pattern "copy" at 64 GiB, tb_per_s_median. NVLink measured:
   // tests/gpu/profiling/benchmark_memory_hierarchy.py --sections peer_copy, sections.peer_copy[].gb_per_s_median,
   // a copy from one GPU to another at 1 GiB and 8 GiB. PCIe measured: the same script with its default

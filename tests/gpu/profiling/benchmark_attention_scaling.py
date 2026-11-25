@@ -12,11 +12,22 @@ from collections.abc import Callable
 import torch
 from torch.nn.attention import SDPBackend
 
-from halo.models.attention.selection import flash_kernel, preferred_flash_impl
-from tests.gpu.profiling.measurement import gpu_state, peak_and_seconds, profile_kernels, run_record, write_record
+from halo.models.attention.selection import (
+    VARLEN_ATTN_IMPLEMENTATIONS,
+    flash_kernel,
+    is_flash_attn_implementation,
+    preferred_flash_impl,
+)
+from tests.gpu.profiling.measurement import (
+    gpu_state,
+    guarded,
+    peak_and_seconds,
+    profile_kernels,
+    run_record,
+    write_record,
+)
 
-FLASH_IMPLEMENTATIONS = ("flash_attention_2", "flash_attention_3", "flash_attention_4")
-IMPLEMENTATIONS = ("naive", "sdpa", *FLASH_IMPLEMENTATIONS)
+IMPLEMENTATIONS = ("naive", "sdpa", *VARLEN_ATTN_IMPLEMENTATIONS)
 PASSES = ("forward", "forward_backward")
 # A causal backward runs five matmuls of the forward's two.
 BACKWARD_FLOP_RATIO = 2.5
@@ -35,7 +46,7 @@ def _naive(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 def _attention(implementation: str) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor]:
     """The call on ``[batch, seq, heads, head_dim]`` operands, the layout a decoder layer hands attention."""
-    if implementation in FLASH_IMPLEMENTATIONS:
+    if is_flash_attn_implementation(implementation):
         flash = flash_kernel(implementation, varlen=False)
 
         def flash_call(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -93,7 +104,7 @@ def _point(implementation: str, attention_pass: str, seq: int, args) -> dict:
     }
     if implementation == "sdpa":
         row["sdpa_backend"] = _sdpa_backend(q, k, v)
-    row.update(peak_and_seconds(step, repeats=args.repeats, repeat_seconds=REPEAT_SECONDS))
+    row.update(guarded(peak_and_seconds, step, repeats=args.repeats, repeat_seconds=REPEAT_SECONDS))
     if "oom" not in row:
         row["tflops_median"] = flops / row["seconds_summary"]["median"] / 1e12
         row["state"] = gpu_state()

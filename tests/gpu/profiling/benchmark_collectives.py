@@ -17,7 +17,7 @@ import torch
 import torch.distributed as dist
 
 from tests.common.distributed import init_distributed, teardown_distributed
-from tests.gpu.profiling.measurement import calls_per_repeat, run_record, summarize, write_record
+from tests.gpu.profiling.measurement import calls_per_repeat, run_record, summarize, time_device, write_record
 
 COLLECTIVES = ("all_reduce", "all_gather", "reduce_scatter", "all_to_all", "broadcast", "send_recv")
 DEFAULT_COLLECTIVES = ("all_reduce", "all_gather", "reduce_scatter", "all_to_all")
@@ -85,15 +85,7 @@ def _per_call_seconds(call, iters: int, repeats: int, warmup: int) -> list[float
     samples = []
     for _ in range(repeats):
         dist.barrier()
-        torch.cuda.synchronize()
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
-        for _ in range(iters):
-            call()
-        end.record()
-        end.synchronize()
-        samples.append(start.elapsed_time(end) / 1e3 / iters)
+        samples += time_device(call, iters=iters, repeats=1, warmup=0)
     slowest = torch.tensor(samples, device="cuda", dtype=torch.float64)
     dist.all_reduce(slowest, op=dist.ReduceOp.MAX)
     return slowest.tolist()
@@ -110,6 +102,12 @@ def main() -> None:
     args = parser.parse_args()
 
     rank, world, _ = init_distributed()
+    if args.wait_probe and world < 2:
+        teardown_distributed()
+        parser.error(
+            "--wait_probe needs one rank to sleep while another waits inside the all-reduce, and this run has one "
+            "process: launch it with torchrun --nproc_per_node=2."
+        )
     record = {
         **run_record(),
         "world_size": world,

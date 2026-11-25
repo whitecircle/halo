@@ -1,5 +1,5 @@
-"""Timing, operand rotation and the run record the single-GPU profiling benchmarks share: per-repeat samples, never
-a bare mean, and the GPU's clocks, power and software stack beside them."""
+"""Timing, operand rotation and the run record the profiling benchmarks share: per-repeat samples, never a bare mean,
+and the GPU's clocks, power and software stack beside them."""
 
 import datetime
 import functools
@@ -16,7 +16,6 @@ import time
 from collections import Counter
 from collections.abc import Callable, Sequence
 
-import pynvml
 import torch
 from torch.profiler import ProfilerActivity, profile
 
@@ -36,6 +35,16 @@ PACKAGES = (
 TF32_OVERRIDE_VAR = "TORCH_ALLOW_TF32_CUBLAS_OVERRIDE"
 # Operand copies span this many L2 caches, so each call reads its operands from HBM as a model's next layer would.
 L2_ROTATION_FACTOR = 4
+# Operand dtype and float32 matmul precision per GEMM precision: tf32 and fp32 both hold fp32 operands, and "high"
+# lets an fp32 GEMM run on TF32 tensor cores where "highest" keeps it IEEE fp32.
+GEMM_PRECISIONS = {
+    "bf16": (torch.bfloat16, "highest"),
+    "fp16": (torch.float16, "highest"),
+    "tf32": (torch.float32, "high"),
+    "fp32": (torch.float32, "highest"),
+}
+# Rough HBM rate that sizes a repeat's call count; the measurement does not depend on it.
+GUESS_BYTES_PER_S = 6e12
 
 
 def summarize(samples: Sequence[float]) -> dict:
@@ -112,6 +121,14 @@ def calls_per_repeat(seconds_per_call: float, repeat_seconds: float, floor: int 
     return min(cap, max(floor, math.ceil(repeat_seconds / seconds_per_call)))
 
 
+def guarded(fn: Callable[..., object], *args, **kwargs) -> object:
+    """``fn(*args, **kwargs)``, or ``{"oom": first line of the error}`` when it runs out of device memory."""
+    try:
+        return fn(*args, **kwargs)
+    except torch.cuda.OutOfMemoryError as exc:
+        return {"oom": str(exc).splitlines()[0]}
+
+
 def _peak_bytes_above(step: Callable[[], object]) -> int:
     torch.cuda.synchronize()
     torch.cuda.empty_cache()
@@ -124,16 +141,12 @@ def _peak_bytes_above(step: Callable[[], object]) -> int:
 
 def peak_and_seconds(step: Callable[[], object], *, repeats: int, repeat_seconds: float) -> dict:
     """``step``'s allocator peak above what it held before the call (measured on a warm call, past any JIT compile and
-    workspace allocation) and its seconds per call over ``repeats`` repeats of about ``repeat_seconds``; ``{"oom":
-    message}`` when it does not fit."""
-    try:
-        step()
-        peak = _peak_bytes_above(step)
-        probe = summarize(time_device(step, iters=1, repeats=3, warmup=1))["median"]
-        iters = calls_per_repeat(probe, repeat_seconds)
-        samples = time_device(step, iters=iters, repeats=repeats, warmup=1)
-    except torch.cuda.OutOfMemoryError as exc:
-        return {"oom": str(exc).splitlines()[0]}
+    workspace allocation) and its seconds per call over ``repeats`` repeats of about ``repeat_seconds``."""
+    step()
+    peak = _peak_bytes_above(step)
+    probe = summarize(time_device(step, iters=1, repeats=3, warmup=1))["median"]
+    iters = calls_per_repeat(probe, repeat_seconds)
+    samples = time_device(step, iters=iters, repeats=repeats, warmup=1)
     return {
         "peak_bytes_above_inputs": peak,
         "calls_per_repeat": iters,
@@ -181,22 +194,32 @@ def rotating(sets: Sequence[tuple]) -> Callable[[], tuple]:
 
 
 @functools.cache
-def _nvml_handle():
+def _nvml():
+    """``(pynvml, handle)``: NVML initialized once and the current GPU's handle. ``nvidia-ml-py`` comes with the NGC
+    base image, not the lock."""
+    try:
+        import pynvml  # noqa: PLC0415
+    except ImportError as exc:
+        raise ImportError(
+            "pynvml is not importable, and run_record, gpu_state and ClockSampler read the GPU's clocks and power "
+            "through it. Install nvidia-ml-py, which provides it and which the NGC base image of Halo's images ships: "
+            "uv pip install nvidia-ml-py."
+        ) from exc
     pynvml.nvmlInit()
     uuid = str(torch.cuda.get_device_properties(torch.cuda.current_device()).uuid)
-    return pynvml.nvmlDeviceGetHandleByUUID(uuid if uuid.startswith("GPU-") else f"GPU-{uuid}")
+    return pynvml, pynvml.nvmlDeviceGetHandleByUUID(uuid if uuid.startswith("GPU-") else f"GPU-{uuid}")
 
 
 def gpu_state() -> dict:
     """Board power, temperature, clocks and active clock-event reasons of the current GPU, read now from NVML."""
-    handle = _nvml_handle()
+    nvml, handle = _nvml()
     return {
         "time_utc": datetime.datetime.now(datetime.UTC).isoformat(),
-        "power_w": pynvml.nvmlDeviceGetPowerUsage(handle) / 1e3,
-        "temperature_c": pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU),
-        "sm_clock_mhz": pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM),
-        "mem_clock_mhz": pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_MEM),
-        "clock_event_reasons": pynvml.nvmlDeviceGetCurrentClocksEventReasons(handle),
+        "power_w": nvml.nvmlDeviceGetPowerUsage(handle) / 1e3,
+        "temperature_c": nvml.nvmlDeviceGetTemperature(handle, nvml.NVML_TEMPERATURE_GPU),
+        "sm_clock_mhz": nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM),
+        "mem_clock_mhz": nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_MEM),
+        "clock_event_reasons": nvml.nvmlDeviceGetCurrentClocksEventReasons(handle),
     }
 
 
@@ -219,13 +242,13 @@ class ClockSampler:
         self._thread.join()
 
     def _run(self) -> None:
-        handle = _nvml_handle()
+        nvml, handle = _nvml()
         while not self._stop.is_set():
             self.samples.append(
                 (
                     time.time(),
-                    pynvml.nvmlDeviceGetClockInfo(handle, pynvml.NVML_CLOCK_SM),
-                    pynvml.nvmlDeviceGetPowerUsage(handle) / 1e3,
+                    nvml.nvmlDeviceGetClockInfo(handle, nvml.NVML_CLOCK_SM),
+                    nvml.nvmlDeviceGetPowerUsage(handle) / 1e3,
                 )
             )
             time.sleep(self.period)
@@ -235,7 +258,7 @@ def run_record() -> dict:
     """The GPU, driver, software versions and command of this run, with the GPU's state at its start."""
     device = torch.cuda.current_device()
     props = torch.cuda.get_device_properties(device)
-    handle = _nvml_handle()
+    nvml, handle = _nvml()
     versions = {}
     for package in PACKAGES:
         try:
@@ -258,11 +281,11 @@ def run_record() -> dict:
             "shared_memory_per_sm_bytes": props.shared_memory_per_multiprocessor,
             "shared_memory_per_block_optin_bytes": props.shared_memory_per_block_optin,
             "warp_size": props.warp_size,
-            "power_limit_w": pynvml.nvmlDeviceGetEnforcedPowerLimit(handle) / 1e3,
-            "max_sm_clock_mhz": pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_SM),
-            "max_mem_clock_mhz": pynvml.nvmlDeviceGetMaxClockInfo(handle, pynvml.NVML_CLOCK_MEM),
+            "power_limit_w": nvml.nvmlDeviceGetEnforcedPowerLimit(handle) / 1e3,
+            "max_sm_clock_mhz": nvml.nvmlDeviceGetMaxClockInfo(handle, nvml.NVML_CLOCK_SM),
+            "max_mem_clock_mhz": nvml.nvmlDeviceGetMaxClockInfo(handle, nvml.NVML_CLOCK_MEM),
         },
-        "driver": pynvml.nvmlSystemGetDriverVersion(),
+        "driver": nvml.nvmlSystemGetDriverVersion(),
         "cuda_runtime": torch.version.cuda,
         "cudnn": torch.backends.cudnn.version(),
         "versions": versions,

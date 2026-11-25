@@ -26,6 +26,8 @@ from liger_kernel.ops.swiglu import LigerSiLUMulFunction
 
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.gpu.profiling.measurement import (
+    GEMM_PRECISIONS,
+    GUESS_BYTES_PER_S,
     ClockSampler,
     calls_per_repeat,
     capture_graph,
@@ -42,11 +44,8 @@ from tests.gpu.profiling.measurement import (
 
 SECTIONS = ("peaks", "sweep", "alignment", "launch", "fusion", "streams", "triton_gemm", "memory_bound")
 SUSTAINED = ("idle", "gemm", "elementwise", "silu_mul", "tiny", "small_m", "expert_loop")
-# fp32 and tf32 both hold fp32 operands; they differ only in the float32 matmul precision the GEMM runs at.
-DTYPES = {"bf16": torch.bfloat16, "fp16": torch.float16, "tf32": torch.float32, "fp32": torch.float32}
-# Rough rates that size a repeat's call count; the measurement does not depend on them.
+# Rough FLOP rates that size a repeat's call count beside GUESS_BYTES_PER_S; the measurement does not depend on them.
 GUESS_FLOPS = {"bf16": 2e15, "fp16": 2e15, "tf32": 1e15, "fp32": 1e14}
-GUESS_BYTES_PER_S = 6e12
 # Default length of one timed repeat.
 REPEAT_SECONDS = 0.05
 SUSTAINED_GEMM_DIM = 8192
@@ -77,11 +76,6 @@ class Timing:
     cooldown: float
 
 
-def _set_matmul_precision(dtype_name: str) -> None:
-    """``high`` lets fp32 GEMMs run on TF32 tensor cores; ``highest`` keeps them IEEE fp32."""
-    torch.set_float32_matmul_precision("high" if dtype_name == "tf32" else "highest")
-
-
 def _gemm_operands(m: int, k: int, n: int, dtype: torch.dtype, hot_l2: bool, form: str = "forward") -> list[tuple]:
     """Operand sets for ``form``: ``forward`` ``x [m, k]``, ``w [k, n]``, ``y [m, n]``; ``wgrad`` ``x [m, k]``,
     ``dy [m, n]``, ``dw [k, n]`` (the weight gradient, contracting over the m rows); ``fp32_out`` as ``forward`` with
@@ -106,8 +100,8 @@ def _gemm_point(
     """One ``[m, k] @ [k, n]`` GEMM (or, for ``form="wgrad"``, ``x.T @ dy``; ``"fp32_out"``, an fp32 output): per-call
     seconds back to back (``eager``) and, with ``graph``, replayed as one CUDA graph (``graph``), with FLOP/s,
     arithmetic intensity and the bytes the call must move."""
-    _set_matmul_precision(dtype_name)
-    dtype = DTYPES[dtype_name]
+    dtype, precision = GEMM_PRECISIONS[dtype_name]
+    torch.set_float32_matmul_precision(precision)
     sets = _gemm_operands(m, k, n, dtype, hot_l2, form)
     next_set = rotating(sets)
 
@@ -121,7 +115,7 @@ def _gemm_point(
             torch.mm(x, w, out=y)
 
     flops = 2 * m * k * n
-    nbytes = torch.finfo(dtype).bits // 8 * (m * k + k * n + m * n)
+    nbytes = sum(t.numel() * t.element_size() for t in sets[0])
     guess = flops / GUESS_FLOPS[dtype_name] + nbytes / GUESS_BYTES_PER_S + 5e-6
     iters = calls_per_repeat(guess, timing.repeat_seconds, floor=len(sets))
     row = {
@@ -161,8 +155,9 @@ def _gemm_point(
 
 def _record_kernels(row: dict) -> None:
     """Adds the kernel cuBLAS picks for ``row``'s GEMM and its launch grid, read from one profiled call."""
-    _set_matmul_precision(row["dtype"])
-    x, w, y = _gemm_operands(row["m"], row["k"], row["n"], DTYPES[row["dtype"]], hot_l2=True)[0]
+    dtype, precision = GEMM_PRECISIONS[row["dtype"]]
+    torch.set_float32_matmul_precision(precision)
+    x, w, y = _gemm_operands(row["m"], row["k"], row["n"], dtype, hot_l2=True)[0]
     row["kernels"] = profile_kernels(lambda: torch.mm(x, w, out=y), calls=1)["kernels"]
 
 
@@ -176,7 +171,7 @@ def _peaks(args, timing: Timing, rows: list[dict], flush: Callable[[], None]) ->
             rows.append(row)
             flush()
             torch.cuda.empty_cache()
-    _set_matmul_precision("fp32")
+    torch.set_float32_matmul_precision("highest")
 
 
 def _sweep_ms(spec: list[str] | None) -> list[int]:
@@ -236,7 +231,7 @@ def _alignment(args, timing: Timing, rows: list[dict], flush: Callable[[], None]
                     )
                     rows.append(row)
                     flush()
-    _set_matmul_precision("fp32")
+    torch.set_float32_matmul_precision("highest")
 
 
 def _eager_issue(op: Callable[[], object], repeats: int) -> tuple[list[float], list[float], list[float]]:
@@ -476,28 +471,29 @@ def _record_profiled_kernels(row: dict, fn: Callable[[], object]) -> None:
 
 
 def _triton_gemm(args, deferred: list[Callable[[], None]]) -> list[dict]:
-    """cuBLAS against Inductor's autotuned Triton GEMM templates on ``--peak_dims`` bf16 squares. Restricting
-    ``max_autotune_gemm_backends`` to Triton is process-wide, so run this section on its own."""
-    inductor_config.max_autotune_gemm_backends = "TRITON"
+    """cuBLAS against Inductor's autotuned Triton GEMM templates on ``--peak_dims`` bf16 squares. Triton is the only
+    GEMM backend autotuning may pick inside this section, where each compile runs on its first call."""
     rows = []
-    for dim in args.peak_dims:
-        a, b = (torch.randn(dim, dim, device="cuda", dtype=torch.bfloat16) for _ in range(2))
-        triton_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
-        variants = {"cublas": lambda: torch.mm(a, b), "triton": lambda: triton_mm(a, b)}
-        for name, fn in variants.items():
-            fn()
-            samples = time_device(fn, iters=20, repeats=args.repeats, warmup=5, cooldown=args.cooldown)
-            median = summarize(samples)["median"]
-            row = {
-                "variant": name,
-                "dim": dim,
-                "seconds": samples,
-                "tflops_median": 2 * dim**3 / median / 1e12,
-                "state": gpu_state(),
-            }
-            rows.append(row)
-            deferred.append(functools.partial(_record_profiled_kernels, row, fn))
-            print(f"  {name:>7} {dim}^3  {row['tflops_median']:7.1f} TFLOP/s", flush=True)
+    with inductor_config.patch(max_autotune_gemm_backends="TRITON"):
+        for dim in args.peak_dims:
+            a, b = (torch.randn(dim, dim, device="cuda", dtype=torch.bfloat16) for _ in range(2))
+            triton_mm = torch.compile(torch.mm, mode="max-autotune-no-cudagraphs", dynamic=False)
+            # Bound per dim: the deferred profile of a row calls its own operands and its own compiled GEMM.
+            variants = {"cublas": functools.partial(torch.mm, a, b), "triton": functools.partial(triton_mm, a, b)}
+            for name, fn in variants.items():
+                fn()
+                samples = time_device(fn, iters=20, repeats=args.repeats, warmup=5, cooldown=args.cooldown)
+                median = summarize(samples)["median"]
+                row = {
+                    "variant": name,
+                    "dim": dim,
+                    "seconds": samples,
+                    "tflops_median": 2 * dim**3 / median / 1e12,
+                    "state": gpu_state(),
+                }
+                rows.append(row)
+                deferred.append(functools.partial(_record_profiled_kernels, row, fn))
+                print(f"  {name:>7} {dim}^3  {row['tflops_median']:7.1f} TFLOP/s", flush=True)
     return rows
 
 
@@ -640,7 +636,7 @@ def main() -> None:
         help="Idle seconds before each GEMM repeat: a burst from cool clocks instead of a sustained, power-capped run",
     )
     parser.add_argument("--peak_dims", type=int, nargs="+", default=(8192, 16384, 32768))
-    parser.add_argument("--peak_dtypes", nargs="+", choices=tuple(DTYPES), default=tuple(DTYPES))
+    parser.add_argument("--peak_dtypes", nargs="+", choices=tuple(GEMM_PRECISIONS), default=tuple(GEMM_PRECISIONS))
     parser.add_argument(
         "--sweep_shapes",
         nargs="+",
@@ -656,7 +652,9 @@ def main() -> None:
     parser.add_argument("--alignment_base", type=int, default=2880, help="Base K and N of the alignment sweep")
     parser.add_argument("--alignment_m", type=int, default=4096, help="Base M of the alignment sweep")
     parser.add_argument("--alignment_span", type=int, default=16, help="Steps added to each dimension in turn")
-    parser.add_argument("--alignment_dtypes", nargs="+", choices=tuple(DTYPES), default=("bf16", "fp32", "tf32"))
+    parser.add_argument(
+        "--alignment_dtypes", nargs="+", choices=tuple(GEMM_PRECISIONS), default=("bf16", "fp32", "tf32")
+    )
     parser.add_argument("--alignment_axes", nargs="+", choices=("k", "n", "m"), default=("k", "n", "m"))
     parser.add_argument("--alignment_forms", nargs="+", choices=GEMM_FORMS, default=("forward",))
     parser.add_argument("--sustain", choices=SUSTAINED, help="Run one steady workload instead of the sections")

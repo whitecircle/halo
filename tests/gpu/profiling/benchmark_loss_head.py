@@ -13,7 +13,7 @@ import torch
 import torch.nn.functional as F
 from liger_kernel.transformers.fused_linear_cross_entropy import LigerFusedLinearCrossEntropyLoss
 
-from tests.gpu.profiling.measurement import gpu_state, peak_and_seconds, run_record, write_record
+from tests.gpu.profiling.measurement import gpu_state, guarded, peak_and_seconds, run_record, write_record
 
 ARMS = ("logits_ce", "liger_flce")
 PASSES = ("forward", "forward_backward")
@@ -55,7 +55,7 @@ def _point(arm: str, loss_pass: str, tokens: int, hidden_size: int, vocab: int, 
         "logits_bf16_bytes": 2 * tokens * vocab,
         "input_bytes": 2 * (hidden.numel() + weight.numel()),
     }
-    row.update(peak_and_seconds(step, repeats=repeats, repeat_seconds=REPEAT_SECONDS))
+    row.update(guarded(peak_and_seconds, step, repeats=repeats, repeat_seconds=REPEAT_SECONDS))
     if "oom" not in row:
         row["state"] = gpu_state()
     return row

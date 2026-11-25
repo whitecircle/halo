@@ -150,7 +150,7 @@
   const SIDE = 8192;
   const BF16_BYTES = 2;
   // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py with its default sections: in its output,
-  // sections.fusion[], the entries with variant "eager" (F.silu(a) * b) and "liger" (one fused kernel). Fields
+  // sections.fusion.variants[], the entries with variant "eager" (F.silu(a) * b) and "liger" (one fused kernel). Fields
   // kernels_per_call, tensor_passes, bytes_moved and seconds_summary.median (7 repeats).
   const COLUMNS = [
     {

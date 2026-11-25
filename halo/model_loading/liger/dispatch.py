@@ -69,6 +69,7 @@ _LIGER_DEFAULTS = {
     "swiglu": True,
     "geglu": True,
 }
+LIGER_FLAGS = tuple(_LIGER_DEFAULTS)
 
 
 def fused_loss_applied(model_config) -> bool:

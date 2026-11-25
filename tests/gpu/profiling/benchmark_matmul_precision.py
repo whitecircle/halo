@@ -11,17 +11,11 @@ import os
 
 import torch
 
-from tests.gpu.profiling.measurement import TF32_OVERRIDE_VAR, run_record, write_record
+from tests.gpu.profiling.measurement import GEMM_PRECISIONS, TF32_OVERRIDE_VAR, run_record, write_record
 
 SEED = 0
 # Elements summed into each step of the running bf16 accumulator.
 RUNNING_CHUNK = 256
-GEMM_PRECISIONS = {
-    "bf16": (torch.bfloat16, "highest"),
-    "fp16": (torch.float16, "highest"),
-    "tf32": (torch.float32, "high"),
-    "fp32": (torch.float32, "highest"),
-}
 
 
 def _relative(value: torch.Tensor, reference: torch.Tensor) -> float:

@@ -16,14 +16,14 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from halo.model_loading.dtype import configure_float32_matmul_precision
 from halo.model_loading.finalization import finalize_loaded_model
-from halo.model_loading.liger.dispatch import apply_liger_kernel
+from halo.model_loading.liger.dispatch import LIGER_FLAGS, apply_liger_kernel
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.benchmark_args import resolve_benchmark_attn
 from tests.common.memory import cleanup_memory
 from tests.common.models import MODEL_CONFIGS
-from tests.gpu.profiling.measurement import gpu_state, run_record, summarize, write_record
+from tests.gpu.profiling.measurement import gpu_state, guarded, run_record, summarize, write_record
 
 EXPERIMENTS = ("activations", "trainable", "padding")
 SCOPES = ("full", "lora", "last_two", "first_two")
@@ -36,7 +36,6 @@ PADDING_DOCS, PADDING_DOC_LEN, PADDING_WIDTH = 16, 1024, 4096
 # Largest relative gap between the packed and the documents-alone loss that still reads as the same computation.
 PACKED_LOSS_TOLERANCE = 1e-3
 FLCE = "fused_linear_cross_entropy"
-LIGER_KERNELS = ("rope", "rms_norm", "swiglu", "cross_entropy", FLCE)
 
 
 def _load_model(model_path: str, attn_implementation: str | None, liger: str):
@@ -45,7 +44,7 @@ def _load_model(model_path: str, attn_implementation: str | None, liger: str):
     logits; or ``defaults``, the family's default Liger kernels as an SFT run applies them."""
     config = AutoConfig.from_pretrained(model_path)
     if liger == "flce":
-        apply_liger_kernel(config, liger_kernel_config={kernel: kernel == FLCE for kernel in LIGER_KERNELS})
+        apply_liger_kernel(config, liger_kernel_config={flag: flag == FLCE for flag in LIGER_FLAGS})
     elif liger == "defaults":
         apply_liger_kernel(config)
     attn = apply_family_patches(config, resolve_benchmark_attn(model_path, attn_implementation))
@@ -66,7 +65,8 @@ def _set_checkpointing(model, enabled: bool) -> None:
 
 
 def _apply_scope(model, scope: str):
-    """Trainable parameters for ``scope``; the input embedding, tied to the head here, stays frozen outside ``full``."""
+    """Trainable parameters for ``scope``; the input embedding and the head, one tensor when tied, stay frozen outside
+    ``full``."""
     if scope == "lora":
         lora = LoraConfig(r=LORA_RANK, lora_alpha=2 * LORA_RANK, lora_dropout=0.0, target_modules=list(LORA_TARGETS))
         return get_peft_model(model, lora)
@@ -186,10 +186,9 @@ def _measure(model, batch: dict, optimizer, *, repeats: int, warmup: int) -> dic
 
 
 def _guarded(fn, *args, **kwargs) -> dict:
+    """:func:`guarded`, the allocator emptied after it either way."""
     try:
-        return fn(*args, **kwargs)
-    except torch.cuda.OutOfMemoryError as exc:
-        return {"oom": str(exc).splitlines()[0]}
+        return guarded(fn, *args, **kwargs)
     finally:
         cleanup_memory()
 
@@ -205,6 +204,20 @@ def _model_facts(model, attn: str) -> dict:
         "vocab_size": config.vocab_size,
         "tie_word_embeddings": config.tie_word_embeddings,
     }
+
+
+def _report(record: dict, row: dict, output: str) -> None:
+    record["rows"].append(row)
+    write_record(output, record)
+    if "oom" in row:
+        print(f"  {row}  OOM", flush=True)
+        return
+    label = {key: row[key] for key in ("scope", "layout", "gradient_checkpointing", "batch", "seq") if key in row}
+    print(
+        f"  {label}  step {row['step_seconds_summary']['median'] * 1e3:8.1f} ms  "
+        f"peak {row['peak_allocated_bytes'] / 2**30:7.2f} GiB  saved {row['saved_by_forward_bytes'] / 2**30:7.2f} GiB",
+        flush=True,
+    )
 
 
 def _activations(args, model_path: str, record: dict) -> None:
@@ -262,7 +275,9 @@ def _padding(args, model_path: str, record: dict) -> None:
     if abs(losses["packed"] - losses["alone"]) > PACKED_LOSS_TOLERANCE * abs(losses["alone"]):
         raise RuntimeError(
             f"packed loss {losses['packed']:.6f} differs from the documents run alone ({losses['alone']:.6f}): "
-            "attention crossed document boundaries, so the padding comparison would not compare the same work."
+            "attention crossed document boundaries, so the padding comparison would not compare the same work. Pass "
+            "--attn_implementation flash_attention_2, flash_attention_3 or flash_attention_4 (unset picks this GPU's "
+            "flash kernel), which isolates each document by its position_ids."
         )
     optimizer = AdamWBF16(list(model.named_parameters()), lr=1e-5)
     real_tokens = PADDING_DOCS * PADDING_DOC_LEN
@@ -287,25 +302,16 @@ def _padding(args, model_path: str, record: dict) -> None:
             _report(record, row, args.output)
 
 
-def _report(record: dict, row: dict, output: str) -> None:
-    record["rows"].append(row)
-    write_record(output, record)
-    if "oom" in row:
-        print(f"  {row}  OOM", flush=True)
-        return
-    label = {key: row[key] for key in ("scope", "layout", "gradient_checkpointing", "batch", "seq") if key in row}
-    print(
-        f"  {label}  step {row['step_seconds_summary']['median'] * 1e3:8.1f} ms  "
-        f"peak {row['peak_allocated_bytes'] / 2**30:7.2f} GiB  saved {row['saved_by_forward_bytes'] / 2**30:7.2f} GiB",
-        flush=True,
-    )
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--experiment", required=True, choices=EXPERIMENTS)
     parser.add_argument("--output", required=True, help="JSON file, rewritten after each row")
-    parser.add_argument("--model", default="qwen3-4b", choices=list(MODEL_CONFIGS))
+    parser.add_argument(
+        "--model",
+        default="qwen3-4b",
+        choices=[key for key, entry in MODEL_CONFIGS.items() if entry["num_experts"] == 0],
+        help="A dense row of the shared roster: the script loads a plain causal LM",
+    )
     parser.add_argument("--attn_implementation", default=None, help="Unset: the production pick for this GPU")
     parser.add_argument(
         "--liger",
