@@ -139,7 +139,8 @@ leaves `checkpoints/`, where every example writes its run.
 ## AI-assisted contributions
 
 AI-assisted contributions are welcome on the terms in [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-one-rule);
-`CLAUDE.md` and `AGENTS.md` bind agents and humans alike.
+`CLAUDE.md` and `AGENTS.md` bind agents and humans alike. PR and issue text, commit messages and
+release notes follow the `voice` skill, `skills/voice/SKILL.md`.
 
 ## Tests
 

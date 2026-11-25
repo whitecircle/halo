@@ -222,7 +222,8 @@ The training images ship repo-specific agent skills (discoverable by Claude Code
 `--build-arg INSTALL_CLAUDE_CODE=1` to bake the CLI into the image) for [launching jobs](skills/launch),
 [choosing parallelism settings](skills/parallelism), [debugging distributed runs](skills/debug), [adding models](skills/add-model), [managing checkpoints](skills/checkpoints),
 [preparing data](skills/data), [optimizing throughput](skills/optimize), [setting up RL](skills/rl-setup),
-[writing tests](skills/write-tests), and [keeping docs current](skills/docs).
+[writing tests](skills/write-tests), [keeping docs current](skills/docs), [writing for people](skills/voice)
+and [making figures](skills/visuals).
 
 </br>
 
