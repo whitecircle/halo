@@ -9,7 +9,7 @@
 
 <!-- Temporary, with the "Halo Competition" section: remove both when the competition ends on Dec 10. -->
 <p align="center">
-  <a href="https://whitecircle.com/halo/competition"><strong>Halo Competition, Dec 1–10: $200k in cash prizes. Apply by Nov 30</strong></a>
+  <a href="https://whitecircle.com/halo/competition"><strong>Halo Competition, Dec 1–10 · $200k in cash prizes · apply by Nov 30</strong></a>
 </p>
 
 <p align="center">
@@ -38,7 +38,7 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 ## Halo Competition
 
-The Halo Competition runs Dec 1–10. It has tracks for making Halo faster on a model family, post-training one for a task you pick, and best-use tracks from the partners and White Circle. Prizes are $200k in cash and $1.5M in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others.
+The Halo Competition runs Dec 1–10. There are tracks for making Halo faster on a model family and for post-training one on a task you pick, and best-use tracks from the partners and White Circle. The prizes are $200k in cash and $1.5M in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others.
 
 Apply by Nov 30: [details](https://whitecircle.com/halo/competition) · [apply](https://luma.com/ykoj0t48).
 
@@ -68,19 +68,19 @@ Apply by Nov 30: [details](https://whitecircle.com/halo/competition) · [apply](
 
 <!-- Newest first, a few lines per entry. The details of a release belong in its release notes. -->
 
-Each entry lists a release's highlights. The full notes of every release, with its breaking changes and upgrade
-steps, are in [GitHub Releases](https://github.com/whitecircle/halo/releases).
+Only the highlights are here. Each release's full notes, with its breaking changes and upgrade steps, are on
+[GitHub Releases](https://github.com/whitecircle/halo/releases).
 
 - **2026-11-25 — Halo 1.3.0rc2.** Adds Inkling 2: Inkling-2-Small trains with LoRA on its attention, alone or
   beside its routed experts, while the released NVFP4/MXFP8 expert weights stay frozen
   ([Inkling 2](agent-docs/models/inkling2.md),
   [release notes](https://github.com/whitecircle/halo/releases/tag/v1.3.0rc2)).
-  - **Adapter sync on vLLM:** environmental GRPO serves each Inkling 2 adapter version from a shared directory,
-    over the release the server loaded, with no full-weight push.
+  - **Adapter sync on vLLM:** in environmental GRPO the server keeps Inkling 2's released weights and loads each
+    adapter version from a shared directory, so no full weights are pushed.
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
     faster LoRA steps at EP8 on 8× B300), and its weights sync to vLLM and SGLang for RL.
   - **Also:** rollouts without reasoning, MaxRL advantages, chunked distillation losses, fused MXFP4 and NVFP4
-    fake-quantization kernels, gpt-oss loading from its native MXFP4 release and Transformers 5.23.
+    fake-quantization kernels, native MXFP4 gpt-oss loading and Transformers 5.23.
 - **2026-11-24 — Halo Competition.** Dec 1–10, with $200k in cash prizes and $1.5M in compute and API credits.
   Apply by Nov 30 ([Halo Competition](#halo-competition)).
 - **2026-11-07 — Halo 1.3.0rc1.** Faster RL at scale: a synchronous GRPO step on Qwen3.5-35B-A3B over two 8× B300
@@ -88,8 +88,8 @@ steps, are in [GitHub Releases](https://github.com/whitecircle/halo/releases).
   ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles),
   [release notes](https://github.com/whitecircle/halo/releases/tag/v1.3.0rc1)).
 - **2026-11-04 — Halo 1.2.0.** Training steps are 1.11× to 2.07× faster than in 1.1.0 on all twelve shapes
-  benchmarked against it. Adds pipeline parallelism, tree packing, training of MTP heads and three model families
-  ([benchmarks](human-docs/performance.md),
+  benchmarked against it. It also adds pipeline parallelism, tree packing, MTP head training and three model
+  families ([benchmarks](human-docs/performance.md),
   [release notes](https://github.com/whitecircle/halo/releases/tag/v1.2.0)).
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL
   ([release notes](https://github.com/whitecircle/halo/releases/tag/v1.1.0)).
