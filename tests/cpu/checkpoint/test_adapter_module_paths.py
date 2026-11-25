@@ -114,15 +114,20 @@ def test_a_shared_lm_head_does_not_hide_the_text_only_class(tmp_path):
     base = load_base_for_adapter(adapter, "/base", load, excuse_task_head=True, log=logged.append)
 
     assert isinstance(base.model, TextOnly) and base.text_only and requests == [False, True]
-    assert logged and "text-only class of Multimodal" in logged[0]
+    assert logged == ["The adapter addresses the text-only class of Multimodal; reading the base as TextOnly."]
 
 
 def test_a_key_set_neither_class_carries_is_refused(tmp_path):
     adapter = _adapter(tmp_path, [f"{_PREFIX}model.blocks.0.attn.lora_A.weight", f"{_PREFIX}{_HEAD}.weight"])
     load, _requests = _loader(_text_only())
 
-    with pytest.raises(ValueError, match=r"Multimodal .* does not have .*model\.blocks\.0\.attn"):
+    with pytest.raises(ValueError, match=r"Multimodal .* does not have .*model\.blocks\.0\.attn") as refused:
         load_base_for_adapter(adapter, "/base", load, excuse_task_head=False, log=lambda _: None)
+
+    assert "merge" not in str(refused.value), "the refusal is worded for every caller, not the merge alone"
+    assert "Set base_model_name_or_path in adapter_config.json to the checkpoint the adapter was trained on" in str(
+        refused.value
+    )
 
 
 def test_a_base_with_no_text_only_class_is_refused_for_the_mismatch(tmp_path):

@@ -184,7 +184,7 @@ def _build_hub_respeller(model: torch.nn.Module) -> Callable[[str], str | None]:
 
 
 def _attention_lora_spec(config: Mapping) -> ExpertLoraSpec:
-    return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=config["use_rslora"])
+    return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=bool(config.get("use_rslora")))
 
 
 def _resolve_server_name(model_types: tuple[str, ...], client_cls) -> str:
