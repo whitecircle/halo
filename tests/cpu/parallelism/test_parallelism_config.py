@@ -739,6 +739,9 @@ def test_reshard_rejects_tp_with_dp():
     except ValueError as e:
         msg = str(e).lower()
         assert "tensor parallelism" in msg and "data parallelism" in msg
+        # The remedy names only knobs this layout accepts: _reject_hsdp refuses use_hsdp under TP.
+        assert "use_hsdp" not in msg and "fsdp_reshard_after_forward=false" in msg
+    create_config(tp_size=2, world_size=8, fsdp_reshard_after_forward=False)
 
 
 def _all_global_group_ranks(ep_size, world_size, gpus_per_node):

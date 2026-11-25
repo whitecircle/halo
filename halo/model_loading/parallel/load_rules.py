@@ -99,8 +99,9 @@ def reject_unsupported_model(
     if (pc.ep_fp32_router or pc.ep_fp32_experts) and not wraps_experts:
         raise ValueError(
             "fp32_router and fp32_experts are read by the EP layers, and this run builds none: the model has no "
-            "routed experts with an EP layer, or expert_parallel_size is 1 with use_grouped_gemm off. Remove them, or "
-            "use fp32_non_ep_params for FP32 masters on the rest of the model."
+            "routed experts with an EP layer, or expert_parallel_size and expert_tensor_parallel_size are both 1 "
+            "with use_grouped_gemm off. Remove them, or use fp32_non_ep_params for FP32 masters on the rest of the "
+            "model."
         )
     if pc.frozen_quantized_experts:
         reject_frozen_experts_family(model_config)
