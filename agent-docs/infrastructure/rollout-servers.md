@@ -794,7 +794,7 @@ docker run --gpus all --network=host --ipc=host \
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do |
 | `VLLM_TOOL_PARSER_PLUGIN` / `VLLM_REASONING_PARSER_PLUGIN` | *(unset)* | Parser plugin paths (gpt-oss: the baked `/opt/gpt_oss_text_tool_parser.py`, `/opt/gpt_oss_reasoning_parser.py`) |
-| `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`): without one vLLM answers every request carrying `thinking_token_budget` with a 400 |
+| `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`): without one vLLM answers every request carrying `thinking_token_budget` with a 400. Leave it unset for a checkpoint that does not think: on Qwen3-30B-A3B-Instruct-2507, vLLM 0.32.0's `qwen3` parser returned the plain answer after a tool result as reasoning, and the turn's content came back empty |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer's `chat_template:` uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `VLLM_TRUST_REMOTE_CODE` | *(unset)* | Any value adds `--trust-remote-code`, which the Bailing (Ling 2.0) and Step-3.7 repos need |
 | `VLLM_EXTRA_ARGS` | *(unset)* | Further flags, appended last, such as `--served-model-name` when the server's path differs from the trainer's model id |

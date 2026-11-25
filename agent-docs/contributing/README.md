@@ -89,7 +89,9 @@ the served model and assert the served policy moved, so server and trainer hold 
 `unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE tests are gpt-oss only
 (`SERVER_TIER=moe`). The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
 per-effort CoT budget, which draws a 400 without a reasoning parser (the target's health guard prints
-the compose line).
+the compose line). The env-GRPO rows on `Qwen/Qwen3-30B-A3B-Instruct-2507` need a server launched without
+it: that checkpoint does not think, and on vLLM 0.32.0 the `qwen3` parser returns its plain answer after a
+tool result as reasoning, so the turn comes back empty and `test_env_grpo_e2e.py` fails on tied rewards.
 
 The env-GRPO rows train on a native tool call, so the vLLM server also needs the served family's tool
 parser ([Tool parsers are per family](../infrastructure/rollout-servers.md#running-it)). The compose
