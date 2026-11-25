@@ -14,7 +14,11 @@ from safetensors.torch import load_file
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.weight_sync import adapter_directory
-from halo.weight_sync.adapter_directory import publish_adapter_directory, remove_adapter_directories
+from halo.weight_sync.adapter_directory import (
+    publish_adapter_directory,
+    remove_adapter_directories,
+    remove_staged_adapter_directories,
+)
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
@@ -77,6 +81,68 @@ def test_a_write_that_raises_leaves_no_staging_directory(tmp_path, monkeypatch):
         publish_adapter_directory(tmp_path, "v1", {"x.lora_A.weight": torch.zeros(2, 3)}, {"r": 2})
 
     assert list(tmp_path.iterdir()) == []
+
+
+def _killed_mid_write(root: Path, name: str) -> Path:
+    """The stage a writer killed before its rename leaves: no handler runs, so nothing removes it."""
+    staged = []
+
+    def cut_short(tensors, path):
+        staged.append(Path(path).parent)
+        Path(path).write_bytes(b"cut short")
+        raise OSError("killed")
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(adapter_directory, "save_file", cut_short)
+        patch.setattr(adapter_directory.shutil, "rmtree", lambda path, ignore_errors=False: None)
+        with pytest.raises(OSError, match="killed"):
+            publish_adapter_directory(root, name, {"x.lora_A.weight": torch.zeros(1, 1)}, {"r": 1})
+    return staged[0]
+
+
+def test_the_stage_of_a_killed_write_is_removed_and_nothing_else(tmp_path, caplog):
+    stage = _killed_mid_write(tmp_path, "halo-adapter-0badc0de-7")
+    publish_adapter_directory(tmp_path, "halo-adapter-0badc0de-8", {"x.lora_A.weight": torch.zeros(1, 1)}, {"r": 1})
+    (tmp_path / ".halo-adapter-0badc0de-9.k3j2h1").write_text("a file")
+    (tmp_path / ".someone-elses-adapter.k3j2h1").mkdir()
+    (tmp_path / ".halo-adapters-archive.k3j2h1").mkdir()
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "kept.txt").write_text("theirs")
+    (tmp_path / ".halo-adapter-0badc0de-10.k3j2h1").symlink_to(elsewhere, target_is_directory=True)
+    assert stage.parent == tmp_path and stage.name.startswith(".halo-adapter-0badc0de-7.") and stage.is_dir()
+
+    with caplog.at_level(logging.WARNING, logger=adapter_directory.__name__):
+        remove_staged_adapter_directories(tmp_path, "halo-adapter-")
+
+    assert caplog.records == [], "a file or a symlink of the staging form is not tried as a stage"
+    assert sorted(path.name for path in tmp_path.iterdir()) == [
+        ".halo-adapter-0badc0de-10.k3j2h1",
+        ".halo-adapter-0badc0de-9.k3j2h1",
+        ".halo-adapters-archive.k3j2h1",
+        ".someone-elses-adapter.k3j2h1",
+        "elsewhere",
+        "halo-adapter-0badc0de-8",
+    ]
+    assert (elsewhere / "kept.txt").read_text() == "theirs", "a symlink's target is not followed"
+
+
+def test_a_stage_that_cannot_be_removed_is_logged_and_the_rest_still_go(tmp_path, monkeypatch, caplog):
+    stuck, cleared = (_killed_mid_write(tmp_path, f"halo-adapter-0badc0de-{i}") for i in range(2))
+    remove_tree = adapter_directory.shutil.rmtree
+
+    def denied_on_stuck(path, *args, **kwargs):
+        if Path(path) == stuck:
+            raise PermissionError(13, "Permission denied", str(path))
+        remove_tree(path, *args, **kwargs)
+
+    monkeypatch.setattr(adapter_directory.shutil, "rmtree", denied_on_stuck)
+    with caplog.at_level(logging.WARNING, logger=adapter_directory.__name__):
+        remove_staged_adapter_directories(tmp_path, "halo-adapter-")
+
+    assert stuck.exists() and not cleared.exists()
+    assert [record.levelname for record in caplog.records] == ["WARNING"]
+    assert str(stuck) in caplog.text and "Permission denied" in caplog.text
 
 
 @pytest.mark.parametrize(

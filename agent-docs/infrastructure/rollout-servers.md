@@ -255,9 +255,11 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
 - **First sync.** The base goes out as above, adapters left out (`fold_adapters=False`), then the adapter loads. A
   restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines and removes every
   `halo-adapter-*` directory under `rollout_adapter_dir`, including those of versions no engine lists any more (a
-  server restarted since, or an eviction). The servers and the directory therefore belong to one run at a time: a
-  second live run sharing the servers has its versions unloaded, and one sharing the directory has its version
-  directories removed. Adapters under other names are someone else's and stay loaded.
+  server restarted since, or an eviction), and the `.halo-adapter-*` stage of a write a killed trainer cut short. The
+  servers and the directory therefore belong to one run at a time: a second live run sharing the servers has its
+  versions unloaded, and one sharing the directory has its version directories removed, a version it is writing
+  included. Adapters and directories under other names are someone else's and stay, `halo-adapters-*` among them: the
+  dash is part of the prefix.
 - **Each later sync.** The adapter is gathered whole on the forwarding rank, B is multiplied by `lora_alpha / r` (or
   `/ sqrt(r)` under rsLoRA) in fp32 and rounded to bf16 once, and the adapter loads under a new name with
   `lora_alpha = r`, so the engine's own scaling is exactly 1. No pause and no session: rounds in flight keep running.
@@ -266,7 +268,7 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   IPC handle, which works on one host only. A per-version directory needs the same mount in the trainer and every
   engine and cannot be used where containers forbid bind mounts. A path load of a 7 to 27 MB adapter took 0.03 to
   0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row. With `rollout_adapter_dir` set, rank 0 writes
-  each version there as a PEFT directory (staged under a temporary name, then renamed; readable by every user) and the servers load it by path:
+  each version there as a PEFT directory (staged beside it as `.<version>.<random>`, then renamed; readable by every user) and the servers load it by path:
   `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`: the preflight refuses a vLLM server that reports the variable off, whose load route would answer 404.
   A version's directory is removed when the version leaves the servers: at its retirement, when a load fails on any
   server, and at the first sync of a `train()` (**First sync**). A load a server refuses names
@@ -334,8 +336,7 @@ four runs the served adapter's log-probs sat 0.0001 to 0.0007 nats (mean) from t
 the trainer's base, and a merged push 0.0004 to 0.04 from the served adapter.
 
 A saved adapter takes the same form offline: `export_engine_adapter.py` writes the version directory a sync would
-publish for it, through `build_engine_adapter`, and refuses what the engine cannot serve through the same checks
-(`reject_unsyncable_config`, `engine_adapter_refusal`, `unservable_adapter_reasons`) ([Scripts](../reference/scripts-reference.md#post-training-scripts)).
+publish for it and refuses what the engine cannot serve ([Scripts](../reference/scripts-reference.md#post-training-scripts)).
 
 ### Served weights stay in checkpoint layout
 

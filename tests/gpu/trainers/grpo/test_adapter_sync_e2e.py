@@ -44,9 +44,10 @@ TEXT = (
 PROMPT_TOKENS = 12
 TRAIN_STEPS = 25
 LEARNING_RATE = 3e-3
-# What the server holds before the run: an adapter someone else serves, and a version a crashed trainer left.
-FOREIGN_ADAPTER = "someone-elses-adapter"
-PREDECESSOR_VERSION = f"{ADAPTER_NAME_PREFIX}-predecessor-0"
+# What the server holds before the run: an adapter someone else serves, under a name that shares the version prefix's
+# letters but not its dash, and a version a crashed trainer left.
+FOREIGN_ADAPTER = "halo-adapters-someone-else"
+PREDECESSOR_VERSION = f"{ADAPTER_NAME_PREFIX}predecessor-0"
 
 
 def _train(model, input_ids: torch.Tensor, steps: int) -> None:

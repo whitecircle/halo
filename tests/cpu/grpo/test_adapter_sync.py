@@ -5,7 +5,10 @@ holds it, and a restarted server gets the base and the adapter again. And every 
 as an adapter is refused with its reason."""
 
 import asyncio
+import re
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -166,8 +169,22 @@ def test_the_first_sync_pushes_the_base_unfolded_then_loads_the_adapter(sync_of,
 
     assert base_pushes == [False], "the base alone: folding the adapter in would count its delta twice"
     [name] = sync.versions.held() | {sync.versions.current}
-    assert name.startswith(f"{ADAPTER_NAME_PREFIX}-")
+    assert name.startswith(ADAPTER_NAME_PREFIX)
     assert _held_everywhere(fakes) == [[name], [name]]
+
+
+def test_a_version_is_named_halo_adapter_nonce_sequence(sync_of, base_pushes, client_pool):
+    """The form every release has published, so a server holding an older build's version still reads as this
+    toolkit's; the prefix the sweep and the preflight match runs up to the nonce, dash included."""
+    sync, trainer = sync_of
+    names = []
+    for _ in range(2):
+        sync.sync(trainer, client_pool)
+        names.append(sync.versions.current)
+
+    first = re.fullmatch(r"halo-adapter-([0-9a-f]{8})-0", names[0])
+    assert first is not None and names[1] == f"halo-adapter-{first[1]}-1", names
+    assert [name.removeprefix(ADAPTER_NAME_PREFIX) for name in names] == [f"{first[1]}-0", f"{first[1]}-1"]
 
 
 def test_the_wire_adapter_is_the_trainers_with_the_scaling_folded_into_b(sync_of, servers, base_pushes, client_pool):
@@ -716,13 +733,64 @@ def test_a_predecessors_version_no_server_lists_leaves_its_directory_at_the_firs
     without the sweep their directories would pile up run after run."""
     pool, fakes = servers
     model = _peft_model()
-    (tmp_path / f"{ADAPTER_NAME_PREFIX}-0badc0de-7").mkdir()
+    (tmp_path / "halo-adapter-0badc0de-7").mkdir()
     (tmp_path / "someone-elses-adapter").mkdir()
     sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
 
     sync.sync(SimpleNamespace(model=model), client_pool)
 
     assert _published(tmp_path) == sorted(["someone-elses-adapter", sync.versions.current])
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+@pytest.fixture(params=["sglang", "vllm"])
+def unsynced(request, tmp_path, base_pushes):
+    """A sync on either engine's fakes that publishes to ``tmp_path`` and has not run yet, and the pool it takes."""
+    if request.param == "vllm":
+        sync, trainer, fakes = request.getfixturevalue("vllm_unpushable")
+        return sync, trainer, fakes, None
+    pool, fakes = request.getfixturevalue("servers")
+    model = _peft_model()
+    sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
+    return sync, SimpleNamespace(model=model), fakes, request.getfixturevalue("client_pool")
+
+
+def test_the_first_sync_leaves_names_that_share_only_the_prefixs_letters(unsynced, tmp_path):
+    """The prefix ends in its dash: ``halo-adapters-*`` and ``halo-adapter_*`` are someone else's."""
+    sync, trainer, fakes, pool = unsynced
+    (tmp_path / "halo-adapters-archive").mkdir()
+    (tmp_path / "halo-adapters-archive" / "kept.txt").write_text("theirs")
+    (tmp_path / "halo-adapter_backup").mkdir()
+    for fake in fakes:
+        fake.adapters["halo-adapters-x"] = ({"r": 8}, {}) if isinstance(fake, FakeSGLangServer) else "/theirs"
+
+    sync.sync(trainer, pool)
+
+    assert _published(tmp_path) == sorted(["halo-adapter_backup", "halo-adapters-archive", sync.versions.current])
+    assert (tmp_path / "halo-adapters-archive" / "kept.txt").read_text() == "theirs"
+    assert _held_everywhere(fakes) == [sorted(["halo-adapters-x", sync.versions.current])] * 2
+
+
+def test_the_first_sync_removes_the_stage_a_killed_trainer_left_and_nothing_else(unsynced, tmp_path):
+    """A trainer killed mid-write runs no handler, so its ``.<version>.<random>`` stage stays; a regular file of that
+    form and a dot-directory of another name are not stages."""
+    sync, trainer, fakes, pool = unsynced
+    stage = Path(tempfile.mkdtemp(prefix=".halo-adapter-0badc0de-7.", dir=tmp_path))
+    (stage / "adapter_model.safetensors").write_bytes(b"cut short")
+    (tmp_path / ".halo-adapter-0badc0de-8.k3j2h1").write_text("a file")
+    (tmp_path / ".someone-elses-adapter.k3j2h1").mkdir()
+    (tmp_path / ".halo-adapters-archive.k3j2h1").mkdir()
+
+    sync.sync(trainer, pool)
+
+    assert _published(tmp_path) == sorted(
+        [
+            ".halo-adapter-0badc0de-8.k3j2h1",
+            ".halo-adapters-archive.k3j2h1",
+            ".someone-elses-adapter.k3j2h1",
+            sync.versions.current,
+        ]
+    )
     assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
 
 
@@ -1145,13 +1213,15 @@ def test_a_vllm_server_short_of_what_the_adapters_need_is_refused_under_its_own_
     [
         (["tenant-a", "tenant-b", "tenant-c"], True),
         (["tenant-a", "tenant-b"], False),
-        ([f"{ADAPTER_NAME_PREFIX}-0badc0de-{i}" for i in range(3)], False),
+        ([f"halo-adapter-0badc0de-{i}" for i in range(3)], False),
+        (["halo-adapters-a", "halo-adapters-b", "halo-adapters-c"], True),
     ],
-    ids=["foreign-eat-a-live-slot", "foreign-leave-room", "a-predecessors-versions"],
+    ids=["foreign-eat-a-live-slot", "foreign-leave-room", "a-predecessors-versions", "the-prefixs-letters-alone"],
 )
 def test_adapters_someone_else_loaded_count_against_the_sglang_loaded_limit(held, refused):
     """Five slots, three live versions: a load past the limit makes SGLang unload what it lists, theirs or a version a
-    round runs under. A predecessor's versions take no slot, since the first sync retires them."""
+    round runs under. A predecessor's versions take no slot, since the first sync retires them. The refusal ends with
+    its own remedy, not the launch-flag one, which this server's flags already satisfy."""
     fake = FakeSGLangServer()
     try:
         fake.lora = {**_LORA, "max_loaded_loras": 5}
@@ -1160,10 +1230,26 @@ def test_adapters_someone_else_loaded_count_against_the_sglang_loaded_limit(held
             _verify(fake)
             return
         with pytest.raises(
-            ValueError, match=r"holds 3 adapter\(s\) this toolkit did not load \(tenant-a, tenant-b"
+            ValueError, match=rf"holds 3 adapter\(s\) this toolkit did not load \({re.escape(', '.join(held))}\)"
         ) as e:
             _verify(fake)
-        assert "Unload them (/unload_lora_adapter)" in str(e.value)
+        assert str(e.value).endswith(
+            "Unload them (/unload_lora_adapter), raise --max-loaded-loras, or set rollout_adapter_sync: false."
+        )
+        assert "SGLANG_LORA_MAX_RANK" not in str(e.value)
+    finally:
+        fake.close()
+
+
+def test_a_server_already_short_of_the_live_versions_is_refused_for_its_limit_alone():
+    """Adapters someone else loaded ask nothing of it that raising the limit does not."""
+    fake = FakeSGLangServer()
+    try:
+        fake.lora = {**_LORA, "max_loaded_loras": 2}
+        fake.adapters.update(dict.fromkeys(["tenant-a", "tenant-b", "tenant-c"]))
+        with pytest.raises(ValueError, match=r"--max-loaded-loras is 2, below the 3 versions") as e:
+            _verify(fake)
+        assert "this toolkit did not load" not in str(e.value)
     finally:
         fake.close()
 

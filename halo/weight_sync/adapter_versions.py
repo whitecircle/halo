@@ -6,8 +6,9 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 # Every version a trainer loads is named under it, which is how a restarted trainer finds the versions its predecessor
-# left on an engine and the preflight tells them from adapters someone else loaded.
-ADAPTER_NAME_PREFIX = "halo-adapter"
+# left on an engine and the preflight tells them from adapters someone else loaded. The dash is part of it, so a name
+# that only shares the letters (``halo-adapters-archive``) stays someone else's.
+ADAPTER_NAME_PREFIX = "halo-adapter-"
 
 
 class AdapterVersions:

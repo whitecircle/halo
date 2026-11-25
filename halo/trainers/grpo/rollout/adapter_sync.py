@@ -47,7 +47,11 @@ from halo.runtime.consensus import DeferredRankFailure, rank0_verdict
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements
 from halo.trainers.grpo.rollout.weight_push import serves_family_as_adapter, sync_trainer_weights
-from halo.weight_sync.adapter_directory import publish_adapter_directory, remove_adapter_directories
+from halo.weight_sync.adapter_directory import (
+    publish_adapter_directory,
+    remove_adapter_directories,
+    remove_staged_adapter_directories,
+)
 from halo.weight_sync.adapter_payload import (
     ADAPTER_WIRE_DTYPE,
     build_adapter_config,
@@ -437,7 +441,7 @@ class AdapterSync:
         if plan.push_base or not self._predecessors_retired:
             self._retire_predecessor_versions()
             self._predecessors_retired = True
-        name = f"{ADAPTER_NAME_PREFIX}-{self._nonce}-{self._sequence}"
+        name = f"{ADAPTER_NAME_PREFIX}{self._nonce}-{self._sequence}"
         self._sequence += 1
         self._load_adapter(model, name)
         self.versions.publish(name)
@@ -534,15 +538,19 @@ class AdapterSync:
     def _retire_predecessor_versions(self) -> None:
         """Retires the versions an earlier trainer, or an earlier ``train()`` of this one, left on the engines, which
         nothing here leases, and removes their directories, with those of versions no engine lists any more (a server
-        restarted since, or an eviction past its loaded limit), which would otherwise pile up run after run."""
+        restarted since, or an eviction past its loaded limit) and the stages of writes a killed trainer cut short,
+        which would otherwise pile up run after run."""
 
         def retire() -> None:
             servers = self._bound_servers()
             left = {name for names in servers.loaded() for name in names if name.startswith(ADAPTER_NAME_PREFIX)}
-            if self.adapter_dir is not None and os.path.isdir(self.adapter_dir):
+            on_disk = self.adapter_dir is not None and os.path.isdir(self.adapter_dir)
+            if on_disk:
                 left.update(name for name in os.listdir(self.adapter_dir) if name.startswith(ADAPTER_NAME_PREFIX))
             servers.unload(sorted(left))
             self._remove_directories(sorted(left))
+            if on_disk:
+                remove_staged_adapter_directories(self.adapter_dir, ADAPTER_NAME_PREFIX)
 
         rank0_verdict(retire, "Retiring a predecessor's adapter versions")
 

@@ -220,17 +220,11 @@ def _adapter_refusals(
             f"without a trace."
         )
     loaded = facts.get("max_loaded_loras")
-    if loaded is not None and int(loaded) < needs.live_versions:
+    short = loaded is not None and int(loaded) < needs.live_versions
+    if short:
         refusals.append(
             f"its {client_cls.ADAPTER_LOADED_LIMIT_FLAG} is {loaded}, below the {needs.live_versions} versions the run "
             f"keeps live, so a load would evict one a round still runs under."
-        )
-    elif loaded is not None and foreign and int(loaded) - len(foreign) < needs.live_versions:
-        refusals.append(
-            f"it holds {len(foreign)} adapter(s) this toolkit did not load ({', '.join(sorted(foreign))}), which leave "
-            f"fewer than the {needs.live_versions} versions the run keeps live under its "
-            f"{client_cls.ADAPTER_LOADED_LIMIT_FLAG} {loaded}, so a load would evict one of them or a version a round "
-            f"still runs under. Unload them ({client_cls.ADAPTER_UNLOAD_ROUTE}), or raise the limit."
         )
     per_batch = facts.get("max_loras_per_batch")
     if per_batch is not None and int(per_batch) < 2:
@@ -244,6 +238,14 @@ def _adapter_refusals(
         refusals.append("it runs data-parallel replicas, which cannot load an adapter at runtime.")
     remedy = f" {client_cls.ADAPTER_FLAGS_REMEDY}, or set rollout_adapter_sync: false."
     refusals = [refusal + remedy for refusal in refusals]
+    if loaded is not None and not short and foreign and int(loaded) - len(foreign) < needs.live_versions:
+        refusals.append(
+            f"it holds {len(foreign)} adapter(s) this toolkit did not load ({', '.join(sorted(foreign))}), which leave "
+            f"fewer than the {needs.live_versions} versions the run keeps live under its "
+            f"{client_cls.ADAPTER_LOADED_LIMIT_FLAG} {loaded}, so a load would evict one of them or a version a round "
+            f"still runs under. Unload them ({client_cls.ADAPTER_UNLOAD_ROUTE}), raise "
+            f"{client_cls.ADAPTER_LOADED_LIMIT_FLAG}, or set rollout_adapter_sync: false."
+        )
     if facts.get(RUNTIME_ADAPTER_ROUTES_FACT) is False:
         refusals.append(
             "it runs without VLLM_ALLOW_RUNTIME_LORA_UPDATING=True, so it registered no adapter load or unload route "

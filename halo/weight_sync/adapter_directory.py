@@ -48,3 +48,22 @@ def remove_adapter_directories(root: str | Path, names: Iterable[str]) -> None:
             continue
         except OSError as error:
             logger.warning(f"Could not remove the adapter version at {Path(root) / name}: {error}")
+
+
+def remove_staged_adapter_directories(root: str | Path, prefix: str) -> None:
+    """Removes the staging directories under ``root`` of versions named under ``prefix`` (``.<name>.<random>``), which
+    a writer killed before its rename leaves behind. Only a directory itself (not a symlink to one) is removed, and one
+    that cannot be removed is logged and left."""
+    with os.scandir(root) as entries:
+        staged = [
+            entry.path
+            for entry in entries
+            if entry.name.startswith(f".{prefix}") and entry.is_dir(follow_symlinks=False)
+        ]
+    for path in staged:
+        try:
+            shutil.rmtree(path)
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            logger.warning(f"Could not remove the adapter staging directory at {path}: {error}")
