@@ -324,7 +324,8 @@ class AsyncRolloutConfig(
         metadata={
             "help": "Under rollout_adapter_sync: an absolute directory the trainer and every rollout server mount at "
             "the same path. Each adapter version is published there and loaded by path instead of sent in a request "
-            "body. vLLM requires it."
+            "body. It belongs to one run at a time, since a run's first sync removes every halo-adapter-* directory "
+            "there. vLLM requires it."
         },
     )
     sync_weights_every_n_steps: int = field(

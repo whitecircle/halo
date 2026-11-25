@@ -188,6 +188,9 @@ class WeightSyncClientBase(UpdateStream, ABC):
     # The engine's routes for a load from a published directory and for an unload; ``None`` where it serves no adapter.
     ADAPTER_DIRECTORY_LOAD_ROUTE: str | None = None
     ADAPTER_UNLOAD_ROUTE: str | None = None
+    # Whether a load past the loaded limit unloads an adapter the engine lists, which one loaded from tensors does not
+    # survive; ``False`` where the limit sizes a cache the engine refills from each adapter's directory.
+    ADAPTER_LIMIT_UNLOADS_LISTED = False
     # The engine reports a launch id on /server_info, which tells a restart from a live group.
     REPORTS_INSTANCE_ID = False
     # No launch id, so a restart shows only as an engine that holds no group: an empty declare tells.

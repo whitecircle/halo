@@ -22,6 +22,7 @@ from halo.environments.rollouts.engine_wire import build_payload, capture_genera
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
+from halo.weight_sync.adapter_versions import ADAPTER_NAME_PREFIX
 from halo.weight_sync.clients.base import RUNTIME_ADAPTER_ROUTES_FACT, ServerFlags, WeightSyncClientBase
 from halo.weight_sync.clients.server_calls import map_concurrently
 from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
@@ -201,10 +202,11 @@ def _server_flag_refusals(
 
 
 def _adapter_refusals(
-    client_cls: type[WeightSyncClientBase], flags: ServerFlags, needs: AdapterRequirements
+    client_cls: type[WeightSyncClientBase], flags: ServerFlags, needs: AdapterRequirements, foreign: list[str]
 ) -> list[str]:
     """Each launch fact that would make a server serve the adapter wrong or not at all, under the engine's own flag
-    names; an unreported one reads as unread."""
+    names; an unreported one reads as unread. ``foreign`` are the adapters it lists under names outside
+    ``ADAPTER_NAME_PREFIX``, which the first sync leaves loaded and a load past the limit would unload."""
     facts = flags.extras
     refusals = []
     if not facts.get("enable_lora"):
@@ -222,6 +224,13 @@ def _adapter_refusals(
         refusals.append(
             f"its {client_cls.ADAPTER_LOADED_LIMIT_FLAG} is {loaded}, below the {needs.live_versions} versions the run "
             f"keeps live, so a load would evict one a round still runs under."
+        )
+    elif loaded is not None and foreign and int(loaded) - len(foreign) < needs.live_versions:
+        refusals.append(
+            f"it holds {len(foreign)} adapter(s) this toolkit did not load ({', '.join(sorted(foreign))}), which leave "
+            f"fewer than the {needs.live_versions} versions the run keeps live under its "
+            f"{client_cls.ADAPTER_LOADED_LIMIT_FLAG} {loaded}, so a load would evict one of them or a version a round "
+            f"still runs under. Unload them ({client_cls.ADAPTER_UNLOAD_ROUTE}), or raise the limit."
         )
     per_batch = facts.get("max_loras_per_batch")
     if per_batch is not None and int(per_batch) < 2:
@@ -248,10 +257,17 @@ def _verify_adapter_servers_on_rank0(
     client_cls: type[WeightSyncClientBase], urls: list[str], needs: AdapterRequirements
 ) -> None:
     readings = _probe_servers(client_cls, urls, client_cls.read_server_flags, None, "read the launch flags of")
-    for url, flags in zip(urls, readings, strict=True):
+    # Elsewhere the limit sizes a cache the engine refills, so the adapters it lists take no slot.
+    listed = (
+        _probe_servers(client_cls, urls, client_cls.loaded_adapters, (), "read the adapters of")
+        if client_cls.ADAPTER_LIMIT_UNLOADS_LISTED
+        else [()] * len(urls)
+    )
+    for url, flags, names in zip(urls, readings, listed, strict=True):
         if flags is None:
             continue
-        if refusals := _adapter_refusals(client_cls, flags, needs):
+        foreign = [name for name in names if not name.startswith(ADAPTER_NAME_PREFIX)]
+        if refusals := _adapter_refusals(client_cls, flags, needs, foreign):
             raise ValueError(f"Rollout server {url} cannot serve the policy as an adapter: " + " ".join(refusals))
         logger.info(f"Rollout server {url} serves adapters: {dict(flags.extras)}")
 

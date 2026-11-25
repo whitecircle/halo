@@ -29,7 +29,6 @@ from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
-    ADAPTER_NAME_PREFIX,
     AdapterSync,
     build_adapter_requirements,
     reject_unadaptable_config,
@@ -40,7 +39,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements, verify_adapter_servers
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
-from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.adapter_versions import ADAPTER_NAME_PREFIX, AdapterVersions
 from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
@@ -709,6 +708,23 @@ def test_a_version_directory_leaves_with_its_version(pushable, servers, base_pus
         rebound.close()
 
 
+def test_a_predecessors_version_no_server_lists_leaves_its_directory_at_the_first_sync(
+    servers, base_pushes, client_pool, tmp_path
+):
+    """A trainer that died before retiring its versions, on servers that restarted since: no server lists them, and
+    without the sweep their directories would pile up run after run."""
+    pool, fakes = servers
+    model = _peft_model()
+    (tmp_path / f"{ADAPTER_NAME_PREFIX}-0badc0de-7").mkdir()
+    (tmp_path / "someone-elses-adapter").mkdir()
+    sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
+
+    sync.sync(SimpleNamespace(model=model), client_pool)
+
+    assert _published(tmp_path) == sorted(["someone-elses-adapter", sync.versions.current])
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
 def test_a_load_a_server_refuses_leaves_no_directory(servers, base_pushes, client_pool, tmp_path):
     pool, [_, refusing] = servers
     refusing.lora["max_lora_rank"] = 4
@@ -1111,6 +1127,46 @@ def test_a_vllm_server_short_of_what_the_adapters_need_is_refused_under_its_own_
         with pytest.raises(ValueError, match=reason) as refusal:
             verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
         assert "VLLM_EXTRA_ARGS" in str(refusal.value) and "SGLANG" not in str(refusal.value)
+    finally:
+        fake.close()
+
+
+@pytest.mark.parametrize(
+    ("held", "refused"),
+    [
+        (["tenant-a", "tenant-b", "tenant-c"], True),
+        (["tenant-a", "tenant-b"], False),
+        ([f"{ADAPTER_NAME_PREFIX}-0badc0de-{i}" for i in range(3)], False),
+    ],
+    ids=["foreign-eat-a-live-slot", "foreign-leave-room", "a-predecessors-versions"],
+)
+def test_adapters_someone_else_loaded_count_against_the_sglang_loaded_limit(held, refused):
+    """Five slots, three live versions: a load past the limit makes SGLang unload what it lists, theirs or a version a
+    round runs under. A predecessor's versions take no slot, since the first sync retires them."""
+    fake = FakeSGLangServer()
+    try:
+        fake.lora = {**_LORA, "max_loaded_loras": 5}
+        fake.adapters.update(dict.fromkeys(held))
+        if not refused:
+            _verify(fake)
+            return
+        with pytest.raises(
+            ValueError, match=r"holds 3 adapter\(s\) this toolkit did not load \(tenant-a, tenant-b"
+        ) as e:
+            _verify(fake)
+        assert "Unload them (/unload_lora_adapter)" in str(e.value)
+    finally:
+        fake.close()
+
+
+def test_adapters_someone_else_registered_on_vllm_take_no_slot():
+    """vLLM lists every registered adapter, and ``--max-cpu-loras`` sizes a cache it refills from an adapter's directory:
+    theirs cost a reload, never a version."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora = {**_VLLM_LORA, "max_cpu_loras": 5}
+        fake.adapters.update(dict.fromkeys(["tenant-a", "tenant-b", "tenant-c"]))
+        verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
     finally:
         fake.close()
 

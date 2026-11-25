@@ -2,26 +2,28 @@
 """``rollout_adapter_sync`` against a live SGLang server launched with the adapter flags (``SGLANG_LORA_MAX_RANK=16``,
 the default module list, Qwen3-0.6B): the base goes out once, a few training steps later the adapter alone is loaded,
 and the engine's log-probs for the served adapter match the trainer's and a merged push's, while a request that names no
-adapter does not. The trainer needs its own GPU.
+adapter does not. The server starts used: an adapter someone else loaded stays, a version a crashed trainer left is
+retired, and a retired version is not served again. The trainer needs its own GPU.
 """
 
 from types import SimpleNamespace
 
+import requests
 import torch
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, get_peft_model, get_peft_model_state_dict
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
-    ADAPTER_NAME_PREFIX,
     build_adapter_requirements,
     reject_unadaptable_model,
     resolve_adapter_serving,
 )
 from halo.trainers.grpo.rollout.engine_preflight import verify_adapter_servers
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
+from halo.weight_sync.adapter_payload import build_adapter_config, serialize_adapter_tensors, wire_adapter_tensors
 from halo.weight_sync.adapter_servers import AdapterServers
-from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.adapter_versions import ADAPTER_NAME_PREFIX, AdapterVersions
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.adapter_sync import build_adapter_sync
 from tests.common.harness import gpu_test_main
@@ -42,6 +44,9 @@ TEXT = (
 PROMPT_TOKENS = 12
 TRAIN_STEPS = 25
 LEARNING_RATE = 3e-3
+# What the server holds before the run: an adapter someone else serves, and a version a crashed trainer left.
+FOREIGN_ADAPTER = "someone-elses-adapter"
+PREDECESSOR_VERSION = f"{ADAPTER_NAME_PREFIX}-predecessor-0"
 
 
 def _train(model, input_ids: torch.Tensor, steps: int) -> None:
@@ -69,6 +74,18 @@ def _gap(a: torch.Tensor, b: torch.Tensor) -> float:
     return float((a - b).abs().mean())
 
 
+def _own(names: list[str]) -> list[str]:
+    return sorted(name for name in names if name.startswith(ADAPTER_NAME_PREFIX))
+
+
+def _is_served(client: SGLangWeightSyncClient, ids: list[int], adapter: str) -> bool:
+    try:
+        _engine_logprobs(client, ids, adapter)
+    except requests.exceptions.HTTPError:
+        return False
+    return True
+
+
 def run(ctx) -> dict:
     ids = AutoTokenizer.from_pretrained(QWEN3_0_6B)(TEXT)["input_ids"]
     input_ids = torch.tensor([ids], device=ctx.device)
@@ -87,6 +104,12 @@ def run(ctx) -> dict:
         _get_tp_rank=lambda: 0,
     )
     checks: dict[str, bool] = {}
+    servers = AdapterServers([SGLANG_SERVER_URL], client_cls=SGLangWeightSyncClient, connection_timeout=120)
+    client = SGLangWeightSyncClient(base_url=SGLANG_SERVER_URL, connection_timeout=120)
+    servers.unload([FOREIGN_ADAPTER, PREDECESSOR_VERSION])
+    untrained = serialize_adapter_tensors(wire_adapter_tensors(get_peft_model_state_dict(peft_model), serving.scaling))
+    for name in (FOREIGN_ADAPTER, PREDECESSOR_VERSION):
+        client.load_adapter(name, build_adapter_config(rank=serving.rank, target_modules=serving.modules), untrained)
 
     verify_adapter_servers(
         [SGLANG_SERVER_URL],
@@ -101,8 +124,6 @@ def run(ctx) -> dict:
         ctx.device,
         "per_server",
     )
-    servers = AdapterServers([SGLANG_SERVER_URL], client_cls=SGLangWeightSyncClient, connection_timeout=120)
-    client = SGLangWeightSyncClient(base_url=SGLANG_SERVER_URL, connection_timeout=120)
     versions = AdapterVersions()
     sync = build_adapter_sync(serving, versions)
     sync.servers = servers
@@ -126,6 +147,7 @@ def run(ctx) -> dict:
             _gap(trainer_adapted, trainer_base) > MIN_SHIFT_OVER_FLOOR * ENGINE_TRAINER_MEAN_ABS_NATS
         )
         checks["the_base_went_out_once_without_the_adapter"] = base_pushes == [{"fold_adapters": False}]
+        checks["the_predecessors_version_was_retired"] = _own(client.loaded_adapters()) == [first]
         checks["engine_adapter_matches_the_trainer"] = (
             _gap(engine_adapted, trainer_adapted) <= ENGINE_TRAINER_MEAN_ABS_NATS
         )
@@ -143,15 +165,17 @@ def run(ctx) -> dict:
         checks["the_second_adapter_matches_the_trainer"] = (
             _gap(engine_adapted, trainer_adapted) <= ENGINE_TRAINER_MEAN_ABS_NATS
         )
-        checks["the_old_version_was_retired"] = client.loaded_adapters() == [versions.current]
+        checks["the_old_version_was_retired"] = _own(client.loaded_adapters()) == [versions.current]
+        checks["a_retired_version_is_not_served"] = not _is_served(client, ids, first)
 
         with versions.lease() as running:
             sync.sync(trainer, pool)
-            checks["a_version_in_flight_stays_loaded"] = sorted(client.loaded_adapters()) == sorted(
+            checks["a_version_in_flight_stays_loaded"] = _own(client.loaded_adapters()) == sorted(
                 [running, versions.current]
             )
         sync.sync(trainer, pool)
-        checks["a_released_version_is_retired"] = client.loaded_adapters() == [versions.current]
+        checks["a_released_version_is_retired"] = _own(client.loaded_adapters()) == [versions.current]
+        checks["the_foreign_adapter_is_left_loaded"] = FOREIGN_ADAPTER in client.loaded_adapters()
 
         trainer_adapted = _trainer_logprobs(peft_model, ids)
         engine_adapted = _engine_logprobs(client, ids, versions.current)
@@ -166,7 +190,7 @@ def run(ctx) -> dict:
         )
     finally:
         adapter_sync.sync_trainer_weights = real_push
-        servers.unload([name for names in servers.loaded() for name in names if name.startswith(ADAPTER_NAME_PREFIX)])
+        servers.unload([FOREIGN_ADAPTER, *(name for names in servers.loaded() for name in _own(names))])
         sync_trainer_weights(trainer, pool, fold_adapters=False)
         servers.close()
         client.close_http_session()

@@ -252,7 +252,11 @@ and every server mount at the same path. vLLM loads it only from `rollout_adapte
 Inkling 2, the one family validated on it (`adapter_sync_backends` on the family spec).
 
 - **First sync.** The base goes out as above, adapters left out (`fold_adapters=False`), then the adapter loads. A
-  restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines.
+  restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines and removes every
+  `halo-adapter-*` directory under `rollout_adapter_dir`, including those of versions no engine lists any more (a
+  server restarted since, or an eviction). The servers and the directory therefore belong to one run at a time: a
+  second live run sharing the servers has its versions unloaded, and one sharing the directory has its version
+  directories removed. Adapters under other names are someone else's and stay loaded.
 - **Each later sync.** The adapter is gathered whole on the forwarding rank, B is multiplied by `lora_alpha / r` (or
   `/ sqrt(r)` under rsLoRA) in fp32 and rounded to bf16 once, and the adapter loads under a new name with
   `lora_alpha = r`, so the engine's own scaling is exactly 1. No pause and no session: rounds in flight keep running.
@@ -264,7 +268,7 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   each version there as a PEFT directory (staged under a temporary name, then renamed) and the servers load it by path:
   `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`: the preflight refuses a vLLM server that reports the variable off, whose load route would answer 404.
   A version's directory is removed when the version leaves the servers: at its retirement, when a load fails on any
-  server, and when the first sync of a `train()` retires the versions found loaded. A load a server refuses names
+  server, and at the first sync of a `train()` (**First sync**). A load a server refuses names
   `rollout_adapter_dir` and the mount beside the engine's answer.
 - **Selection.** Every episode leases the newest version for its whole length and its requests send
   `model: <model_name>:<version>` on SGLang and `model: <version>` on vLLM, so a multi-turn episode and a prefetched
@@ -277,6 +281,13 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   fails the sync.
 - **Retirement.** After each load the ranks join the versions their episodes still hold, and rank 0 unloads the
   others. An episode cancelled at its deadline can outlive its lease; the engine's unload then waits for its request.
+  An unload frees the adapter's slot and its host copy, and GPU memory stays flat, since the adapter pool is allocated
+  at launch (86,103 MiB through ten load and unload cycles of Qwen3-0.6B on SGLang 0.5.22). SGLang loads an
+  unregistered name back from its recorded path when a request names it, which is how an adapter evicted past
+  `--max-loaded-loras` returns; upstream 0.5.22 does so for an explicitly unloaded adapter too and serves it again.
+  The toolkit's image forgets the name on an explicit unload (`lora_unload_forgets_name` on `/server_info`), so such
+  a request answers 400 "never been loaded". On either image a retired version has no directory to load from, and a
+  tensors-route version no path.
 - **Restart.** Every step that is not a sync probes each server's `/v1/models` (a refused connection is retried for
   about a second and logged once per outage). A server that lacks the newest version has restarted, and an episode is
   routed only to servers that hold the version it leased: one that lacks it is skipped, and one that answers "not
@@ -297,6 +308,12 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   limit is too small for the run (`prefetch_depth` + 2 versions are live at once), one with speculative decoding
   (its draft runs without the adapter), a quantized base or data-parallel replicas. A module outside
   `--lora-target-modules` is dropped by the engine without a trace, hence the module check (SGLang only).
+  SGLang answers a load past `--max-loaded-loras` with success and unloads its least recently used adapter, and one
+  loaded by tensors cannot come back: its requests answer 400 "Failed to implicitly load", which no route reads as a
+  missing adapter. The preflight therefore also counts against the limit every adapter an SGLang server lists under a
+  name outside `halo-adapter-*`; one loaded after the preflight is not counted. vLLM lists every registered adapter
+  and `--max-cpu-loras` sizes a cache it refills from an adapter's directory, so adapters registered there are not
+  counted.
 - **Cost.** On Qwen3.5-35B-A3B, SGLang 0.5.22 decoded 2.6% slower with `--enable-lora` and no adapter against a warm
   base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar, so it serves an adapter only where
   no merged push exists (Inkling 2).
@@ -310,8 +327,10 @@ alone, by `halo:vllm-0.1.dev25249`, at the attention adapters' rank and scaling:
 `modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
 (`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is
-already refused by every weight sync. Run it with the GPU rows in
-`tests/gpu/trainers/grpo/test_adapter_sync_e2e.py`, which run the SGLang path and decide whether it stays.
+already refused by every weight sync. `tests/gpu/trainers/grpo/test_adapter_sync_e2e.py` runs the SGLang path on
+the pinned 0.5.22, Qwen3-0.6B, on a server that already holds someone else's adapter and a dead trainer's version: over
+four runs the served adapter's log-probs sat 0.0001 to 0.0007 nats (mean) from the trainer's, the served base 0.03 from
+the trainer's base, and a merged push 0.0004 to 0.04 from the served adapter.
 
 ### Served weights stay in checkpoint layout
 
@@ -845,6 +864,8 @@ upstream leaves the offset behind, so each later request in the batch reads anot
 log-probs and the `isr_engine_reference` re-score is silently wrong. The build asserts the weight-sync
 routes, request schemas, rendezvous convention and expert loader layouts the client relies on
 (`docker/sglang/verify_image.py`) and drives the patched loop on a retracted request.
+An explicit `/unload_lora_adapter` also forgets the adapter's name, which upstream keeps and serves again from its path
+([Adapter sync](#adapter-sync)).
 
 The server keeps SGLang's own transformers (5.19.0) and torch. Serving-only use can run upstream
 (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.22`); weight sync needs this image, which names itself on `/server_info`
@@ -869,7 +890,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | Keep `triton` for MoE RL and R3 |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any value adds `--enable-return-routed-experts` |
 | `SGLANG_LORA_MAX_RANK` | *(unset)* | At least the run's `lora_r`; adds `--enable-lora --max-lora-rank` and the three rows below for `rollout_adapter_sync` ([Adapter sync](#adapter-sync)) |
-| `SGLANG_LORA_TARGET_MODULES` / `SGLANG_MAX_LOADED_LORAS` / `SGLANG_MAX_LORAS_PER_BATCH` | `q_proj k_proj v_proj o_proj` / `8` / `3` | `--lora-target-modules` (every adapted projection), `--max-loaded-loras` (`prefetch_depth` + 2 or more), `--max-loras-per-batch` (2 or more) |
+| `SGLANG_LORA_TARGET_MODULES` / `SGLANG_MAX_LOADED_LORAS` / `SGLANG_MAX_LORAS_PER_BATCH` | `q_proj k_proj v_proj o_proj` / `8` / `3` | `--lora-target-modules` (every adapted projection), `--max-loaded-loras` (`prefetch_depth` + 2 or more, plus the adapters loaded outside the run), `--max-loras-per-batch` (2 or more) |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) |
 | `SGLANG_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `SGLANG_ATTENTION_BACKEND` | *(unset)* | `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the default backend (`Unsupported head dimensions`) |

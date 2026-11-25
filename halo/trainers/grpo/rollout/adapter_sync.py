@@ -56,15 +56,11 @@ from halo.weight_sync.adapter_payload import (
 )
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
-from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.adapter_versions import ADAPTER_NAME_PREFIX, AdapterVersions
 from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
-
-# Every adapter version this trainer loads is named under it, which is how a restarted trainer finds the versions
-# its predecessor left on an engine.
-ADAPTER_NAME_PREFIX = "halo-adapter"
 
 
 class AdapterServing(NamedTuple):
@@ -485,15 +481,16 @@ class AdapterSync:
 
     def _retire_predecessor_versions(self) -> None:
         """Retires the versions an earlier trainer, or an earlier ``train()`` of this one, left on the engines, which
-        nothing here leases, and removes their directories."""
+        nothing here leases, and removes their directories, with those of versions no engine lists any more (a server
+        restarted since, or an eviction past its loaded limit), which would otherwise pile up run after run."""
 
         def retire() -> None:
             servers = self._bound_servers()
-            left = sorted(
-                {name for names in servers.loaded() for name in names if name.startswith(ADAPTER_NAME_PREFIX)}
-            )
-            servers.unload(left)
-            self._remove_directories(left)
+            left = {name for names in servers.loaded() for name in names if name.startswith(ADAPTER_NAME_PREFIX)}
+            if self.adapter_dir is not None and os.path.isdir(self.adapter_dir):
+                left.update(name for name in os.listdir(self.adapter_dir) if name.startswith(ADAPTER_NAME_PREFIX))
+            servers.unload(sorted(left))
+            self._remove_directories(sorted(left))
 
         rank0_verdict(retire, "Retiring a predecessor's adapter versions")
 

@@ -5,6 +5,10 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 
+# Every version a trainer loads is named under it, which is how a restarted trainer finds the versions its predecessor
+# left on an engine and the preflight tells them from adapters someone else loaded.
+ADAPTER_NAME_PREFIX = "halo-adapter"
+
 
 class AdapterVersions:
     """A request leases the newest version for its whole episode, so a version is retired only once nothing holds it.

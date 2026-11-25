@@ -114,6 +114,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     ADAPTER_DIRECTORY_LOAD_ROUTE = "/load_lora_adapter"
     ADAPTER_UNLOAD_ROUTE = "/unload_lora_adapter"
+    ADAPTER_LIMIT_UNLOADS_LISTED = True
     PAUSE_ENDPOINT = "/pause_generation"
     # retract hands in-flight requests back to the queue with their tokens and rebuilds their KV under the new weights,
     # and the post-update flush skips that queue while paused. abort would drop them: re-issued from scratch, the
