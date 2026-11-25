@@ -8,6 +8,8 @@
 
   body { width: 1600px; }
 
+  h1 { font-variant-numeric: lining-nums; }
+
   svg.chart {
     display: block;
     width: 100%;
@@ -21,19 +23,19 @@
 
   svg .axis { font-size: 23px; fill: var(--body); }
 
-  svg .why { font-size: 22px; fill: var(--secondary); }
+  svg .why { font-size: 21px; fill: var(--secondary); }
 
-  svg .mark { font-size: 23px; fill: var(--body); }
+  svg .mark { font-size: 22px; fill: var(--body); }
 
-  svg .point { font-size: 22px; fill: var(--text); }
+  svg .point { font-size: 21px; fill: var(--text); }
 
-  svg .ridge { font-size: 25px; fill: var(--text); }
+  svg .ridge { font-size: 23px; fill: var(--text); }
 
-  /* The key names the two regions in a column left of the plot. */
+  /* The key names the two regions and the marks in a column left of the plot. */
   .figure {
     display: grid;
     grid-template-columns: 330px minmax(0, 1fr);
-    column-gap: 44px;
+    column-gap: 40px;
     align-items: start;
   }
 
@@ -47,10 +49,12 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    margin-bottom: var(--heading-gap);
     font-family: var(--serif);
     font-weight: 400;
     font-size: 31px;
     letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
     color: var(--heading);
   }
 
@@ -61,8 +65,6 @@
     background: var(--hue);
   }
 
-  .key h3 { margin-bottom: var(--heading-gap); }
-
   .key p {
     font-size: 21px;
     line-height: 1.4;
@@ -70,6 +72,21 @@
   }
 
   .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 22px 1fr;
+    column-gap: 12px;
+    color: var(--body);
+  }
+
+  .key p.mark svg {
+    width: 22px;
+    height: 22px;
+    margin-top: 4px;
+    overflow: visible;
+  }
 </style>
 </head>
 <body>
@@ -82,67 +99,166 @@
     <div class="key" id="key"></div>
     <svg class="chart" id="chart"></svg>
   </div>
+
+  <footer>
+    <p>
+      <span class="s">The roof is the sustained rate of an 8192³ bf16 GEMM, held to it by the board’s power limit.</span>
+      <span class="s">The memory line is the rate of a copy, read plus write.</span>
+      <span class="s" id="above"></span>
+      <span class="s">A percentage is the rate on the device as a share of the ceiling above the point.</span>
+    </p>
+  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
-  const PEAK = 1818; // TFLOP/s, best dense bf16 8192³ GEMM on an unloaded B300
-  const BW = 6.6; // TB/s, so TFLOP/s per FLOP/byte
-  const RIDGE = PEAK / BW;
-  // [M, AI in FLOP/byte, TFLOP/s]: the gpt-oss expert sweep, K = N = 2880.
-  const MEASURED = [
-    [128, 118, 180],
-    [512, 378, 548],
-    [8192, 1225, 1375],
+  // Measured on one B300 in bf16, by tests/gpu/profiling/benchmark_roofline.py.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --output roofline.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections peaks --peak_dims 8192 16384 --peak_dtypes bf16
+  //     --repeat_seconds 0.5 --repeats 10 --output peaks-sustained.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections peaks --peak_dims 4096 8192 12288 16384 24576
+  //     32768 --peak_dtypes bf16 fp16 tf32 --cooldown 1.0 --repeat_seconds 0.01 --repeats 10 --output
+  //     peaks-burst.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sustain elementwise --seconds 20 --output
+  //     power-p1-elementwise.json
+  // roofline.json, sections.sweep[] with k = n = 2880 (the weight read from HBM on every call):
+  // [m, eager.tflops_median, graph.tflops_median]. Eager is back-to-back torch.mm calls, graph the same calls
+  // replayed from one CUDA graph, so the time on the device alone.
+  const SWEEP_2880 = [
+    [16, 27.75, 32.39], [19, 32.44, 44.8], [23, 39.17, 53.81], [27, 45.97, 80.44], [32, 55.39, 95.49],
+    [38, 66.41, 114.9], [45, 77.87, 135.8], [54, 100.6, 158], [64, 118.5, 184.8], [76, 140, 224.3],
+    [91, 169.9, 267.5], [108, 199.5, 301.2], [128, 236.7, 353.8], [152, 281.7, 429.4], [181, 337.1, 502.7],
+    [215, 396.6, 578.7], [256, 476.9, 623.6], [304, 564.8, 706.7], [362, 670.2, 790.2], [431, 799.7, 874.8],
+    [512, 805.3, 808.3], [609, 855.3, 880.2], [724, 922.6, 977.9], [861, 999.3, 1022], [1024, 959.1, 997.2],
+    [1218, 1019, 1069], [1448, 1046, 1065], [1722, 1025, 1049], [2048, 1058, 1065], [2435, 1160, 1184],
+    [2896, 1156, 1174], [3444, 1166, 1202], [4096, 1121, 1146], [4871, 1211, 1223], [5793, 1209, 1227],
+    [6889, 1172, 1166], [8192, 1231, 1227], [9742, 1170, 1182], [11585, 1271, 1271], [13777, 1315, 1316],
+    [16384, 1207, 1199], [19484, 1254, 1246], [23170, 1323, 1327], [27554, 1327, 1328], [32768, 1339, 1332],
   ];
-  /** Decades of throughput the memory ceiling climbs to the ridge, so its slope reads. */
-  const SLOPE_DECADES = 2;
+  // The same file and section with k = n = 8192: [m, graph.tflops_median].
+  const SWEEP_8192 = [
+    [16, 102.1], [19, 120.8], [23, 146], [27, 170.9], [32, 202.1], [38, 215.4], [45, 253.8],
+    [54, 334.5], [64, 393.9], [76, 415.7], [91, 469.2], [108, 547.9], [128, 639.7], [152, 723.8],
+    [181, 811.9], [215, 917.4], [256, 993.3], [304, 1025], [362, 1081], [431, 1145], [512, 1198],
+    [609, 1107], [724, 1137], [861, 1202], [1024, 1272], [1218, 1148], [1448, 1176], [1722, 1248],
+    [2048, 1282], [2435, 1198], [2896, 1240], [3444, 1248], [4096, 1349], [4871, 1300], [5793, 1350],
+    [6889, 1354], [8192, 1370], [9742, 1353], [11585, 1366], [13777, 1375], [16384, 1386], [19484, 1375],
+    [23170, 1383], [27554, 1393], [32768, 1394],
+  ];
+  /** roofline.json, sections.bandwidth[], pattern "copy" at 64 GiB, tb_per_s_median: read plus write, TB/s. */
+  const COPY_TB_PER_S = 6.652;
+  /** peaks-sustained.json, the 8192³ bf16 row, eager.tflops_median: ten samples of 0.5 s back to back. */
+  const SUSTAINED_PEAK = 1388;
+  /** peaks-burst.json, the 8192³ bf16 row, eager.tflops_median: samples of 10 ms from a cool start. */
+  const BURST_PEAK = 1793;
+  /** power-p1-elementwise.json, sustain.tb_per_s: torch.addcmul on 4 GiB bf16 tensors for 20 s. */
+  const ADDCMUL_TB_PER_S = 7.236;
+  /** torch.addcmul(t, a, b) is t + a × b on every value: a multiply and an add, over three reads and one write of 2 bytes. */
+  const ADDCMUL = { flops: 2, bytes: 4 * 2 };
+  /** The values of M named on the plot, each with a line to the ceiling above it. */
+  const NAMED_M = [16, 128, 512, 8192];
+  const SQUARE = 8192;
+
+  /** Arithmetic intensity of a bf16 GEMM [M, K] @ [K, N], each operand and the output counted once. */
+  const intensity = (m, k, n) => (m * k * n) / (m * k + k * n + m * n);
+  const RIDGE = SUSTAINED_PEAK / COPY_TB_PER_S;
+  /** The roofline: the lower of the memory line and the roof at this arithmetic intensity. */
+  const ceiling = (ai) => Math.min(ai * COPY_TB_PER_S, SUSTAINED_PEAK);
+
+  const narrow = SWEEP_2880.map(([m, eager, device]) => ({ m, ai: intensity(m, 2880, 2880), eager, device }));
+  // Of the wide weight, the points left of the ridge, where the roofline says the bytes set the speed.
+  const wide = SWEEP_8192.map(([m, device]) => ({ m, ai: intensity(m, 8192, 8192), device })).filter((p) => p.ai < RIDGE);
+  const square = { ai: intensity(SQUARE, SQUARE, SQUARE) };
+  const addcmul = { ai: ADDCMUL.flops / ADDCMUL.bytes, rate: (ADDCMUL.flops / ADDCMUL.bytes) * ADDCMUL_TB_PER_S };
+  const named = NAMED_M.map((m) => narrow.find((p) => p.m === m));
+
+  if (named.includes(undefined) || !wide.some((p) => p.m === NAMED_M[0])) {
+    throw new Error("A named M is missing from a sweep.");
+  }
+
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const percent = (share) => `${Math.round(100 * share)}%`;
+  const ridgeText = `${Number(RIDGE.toPrecision(2))} FLOP/byte`;
+  const wideFirst = wide.find((p) => p.m === NAMED_M[0]);
+
+  document.getElementById("title").textContent = `Below about ${ridgeText} the bytes set the speed, and small GEMMs run lower still`;
+  document.getElementById("above").textContent =
+    `A kernel that reads more than it writes runs above it: addcmul, three reads and one write for a multiply and an add, is at ${percent(addcmul.rate / ceiling(addcmul.ai))}.`;
+
   /** Region fills: a faint wash of each ceiling's colour over the canvas. */
   const TINTS = {
     memory: "color-mix(in oklab, var(--bg), var(--halo-violet) 9%)",
     compute: "color-mix(in oklab, var(--bg), var(--halo-blue) 6%)",
   };
-  /** The two regions the ridge splits the plot into, named in the key above it, left to right. */
-  const REGIONS = [
+  /** Mark shapes, drawn alike on the plot and in the key: a 22px swatch centred on (11, 11). */
+  const MARKS = {
+    device: (x, y) => svgEl("circle", { cx: x, cy: y, r: 4, fill: "var(--text)" }),
+    eager: (x, y) => svgEl("circle", { cx: x, cy: y, r: 3.5, fill: "var(--bg)", stroke: "var(--secondary)", "stroke-width": 1.5 }),
+    wide: (x, y) => svgEl("polygon", { points: `${x},${y - 5.5} ${x + 5.5},${y} ${x},${y + 5.5} ${x - 5.5},${y}`, fill: "var(--text)" }),
+    burst: (x, y) => svgEl("polygon", { points: `${x},${y - 5} ${x + 5},${y} ${x},${y + 5} ${x - 5},${y}`, fill: "var(--bg)", stroke: "var(--text)", "stroke-width": 1.5 }),
+    elementwise: (x, y) => svgEl("rect", { x: x - 4.5, y: y - 4.5, width: 9, height: 9, fill: "var(--text)" }),
+  };
+  const KEY = [
     {
       name: "Memory-bound",
       hue: "var(--halo-violet)",
-      lines: ["More cores don’t help: move fewer bytes, or use faster HBM", "Typical: fine-grained MoE experts, small per-expert M"],
+      lines: ["More tensor cores don’t help: move fewer bytes", "Elementwise kernels, small-M GEMMs with large weights"],
     },
     {
       name: "Compute-bound",
       hue: "var(--halo-blue)",
-      lines: ["Faster HBM doesn’t help: bigger dims, lower precision", "Typical: large-M GEMM, dense MLP"],
+      lines: ["Faster memory doesn’t help: lower precision does", "Large-M GEMMs"],
+    },
+    {
+      name: "Measured on one B300",
+      marks: [
+        ["device", "bf16 GEMM, K = N = 2880, time on the device"],
+        ["eager", "The same calls timed from PyTorch: the gap is the CPU"],
+        ["wide", `K = N = 8192 on the device, ${percent(wideFirst.device / ceiling(wideFirst.ai))} of the line at M = ${wideFirst.m}`],
+        ["burst", `The ${SQUARE}³ GEMM in its first 40 ms`],
+        ["elementwise", "addcmul on 4 GiB tensors"],
+      ],
     },
   ];
-  const HEIGHT = 700;
-  /** Length of a tick mark outside an axis. */
-  const TICK = 8;
-  /** Plot-area insets inside the SVG: room for the y title and ticks, and the x ticks and title. */
-  const PAD = { l: 124, r: 0, t: 0, b: 84 };
-
-  if (REGIONS.length !== 2) {
-    throw new Error("The ridge splits the plot in two: the key takes exactly two regions.");
-  }
 
   const key = document.getElementById("key");
 
-  for (const region of REGIONS) {
-    const column = document.createElement("div");
-    const heading = document.createElement("h3");
-    const dot = document.createElement("i");
-    dot.style.setProperty("--hue", region.hue);
-    heading.append(dot, region.name);
+  for (const group of KEY) {
+    const column = el("div");
+    const heading = el("h3");
+
+    if (group.hue !== undefined) {
+      const dot = el("i");
+      dot.style.setProperty("--hue", group.hue);
+      heading.append(dot);
+    }
+
+    heading.append(group.name);
     column.append(heading);
 
-    for (const line of region.lines) {
-      const p = document.createElement("p");
-      p.textContent = line;
+    for (const line of group.lines ?? []) {
+      column.append(el("p", undefined, line));
+    }
+
+    for (const [mark, text] of group.marks ?? []) {
+      const p = el("p", "mark");
+      const swatch = svgEl("svg", { viewBox: "0 0 22 22" });
+      swatch.append(MARKS[mark](11, 11));
+      p.append(swatch, el("span", undefined, text));
       column.append(p);
     }
 
     key.append(column);
   }
+
+  const HEIGHT = 760;
+  /** Length of a tick mark outside an axis. */
+  const TICK = 8;
+  /** Plot-area insets inside the SVG: the y title and ticks, the line-end labels, and the x ticks and title. */
+  const PAD = { l: 118, r: 196, t: 4, b: 84 };
+  /** Clear space kept around a label on the plot. */
+  const CLEAR = 6;
 
   const chart = document.getElementById("chart");
   const width = chart.getBoundingClientRect().width;
@@ -150,125 +266,158 @@
   chart.setAttribute("viewBox", `0 0 ${width} ${HEIGHT}`);
 
   const plot = { l: PAD.l, r: width - PAD.r, t: PAD.t, b: HEIGHT - PAD.b };
-  const logScale = ([lo, hi], a, b) => (v) => a + ((Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (b - a);
-  const fmt = (v) => v.toLocaleString("en-US");
   const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
   // The epsilon keeps an exact power of ten on its own decade through log10's rounding.
   const decadeBelow = (v) => 10 ** Math.floor(Math.log10(v) + 1e-9);
   const decadeAbove = (v) => 10 ** Math.ceil(Math.log10(v) - 1e-9);
-  const ridgeText = `${fmt(Math.round(RIDGE))} FLOP/byte`;
+  const tickText = (v) => (v < 1 ? String(v) : v.toLocaleString("en-US"));
 
-  document.getElementById("title").textContent = `Below ${ridgeText}, HBM sets the speed`;
+  // Whole decades covering every point and both peaks, with room under the lowest point for its name.
+  const rates = [...narrow.flatMap((p) => [p.eager, p.device]), ...wide.map((p) => p.device), addcmul.rate, BURST_PEAK];
+  const ais = [...narrow.map((p) => p.ai), ...wide.map((p) => p.ai), addcmul.ai, square.ai];
+  const xRange = [decadeBelow(Math.min(...ais)), decadeAbove(Math.max(...ais))];
+  const yRange = [decadeBelow(Math.min(...rates) / 2), decadeAbove(Math.max(...rates))];
+  const logScale = ([lo, hi], a, b) => (v) => a + ((Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (b - a);
+  const sx = logScale(xRange, plot.l, plot.r);
+  const sy = logScale(yRange, plot.b, plot.t);
+  const decades = ([lo, hi]) => {
+    const first = Math.round(Math.log10(lo));
 
-  /** Draw the whole chart on these log ranges. */
-  function draw(xRange, yRange) {
-    chart.replaceChildren();
-    const sx = logScale(xRange, plot.l, plot.r);
-    const sy = logScale(yRange, plot.b, plot.t);
-    const decades = ([lo, hi]) => {
-      const first = Math.round(Math.log10(lo));
+    return Array.from({ length: Math.round(Math.log10(hi)) - first + 1 }, (_, i) => 10 ** (first + i));
+  };
 
-      return Array.from({ length: Math.round(Math.log10(hi)) - first + 1 }, (_, i) => 10 ** (first + i));
-    };
-    // Regions, behind everything: memory-bound left of the ridge, compute-bound right of it.
-    add("rect", { x: plot.l, y: plot.t, width: sx(RIDGE) - plot.l, height: plot.b - plot.t, fill: TINTS.memory });
-    add("rect", { x: sx(RIDGE), y: plot.t, width: plot.r - sx(RIDGE), height: plot.b - plot.t, fill: TINTS.compute });
+  // Regions, behind everything: memory-bound left of the ridge, compute-bound right of it.
+  add("rect", { x: plot.l, y: plot.t, width: sx(RIDGE) - plot.l, height: plot.b - plot.t, fill: TINTS.memory });
+  add("rect", { x: sx(RIDGE), y: plot.t, width: plot.r - sx(RIDGE), height: plot.b - plot.t, fill: TINTS.compute });
 
-    // Labels sit on the plot, so it draws no gridlines: a tick mark outside each axis marks every decade.
-    for (const v of decades(xRange)) {
-      add("line", { x1: sx(v), x2: sx(v), y1: plot.b, y2: plot.b + TICK, stroke: "var(--secondary)", "stroke-width": 1 });
-      add("text", { class: "tick", x: sx(v), y: plot.b + 34, "text-anchor": v === xRange[1] ? "end" : "middle" }, fmt(v));
-    }
-
-    for (const v of decades(yRange)) {
-      add("line", { x1: plot.l - TICK, x2: plot.l, y1: sy(v), y2: sy(v), stroke: "var(--secondary)", "stroke-width": 1 });
-      add("text", { class: "tick", x: plot.l - TICK - 10, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, fmt(v));
-    }
-
-    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
-    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
-    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, "Arithmetic intensity, FLOP per byte");
-    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Throughput, TFLOP/s");
-
-    // The two ceilings meet at the ridge point. The memory ceiling enters at the left edge or the floor.
-    const enter = Math.max(xRange[0], yRange[0] / BW);
-    add("line", { x1: sx(RIDGE), x2: sx(RIDGE), y1: sy(PEAK), y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5 });
-    add("line", { x1: sx(enter), y1: sy(BW * enter), x2: sx(RIDGE), y2: sy(PEAK), stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" });
-    add("line", { x1: sx(RIDGE), y1: sy(PEAK), x2: plot.r, y2: sy(PEAK), stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" });
-    add("circle", { cx: sx(RIDGE), cy: sy(PEAK), r: 9, fill: "var(--text)" });
-
-    // Ceiling labels: the flat one above its line at the right end, the diagonal one along and above it, low
-    // on the slope in the empty memory-bound corner, clear of the measured points near the ridge.
-    const computeLabel = svgEl("text", { class: "mark", x: plot.r - 12, y: sy(PEAK) - 48, "text-anchor": "end" });
-    computeLabel.append(
-      svgEl("tspan", {}, "Compute ceiling"),
-      svgEl("tspan", { class: "why", x: plot.r - 12, dy: 30 }, `${fmt(PEAK)} TFLOP/s measured`),
-    );
-    chart.append(computeLabel);
-    const a0 = 10 ** (Math.log10(enter) + 0.1 * (Math.log10(RIDGE) - Math.log10(enter)));
-    const angle = (Math.atan2(sy(PEAK) - sy(BW * enter), sx(RIDGE) - sx(enter)) * 180) / Math.PI;
-    add("text", { class: "mark", transform: `translate(${sx(a0)} ${sy(BW * a0)}) rotate(${angle}) translate(0 -16)` }, `Memory ceiling = AI × ${BW} TB/s`);
-
-    const ridgeLabel = svgEl("text", { class: "ridge", x: sx(RIDGE) - 24, y: sy(PEAK) - 48, "text-anchor": "end" });
-    ridgeLabel.append(
-      svgEl("tspan", {}, "Ridge point"),
-      svgEl("tspan", { class: "why", x: sx(RIDGE) - 24, dy: 30 }, `AI ≈ ${ridgeText}`),
-    );
-    chart.append(ridgeLabel);
-
-    for (const [m, ai, tflops] of MEASURED) {
-      add("circle", { cx: sx(ai), cy: sy(tflops), r: 8, fill: "var(--bg)", stroke: "var(--text)", "stroke-width": 2.5 });
-    }
-
-    const label = (m, ai, tflops, dx, dy, anchor) =>
-      add("text", { class: "point", x: sx(ai) + dx, y: sy(tflops) + dy, "text-anchor": anchor, "dominant-baseline": "central" }, `M = ${fmt(m)}`);
-    label(...MEASURED[0], -20, 0, "end");
-    label(...MEASURED[1], 20, 0, "start");
-    label(...MEASURED[2], 0, 28, "middle");
+  // Labels sit on the plot, so it draws no gridlines: a tick mark outside each axis marks every decade.
+  for (const v of decades(xRange)) {
+    add("line", { x1: sx(v), x2: sx(v), y1: plot.b, y2: plot.b + TICK, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "tick", x: sx(v), y: plot.b + 34, "text-anchor": "middle" }, tickText(v));
   }
 
-  const LABELS = "text.mark, text.point, text.ridge";
-
-  /**
-   * True when every label and dot in the plot sits inside it, no label overlaps a dot, and side by side two
-   * texts keep 12px apart.
-   */
-  function fits() {
-    const origin = chart.getBoundingClientRect();
-    const items = [...chart.querySelectorAll(`${LABELS}, circle`)].map((n) => ({ text: n.tagName === "text", label: n.matches("text, .dot"), r: n.getBoundingClientRect() }));
-    const out = ({ r }) => r.left < origin.left + plot.l || r.right > origin.left + plot.r || r.top < origin.top + plot.t || r.bottom > origin.top + plot.b;
-    const overlap = (a, b) =>
-      (a.label || b.label) &&
-      Math.min(a.r.right, b.r.right) + (a.text && b.text ? 12 : 0) > Math.max(a.r.left, b.r.left) &&
-      Math.min(a.r.bottom, b.r.bottom) > Math.max(a.r.top, b.r.top);
-
-    return items.every((a, i) => !out(a) && items.slice(i + 1).every((b) => !overlap(a, b)));
+  for (const v of decades(yRange)) {
+    add("line", { x1: plot.l - TICK, x2: plot.l, y1: sy(v), y2: sy(v), stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "tick", x: plot.l - TICK - 10, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, tickText(v));
   }
 
-  // Whole decades covering the measured points, the ridge and SLOPE_DECADES of the memory ceiling, the
-  // x axis starting where that ceiling meets the floor. Where a label does not fit, widen the fewest decades.
-  const ais = MEASURED.map(([, ai]) => ai);
-  const yLo = Math.min(decadeBelow(PEAK / 10 ** SLOPE_DECADES), decadeBelow(Math.min(...MEASURED.map(([, , t]) => t))));
-  const xLo = Math.min(decadeBelow(yLo / BW), decadeBelow(Math.min(...ais)));
-  const xHi = decadeAbove(Math.max(RIDGE, ...ais));
-  const yHi = decadeAbove(PEAK);
-  /** The ranges widened by [x low, x high, y low, y high] decades. */
-  const widened = ([a, b, c, d]) => [[xLo / 10 ** a, xHi * 10 ** b], [yLo / 10 ** c, yHi * 10 ** d]];
-  const steps = [0, 1, 2];
-  const total = (w) => w.reduce((sum, n) => sum + n, 0);
-  const widenings = steps.flatMap((a) => steps.flatMap((b) => steps.flatMap((c) => steps.map((d) => [a, b, c, d]))));
-  const fitting = widenings.sort((p, q) => total(p) - total(q)).find((w) => {
-    draw(...widened(w));
+  add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+  add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+  add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, "Arithmetic intensity, FLOP per byte");
+  add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Rate, TFLOP/s");
 
-    return fits();
-  });
+  // Everything a label must stay clear of: boxes around marks and labels, and the drawn lines.
+  const boxes = [];
+  const lines = [];
+  const line = (x1, y1, x2, y2, attrs) => {
+    lines.push([x1, y1, x2, y2]);
 
-  if (fitting === undefined) {
-    draw(...widened([0, 0, 0, 0]));
-    throw new Error("No whole-decade range fits every roofline label: widen the canvas or shorten a label.");
+    return add("line", { x1, y1, x2, y2, ...attrs });
+  };
+  const mark = (kind, x, y) => {
+    chart.append(MARKS[kind](x, y));
+    boxes.push({ l: x - 6, r: x + 6, t: y - 6, b: y + 6 });
+  };
+
+  // The ceilings meet at the ridge. The memory line enters at the left edge or the floor. The burst peak is a
+  // thin second roof from where the memory line reaches it.
+  const enter = Math.max(xRange[0], yRange[0] / COPY_TB_PER_S);
+  line(sx(RIDGE), sy(SUSTAINED_PEAK), sx(RIDGE), plot.b, { stroke: "var(--tertiary)", "stroke-width": 1.5 });
+  line(sx(enter), sy(COPY_TB_PER_S * enter), sx(RIDGE), sy(SUSTAINED_PEAK), { stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" });
+  line(sx(RIDGE), sy(SUSTAINED_PEAK), plot.r, sy(SUSTAINED_PEAK), { stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" });
+  line(sx(BURST_PEAK / COPY_TB_PER_S), sy(BURST_PEAK), plot.r, sy(BURST_PEAK), { stroke: "var(--halo-blue)", "stroke-width": 1.25 });
+
+  // From each named point a thin line up to the ceiling above it, through the eager and the device mark.
+  const leaders = named.map((p) => ({ p, x: sx(p.ai), top: sy(ceiling(p.ai)), bottom: sy(Math.min(p.eager, p.device)) }));
+
+  for (const p of narrow) {
+    mark("eager", sx(p.ai), sy(p.eager));
   }
 
-  draw(...widened(fitting));
+  for (const p of narrow) {
+    mark("device", sx(p.ai), sy(p.device));
+  }
+
+  for (const p of wide) {
+    mark("wide", sx(p.ai), sy(p.device));
+  }
+
+  mark("wide", sx(square.ai), sy(SUSTAINED_PEAK));
+  mark("burst", sx(square.ai), sy(BURST_PEAK));
+  mark("elementwise", sx(addcmul.ai), sy(addcmul.rate));
+
+  const overlaps = (a, b) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
+  /** Whether the segment (x1, y1)–(x2, y2) passes through the box. */
+  const crosses = ([x1, y1, x2, y2], box) => {
+    let [t0, t1] = [0, 1];
+
+    for (const [p, q] of [[x1 - x2, x1 - box.l], [x2 - x1, box.r - x1], [y1 - y2, y1 - box.t], [y2 - y1, box.b - y1]]) {
+      if (p === 0) {
+        if (q < 0) {
+          return false;
+        }
+      } else if (p < 0) {
+        t0 = Math.max(t0, q / p);
+      } else {
+        t1 = Math.min(t1, q / p);
+      }
+    }
+
+    return t0 < t1;
+  };
+  const free = (box) =>
+    box.l >= plot.l + CLEAR && box.r <= plot.r - CLEAR && box.t >= plot.t + CLEAR && box.b <= plot.b - CLEAR &&
+    !boxes.some((other) => overlaps(box, other)) && !lines.some((segment) => crosses(segment, box));
+  /** A label of one or two lines, drawn at its first free place among `places(width, height)`, each a top-left corner. */
+  const label = (rows, places) => {
+    const text = add("text", { class: "point" });
+    rows.forEach(([cls, value], i) => text.append(svgEl("tspan", { class: cls, x: 0, dy: i === 0 ? 0 : 27 }, value)));
+    const size = text.getBBox();
+    const spot = places(size.width, size.height).find(([l, t]) => free({ l: l - CLEAR, t: t - CLEAR, r: l + size.width + CLEAR, b: t + size.height + CLEAR }));
+
+    if (spot === undefined) {
+      throw new Error(`No free place on the plot for the label ${rows.map(([, value]) => value).join(" / ")}.`);
+    }
+
+    const [l, t] = spot;
+    text.setAttribute("transform", `translate(${l - size.x} ${t - size.y})`);
+    boxes.push({ l, t, r: l + size.width, b: t + size.height });
+
+    return { l, t, r: l + size.width, b: t + size.height };
+  };
+
+  // A named point's label hangs under its line: as near under the marks as it finds room, centred on the line
+  // or to one side of it.
+  for (const leader of leaders) {
+    const { p, x } = leader;
+    const placed = label([["point", `M = ${p.m.toLocaleString("en-US")}`], ["why", percent(p.device / ceiling(p.ai))]], (w) =>
+      Array.from({ length: 120 }, (_, i) => leader.bottom + 14 + 4 * i).flatMap((t) => [[x - w / 2, t], [x - w + 10, t], [x - 10, t]]));
+    line(x, leader.top, x, placed.t - 6, { stroke: "var(--secondary)", "stroke-width": 1 });
+  }
+
+  // The other marks' names sit beside them, on the first side that is free.
+  const beside = (x, y) => (w, h) =>
+    [8, 16, 28].flatMap((d) => [[x + d, y + d], [x + d, y - h / 2], [x - w / 2, y + d + 4], [x - w - d, y + d], [x - w - d, y - h / 2], [x - w / 2, y - h - d - 4]]);
+  label([["point", "addcmul"]], beside(sx(addcmul.ai), sy(addcmul.rate)));
+  label([["point", `${SQUARE}³`]], beside(sx(square.ai), sy(SUSTAINED_PEAK)));
+
+  // The memory line's name runs along and above it, past the elementwise mark.
+  const a0 = addcmul.ai * 10 ** 0.35;
+  const angle = (Math.atan2(sy(SUSTAINED_PEAK) - sy(COPY_TB_PER_S * enter), sx(RIDGE) - sx(enter)) * 180) / Math.PI;
+  add("text", { class: "mark", transform: `translate(${sx(a0)} ${sy(COPY_TB_PER_S * a0)}) rotate(${angle}) translate(0 -16)` }, `Memory line, AI × ${COPY_TB_PER_S.toFixed(2)} TB/s`);
+
+  const ridgeLabel = svgEl("text", { class: "ridge", x: sx(RIDGE) - 22, y: sy(BURST_PEAK) - 58, "text-anchor": "end" });
+  ridgeLabel.append(
+    svgEl("tspan", {}, "Ridge"),
+    svgEl("tspan", { class: "why", x: sx(RIDGE) - 22, dy: 28 }, `about ${ridgeText}`),
+  );
+  chart.append(ridgeLabel);
+  add("circle", { cx: sx(RIDGE), cy: sy(SUSTAINED_PEAK), r: 7, fill: "var(--text)" });
+
+  // Each roof's value at its right end, the two nudged apart where the lines run closer than a line of text.
+  const apart = Math.max(0, (26 - (sy(SUSTAINED_PEAK) - sy(BURST_PEAK))) / 2);
+  add("text", { class: "why", x: plot.r + 12, y: sy(BURST_PEAK) - apart, "dominant-baseline": "central" }, `${fmt(BURST_PEAK)}, first 40 ms`);
+  add("text", { class: "point", x: plot.r + 12, y: sy(SUSTAINED_PEAK) + apart, "dominant-baseline": "central" }, `${fmt(SUSTAINED_PEAK)}, sustained`);
 </script>
 </body>
 </html>

@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Decode on the roofline</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* Each panel's key sits in a column left of its plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: var(--group-gap);
+    align-items: start;
+  }
+
+  .key h3 {
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
+  }
+
+  .key p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
+    color: var(--body);
+  }
+
+  .key p.mark svg { margin-top: 3px; }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="time-key"></div>
+    <svg class="chart" id="time"></svg>
+    <div class="key" id="rate-key"></div>
+    <svg class="chart" id="rate"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each point is the median of 7 samples of back-to-back calls.</span>
+      <span class="s">The roof is the sustained rate of an 8192³ bf16 GEMM, and the memory line the rate of a copy, read plus write.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py: one bf16 linear layer, torch.mm(x, w) with
+  // x [M, 4096] and w [4096, 4096], the weight read from HBM on every call.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections sweep --sweep_shapes 4096x4096 --sweep_m 1 2 4 8
+  //     16 32 64 128 256 512 1024 2048 --kernel_shapes --output decode.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections sweep --sweep_shapes 4096x4096 --sweep_m 1 2 4 8
+  //     16 32 64 128 256 512 1024 2048 --output decode-clean.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --output roofline.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections peaks --peak_dims 8192 16384 --peak_dtypes bf16
+  //     --repeat_seconds 0.5 --repeats 10 --output peaks-sustained.json
+  // [m, device µs, eager µs, kernels per call]. Device: decode.json, sections.sweep[].graph.seconds_summary.median,
+  // the calls replayed from one CUDA graph, and the number of kernels the profiler saw one call run (the keys of
+  // .kernels). Eager: decode-clean.json, the same sweep in a process with no profiler,
+  // sections.sweep[].eager.seconds_summary.median, back-to-back PyTorch calls. Medians of 7.
+  const SWEEP = [
+    [1, 8.66, 11.45, 2], [2, 9.046, 11.5, 2], [4, 9.163, 11.51, 2], [8, 8.987, 11.5, 2],
+    [16, 12.04, 12.3, 1], [32, 8.465, 8.683, 1], [64, 8.599, 8.881, 1], [128, 8.886, 9.144, 1],
+    [256, 11.88, 12.05, 1], [512, 16.77, 17.51, 1], [1024, 28.77, 29.57, 1], [2048, 53.7, 53.87, 1],
+  ];
+  /** roofline.json, sections.bandwidth[], pattern "copy" at 64 GiB, tb_per_s_median: read plus write, TB/s. */
+  const COPY_TB_PER_S = 6.652;
+  /** peaks-sustained.json, the 8192³ bf16 row, eager.tflops_median: ten samples of 0.5 s back to back. */
+  const SUSTAINED_PEAK = 1388;
+  /** The layer's weight is [K, N]. */
+  const K = 4096;
+  const N = 4096;
+  /** The two row counts the title compares. */
+  const TITLE_M = [1, 128];
+
+  /** Arithmetic intensity of a bf16 GEMM [M, K] @ [K, N], each operand and the output counted once. */
+  const intensity = (m) => (m * K * N) / (m * K + K * N + m * N);
+  const flops = (m) => 2 * m * K * N;
+  const ridge = SUSTAINED_PEAK / COPY_TB_PER_S;
+  /** The roofline's ceiling at M rows, TFLOP/s. */
+  const ceiling = (m) => Math.min(intensity(m) * COPY_TB_PER_S, SUSTAINED_PEAK);
+  /** Where a square-weight GEMM's arithmetic intensity M × K / (K + 2M) reaches the ridge. */
+  const crossover = (ridge * K) / (K - 2 * ridge);
+  const points = SWEEP.map(([m, device, eager, kernels]) => ({ m, device, eager, kernels, rate: flops(m) / (device * 1e-6) / 1e12 }));
+  /** The row counts at which one call runs more than one kernel: the smallest of the sweep. */
+  const split = points.filter((p) => p.kernels > 1);
+
+  if (split.some((p, i) => p !== points[i] || p.kernels !== split[0].kernels)) {
+    throw new Error("the key says the smallest row counts run one number of kernels per call: the sweep no longer shows that");
+  }
+
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const [few, many] = TITLE_M.map((m) => points.find((p) => p.m === m));
+  const rowsWord = (m) => `${fmt(m)} ${m === 1 ? "row" : "rows"}`;
+
+  document.getElementById("title").textContent =
+    `One ${K} × ${N} layer takes ${few.device.toFixed(1)}\u00a0µs for ${rowsWord(few.m)} and ${many.device.toFixed(1)}\u00a0µs for ${fmt(many.m)}`;
+
+  /** A key swatch: a 36 × 24 drawing of the mark. */
+  const swatch = (draw) => {
+    const svg = svgEl("svg", { viewBox: "0 0 36 24", "aria-hidden": "true" });
+    draw(svg);
+
+    return svg;
+  };
+  const MARKS = {
+    device: (x, y) => svgEl("circle", { cx: x, cy: y, r: 5.5, fill: "var(--text)" }),
+    eager: (x, y) => svgEl("circle", { cx: x, cy: y, r: 5, fill: "var(--bg)", stroke: "var(--secondary)", "stroke-width": 1.75 }),
+  };
+  const rule = (attrs) => (svg) => svg.append(svgEl("line", { x1: 2, y1: 12, x2: 34, y2: 12, ...attrs }));
+  const SWATCHES = {
+    device: (svg) => svg.append(MARKS.device(18, 12)),
+    eager: (svg) => svg.append(MARKS.eager(18, 12)),
+    memory: rule({ stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" }),
+    roof: rule({ stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" }),
+    crossover: (svg) => svg.append(svgEl("line", { x1: 18, y1: 1, x2: 18, y2: 23, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" })),
+  };
+
+  /** Fills a key column: its heading, plain lines, then one line per mark. */
+  function fillKey(id, { name, lines, marks }) {
+    const key = document.getElementById(id);
+    key.append(el("h3", undefined, name));
+
+    for (const line of lines) {
+      key.append(el("p", undefined, line));
+    }
+
+    for (const [kind, text] of marks) {
+      const p = el("p", "mark");
+      p.append(swatch(SWATCHES[kind]), el("span", undefined, text));
+      key.append(p);
+    }
+  }
+
+  fillKey("time-key", {
+    name: "Time per call",
+    lines: [`One bf16 layer, [M, ${K}] @ [${K}, ${N}], on one B300, the weight read from HBM on every call`],
+    marks: [
+      ["device", "On the device"],
+      ["eager", `Called from PyTorch, one call after another. At ${split[0].m} to ${split.at(-1).m} rows a call runs ${split[0].kernels} kernels, and so ${split[0].kernels} launches`],
+    ],
+  });
+  fillKey("rate-key", {
+    name: "Rate on the device",
+    lines: ["The same calls as FLOPs per second, under the roofline for this layer"],
+    marks: [
+      ["memory", `Memory line, AI × ${COPY_TB_PER_S.toFixed(2)} TB/s`],
+      ["roof", `Roof, ${fmt(SUSTAINED_PEAK)} TFLOP/s sustained`],
+      ["crossover", `Crossover M, ${fmt(crossover)}`],
+    ],
+  });
+
+  /** Plot-area insets inside each SVG: room for the y title and ticks on the left. */
+  const PAD = { l: 118, r: 24 };
+  const first = Math.log2(points[0].m);
+  const last = Math.log2(points.at(-1).m);
+
+  /** Sets up one panel's SVG and returns its plot box, x scale and an element adder. */
+  function panel(id, height, top, bottom) {
+    const chart = document.getElementById(id);
+    const width = chart.getBoundingClientRect().width;
+    chart.setAttribute("height", height);
+    chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const plot = { l: PAD.l, r: width - PAD.r, t: top, b: height - bottom };
+    // The M axis is logarithmic, with room at each end for the first and last mark.
+    const sx = (m) => plot.l + 24 + ((Math.log2(m) - first) / (last - first)) * (plot.r - plot.l - 48);
+    const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+
+    return { chart, plot, sx, add, height };
+  }
+
+  /** Draws a panel's frame: gridlines and labels at the y ticks, x tick marks, its axis lines and its rotated title. */
+  function frame({ plot, sx, add }, ticks, sy, title) {
+    for (const v of ticks) {
+      if (sy(v) < plot.b - 0.5) {
+        add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+
+      add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, v.toLocaleString("en-US"));
+    }
+
+    for (const p of points) {
+      add("line", { x1: sx(p.m), x2: sx(p.m), y1: plot.b, y2: plot.b + 8, stroke: "var(--secondary)", "stroke-width": 1 });
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, title);
+    add("line", { x1: sx(crossover), x2: sx(crossover), y1: plot.t, y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+  }
+
+  // The time panel: a linear axis from zero.
+  {
+    const p = panel("time", 400, 8, 8);
+    const { chart, plot, sx, add } = p;
+    const axis = niceAxis(Math.max(...points.flatMap((q) => [q.device, q.eager])) * 1.04);
+    const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
+    frame(p, axis.ticks, sy, "Time per call, µs");
+    add("polyline", { points: points.map((q) => `${sx(q.m)},${sy(q.device)}`).join(" "), fill: "none", stroke: "var(--text)", "stroke-width": 1.5 });
+
+    for (const q of points) {
+      chart.append(MARKS.eager(sx(q.m), sy(q.eager)));
+    }
+
+    for (const q of points) {
+      chart.append(MARKS.device(sx(q.m), sy(q.device)));
+    }
+  }
+
+  // The rate panel: a log axis over whole decades, on the same M axis, which it labels.
+  {
+    const p = panel("rate", 420, 8, 84);
+    const { chart, plot, sx, add, height } = p;
+    const low = Math.floor(Math.log10(Math.min(...points.map((q) => q.rate))) + 1e-9);
+    const high = Math.ceil(Math.log10(SUSTAINED_PEAK) - 1e-9);
+    const sy = (v) => plot.b - ((Math.log10(v) - low) / (high - low)) * (plot.b - plot.t);
+    frame(p, Array.from({ length: high - low + 1 }, (_, i) => 10 ** (low + i)), sy, "Rate, TFLOP/s");
+
+    for (const q of points) {
+      add("text", { class: "tick", x: sx(q.m), y: plot.b + 34, "text-anchor": "middle" }, fmt(q.m));
+    }
+
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: height - 6, "text-anchor": "middle" }, "M, sequences decoded together");
+
+    // The ceiling over the sweep's range of M: the memory line up to the crossover, the roof past it.
+    const steps = Array.from({ length: 97 }, (_, i) => 2 ** (first + ((last - first) * i) / 96));
+    const curve = (ms) => ms.map((m) => `${sx(m)},${sy(ceiling(m))}`).join(" ");
+    add("polyline", { points: curve([...steps.filter((m) => m < crossover), crossover]), fill: "none", stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" });
+    add("polyline", { points: curve([crossover, ...steps.filter((m) => m > crossover)]), fill: "none", stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" });
+
+    for (const q of points) {
+      chart.append(MARKS.device(sx(q.m), sy(q.rate)));
+    }
+  }
+</script>
+</body>
+</html>

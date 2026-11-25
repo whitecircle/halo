@@ -1,0 +1,413 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Launches against work</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --launch: var(--halo-blue);
+    --kernel: var(--halo-violet);
+    --together: var(--halo-indigo);
+    --lane-col: 84px;
+    --lane-h: 48px;
+    --lane-gap: 6px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .timeline + .timeline { margin-top: var(--group-gap); }
+
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: var(--heading-gap);
+  }
+
+  .head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    white-space: nowrap;
+    font-variant-numeric: lining-nums;
+  }
+
+  .head span {
+    font-size: 22px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The lane names, then a track whose width is the time scale. */
+  .lanes {
+    display: grid;
+    grid-template-columns: var(--lane-col) 1fr;
+    row-gap: var(--lane-gap);
+    align-items: center;
+  }
+
+  .lane-name {
+    font-size: 23px;
+    color: var(--body);
+  }
+
+  .track {
+    position: relative;
+    height: var(--lane-h);
+  }
+
+  /* The track is as long as the lane's time span, so the stretch right of it is no part of the run. */
+  .track .lane {
+    position: absolute;
+    left: 0;
+    top: 0;
+    height: 100%;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--surface);
+  }
+
+  .track svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .ticks {
+    position: relative;
+    height: 44px;
+    font-size: 21px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks i {
+    position: absolute;
+    bottom: 0;
+    width: 1px;
+    height: 9px;
+    background: var(--secondary);
+  }
+
+  .ticks span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  .ticks span.first { transform: none; }
+
+  /* The measured total, at the end of its span. */
+  .ticks span.total { color: var(--text); }
+
+  .ticks span.total.flush { transform: translateX(-100%); }
+
+  .ticks i.total { background: var(--text); }
+
+  /* The grouped launch spans both lanes: its time is not split between them. */
+  .both {
+    position: absolute;
+    left: 0;
+    top: 0;
+    border-radius: 7px;
+    background: var(--together);
+  }
+
+  .both-label {
+    position: absolute;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    font-size: 23px;
+    line-height: 1.35;
+    color: var(--body);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .both-label b {
+    font-weight: 400;
+    color: var(--text);
+  }
+
+  /* The enlarged stretch: the same two lanes, with room for the durations. */
+  .zoom-head {
+    margin-top: 40px;
+    margin-bottom: 14px;
+    margin-left: var(--lane-col);
+    font-size: 23px;
+    color: var(--body);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .zoom-head i {
+    display: inline-block;
+    width: 26px;
+    height: 18px;
+    margin-right: 12px;
+    border: 2px solid var(--text);
+    border-radius: 5px;
+    vertical-align: -2px;
+  }
+
+  .cell {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    font-size: 23px;
+    color: #000;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cell.launch { background: var(--launch); }
+
+  .cell.kernel { background: var(--kernel); }
+
+  .cell.idle { color: var(--secondary); }
+
+  .outline {
+    position: absolute;
+    border: 2px solid var(--text);
+    border-radius: 5px;
+    pointer-events: none;
+  }
+
+  .lanes.wrap { position: relative; }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>{matmuls} small matmuls take {loopMs} ms one by one and {groupedMs} ms as one grouped launch</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <section class="timeline">
+      <div class="head">
+        <h2>One launch per matmul</h2>
+        <span>{matmuls} launches of [{m}, {k}] @ [{k}, {n}] from a Python loop: {loopMs} ms, and the GPU works about {busy}% of it</span>
+      </div>
+      <div class="lanes wrap" id="loop"></div>
+      <div class="zoom-head"><i></i>The {zoomLaunches} outlined launches, enlarged {zoomFactor} times</div>
+      <div class="lanes" id="zoom"></div>
+    </section>
+
+    <section class="timeline">
+      <div class="head">
+        <h2>One grouped launch</h2>
+        <span>the same {matmuls} matmuls in one kernel, on the same time scale: {groupedMs} ms</span>
+      </div>
+      <div class="lanes wrap" id="grouped"></div>
+    </section>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">The {loopMs} ms and the {groupedMs} ms are recorded on one B300 for a bf16 expert projection of Qwen3-30B-A3B, {matmuls} experts with {m} rows each, as the median of 50 timed passes that each end by waiting for the GPU.</span>
+      <span class="s">The {deviceUs} µs is measured on one B300 in a separate run: the device time of one such matmul when the calls are replayed from a CUDA graph.</span>
+      <span class="s">Schematic in one respect: each kernel is drawn starting when its launch ends, so under the next launch, and no measurement places it inside the {perLaunchUs} µs.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * Every time and count on the canvas is drawn from these.
+   * loop, grouped: the "Isolated kernel" record of agent-docs/optimization/grouped-gemm.md, taken with
+   *   tests/gpu/profiling/benchmark_grouped_mm.py on one B300 (hidden 2048, intermediate 768, 128 experts,
+   *   4,096 rows, bf16): wall time of one pass with a synchronize, median of 50, Halo 1.1.0 or earlier.
+   * deviceUs: the sweep section of tests/gpu/profiling/benchmark_roofline.py at shape 2048x768 and M = 32 on one
+   *   B300: the median device time per call of [32, 2048] @ [2048, 768] replayed from one CUDA graph, 7 repeats.
+   */
+  const MEASURED = {
+    shape: { m: 32, k: 2048, n: 768 },
+    loop: { matmuls: 128, ms: 1.12 },
+    grouped: { ms: 0.11 },
+    deviceUs: 4.10,
+  };
+  /** Consecutive launches the enlarged stretch shows. */
+  const ZOOM_LAUNCHES = 3;
+  /** Width in px of the gap that separates two launches drawn back to back. */
+  const CELL_GAP = 1.5;
+
+  const loopUs = MEASURED.loop.ms * 1000;
+  const groupedUs = MEASURED.grouped.ms * 1000;
+  const perLaunchUs = loopUs / MEASURED.loop.matmuls;
+  const idleUs = perLaunchUs - MEASURED.deviceUs;
+
+  if (idleUs <= 0) {
+    throw new Error("a kernel longer than its launch never leaves the GPU idle: this figure draws the idle case");
+  }
+
+  // The last kernel starts when the last launch ends, so the drawn span is the loop plus one kernel.
+  const spanUs = loopUs + MEASURED.deviceUs;
+  const zoomUs = ZOOM_LAUNCHES * perLaunchUs;
+  const us = (value) => value.toFixed(2);
+  /** Text for each `{name}` in the page's static text. */
+  const VALUES = {
+    matmuls: String(MEASURED.loop.matmuls),
+    loopMs: MEASURED.loop.ms.toFixed(2),
+    groupedMs: MEASURED.grouped.ms.toFixed(2),
+    m: String(MEASURED.shape.m),
+    k: String(MEASURED.shape.k),
+    n: String(MEASURED.shape.n),
+    busy: String(Math.round((100 * MEASURED.deviceUs) / perLaunchUs)),
+    deviceUs: us(MEASURED.deviceUs),
+    perLaunchUs: us(perLaunchUs),
+    zoomLaunches: String(ZOOM_LAUNCHES),
+    zoomFactor: String(Math.round(spanUs / zoomUs)),
+  };
+
+  fillValues(VALUES);
+
+  const token = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+  /** Adds a named lane to `lanes` and returns its track. */
+  function addLane(lanes, name) {
+    const track = el("div", "track");
+    lanes.append(el("div", "lane-name", name), track);
+
+    return track;
+  }
+
+  /**
+   * Adds the shared time axis under the lanes of `lanes`: a tick every step from zero, in ms, and a brighter mark
+   * at `totalMs`, the measured time the lanes above it span. The total's label ends at its mark when `flush`.
+   */
+  function addAxis(lanes, pxPerUs, totalMs, flush) {
+    const ticks = el("div", "ticks");
+    lanes.append(el("div"), ticks);
+    const place = (ms, text, className) => {
+      const mark = el("i", className);
+      mark.style.left = `${ms * 1000 * pxPerUs}px`;
+      mark.style.top = "0";
+      const label = el("span", className, text);
+      label.style.left = `${ms * 1000 * pxPerUs}px`;
+      label.style.top = "14px";
+      ticks.append(mark, label);
+    };
+
+    for (const ms of niceTicks(MEASURED.loop.ms)) {
+      place(ms, ms === 0 ? "0" : ms.toFixed(1), ms === 0 ? "first" : undefined);
+    }
+
+    place(totalMs, `${totalMs.toFixed(2)} ms`, flush ? "total flush" : "total");
+  }
+
+  // The loop: one cell per launch on the CPU lane, and its kernel on the GPU lane from the launch's end.
+  const loop = document.getElementById("loop");
+  const cpuTrack = addLane(loop, "CPU");
+  const gpuTrack = addLane(loop, "GPU");
+  const pxPerUs = cpuTrack.getBoundingClientRect().width / spanUs;
+  const lane = (track, untilUs) => {
+    const node = el("div", "lane");
+    node.style.width = `${untilUs * pxPerUs}px`;
+    track.append(node);
+  };
+  lane(cpuTrack, loopUs);
+  lane(gpuTrack, spanUs);
+  const cpuSvg = svgEl("svg", {});
+  const gpuSvg = svgEl("svg", {});
+  cpuTrack.append(cpuSvg);
+  gpuTrack.append(gpuSvg);
+  const laneH = cpuTrack.getBoundingClientRect().height;
+
+  for (let i = 0; i < MEASURED.loop.matmuls; i += 1) {
+    cpuSvg.append(svgEl("rect", {
+      x: i * perLaunchUs * pxPerUs + CELL_GAP / 2,
+      y: 0,
+      width: perLaunchUs * pxPerUs - CELL_GAP,
+      height: laneH,
+      rx: 2.5,
+      fill: token("--launch"),
+    }));
+    gpuSvg.append(svgEl("rect", {
+      x: (i + 1) * perLaunchUs * pxPerUs,
+      y: 0,
+      width: MEASURED.deviceUs * pxPerUs,
+      height: laneH,
+      rx: 2,
+      fill: token("--kernel"),
+    }));
+  }
+
+  addAxis(loop, pxPerUs, MEASURED.loop.ms, true);
+
+  // The outline marks the launches the enlarged stretch repeats, taken from the middle of the loop.
+  const firstZoomed = Math.floor((MEASURED.loop.matmuls - ZOOM_LAUNCHES) / 2);
+  const outline = el("div", "outline");
+  const loopBox = loop.getBoundingClientRect();
+  const cpuBox = cpuTrack.getBoundingClientRect();
+  const gpuBox = gpuTrack.getBoundingClientRect();
+  outline.style.left = `${cpuBox.left - loopBox.left + firstZoomed * perLaunchUs * pxPerUs - 2.5}px`;
+  outline.style.width = `${zoomUs * pxPerUs + 3}px`;
+  outline.style.top = `${cpuBox.top - loopBox.top - 5}px`;
+  outline.style.height = `${gpuBox.bottom - cpuBox.top + 10}px`;
+  loop.append(outline);
+
+  // The enlarged stretch: in the steady state each launch has the previous launch's kernel under its start.
+  const zoom = document.getElementById("zoom");
+  const zoomCpu = addLane(zoom, "CPU");
+  const zoomGpu = addLane(zoom, "GPU");
+  const zoomPxPerUs = zoomCpu.getBoundingClientRect().width / zoomUs;
+  const cell = (track, kind, fromUs, lengthUs, text) => {
+    const node = el("div", `cell ${kind}`, text);
+    node.style.left = `${fromUs * zoomPxPerUs + CELL_GAP}px`;
+    node.style.width = `${lengthUs * zoomPxPerUs - 2 * CELL_GAP}px`;
+    track.append(node);
+  };
+  const zoomLane = (track) => {
+    const node = el("div", "lane");
+    node.style.width = "100%";
+    track.append(node);
+  };
+  zoomLane(zoomCpu);
+  zoomLane(zoomGpu);
+
+  for (let i = 0; i < ZOOM_LAUNCHES; i += 1) {
+    cell(zoomCpu, "launch", i * perLaunchUs, perLaunchUs, `one launch, ${us(perLaunchUs)} µs`);
+    cell(zoomGpu, "kernel", i * perLaunchUs, MEASURED.deviceUs, `kernel, ${us(MEASURED.deviceUs)} µs`);
+    cell(zoomGpu, "idle", i * perLaunchUs + MEASURED.deviceUs, idleUs, `idle, ${us(idleUs)} µs`);
+  }
+
+  // The grouped launch: one span over both lanes, on the loop's scale.
+  const grouped = document.getElementById("grouped");
+  const groupedCpu = addLane(grouped, "CPU");
+  const groupedGpu = addLane(grouped, "GPU");
+  lane(groupedCpu, groupedUs);
+  lane(groupedGpu, groupedUs);
+  addAxis(grouped, pxPerUs, MEASURED.grouped.ms, false);
+  const groupedBox = grouped.getBoundingClientRect();
+  const topBox = groupedCpu.getBoundingClientRect();
+  const bottomBox = groupedGpu.getBoundingClientRect();
+  const both = el("div", "both");
+  both.style.left = `${topBox.left - groupedBox.left}px`;
+  both.style.top = `${topBox.top - groupedBox.top}px`;
+  both.style.width = `${groupedUs * pxPerUs}px`;
+  both.style.height = `${bottomBox.bottom - topBox.top}px`;
+  const label = el("div", "both-label");
+  label.style.left = `${topBox.left - groupedBox.left + groupedUs * pxPerUs + 24}px`;
+  label.style.top = `${topBox.top - groupedBox.top}px`;
+  label.style.height = both.style.height;
+  const first = el("div");
+  first.append(el("b", undefined, `${VALUES.groupedMs} ms from the launch to the result`));
+  label.append(first, el("div", undefined, "one wall time: the record does not split it between the CPU and the GPU"));
+  grouped.append(both, label);
+</script>
+</body>
+</html>

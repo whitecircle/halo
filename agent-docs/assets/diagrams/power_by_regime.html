@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Power by regime</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 440px;
+    --bar-h: 34px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* One row per state: its name, then a bar for each of the three readings. */
+  .rows {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(3, 1fr);
+    column-gap: 36px;
+    row-gap: 22px;
+    align-items: center;
+  }
+
+  .rows .head {
+    align-self: end;
+    margin-bottom: calc(var(--heading-gap) - 22px + 10px);
+  }
+
+  .rows .head .name {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  .rows .head .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .rows .head .of {
+    margin-top: 2px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+  }
+
+  .label .state {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .label .load {
+    margin-top: 1px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  /* A bar's track is as long as the reading's maximum: the fill is the share of it. */
+  .track {
+    position: relative;
+    height: var(--bar-h);
+    border-radius: 7px;
+    background: var(--surface);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+
+  .track .fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 7px;
+    background: var(--hue);
+  }
+
+  .track .value {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 21px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .track .value.inside { color: #000; }
+
+  /* The cold start: its key left of its plot, under the rows. */
+  .start {
+    display: grid;
+    grid-template-columns: var(--label-col) minmax(0, 1fr);
+    column-gap: 36px;
+    align-items: start;
+    margin-top: var(--group-gap);
+  }
+
+  .start h3 {
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .start p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .start p + p { margin-top: 12px; }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="rows" id="rows"></div>
+    <div class="start">
+      <div id="start-key"></div>
+      <svg class="chart" id="start"></svg>
+    </div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">One B300. Each bar is the mean of ten readings a second, as nvidia-smi reports them, over 20 s of a loop, 60 training steps or 28 s of waiting.</span>
+      <span class="s">Utilization is the share of time in which at least one kernel was running.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py --sustain <workload> --seconds 20, with
+  // nvidia-smi sampling the board ten times a second beside it.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --sustain gemm --seconds 20 --output power-p1-gemm.json
+  //   python tests/gpu/profiling/benchmark_training_step.py --experiment trainable --scopes full --shapes 1x8192
+  //     --gc off --repeats 60 --output step-power-full8k.json
+  //   python tests/gpu/profiling/benchmark_collectives.py --wait_probe 30 --output wait-probe-2.json
+  // One entry per workload, from the samples inside its run's 20 s window (199 or 200 of them): the means of
+  // power.draw (W), utilization.gpu (%) and clocks.current.sm (MHz), and whether the clock-event reasons hold the
+  // driver's software power cap (0x4). A whole training step is the same three means over the 60 measured steps
+  // of step-power-full8k.json, whose samples carry the power cap. The waiting rank is GPU 0 of two inside an
+  // all-reduce the other rank joins 30 s late: the means of its samples over the last 28 s of wait-probe-2.json's
+  // wait_probe.wait_window_unix, 279 samples. Rows are in order of power.
+  const STATES = [
+    { id: "none", power: 185.1, utilization: 0, clock: 120, capped: false },
+    { id: "idle", power: 237.4, utilization: 0, clock: 2032, capped: false },
+    { id: "waiting", power: 238.4, utilization: 100, clock: 2032, capped: false },
+    { id: "tiny", power: 241.3, utilization: 51.5, clock: 2032, capped: false },
+    { id: "expert_loop", power: 373.9, utilization: 58.8, clock: 2032, capped: false },
+    { id: "small_m", power: 666.1, utilization: 92.9, clock: 2032, capped: false },
+    { id: "elementwise", power: 875, utilization: 100, clock: 2032, capped: false },
+    { id: "silu_mul", power: 1029, utilization: 100, clock: 2032, capped: false },
+    { id: "train_step", power: 1042, utilization: 98, clock: 1927, capped: true },
+    { id: "gemm", power: 1092, utilization: 100, clock: 1187, capped: true },
+  ];
+  /** power-p1-gemm.json, gpu.power_limit_w and gpu.max_sm_clock_mhz. */
+  const POWER_LIMIT = 1100;
+  const MAX_CLOCK = 2032;
+  // The large GEMM loop from a cool start: power-p1-gemm.json, sustain.timeline_seconds_and_chunk_length, each
+  // chunk 16 calls of an 8192³ bf16 torch.mm. [ms from the end of the first chunk to the end of this one,
+  // the chunk's length in ms]. The first chunk, which loads cuBLAS, is left out. Chunks ending in the first second.
+  const CHUNK_CALLS = 16;
+  const CHUNKS = [
+    [9.867, 9.866], [19.66, 9.795], [29.44, 9.773], [39.31, 9.869], [51.89, 12.58], [64.61, 12.72],
+    [77.38, 12.77], [89.99, 12.61], [102.6, 12.62], [115.1, 12.48], [127.4, 12.32], [139.7, 12.29],
+    [152, 12.25], [164.2, 12.22], [176.4, 12.24], [188.6, 12.2], [200.8, 12.16], [212.9, 12.14],
+    [225.1, 12.15], [237.2, 12.12], [249.4, 12.23], [261.7, 12.25], [273.9, 12.28], [286.2, 12.22],
+    [298.4, 12.26], [310.7, 12.27], [322.9, 12.25], [335.2, 12.22], [347.4, 12.22], [359.7, 12.29],
+    [372.2, 12.53], [384.8, 12.56], [397.5, 12.72], [410.7, 13.2], [423.9, 13.22], [437.1, 13.17],
+    [450, 12.93], [462.9, 12.86], [475.7, 12.79], [488.4, 12.71], [501.1, 12.72], [513.8, 12.7],
+    [526.5, 12.68], [539.2, 12.69], [551.8, 12.65], [564.5, 12.69], [577.2, 12.71], [589.9, 12.72],
+    [602.6, 12.69], [615.3, 12.67], [627.9, 12.63], [640.6, 12.65], [653.2, 12.64], [665.9, 12.67],
+    [678.5, 12.67], [691.2, 12.7], [703.9, 12.66], [716.6, 12.64], [729.2, 12.66], [741.8, 12.64],
+    [754.4, 12.55], [767, 12.56], [779.6, 12.64], [792.2, 12.57], [804.7, 12.59], [817.4, 12.65],
+    [830.1, 12.67], [842.7, 12.66], [855.4, 12.63], [867.9, 12.59], [880.5, 12.59], [893.1, 12.57],
+    [905.7, 12.63], [918.4, 12.68], [931.1, 12.69], [943.8, 12.69], [956.5, 12.66], [969.1, 12.67],
+    [981.8, 12.65], [994.5, 12.68],
+  ];
+  /** power-p1-gemm.json, sustain.tflops and the --seconds of its command: the loop's rate over its whole window. */
+  const WINDOW = { seconds: 20, rate: 1384 };
+  /** What each measured state is, by its id in the data. */
+  const NAMES = {
+    none: ["No process", "Nothing holds the GPU"],
+    idle: ["A process and no work", "A CUDA context, nothing running"],
+    tiny: ["Loop of 1-element kernels", "x.add_(1.0), one call after another"],
+    expert_loop: ["Loop over 128 experts", "256 matmuls of 128 rows per pass"],
+    small_m: ["Small-M GEMM loop", "[128, 2880] @ [2880, 2880]"],
+    elementwise: ["Elementwise loop", "addcmul on 4 GiB tensors"],
+    silu_mul: ["Elementwise loop, two kernels", "silu(a) × b on 134 MB tensors"],
+    gemm: ["Large GEMM loop", "8192³ in bf16"],
+    train_step: ["A whole training step", "Qwen3-4B, one row of 8,192 tokens"],
+    waiting: ["A rank waiting in a collective", "In an all-reduce the other rank has not joined"],
+  };
+  /** The three readings, each drawn against its own maximum. */
+  const READINGS = [
+    { field: "power", name: "Board power", of: (max) => `Watts, of the ${fmt(max)} W limit`, max: POWER_LIMIT, hue: "var(--halo-blue)" },
+    { field: "utilization", name: "Utilization", of: () => "Percent of time a kernel is running", max: 100, hue: "var(--halo-violet)" },
+    { field: "clock", name: "SM clock", of: (max) => `MHz, of the ${fmt(max)} MHz maximum`, max: MAX_CLOCK, hue: "var(--halo-indigo)" },
+  ];
+  /** FLOPs of one call of the cold-start loop, an 8192³ GEMM. */
+  const CALL_FLOPS = 2 * 8192 ** 3;
+  /** A chunk at or above this share of the fastest one counts as running before the cap. */
+  const UNCAPPED = 0.9;
+
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const busy = STATES.filter((s) => Math.round(s.utilization) === 100).map((s) => s.power);
+  const NUMBER_WORDS = ["Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"];
+
+  document.getElementById("title").textContent =
+    `${NUMBER_WORDS[busy.length]} states read 100% utilization, from ${fmt(Math.min(...busy))} to ${fmt(Math.max(...busy))}\u00a0W`;
+
+  const rows = document.getElementById("rows");
+  rows.append(el("div"));
+
+  for (const reading of READINGS) {
+    const head = el("div", "head");
+    const name = el("div", "name");
+    const dot = el("i");
+    dot.style.setProperty("--hue", reading.hue);
+    name.append(dot, reading.name);
+    head.append(name, el("div", "of", reading.of(reading.max)));
+    rows.append(head);
+  }
+
+  const bars = [];
+
+  for (const state of STATES) {
+    const [title, load] = NAMES[state.id];
+    const label = el("div", "label");
+    label.append(el("div", "state", title), el("div", "load", load));
+    rows.append(label);
+
+    for (const reading of READINGS) {
+      const track = el("div", "track");
+      const fill = el("div", "fill");
+      fill.style.width = `${(100 * state[reading.field]) / reading.max}%`;
+      fill.style.setProperty("--hue", reading.hue);
+      const text = reading.field === "clock" && state.capped ? `${fmt(state.clock)}, power cap` : fmt(state[reading.field]);
+      const value = el("div", "value", text);
+      track.append(fill, value);
+      rows.append(track);
+      bars.push({ track, fill, value });
+    }
+  }
+
+  // A value sits just past its bar's end, or inside the bar where the track has no room left.
+  for (const { track, fill, value } of bars) {
+    const end = fill.getBoundingClientRect().width;
+
+    if (end + 10 + value.getBoundingClientRect().width <= track.getBoundingClientRect().width) {
+      value.style.left = `${end + 10}px`;
+    } else {
+      value.classList.add("inside");
+      value.style.left = `${end - 10 - value.getBoundingClientRect().width}px`;
+    }
+  }
+
+  // The cold start: each chunk's rate at the time it ended.
+  const chunks = CHUNKS.map(([end, length]) => ({ end, rate: (CHUNK_CALLS * CALL_FLOPS) / (length * 1e-3) / 1e12 }));
+  const fastest = Math.max(...chunks.map((c) => c.rate));
+  const lead = chunks.findIndex((c) => c.rate < UNCAPPED * fastest);
+  const before = chunks.slice(0, lead);
+  const after = chunks.slice(lead);
+  const mean = (values) => values.reduce((sum, v) => sum + v, 0) / values.length;
+  const median = (values) => {
+    const sorted = [...values].sort((a, b) => a - b);
+
+    return sorted.length % 2 ? sorted[(sorted.length - 1) / 2] : (sorted[sorted.length / 2 - 1] + sorted[sorted.length / 2]) / 2;
+  };
+
+  if (after.some((c) => c.rate >= UNCAPPED * fastest)) {
+    throw new Error("The rate returns to its first level after the drop: the note under the heading no longer holds.");
+  }
+
+  const startKey = document.getElementById("start-key");
+  startKey.append(
+    el("h3", undefined, "The large GEMM loop from a cool start"),
+    el("p", undefined, `It runs at ${fmt(mean(before.map((c) => c.rate)))} TFLOP/s for its first ${fmt(before.at(-1).end)} ms, then at ${fmt(median(after.map((c) => c.rate)))} for the rest of this second: the board has reached its limit and the driver has lowered the clock`),
+    el("p", undefined, `Over the whole ${WINDOW.seconds} s that its bars above cover, it averages ${fmt(WINDOW.rate)}`),
+    el("p", undefined, `Each point is ${CHUNK_CALLS} calls. The first ${CHUNK_CALLS}, which load the library, are not drawn`),
+  );
+
+  const HEIGHT = 330;
+  const PAD = { l: 118, r: 24, t: 8, b: 84 };
+  const chart = document.getElementById("start");
+  const width = chart.getBoundingClientRect().width;
+  chart.setAttribute("height", HEIGHT);
+  chart.setAttribute("viewBox", `0 0 ${width} ${HEIGHT}`);
+  const plot = { l: PAD.l, r: width - PAD.r, t: PAD.t, b: HEIGHT - PAD.b };
+  const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+  const xAxis = niceAxis(chunks.at(-1).end, undefined, { most: 5 });
+  const yAxis = niceAxis(fastest * 1.04, undefined, { most: 4 });
+  const sx = (ms) => plot.l + (ms / xAxis.max) * (plot.r - plot.l);
+  const sy = (v) => plot.b - (v / yAxis.max) * (plot.b - plot.t);
+
+  for (const v of yAxis.ticks) {
+    if (v > 0) {
+      add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+    }
+
+    add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, fmt(v));
+  }
+
+  for (const v of xAxis.ticks) {
+    add("line", { x1: sx(v), x2: sx(v), y1: plot.b, y2: plot.b + 8, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "tick", x: sx(v), y: plot.b + 34, "text-anchor": "middle" }, fmt(v));
+  }
+
+  add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+  add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+  add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, `Milliseconds after the first ${CHUNK_CALLS} calls`);
+  add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Rate, TFLOP/s");
+
+  for (const c of chunks) {
+    add("circle", { cx: sx(c.end), cy: sy(c.rate), r: 4, fill: "var(--halo-blue)" });
+  }
+</script>
+</body>
+</html>

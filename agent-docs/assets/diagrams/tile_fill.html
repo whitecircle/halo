@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tile fill</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* Each panel's key sits in a column left of its plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: var(--group-gap);
+    align-items: start;
+  }
+
+  .key h3 {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
+  }
+
+  .key p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
+    color: var(--body);
+  }
+
+  .key p.mark svg { margin-top: 3px; }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+  svg .point { font-size: 21px; fill: var(--text); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="time-key"></div>
+    <svg class="chart" id="time"></svg>
+    <div class="key" id="grid-key"></div>
+    <svg class="chart" id="grid"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each point is the median of 7 samples of back-to-back calls, timed on the device.</span>
+      <span class="s">The work of the GEMM, 2 × M × K × N FLOPs, grows in proportion to N.</span>
+      <span class="s">The grid and the kernel’s name are read from a profiler trace, and the tile is the one in the name.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py: bf16 torch.mm(x, w) with x [128, 2880] and
+  // w [2880, N], the weight read from HBM on every call.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections sweep --sweep_shapes 2880x128 … 2880x18944
+  //     (148 values) --sweep_m 128 --kernel_shapes --repeat_seconds 0.02 --output tilefill.json
+  // tilefill.json, sections.sweep[], one row per N:
+  // [n, graph.seconds_summary.median in µs, kernels.<the nvjet GEMM kernel>.grid[0], number of kernels per call,
+  // the tile's rows, the tile's columns].
+  // graph is the calls replayed from one CUDA graph (the time on the device), median of 7 samples. The grid is
+  // the number of blocks the profiler saw the GEMM kernel launch. Where a call ran two kernels, the second is
+  // cuBLAS's splitKreduce, which sums the parts of a product split along K. The tile is read from the GEMM
+  // kernel's name, `tst_AxB`: A columns of the output by B rows.
+  const SWEEP = [
+    [128, 4.513, 24, 2, 32, 64], [256, 5.185, 32, 2, 32, 64], [384, 5.476, 48, 2, 32, 64], [512, 4.836, 32, 1, 32, 64], [640, 4.867, 40, 1, 32, 64], [768, 4.919, 48, 1, 32, 64],
+    [896, 4.963, 56, 1, 32, 64], [1024, 4.995, 64, 1, 32, 64], [1152, 4.862, 72, 1, 32, 64], [1280, 5.15, 80, 1, 32, 64], [1408, 5.191, 88, 1, 32, 64], [1536, 5.233, 96, 1, 32, 64],
+    [1664, 5.265, 104, 1, 32, 64], [1792, 5.302, 112, 1, 32, 64], [1920, 5.351, 120, 1, 32, 64], [2048, 5.383, 128, 1, 32, 64], [2176, 5.352, 136, 1, 32, 64], [2304, 5.488, 144, 1, 32, 64],
+    [2432, 5.871, 76, 1, 64, 64], [2560, 5.916, 80, 1, 64, 64], [2688, 6.004, 84, 1, 64, 64], [2816, 6.072, 88, 1, 64, 64], [2944, 6.165, 92, 1, 64, 64], [3072, 6.287, 96, 1, 64, 64],
+    [3200, 6.387, 100, 1, 64, 64], [3328, 6.482, 104, 1, 64, 64], [3456, 6.594, 108, 1, 64, 64], [3584, 6.696, 112, 1, 64, 64], [3712, 6.746, 116, 1, 64, 64], [3840, 6.835, 120, 1, 64, 64],
+    [3968, 6.909, 124, 1, 64, 64], [4096, 7.008, 128, 1, 64, 64], [4224, 7.068, 132, 1, 64, 64], [4352, 7.045, 136, 1, 64, 64], [4480, 7.109, 140, 1, 64, 64], [4608, 7.202, 144, 1, 64, 64],
+    [4736, 7.317, 148, 1, 64, 64], [4864, 8.237, 104, 1, 64, 96], [4992, 8.368, 104, 1, 64, 96], [5120, 8.346, 112, 1, 64, 96], [5248, 8.427, 112, 1, 64, 96], [5376, 8.506, 112, 1, 64, 96],
+    [5504, 8.538, 120, 1, 64, 96], [5632, 8.648, 120, 1, 64, 96], [5760, 8.713, 120, 1, 64, 96], [5888, 8.652, 124, 1, 64, 96], [6016, 8.729, 128, 1, 64, 96], [6144, 8.834, 128, 1, 64, 96],
+    [6272, 8.922, 132, 1, 64, 96], [6400, 8.956, 134, 1, 64, 96], [6528, 9.036, 136, 1, 64, 96], [6656, 9.151, 140, 1, 64, 96], [6784, 9.192, 142, 1, 64, 96], [6912, 9.31, 144, 1, 64, 96],
+    [7040, 9.346, 148, 1, 64, 96], [7168, 10.42, 112, 1, 64, 128], [7296, 10.56, 116, 1, 64, 128], [7424, 10.62, 116, 1, 64, 128], [7552, 10.69, 120, 1, 64, 128], [7680, 10.77, 120, 1, 64, 128],
+    [7808, 10.82, 124, 1, 64, 128], [7936, 10.85, 124, 1, 64, 128], [8064, 10.91, 128, 1, 64, 128], [8192, 11, 128, 1, 64, 128], [8320, 11.01, 132, 1, 64, 128], [8448, 11.13, 132, 1, 64, 128],
+    [8576, 11.95, 134, 1, 64, 128], [8704, 12.03, 136, 1, 64, 128], [8832, 12.06, 138, 1, 64, 128], [8960, 12.16, 140, 1, 64, 128], [9088, 12.3, 142, 1, 64, 128], [9216, 12.34, 144, 1, 64, 128],
+    [9344, 12.4, 146, 1, 64, 128], [9472, 12.45, 148, 1, 64, 128], [9600, 12.52, 120, 1, 64, 160], [9728, 12.57, 124, 1, 64, 160], [9856, 12.64, 124, 1, 64, 160], [9984, 12.76, 128, 1, 64, 160],
+    [10112, 12.76, 128, 1, 64, 160], [10240, 12.9, 128, 1, 64, 160], [10368, 12.89, 132, 1, 64, 160], [10496, 13.07, 132, 1, 64, 160], [10624, 12.99, 134, 1, 64, 160], [10752, 13.02, 136, 1, 64, 160],
+    [10880, 13.21, 136, 1, 64, 160], [11008, 13.3, 138, 1, 64, 160], [11136, 13.44, 140, 1, 64, 160], [11264, 13.45, 142, 1, 64, 160], [11392, 13.51, 144, 1, 64, 160], [11520, 13.66, 144, 1, 64, 160],
+    [11648, 13.86, 146, 1, 64, 160], [11776, 13.86, 148, 1, 64, 160], [11904, 15.29, 124, 1, 64, 192], [12032, 15.26, 128, 1, 64, 192], [12160, 15.36, 128, 1, 64, 192], [12288, 15.54, 128, 1, 64, 192],
+    [12416, 15.48, 132, 1, 64, 192], [12544, 15.65, 132, 1, 64, 192], [12672, 15.61, 132, 1, 64, 192], [12800, 16.56, 134, 1, 64, 192], [12928, 16.58, 136, 1, 64, 192], [13056, 16.69, 136, 1, 64, 192],
+    [13184, 16.9, 138, 1, 64, 192], [13312, 17.02, 140, 1, 64, 192], [13440, 17.03, 140, 1, 64, 192], [13568, 17.12, 142, 1, 64, 192], [13696, 17.14, 144, 1, 64, 192], [13824, 17.26, 144, 1, 64, 192],
+    [13952, 17.25, 146, 1, 64, 192], [14080, 17.33, 148, 1, 64, 192], [14208, 17.39, 148, 1, 64, 192], [14336, 16.35, 128, 1, 64, 224], [14464, 16.38, 132, 1, 64, 224], [14592, 16.42, 132, 1, 64, 224],
+    [14720, 16.51, 132, 1, 64, 224], [14848, 16.47, 134, 1, 64, 224], [14976, 16.63, 134, 1, 64, 224], [15104, 16.66, 136, 1, 64, 224], [15232, 16.98, 136, 1, 64, 224], [15360, 16.99, 138, 1, 64, 224],
+    [15488, 17.04, 140, 1, 64, 224], [15616, 17.08, 140, 1, 64, 224], [15744, 17.36, 142, 1, 64, 224], [15872, 17.44, 142, 1, 64, 224], [16000, 17.46, 144, 1, 64, 224], [16128, 17.71, 144, 1, 64, 224],
+    [16256, 17.76, 146, 1, 64, 224], [16384, 17.88, 148, 1, 64, 224], [16512, 18.17, 148, 1, 64, 224], [16640, 20.38, 132, 1, 64, 256], [16768, 20.53, 132, 1, 64, 256], [16896, 20.53, 132, 1, 64, 256],
+    [17024, 20.52, 134, 1, 64, 256], [17152, 20.92, 134, 1, 64, 256], [17280, 20.97, 136, 1, 64, 256], [17408, 21.03, 136, 1, 64, 256], [17536, 21.06, 138, 1, 64, 256], [17664, 21.16, 138, 1, 64, 256],
+    [17792, 21.32, 140, 1, 64, 256], [17920, 21.26, 140, 1, 64, 256], [18048, 21.3, 142, 1, 64, 256], [18176, 21.39, 142, 1, 64, 256], [18304, 21.48, 144, 1, 64, 256], [18432, 21.26, 144, 1, 64, 256],
+    [18560, 21.86, 146, 1, 64, 256], [18688, 21.55, 146, 1, 64, 256], [18816, 21.91, 148, 1, 64, 256], [18944, 21.85, 148, 1, 64, 256],
+  ];
+  /** tilefill.json, gpu.sms: the streaming multiprocessors of a B300. */
+  const SMS = 148;
+  /** The fixed dimensions of the sweep. */
+  const M = 128;
+  const K = 2880;
+
+  const points = SWEEP.map(([n, time, blocks, kernels, tileRows, tileColumns]) => ({ n, time, blocks, split: kernels > 1, tileRows, tileColumns }));
+  const full = points.find((p) => p.blocks >= SMS);
+  const after = points.filter((p) => p.n > full.n);
+  /** The points whose kernel has another tile than the point before: the grid before, and the grid the old tile would need. */
+  const retiled = points.slice(1).flatMap((p, i) => {
+    const from = points[i];
+
+    return from.tileRows === p.tileRows && from.tileColumns === p.tileColumns
+      ? []
+      : [{ ...p, before: from.blocks, needed: Math.ceil(p.n / from.tileColumns) * Math.ceil(M / from.tileRows), grew: p.tileRows * p.tileColumns > from.tileRows * from.tileColumns }];
+  });
+  const [firstRetile, ...laterRetiles] = retiled;
+
+  if (retiled.some((p) => !p.grew || p.needed <= SMS || p.blocks >= p.before) || laterRetiles.some((p) => p.n <= full.n) || firstRetile.n >= full.n) {
+    throw new Error("the grid key says cuBLAS takes a larger tile each time the grid would pass the SM count, once before the grid first reaches it: the sweep no longer shows that");
+  }
+  const fmt = (v) => v.toLocaleString("en-US");
+  const times = (ratio) => (ratio >= 10 ? String(Math.round(ratio)) : ratio.toFixed(1));
+
+  document.getElementById("title").textContent =
+    `Up to ${SMS} blocks, ${times(full.n / points[0].n)} times the work takes ${times(full.time / points[0].time)} times as long`;
+
+  const HUES = { time: "var(--halo-blue)", blocks: "var(--halo-violet)" };
+  /** A key swatch: a 36 × 24 drawing of the mark. */
+  const swatch = (draw) => {
+    const svg = svgEl("svg", { viewBox: "0 0 36 24", "aria-hidden": "true" });
+    draw(svg);
+
+    return svg;
+  };
+  const dots = (hue, hollow = false) => (svg) =>
+    [8, 18, 28].forEach((x) => svg.append(svgEl("circle", { cx: x, cy: 12, r: 3.5, ...(hollow ? { fill: "var(--bg)", stroke: hue, "stroke-width": 1.75 } : { fill: hue }) })));
+  const SWATCHES = {
+    time: dots(HUES.time),
+    blocks: dots(HUES.blocks),
+    split: dots(HUES.time, true),
+    splitBlocks: dots(HUES.blocks, true),
+    full: (svg) => svg.append(svgEl("line", { x1: 18, y1: 1, x2: 18, y2: 23, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" })),
+    sms: (svg) => svg.append(svgEl("line", { x1: 2, y1: 12, x2: 34, y2: 12, stroke: "var(--secondary)", "stroke-width": 1.5 })),
+  };
+
+  /** Fills a key column: its heading with a swatch, plain lines, then one line per mark. */
+  function fillKey(id, { name, mark, lines, marks = [] }) {
+    const key = document.getElementById(id);
+    const heading = el("h3");
+    heading.append(swatch(SWATCHES[mark]), name);
+    key.append(heading);
+
+    for (const line of lines) {
+      key.append(el("p", undefined, line));
+    }
+
+    for (const [kind, text] of marks) {
+      const p = el("p", "mark");
+      p.append(swatch(SWATCHES[kind]), el("span", undefined, text));
+      key.append(p);
+    }
+  }
+
+  fillKey("time-key", {
+    name: "Time on the device",
+    mark: "time",
+    lines: [`A bf16 GEMM [${M}, ${K}] @ [${K}, N] on one B300, the weight read from HBM on every call, at ${points.length} values of N`],
+    marks: [
+      ["split", `At the ${points.filter((p) => p.split).length} smallest N cuBLAS splits the product along K and runs a second kernel to add the parts`],
+      ["full", `N = ${fmt(full.n)}: the grid first reaches ${SMS} blocks`],
+    ],
+  });
+  fillKey("grid-key", {
+    name: "Blocks in the grid",
+    mark: "blocks",
+    lines: [
+      "The blocks of the GEMM kernel in each launch",
+      `cuBLAS moves to a kernel with a larger tile each time the grid would pass ${SMS} blocks: at N = ${fmt(firstRetile.n)}, where the grid falls from ${firstRetile.before} to ${firstRetile.blocks}, and ${laterRetiles.length} times past N = ${fmt(full.n)}, where it stays between ${Math.min(...after.map((p) => p.blocks))} and ${Math.max(...after.map((p) => p.blocks))}`,
+    ],
+    marks: [
+      ["splitBlocks", `The ${points.filter((p) => p.split).length} smallest N: the first of the call’s two kernels`],
+      ["sms", `${SMS}, the SMs of a B300`],
+    ],
+  });
+
+  /** Plot-area insets inside each SVG: room for the y title and ticks on the left. */
+  const PAD = { l: 118, r: 24 };
+  const xAxis = niceAxis(points.at(-1).n * 1.01, undefined, { most: 8 });
+
+  /** Sets up one panel's SVG and returns its plot box, x scale and an element adder. */
+  function panel(id, height, top, bottom) {
+    const chart = document.getElementById(id);
+    const width = chart.getBoundingClientRect().width;
+    chart.setAttribute("height", height);
+    chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const plot = { l: PAD.l, r: width - PAD.r, t: top, b: height - bottom };
+    const sx = (n) => plot.l + (n / xAxis.max) * (plot.r - plot.l);
+    const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+
+    return { plot, sx, add, height };
+  }
+
+  /** Draws a panel's frame: gridlines and labels at the y ticks, x tick marks, its axis lines and its rotated title. */
+  function frame({ plot, sx, add }, axis, sy, title) {
+    for (const v of axis.ticks) {
+      if (v > 0) {
+        add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+
+      add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, fmt(v));
+    }
+
+    for (const v of xAxis.ticks) {
+      add("line", { x1: sx(v), x2: sx(v), y1: plot.b, y2: plot.b + 8, stroke: "var(--secondary)", "stroke-width": 1 });
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, title);
+  }
+
+  // The time panel.
+  {
+    const p = panel("time", 430, 8, 8);
+    const { plot, sx, add } = p;
+    const axis = niceAxis(Math.max(...points.map((q) => q.time)) * 1.04);
+    const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
+    frame(p, axis, sy, "Time per call, µs");
+    add("line", { x1: sx(full.n), x2: sx(full.n), y1: plot.t, y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+
+    for (const q of points) {
+      add("circle", { cx: sx(q.n), cy: sy(q.time), r: 3.5, ...(q.split ? { fill: "var(--bg)", stroke: HUES.time, "stroke-width": 1.75 } : { fill: HUES.time }) });
+    }
+  }
+
+  // The grid panel, on the same N axis, which it labels.
+  {
+    const p = panel("grid", 400, 8, 84);
+    const { plot, sx, add, height } = p;
+    const axis = niceAxis(SMS * 1.12, undefined, { most: 3 });
+    const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
+    frame(p, axis, sy, "Blocks");
+
+    for (const v of xAxis.ticks) {
+      add("text", { class: "tick", x: sx(v), y: plot.b + 34, "text-anchor": "middle" }, fmt(v));
+    }
+
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: height - 6, "text-anchor": "middle" }, "N, columns of the output");
+    add("line", { x1: plot.l, x2: plot.r, y1: sy(SMS), y2: sy(SMS), stroke: "var(--secondary)", "stroke-width": 1.5 });
+    add("line", { x1: sx(full.n), x2: sx(full.n), y1: plot.t, y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+
+    for (const q of points) {
+      add("circle", { cx: sx(q.n), cy: sy(q.blocks), r: 3.5, ...(q.split ? { fill: "var(--bg)", stroke: HUES.blocks, "stroke-width": 1.75 } : { fill: HUES.blocks }) });
+    }
+  }
+</script>
+</body>
+</html>
