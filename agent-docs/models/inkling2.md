@@ -153,4 +153,6 @@ The attention example ran 16 steps of 8 rollouts on WebInstruct-verified at EP2 
 
 The expert example, run the same way, peaked at 232.4 GiB allocated on its largest micro-batch of 7,703 tokens (245.5 GiB in `nvidia-smi`). A step took 24.4–88.1 s: the rollout 8.0–60.4 s, training 3.7–15.3 s and the adapter sync 8.3–19.3 s, which publishes the 4.8 GB adapter and loads it on the server.
 
+The two examples as shipped, with the row cap and with degenerate groups dropped, also ran 16 steps each on the same GPUs. No row went over the cap, and `nvidia-smi` peaked at 227.7 GiB with attention LoRA and 244.5 GiB with expert LoRA.
+
 CPU coverage: `tests/cpu/models/test_inkling2_frozen_experts.py`, `tests/cpu/kernels/test_frozen_bank.py`, `tests/cpu/models/test_inkling2_block_residual_patch.py`. GPU gates: `test_ep_family_vs_reference.py --family inkling2_text` (with and without `--expert-tp-size 2`), `test_lazy_load_inkling2_frozen.py`, `test_lora_merged_save_resume.py --family inkling2_text`, `test_lora_frozen_banks_resume.py`, `test_frozen_bank_fused_dequant.py`, `test_inkling2_relative_flex.py`, `test_inkling2_block_residual.py`.
