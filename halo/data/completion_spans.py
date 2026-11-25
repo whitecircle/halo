@@ -11,6 +11,7 @@ from transformers import PreTrainedTokenizerBase
 
 from halo.data.chat_render import render_tool_round_probe
 from halo.data.turn_markers import (
+    TEXT_PROBE_CONVERSATIONS,
     reject_missing_response_marker,
     resolve_eos_token_ids,
     tokenize_response_template,
@@ -441,21 +442,49 @@ def reject_untrainable_completions(
 ) -> None:
     """Refuse completion-only labels that would train no token of any of ``probe_conversations``: a marker the
     template never emits, or no assistant turn ending in ``eos_token_ids``, as with a template borrowed from another
-    family until ``eos_token`` names its closing token."""
+    family until ``eos_token`` names its closing token. One probe the marker matches that trains a span is enough;
+    the message quotes the first matched probe that trains none."""
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
     span_bounds = SpanBounds(turn_opener=find_turn_opener(tokenizer, response_token_ids, eos_token_ids))
+    untrained = None
     for text in verify_marker_renders(render, probe_conversations, response_prompt_template):
         input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         starts, ends = resolve_completion_spans(
             input_ids, response_token_ids, eos_token_ids, span_bounds=span_bounds, **span_policy
         )
-        if starts and all(end == -1 for end in ends):
-            terminators = sorted(tokenizer.convert_ids_to_tokens(sorted(eos_token_ids)))
-            raise ValueError(
-                f"{subject}: no assistant turn of the chat template ends in a turn terminator {terminators}, so "
-                f"completion-only masking would train no token; the template renders {text!r}. Set eos_token to "
-                f"the token the template closes an assistant turn with, or set train_on_completions_only: false."
-            )
+        if any(end != -1 for end in ends):
+            return
+        if starts and untrained is None:
+            untrained = text
+    if untrained is not None:
+        terminators = sorted(tokenizer.convert_ids_to_tokens(sorted(eos_token_ids)))
+        raise ValueError(
+            f"{subject}: no assistant turn of the chat template ends in a turn terminator {terminators}, so "
+            f"completion-only masking would train no token; the template renders {untrained!r}. Set eos_token to "
+            f"the token the template closes an assistant turn with, or set train_on_completions_only: false."
+        )
+
+
+def reject_untrainable_text_completions(
+    tokenizer,
+    response_prompt_template: str,
+    eos_token_ids: frozenset[int],
+    span_policy: dict[str, bool],
+    subject: str,
+) -> None:
+    """:func:`reject_untrainable_completions` over :data:`TEXT_PROBE_CONVERSATIONS` as the tokenizer's chat template
+    renders them; a tokenizer without a chat template is not probed."""
+    if not getattr(tokenizer, "chat_template", None):
+        return
+    reject_untrainable_completions(
+        lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
+        TEXT_PROBE_CONVERSATIONS,
+        tokenizer,
+        response_prompt_template,
+        eos_token_ids,
+        span_policy,
+        subject,
+    )
 
 
 def find_injected_block(
