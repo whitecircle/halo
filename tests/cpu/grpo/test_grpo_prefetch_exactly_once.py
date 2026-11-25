@@ -802,8 +802,8 @@ def test_stopping_the_worker_cancels_the_rounds_still_collecting(caplog):
 
 
 def test_stopping_the_worker_drops_the_rounds_no_later_step_consumes():
-    """A second ``train()`` restarts the worker over the same queues: an output delivered before the stop
-    would be popped against that run's own pending rounds."""
+    """An output delivered before the stop, popped by a second ``train()``, would pair with that run's own pending
+    rounds."""
     host = _Host()
     host.round(["b0"])
     host.worker_step()  # b0's rollouts are delivered, unconsumed
@@ -952,10 +952,9 @@ def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
 
 
 def _async_state(server_configs, enable_prefetch=None):
-    host = types.SimpleNamespace(
-        async_config=AsyncRolloutConfig(rollout_server_configs=server_configs, enable_prefetch=enable_prefetch)
-    )
-    _T._init_async_state(host)
+    host = object.__new__(_T)
+    host.async_config = AsyncRolloutConfig(rollout_server_configs=server_configs, enable_prefetch=enable_prefetch)
+    host._init_async_state()
     return host
 
 
