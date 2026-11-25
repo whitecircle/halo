@@ -95,7 +95,7 @@ EP mechanics are in the [Expert Parallelism guide](../parallelism/expert-paralle
 
 `tests/cpu/models/test_moe_family_specs.py` holds every spec to exactly one family class, and the spec index refuses a `model_type` two specs claim.
 
-**1. Write the EP layer.** Subclass `EPSharedExpertsMoELayerBase` when the forward is the routed template — route the flattened tokens, then routed plus shared experts — and supply `route_tokens_to_experts` over the fp32 router logits (LFM-2, Cohere2 MoE) or override `_route_hidden_states` where the router routes itself (Qwen3, Qwen3.5, Bailing, DeepSeek-V4's hash layers). `EPGroupLimitedMoELayerBase` sits on top of it when routing carries the six DeepSeek-V3 group-limited knobs (GLM-4, Laguna, Mistral4, GLM-5 Next, Step-3.7, Nemotron-H). Subclass `EPMoELayerBase` directly only for a forward of another shape (GPT-OSS, Gemma4, Inkling, Zaya). Crib the closest layout:
+**1. Write the EP layer.** Subclass `EPSharedExpertsMoELayerBase` when the forward is the routed template — route the flattened tokens, then routed plus shared experts — and supply `route_tokens_to_experts` over the fp32 router logits (LFM-2, Cohere2 MoE) or override `_route_hidden_states` where the router routes itself (Qwen3, Qwen3.5, Bailing, DeepSeek-V4's hash layers). `EPGroupLimitedMoELayerBase` sits on top of it when routing carries the six DeepSeek-V3 group-limited knobs (GLM-4, Laguna, Mistral4, GLM-5 Next, Step-3.7, Nemotron-H, Inkling 2). Subclass `EPMoELayerBase` directly only for a forward of another shape (GPT-OSS, Gemma4, Inkling, Zaya). Crib the closest layout:
 
 | Layout | Closest EP layer |
 |---|---|
@@ -121,8 +121,8 @@ The base (`moe_layer/layer.py`, with its compute, routing, grad-sync, expert-LoR
 | `_detect_hidden_dim(router, experts)` | the router projection's input width, else `gate_up_proj`'s | Nemotron-H, whose wire carries the experts' width, the latent where a release has one; Gemma4 and Zaya reach the fallback by having no bare router projection |
 | `_adopt_routing(block)` | `self.top_k = self._find_top_k(block)` | every family with more knobs: a selection function, a correction-bias buffer. Group-limited families inherit `EPGroupLimitedMoELayerBase`, whose `_adopt_routing` resolves the DeepSeek-V3 knobs off block → gate → config |
 | `_adopt_shared_experts(block)` | adopt `FAMILY.shared_expert_attrs` | Cohere2 (combination strategy), Qwen3.5/3.6 (a second gate module) |
-| `_adopt_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module); Nemotron-H adds its latent projections |
-| `_adopt_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params`, which stores a `SEPARATE_GLU` family's halves apart (Qwen3) | Bailing (stack), GptOss (interleave), Nemotron-H (no gate) |
+| `_adopt_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module), Inkling 2 (softcapped SwiGLU); Nemotron-H adds its latent projections |
+| `_adopt_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params`, which stores a `SEPARATE_GLU` family's halves apart (Qwen3) | Bailing (stack), GptOss (interleave), Nemotron-H (no gate), Inkling 2 (frozen quantized banks) |
 | `_init_summary_extras(block)` | `()`; the group-limited base adds its resolved knobs, and every line already prints `wire_width` and `top_k` | any family with a field worth printing at construction, extending `super()` |
 
 The forward's seams, each overridden only where the family differs:
@@ -130,7 +130,7 @@ The forward's seams, each overridden only where the family differs:
 | Hook | Default | Overridden by |
 |---|---|---|
 | `_route_hidden_states(flat, **kwargs)` | `route_tokens_to_experts` over `_router_logits` | a router that selects itself: Qwen3, Qwen3.5/3.6, Bailing, DeepSeek-V4 |
-| `_router_logits(flat)` | the gate's logits | a router whose forward also selects: LFM-2; Nemotron-H (fp32) |
+| `_router_logits(flat)` | the gate's logits | a router whose forward also selects: LFM-2; Nemotron-H, Inkling 2 (fp32) |
 | `_gate_weights_at(logits, indices)` | required where routing replay or `_biased_route` runs | every family whose router selects or whose route is biased in the base, with the router's own arithmetic |
 | `_routing_scores(logits)` | sigmoid, on the group-limited base | Mistral4 (softmax) |
 | `_shared_expert_output(hidden)` | the shared expert | Qwen3.5/3.6 (sigmoid gate) |
@@ -202,7 +202,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 - `MoEFamilySpec.balancing_slot` — the family's exported balancing slot: its first spelling is the live-tree path the layer adopts, so the sign-updates land in exported state (`bias_update_transient` is the user's explicit opt-in where there is none), and its `config_flag` the field flipped for a slot the config gates. A config-gated slot also implements the `_materialize_native_balancing_slot` hook (LFM-2).
 
 - `SEVERS_AUX_LOSS` — `True` when the EP layer bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `halo/models/moe/balancing.py`, applied by `halo/callbacks/balancing.py`).
-- `_SHARED_EXPERT_REQUIRED` — `True` by default: a declared shared expert the block does not carry raises as a rename instead of dropping the FFN from every output. `False` only where the block may lack one: a config flag decides (Bailing, Cohere2 MoE) or upstream ships none (LFM-2).
+- `_SHARED_EXPERT_REQUIRED` — `True` by default: a declared shared expert the block does not carry raises as a rename instead of dropping the FFN from every output. `False` only where the block may lack one: a config flag decides (Bailing, Cohere2 MoE) or upstream ships none (LFM-2, Inkling 2).
 
     `replicated_named_params()` is derived from the adopted name, so a family with the ordinary single shared expert writes no override. Replicated submodules are FSDP-ignored and DP-averaged by the router hook, and an undeclared one trips the same construction-time scan. Override `replicated_named_params()` only when the replicated set is a different *shape* — Qwen3.5/3.6, whose gate is a second module, and Nemotron-H, with its latent projections.
 
@@ -221,7 +221,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - `_OPTIONAL_ROUTING_KNOBS` — for a `EPGroupLimitedMoELayerBase` family only: the routing knobs (any spelling) its block, router and config genuinely do not declare, so the shared `_adopt_routing` may substitute a neutral default.
 
-    Everything else is required — an upstream rename raises instead of silently under-scaling every routed weight. Laguna and Step-3.7 carry no group limiting and no `norm_topk_prob`; no family opts out of `routed_scaling_factor`.
+    Everything else is required — an upstream rename raises instead of silently under-scaling every routed weight. Laguna, Step-3.7 and Inkling 2 carry no group limiting and no `norm_topk_prob`; no family opts out of `routed_scaling_factor`.
 
 **4. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`halo/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
 

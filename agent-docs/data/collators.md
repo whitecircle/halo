@@ -253,8 +253,9 @@ A family outside the table above and the family specs gets a warning on every ba
 
 ## Constraints
 
-- **`packing` and `padding_free` are mutually exclusive.** Packing pads concatenated sequences to
-  `max_length`; padding-free flattens to one variable-length tensor. Pick packing for short
+- **`packing` and `padding_free` are mutually exclusive.** Packing concatenates documents into rows of
+  at most `max_length` (flattened to one row of real tokens outside PP, as in
+  [Collator classes](#collator-classes)); padding-free flattens unpacked rows to one variable-length tensor. Pick packing for short
   sequences, padding-free for long/variable ones.
 
 - **Both want a varlen Flash Attention backend.** The gate is the model's **resolved**
@@ -264,7 +265,7 @@ A family outside the table above and the family specs gets a warning on every ba
     Off it, `padding_free` **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing`
     **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents
     makes packing raise too ([Document isolation](#document-isolation-under-packing)), and
-    DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
+    DeepSeek-V4 (eager-only, and its compressed-KV windows cross documents on every backend) refuses both. Gemma 4 lands on the
     warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
 - **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose kernels are not validated with a

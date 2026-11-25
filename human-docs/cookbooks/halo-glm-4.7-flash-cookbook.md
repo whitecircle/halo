@@ -28,7 +28,7 @@ halo launch sft examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml -n 8 \
 Add one of these to the full fine-tune command:
 
 - EP8 + CP2, for long sequences: `--context_parallel_size=2 --packing=false`. EP+CP needs EP to fill
-  the node, so EP8 is the only EP size that pairs with CP on eight GPUs.
+  the NVLink domain, so EP8 is the only EP size that pairs with CP on eight GPUs.
 - EP8 + TP2, when attention memory is the limit: `--tensor_parallel_size=2`
 - Pure ETP8, to shard every expert instead of placing whole experts: `--expert_parallel_size=1 --expert_tensor_parallel_size=8`
 - A 4-way expert split: `--expert_parallel_size=4 --expert_tensor_parallel_size=2`

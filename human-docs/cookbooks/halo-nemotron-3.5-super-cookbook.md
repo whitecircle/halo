@@ -32,8 +32,8 @@ Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model
 | Images | about 6,790 | 3,198 | 184–188 GB |
 | Half image rows, half text | — | 3,166 | 183–186 GB |
 
-A B300 reports 288 GB, and the top GPU reached 99.4% at 32,000 and 99% at 50,000, so treat those as the limit. Each
-`max_length` is a starting point: watch the first steps' peak.
+A B300's driver reports 287.4 GB (NVIDIA lists 288 GB), and the top GPU reserved 283 GB at 32,000 and at 50,000,
+so treat those as the limit. Each `max_length` is a starting point: watch the first steps' peak.
 
 ## Recipes
 
@@ -95,8 +95,8 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
 
 - **Gradient checkpointing stays on.** By arithmetic a token holds about 66 MB without it, so a GPU fits about
   1,650 tokens per rank. It costs 37% on a Mamba layer.
-- **Speed.** The Mamba scan dominates, at 64.8% of the tower's forward and backward at EP8, and throughput stays flat
-  with length. Rows of many short documents scan slower: 64 × 128 costs 1.9× one 8,192-token document on a Mamba layer.
+- **Speed.** The Mamba layers take 64.8% of the tower's forward and backward at EP8 and 8,192 tokens per rank, and
+  their scan is the bottleneck. Throughput stays flat with length. Rows of many short documents scan slower: 64 × 128 costs 1.9× one 8,192-token document on a Mamba layer.
 - **Attention.** Leave `attn_implementation` unset: FA4 runs both towers on B300, with FA2 as the fallback.
 - **Pad token.** `pad_token: <unk>` keeps the export's config equal to the release's. The tokenizer's own pad is
   its eos.
@@ -104,7 +104,7 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
   text, so the empty block trains as part of the completion.
 - **Router balancing.** `auto` picks `bias_update`, which trains the router's own bias and ships it in every
   checkpoint. The bias stays fp32 and routes with balancing off as well.
-- **LoRA.** `lora_r` must be a multiple of 8. An adapter on `conv1d` is refused.
+- **LoRA.** `lora_r` must be a multiple of 8 for the expert adapters. An adapter on `conv1d` is refused.
 
 ## Limits
 

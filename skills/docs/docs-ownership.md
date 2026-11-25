@@ -268,6 +268,8 @@ changes.
 | `scripts/docs/**` | `agent-docs/infrastructure/ci.md`, `skills/docs/SKILL.md` |
 | `agent-docs/assets/**/*.html` figure pages, `skills/visuals/kit/**` | the page embedding the figure (every embedding page, for a kit change); re-render in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
 | `tests/baselines/bench/**`, `tests/gpu/profiling/benchmark_sft_{dense,ep}.py` | `agent-docs/contributing/README.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `tests/gpu/profiling/{measurement,benchmark_roofline,benchmark_memory_hierarchy,benchmark_attention_scaling,benchmark_loss_head,benchmark_training_step,benchmark_matmul_precision,benchmark_first_call,benchmark_collectives}.py` | `agent-docs/reference/gpu-training-theory.md` (Reproduce the numbers), `agent-docs/reference/scripts-reference.md` |
+| `tests/gpu/profiling/{benchmark_lowp_kernels,benchmark_grouped_mm}.py` | `agent-docs/reference/gpu-training-theory.md` (Reproduce the numbers), `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/grouped-gemm.md` (`benchmark_grouped_mm`) |
 
 ## Cross-cutting
 

@@ -97,7 +97,7 @@ Bloat:
 Lean:
 
 > Grouped GEMM (`torch.nn.functional.grouped_mm`) batches the per-expert matmuls
-> into one kernel launch (SM90+, PyTorch 2.11+). On Qwen3-30B-A3B at EP=2 it runs
+> into one kernel launch (SM90+, PyTorch 2.11+). On Qwen3-30B-A3B at `ep2` it runs
 > 2.45× faster than the loop, measured on 2× B300 with 8,192-token rows at batch 4.
 > The gain shrinks as the batch grows, so measure at batch 4 or more.
 

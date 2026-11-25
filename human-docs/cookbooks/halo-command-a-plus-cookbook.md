@@ -55,7 +55,7 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 
 ## Settings that matter
 
-- **Sequence length.** `max_length: 1024` peaks at about 255 GiB of the B300's ~268 GiB. That leaves
+- **Sequence length.** `max_length: 1024` peaks at about 255 GiB of the B300's 267.7 GiB. That leaves
   DeepEP's buffer room to grow. At 4,096 the allocation fails once a longer batch forces it to grow.
 - **Router balancing.** The recipe sets `moe_balancing: bias_update_transient` at the default
   `router_balancing_rate` of 1.0e-3. The model has no usable auxiliary loss and no exportable bias slot,

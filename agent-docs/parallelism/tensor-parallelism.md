@@ -5,7 +5,7 @@ HF-native load places each rank's shard as it reads, while plain FSDP2 and DDP l
 onto every GPU first ([Data Parallelism](data-parallelism.md#fsdp2-strategy-by-mode)).
 `data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
 (`ParallelismConfig`, `halo/distributed/parallelism_config.py`). Why its all-reduce has to stay on
-NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collectives).
+NVLink: [GPU Training Theory → Tensor parallelism](../reference/gpu-training-theory.md#tensor-parallelism).
 
 > [!WARNING]
 > **TP buys little memory on a fine-grained MoE**
@@ -164,8 +164,10 @@ replicated.
 
 Every TP rank must call `model.forward` with **identical** `input_ids` / `attention_mask` shapes
 *and* values — column/row-parallel collectives assume each rank computes a partial result for the
-same hidden states. Mismatched inputs do not error early; they deadlock at the first `o_proj`
-all-reduce (visible in py-spy as ranks stuck at different sub-modules of one forward).
+same hidden states. Mismatched inputs do not error. Inputs of different shapes stop the job at the
+first all-reduce of the forward until the NCCL watchdog ends it (visible in py-spy as ranks stuck at
+different sub-modules of one forward); inputs of the same shape complete every all-reduce and sum partial
+results of different inputs, so the run is wrong with no error.
 
 This affects trainers pulling per-rank data from an external service. `DistributedOnlineGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
@@ -225,7 +227,8 @@ with plain `dist.all_reduce` or DDP — FSDP2's `fully_shard` understands DTenso
 loader builds the mesh and attaches it to the model; the trainer wraps over the DP dimension via
 `apply_fsdp2_for_tp` (`halo/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
 point with its EP modules as `ignored_params`. Pure TP (DP=1)
-skips FSDP. Prefer `tp_size = world_size` when the model fits the TP group's memory.
+skips FSDP. TP ranks share one batch, so each TP group is one replica and raising `tp_size` divides the
+number of replicas ([GPU Training Theory → Tensor parallelism](../reference/gpu-training-theory.md#tensor-parallelism)).
 
 ## Gradient sync and the grad norm
 

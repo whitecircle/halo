@@ -105,8 +105,9 @@ round's generation.
 - Startup and every push fail fast: an error on any rank raises on all ranks together. An engine restarted between
   syncs is the exception: the client reconnects and re-sends, with a warning
   ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
-- Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales
-  with total expert count, not `ep_size`.
+- Each EP layer's expert gather assembles the **full expert set** on the forwarding rank alone, which also holds the
+  layer issued ahead (`HALO_WEIGHT_SYNC_GATHER_AHEAD`, 1 by default), so that rank's peak scales with total expert
+  count, not `ep_size` ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 
 ## Multiple servers and prefetch
 
@@ -198,8 +199,9 @@ address differs per server.
 ## Shipped recipes
 
 `examples/grpo/environmental/<family>/<backend>/`: `gemma4`, `gptoss` and `qwen3_5`, each with `vllm/` and `sglang/`
-(`sglang/` ships ep1 files only). In a filename, `-lora-` / `-full-` is the adapter and `-ep1` / `-ep4` the expert distribution
-(none, or a 4-rank DeepEP group). Each header carries its launch line and server flags. One template sits at the root:
+(`sglang/` ships ep1 files only), plus `inkling2/vllm/` and `qwen4_exp/vllm/`. In a filename, `-lora-` / `-full-` is
+the adapter and `-ep<N>` the expert distribution (`-ep1` none, otherwise an N-rank DeepEP group: 2, 4 or 8). Each
+header carries its launch line and server flags. One template sits at the root:
 `environmental-grpo-template.yaml` (`react_math`). `code-contests-judge/` holds the audit judge's `context_file`s the
 code-contests recipes share ([Reward](environments/tasks/code-contests/reward.md)).
 

@@ -31,17 +31,22 @@ enable recipe in [Debugging](../../agent-docs/reference/debugging.md).
 
 ## Triage decision tree
 
-### Hang / deadlock (job stuck, no progress, GPUs idle or one busy)
+### Hang / deadlock (job stuck, no progress; waiting GPUs read 100% utilization at idle-process power)
 
-A hang is almost always a **collective mismatch**: one rank issues a collective
-the others never reach.
+In a hang, ranks wait in a collective that another rank never reaches: that rank issued a
+different collective (a **collective mismatch**), raised, or is still compiling or loading
+([GPU Training Theory → How distributed runs fail](../../agent-docs/reference/gpu-training-theory.md#how-distributed-runs-fail)).
 
-1. Dump every rank's stack — the rank *not* in a collective is the culprit:
+1. Dump every rank's stack:
    `python scripts/profiling/py_spy_diag.py dump` from a shell in the training container attaches
    py-spy to every torchrun rank on that node. No launch-time setup, so it works on a job already hung;
    one file per rank under `$HALO_DATA_ROOT/profiling/py_spy/stacks`. Attaching needs
    `--cap-add=SYS_PTRACE` when the host's `kernel.yama.ptrace_scope` is 1 or 2 (0 needs nothing, 3 never
-   attaches), else py-spy fails with `Permission denied`.
+   attaches), else py-spy fails with `Permission denied`. A rank somewhere its peers are not (the
+   dataloader, another branch) is the culprit. A collective does not block the CPU, so a waiting rank's
+   stack shows the first line that needed a GPU result, which can be later than the stuck collective;
+   when every rank waits, PyTorch's flight recorder (set up before launch, NCCL timeout branch step 2)
+   names the mismatched collective.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `assert_rank_uniform(tuple(t.shape), group=..., label=..., strict=True)`.
 3. An EP job that stops at startup naming `concurrent >2-rank DeepEP dispatch groups` is a rejected
@@ -114,7 +119,9 @@ the others never reach.
   → per-rank flame SVGs (in-script equivalent: `record_flamegraphs`).
 - Operator/kernel picture: `enable_torch_profiler: true` (`TorchProfilerCallback`) → Chrome trace;
   the EP phases are labeled ranges (`ep.dispatch` / `ep.expert_compute` / `ep.combine`, plus
-  `grad_sync.reduce_bucketed`), so the comm fraction reads directly off the Perfetto timeline.
+  `grad_sync.reduce_bucketed`), so each phase reads directly off the Perfetto timeline. `ep.combine`
+  includes the wait for the rank with the most rows, which is most of it at ep8 on uniform token ids
+  ([Throughput Benchmarks → Where the EP step's time goes](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)).
   `trace_report.py` turns the trace into TraceLens workbooks (gpu_timeline compute/comm/idle split,
   op tables, roofline).
 

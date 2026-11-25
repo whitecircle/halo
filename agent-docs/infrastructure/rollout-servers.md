@@ -44,8 +44,9 @@ Use vLLM unless a run needs SGLang specifically.
 
 ## Weight sync
 
-Both engines receive the **full model** every sync: merged LoRA touches ~95% of bytes, so there is no
-delta path (~42 GB at 20B), unless a LoRA run serves its adapter apart ([Adapter sync](#adapter-sync)).
+Both engines receive the **full model** every sync, a merged LoRA included, unless a LoRA run serves its
+adapter apart ([Adapter sync](#adapter-sync)). There is no delta path, so a bf16 sync of gpt-oss-20b
+moves 41.8 GB.
 Re-assembling the sharded weights is a collective every rank joins.
 
 One rank owns the clients and sends: the **forwarding rank** (global main; TP rank 0 under TP). A
@@ -965,7 +966,7 @@ the default process group and DeepEP pick too. It is not a group-address knob.
 
 ## Servers on other nodes (EFA)
 
-The weight-sync group rides the fabric when both containers can drive it. All three images install one
+The weight-sync group rides the fabric when both containers can drive it. Every image installs one
 EFA userspace whole (`docker/efa/install_efa_userspace.sh`: rdma-core, AWS libfabric and one
 `aws-ofi-nccl` build; inventory on [Docker](docker.md#rdma-networking-infiniband-and-efa)). The stack
 is wire-sensitive down to rdma-core: at init the plugin probes libfabric for in-order RDMA writes and
@@ -1100,20 +1101,20 @@ but serve at ≤ 0.80, or with a smaller `--max-num-batched-tokens`, under `isr_
 `prompt_logprobs` re-scores allocate outside the engine's memory profile. Do not pass
 `--enforce-eager`: the in-place sync keeps captured CUDA graphs valid, and graph decode is several-fold
 faster on long generations. On B200 pin `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer
-JIT-fails on SM 10.0.
+JIT-fails on compute capability 10.0.
 
 **Sync cadence.** `sync_weights_every_n_steps: 2–4` for slow environments
 ([Async GRPO](../training-methods/async-grpo/setup.md#weight-synchronization)).
 
 ## Coverage
 
-What passed against a live server on this release, on one node with each server at TP=1 unless a row says otherwise.
+What passed against a live server on Halo 1.2.0, and on 1.3.0rc2 where a row says so, on one node with each server at TP=1 unless a row says otherwise.
 A dash is a shape the code admits with no row on that engine.
 
-**Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
+**Weight push** (`test_weight_push_exact.py`). A push of the unchanged checkpoint leaves every served
 log-prob bit-identical: dense Qwen3-0.6B plain and at TP=2;
-gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
-family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
+gpt-oss-20b, every full fine-tuning checkpoint of the second table below and Step-3.7 at `ep1` and `ep2`, on each engine that takes the
+family; on 1.3.0rc2 the tiny Qwen3.8-Flash-Next composite at two ranks on both engines. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
 
 **Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
 4, dense rows on Qwen3-0.6B.
@@ -1150,7 +1151,7 @@ Other checkpoints, async GRPO at 2 ranks:
 | Gemma 4 26B-A4B | `ep1`, EP=2, `ep1` attention LoRA | `ep1`, EP=2, `ep1` attention LoRA |
 | Laguna-XS-2.1 | `ep1`, EP=2, R2 and R3 at EP=2 | refused |
 | Ling-mini-2.0 | `ep1`, EP=2, R2 and R3 at EP=2 | R2 and R3 at EP=2 |
-| Inkling-2-Small | attention and expert LoRA at EP=2 through adapter sync, on `halo:vllm-0.1.dev25249` at TP=2 | refused |
+| Inkling-2-Small | on 1.3.0rc2: attention and expert LoRA at EP=2 through adapter sync, on `halo:vllm-0.1.dev25249` at TP=2 | refused |
 
 Online GRPO and SDPG ran on Qwen3-30B-A3B (`ep1`, EP=2, EP=2 × DP=2, EP=2 on two simulated domains, EP=2 + TP=2, EP=2 +
 ETP=2, attention and expert LoRA) and Qwen3-0.6B (FSDP2, one rank, TP=2, TP=2 × DP=2, ZeRO-3, HSDP on two simulated

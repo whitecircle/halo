@@ -104,8 +104,8 @@ and Inkling 2 have vLLM recipes only.
 
 - **Sampling** goes through the `rollout_*` fields. TRL's `top_p`, `top_k`, `min_p`,
   `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one raises at startup.
-- **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference: under EP,
-  ETP or TP a whole unsharded copy on every rank. A PEFT policy is its own reference with the adapter
+- **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference: a whole
+  unsharded copy on every rank, under plain FSDP2 as under EP, ETP or TP. A PEFT policy is its own reference with the adapter
   off.
 
 Three decisions matter more than the rest:

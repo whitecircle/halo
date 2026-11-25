@@ -2,7 +2,7 @@
 
 On EP MoE `torch.compile` gains at most 1%, and in `reduce-overhead` mode it costs throughput, so the trainer falls back to `default` when `torch_compile_mode` is unset. On Qwen3-30B-A3B EP=2 at seq 16384, batch 1, `default` mode gains **1%** without Liger and **0.3%** on top of it, `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger, and Liger alone adds **27%** ([Benchmark results](#benchmark-results)). At that shape keep `torch_compile` off and [Liger kernels](liger-kernels.md) on.
 
-What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
+What fusion helps with and what it does not: [GPU Training Theory → What fusion does not help with](../reference/gpu-training-theory.md#what-fusion-does-not-help-with).
 
 ## Expert activations are not compiled
 

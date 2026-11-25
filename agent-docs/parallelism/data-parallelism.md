@@ -171,7 +171,7 @@ EP issues no collectives, so the re-gather races nothing).
 race the DeepEP combine (real EP) or the Expert-TP reduce (pure ETP). **TP with
 `data_parallel_size>1` is also rejected** (a plain all-gather on TP-sharded DTensor params has no
 registered sharding strategy). Lower peak
-memory there with [HSDP](#hsdp-hybrid-sharded-data-parallel) or activation checkpointing instead.
+memory there with activation checkpointing instead.
 
 `fsdp_reshard_after_backward: false` additionally keeps parameters **unsharded across a
 gradient-accumulation window's microsteps** (torch `set_reshard_after_backward`). Even under
@@ -294,11 +294,12 @@ broadcast hangs.
 requirement.** The default DP path 1D-full-shards non-expert params across **every** DP rank, so on
 a multi-node job every shard group's all-gather and reduce-scatter crosses the inter-node fabric, an
 order of magnitude below NVLink
-([bandwidth ladder](../reference/gpu-training-theory.md#interconnect-tiers)).
+([link rates per GPU](../reference/gpu-training-theory.md#the-wires)).
 
 HSDP shards within each NVLink domain and **replicates** across domains, keeping the bandwidth-heavy
-collectives on NVLink so only one gradient all-reduce crosses RDMA per backward — per optimizer step
-with [`fsdp_defer_grad_sync`](#deferred-gradient-reduce-fsdp_defer_grad_sync).
+collectives on NVLink. Only the all-reduce of each rank's gradient shard across replicas crosses RDMA.
+It runs once per shard group in every backward, or only in a window's last backward with
+[`fsdp_defer_grad_sync`](#deferred-gradient-reduce-fsdp_defer_grad_sync).
 
 Enable with `--use_hsdp`. The layout is derived from topology — no shard-size knob: shard width =
 `nvlink_domain_size`, replica count = `num_nvlink_domains`. `apply_fsdp2_for_dp()` applies FSDP2 over

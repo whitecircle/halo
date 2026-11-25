@@ -1,7 +1,8 @@
 # Halo vs stock TRL / transformers
 
 Halo 1.2.0 against `trl.SFTTrainer` 1.17.1, measured on Transformers 5.20.2, 8× B300 and the Blackwell image, bf16, FA4, Liger,
-`grouped_mm` experts. Same model, rows and kernels on both sides; only the framework changes. The rates themselves, with
+`grouped_mm` experts. Same model, rows and kernels on both sides, except that TRL's Qwen3.6-35B-A3B 16k row ran SDPA;
+otherwise only the framework changes. The rates themselves, with
 NeMo AutoModel and Megatron Bridge beside them, and the conditions that decide how to read them are in
 [Throughput Benchmarks](throughput-benchmarks.md#full-parameter-sft-framework-comparison). This page holds the TRL
 side: layouts, ratios, what differs, and the older long-context and convergence runs.
@@ -19,7 +20,7 @@ Short rows (16k and 4k, 131,072 tokens per step), Halo over TRL:
 | gpt-oss-20b, 4k, batch 4 | 3.06 | ZeRO-2 (ZeRO-3: 9,309) |
 | Qwen3.5-35B-A3B, 16k | 1.41 | ZeRO-2, FA4, steady state (1.54 against its 10-step mean of 13,137, which includes two slow steps) |
 | Qwen3-30B-A3B, 16k | 1.27 | ZeRO-2 (ZeRO-3: 12,750) |
-| Qwen3.6-35B-A3B, 16k | 1.59 | ZeRO-2, SDPA (FA4 not run; the gap is likely smaller) |
+| Qwen3.6-35B-A3B, 16k | 1.59 | ZeRO-2, SDPA (FA4 not run) |
 
 On packed 64k and 128k rows Halo runs 1.17× TRL on Qwen3.5-9B, 1.47× on Qwen3.6-35B-A3B and 1.50× on
 Qwen3.5-122B-A10B. TRL's rows there are pure bf16 parameters and Adam moments; its fp32-master runs are within 3% on the
@@ -34,7 +35,7 @@ router auxiliary loss (coefficient 0.9 on gpt-oss) to its loss, so every through
 | | TRL 1.17.1 | Halo |
 |---|---|---|
 | Trainer | `trl.SFTTrainer` | `DistributedSFTTrainer` |
-| Precision | bf16 + FA4 bf16 compute | *identical* |
+| Precision | bf16 + FA4 bf16 compute (SDPA on the Qwen3.6-35B-A3B 16k row) | bf16 + FA4 bf16 compute |
 | Optimizer | `adamw_torch_fused` over bf16 weights: bf16 moments, nearest rounding, 6 B/param (fp32 master with mixed precision) | AdamWBF16 + stochastic rounding, 6 B/param |
 | Sharding | FSDP2 ZeRO-2 or ZeRO-3 (`reshard_after_forward`) | FSDP2 ZeRO-2 default + Expert Parallelism, ZeRO-3 for the 122B |
 | Expert kernel | `grouped_mm` (Transformers default) | `grouped_mm` + EP token distribution |
@@ -45,11 +46,11 @@ router auxiliary loss (coefficient 0.9 on gpt-oss) to its loss, so every through
 
 TRL 1.17.1 has no expert-parallel option of its own. Transformers' expert-parallel path (`ep_size` 8, experts as
 DTensors, 4 of 32 local) switched on through a local patch trains gpt-oss-20b at 16k at 2,184 tok/s/GPU and 117.6 GiB,
-4.4× below TRL's ZeRO-2 row and 9× below Halo's EP8 row (19,817). It is untuned and not a TRL trainer feature.
+4.4× below TRL's ZeRO-2 row and 9× below Halo's `ep8` row (19,817). It is untuned and not a TRL trainer feature.
 
 ## Gradient checkpointing on vs off
 
-gpt-oss-20b at 16k, batch 1, Halo EP1 with fused linear cross-entropy against TRL ZeRO-2:
+gpt-oss-20b at 16k, batch 1, Halo `ep1` with fused linear cross-entropy against TRL ZeRO-2:
 
 | | Checkpointing | No checkpointing | Gain | Peak GiB (on → off) |
 |---|---:|---:|---:|---|
@@ -67,27 +68,28 @@ cross-entropy, batch 1, gradient checkpointing, tok/s/GPU · peak GiB. Nothing o
 | config | 128k | 256k |
 |---|---|---|
 | TRL (ZeRO-3) | 5,961 · 93 | 4,463 · 148 |
-| **Halo EP1 ZeRO-3 (dense)** | **9,566 · 67** | **5,728 · 112** |
-| Halo EP8+CP4 (DP2) | 1,898 · 81 | 2,310 · 142 |
-| Halo EP8+CP8 (DP1) | 3,810 · 47 | 2,395 · 77 |
+| **Halo `ep1` ZeRO-3 (dense)** | **9,566 · 67** | **5,728 · 112** |
+| Halo `ep8 × cp4` (`dp2`) | 1,898 · 81 | 2,310 · 142 |
+| Halo `ep8 × cp8` (`dp1`) | 3,810 · 47 | 2,395 · 77 |
 | Halo dense CP-only (ZeRO-3) | 3,279 · **32** | 1,836 · **56** |
-| Halo EP1 ZeRO-2, EP8, EP8+CP2, EP8+TP8 | OOM / crash | OOM / crash |
+| Halo `ep1` ZeRO-2, `ep8`, `ep8 × cp2`, `ep8 × tp8` | OOM / crash | OOM / crash |
 
-- Dense EP1 ZeRO-3 wins throughput at both lengths and still beats TRL on memory.
-- More CP is strictly better past 64k: `EP8+CP8` beats `EP8+CP4` on both axes at 128k.
+- Dense `ep1` ZeRO-3 wins throughput at both lengths and still beats TRL on memory.
+- More CP is strictly better past 64k: `ep8 × cp8` beats `ep8 × cp4` on both axes at 128k.
 - Dense CP-only ZeRO-3 is the leanest point (32–56 GiB across 128k→256k) and the only long-context mode with no DeepEP
-  dependency. Splitting 4-way instead of 8 trades memory for throughput (256k: CP4 2,257 · 98 vs CP8 1,836 · 56).
-- `EP1` ZeRO-2 OOMs (ZeRO-2 keeps ~40 GB of params resident). `EP8`, `EP8+CP2` and `EP8+TP8` put 128k tokens per rank
-  through the dispatch, which no transport is validated for: elastic EP8 deadlocks at ≥~64k tokens per rank (its combine
-  barrier races FSDP2's reduce-scatter), and `ep_buffer_backend: legacy` has not run an EP8 training step at 128k
+  dependency. Splitting 4-way instead of 8 trades memory for throughput (256k: `cp4` 2,257 · 98 vs `cp8` 1,836 · 56).
+- `ep1` ZeRO-2 OOMs (ZeRO-2 keeps all 41.8 GB of bf16 weights gathered on every rank).
+  `ep8`, `ep8 × cp2` and `ep8 × tp8` put 128k tokens per rank
+  through the dispatch, which no transport is validated for: elastic `ep8` deadlocks at ≥~64k tokens per rank (its combine
+  barrier races FSDP2's reduce-scatter), and `ep_buffer_backend: legacy` has not run an `ep8` training step at 128k
   tokens per rank (its dispatch alone is bit-exact to 200k)
   ([DeepEP → Transport backend](../infrastructure/deepep.md#transport-backend),
   [Dispatch token ceiling](../infrastructure/deepep.md#dispatch-token-ceiling)).
 
 ## Convergence (Halo 1.1.0)
 
-200 steps on the same seeded data, same global batch (16), constant LR, 8× B300. TRL (ZeRO-3), Halo dense (EP1), EP2 and
-EP8 reach the same loss, about 0.00205 at step 200 (0.002048–0.002051), within 0.8% of each other by step 100.
+200 steps on the same seeded data, same global batch (16), constant LR, 8× B300. TRL (ZeRO-3), Halo dense (`ep1`), `ep2` and
+`ep8` reach the same loss, about 0.00205 at step 200 (0.002048–0.002051), within 0.8% of each other by step 100.
 
 ## Reproduce
 

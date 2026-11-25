@@ -11,4 +11,4 @@ Start with the guides below, or jump to [Training Methods](training-methods/READ
 - **[Choosing a method](../human-docs/choosing-a-method.md)** — Match the data you have to a trainer.
 - **[Configuration Reference](reference/configuration-reference.md)** — The YAML parser, CLI overrides, every field and environment variable.
 
-[GPU Training Theory](reference/gpu-training-theory.md) covers the roofline and training-step bottlenecks behind every optimization lever — read it before tuning. For the design rationale and how the toolkit relates to TRL, Accelerate, Unsloth, Axolotl, MS-SWIFT, veRL, and Megatron-LM, see [Why this framework](reference/why-this-framework.md).
+[GPU Training Theory](reference/gpu-training-theory.md) is a lecture on the limits a training step hits on one GPU and across many, with the measurements behind each optimization lever. Read it before tuning. For the design rationale and how Halo relates to TRL, Accelerate, Unsloth, Axolotl, MS-SWIFT, veRL, and Megatron-LM, see [Why this framework](reference/why-this-framework.md).

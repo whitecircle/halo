@@ -140,7 +140,8 @@
       <span class="s">An NCCL <span class="nw">all-reduce</span> of {message} on {ranks} GPUs of the node reaches a bus bandwidth of {bus} GB/s.</span>
       <span class="s">EFA is an NCCL send and receive between a GPU pair on two nodes, at 256 MiB and 1 GiB.</span>
       <span class="s">Sockets is one weight transfer between two nodes.</span>
-      <span class="s">{load} takes the time shown at the specified rate where there is one, and a copy inside HBM reads and writes it.</span>
+      <span class="s">{load} takes the time shown at the specified rate where there is one.</span>
+      <span class="s">HBM is timed at its measured copy rate, reading and writing the {load}.</span>
     </p>
   </footer>
 </div>
@@ -200,7 +201,7 @@
   const duration = (seconds) => (seconds >= 1 ? `${trim(seconds)} s` : `${trim(seconds * 1e3)} ms`);
   const rows = SECTIONS.flatMap((section) => section.rows);
   const byId = Object.fromEntries(rows.map((row) => [row.id, row]));
-  /** Seconds to move the load over a row: at its specified rate, or the slowest measured one where it has none. */
+  /** Seconds to move the load over a row: HBM at its measured copy rate, read plus write; another row at its specified rate, or at its slowest measured one where it has none. */
   const seconds = (row) => ((row.passes ?? 1) * LOAD_GB) / (row.passes ? Math.min(...row.measured) : row.spec ?? Math.min(...row.measured));
 
   /** A row's two reading lines: its rate, then the specification and the time for the load. */
@@ -216,7 +217,7 @@
 
   // The title's ratio: NVLink over the nodes' own network, specification against specification.
   const ratio = byId.nvlink.spec / byId.efa.spec;
-  document.getElementById("title").textContent = `On these nodes the network runs ${trim(ratio)} times below NVLink`;
+  document.getElementById("title").textContent = `On these nodes the network is specified at 1/${trim(ratio)} of NVLink's rate`;
   fillValues({
     message: `${ALL_REDUCE.bytes / 2 ** 30} GiB`,
     ranks: ALL_REDUCE.ranks.join(" and "),

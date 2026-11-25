@@ -1,6 +1,6 @@
 # Monitoring
 
-Async GRPO metrics are namespaced by the question they answer. The rollout, `sampling/*`, `reward/*` and `routing/*` metrics and the prefetch counters fold every rank's episodes or counts; timings are the main process's.
+Async GRPO metrics are namespaced by the question they answer. The rollout, `sampling/*`, `reward/*` and `routing/*` metrics and the prefetch counters fold every rank's episodes or counts; timings are the main process's, except the phase times, which fold every rank's ([Phase times](#phase-times)).
 
 ## Logged metrics
 
@@ -184,5 +184,5 @@ TRL's `entropy` counts a micro-batch whose loss tokens were all dropped (degener
 
 Read the band and the gap off a healthy run; both are model-specific. The gap grows with entropy, and faster than it once the policy flattens, so it shows a drift before entropy does.
 
-- The Qwen3.6 vLLM code-contests recipes stop on a band of `[0.12, 0.40]` and a gap of `0.005`.
+- The Qwen3.6 vLLM code-contests recipes with thinking on stop on a band of `[0.12, 0.40]` and a gap of `0.005`.
 - Every code-contests recipe stops on skipped updates.

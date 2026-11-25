@@ -93,5 +93,5 @@ mechanism.
   images.
 
 [GPU Training Theory](../agent-docs/reference/gpu-training-theory.md) ↗ explains
-why the defaults are what they are: arithmetic intensity, and where a training
-step's time goes.
+the limits a training step hits on one GPU and across many, with measurements
+on B300 GPUs, and how to find which one your step is hitting.

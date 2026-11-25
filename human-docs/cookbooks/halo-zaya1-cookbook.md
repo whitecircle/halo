@@ -38,7 +38,7 @@ Both recipes pack 16,384-token rows at gradient accumulation 4. Three steps on e
 reserved per GPU under EP8 and 80 GiB under plain FSDP2. Zaya cannot use gradient checkpointing, so other shapes
 need their own fit, computed rather than measured:
 
-- **One GPU:** a B200 or B300 (about 102–124 GB). Its ~72 GB of state leaves an 80 GB GPU no room for a useful row.
+- **One GPU:** a B200 or B300, since a run on 16,384-token rows needs about 102–124 GB. Zaya's state of about 72 GB leaves an 80 GB GPU no room for a useful row.
 - **Eight 80 GB GPUs:** the EP8 recipe as shipped, or plain FSDP2 with
   `-n 8 --max_length=8192 --gradient_accumulation_steps=8`.
 - **Long context at EP8:** `--max_length=32768 --gradient_accumulation_steps=2`. The fused loss never builds the

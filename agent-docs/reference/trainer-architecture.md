@@ -118,8 +118,8 @@ them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 | `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
 No trainer refuses EP, TP or ETP. GPU rows run all three under SFT, DPO, offline, online and async GRPO,
-SDPG, reward and classification; SMPO, KTO, teacher distillation and embedding are verified under EP and TP,
-and self-distillation under EP only. A **No** PP trainer is refused at config time
+SDPG, reward, classification, SMPO and teacher and self distillation; KTO and embedding are verified under EP
+and TP. A **No** PP trainer is refused at config time
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 `DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
@@ -136,6 +136,7 @@ pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
 | `SUPPORTS_HYBRID_CP` | `False` | dense hybrid CP admitted only when declared on the concrete SFT trainer; subclasses must opt in separately ([restrictions](../parallelism/context-parallelism.md#dense-hybrid-sft)) |
 | `PP_REFUSAL` | a generic refusal | the mechanism the PP refusal names; `None` where PP is supported |
 | `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
+| `GENERATION_SHAPED_ROWS` | `False` | rows come from generation, so the config has no `max_length`: the EP dispatch-ceiling gate takes the row length from `declared_row_length` (online and async GRPO, SDPG) |
 | `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT, and teacher distillation on the student) |
 | `POLICY_GRADIENT_LOSS` | `False` | the loss runs outside the forward with no labels (the GRPO family): it never adds the router aux loss, and an applied Liger FLCE draws a warning |
 | `SYNCS_TO_EXTERNAL_GENERATOR` | `False` | on-policy RL that syncs weights to a rollout engine (online and async GRPO, SDPG) |
@@ -418,8 +419,8 @@ every clip path, so every rank reaches the same verdict. The optimizer picks how
 
 On the device path the warning and both raises come at the late read, at the latest before the next step's
 update, so no later step is applied and a final non-finite step is reported before training ends. Against no guard
-on 8× B300 at s4096 (1.2.0) that path reads TP2 +0.88%, ep1 +0.31%, ep2 +0.69% and CP2 −0.96% (six rounds, ranges
-overlapping), where a host read before every step costs TP2 3.26% and ep2 42 ms of sync wait per step.
+on 8× B300 at s4096 (1.2.0) that path reads `tp2` +0.88%, `ep1` +0.31%, `ep2` +0.69% and `cp2` −0.96% (six rounds, ranges
+overlapping), where a host read before every step costs `tp2` 3.26% and `ep2` 42 ms of sync wait per step.
 
 The skip is installed in `create_optimizer` on the optimizer that steps (the one inside accelerate's wrapper), so
 every trainer gets it: before the LR scheduler wraps its `step`, or over the scheduler's wrapper when the caller

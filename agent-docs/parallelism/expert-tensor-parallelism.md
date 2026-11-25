@@ -211,8 +211,9 @@ layer that does the split cannot disagree on which config spelling carries the p
 **Axis combinations.** Pure ETP, EP+ETP, and pure ETP inside PP stages
 ([allowlist](README.md#supported-combinations)).
 
-**Knobs.** ETP inherits every [EP knob rule](expert-parallelism.md#limitations) (`has_ep_group` is
-`ep_group_size > 1`, which pure ETP satisfies). On top of those:
+**Knobs.** ETP inherits the [EP knob rules](expert-parallelism.md#limitations) (`has_ep_group` is
+`ep_group_size > 1`, which pure ETP satisfies), except the fp32-training refusal, which keys on
+`expert_parallel_size > 1` because pure ETP never reaches DeepEP's 2-byte transport. On top of those:
 
 | Knob | Under ETP | Gate |
 |---|---|---|

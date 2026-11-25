@@ -300,8 +300,7 @@ mapping:
 - one that writes a block per argument (Qwen3.5/3.6, Gemma 4, GLM native) raises on the text;
 - one that applies `tojson` to it writes a quoted, escaped string;
 - one that raises on both probes tells nothing, so it takes what a serving engine hands it: Mistral v0.3's
-  checks a call id's length, and a single-turn template (the bundled `*-instruct` ones and `gpt-oss-thinking.jinja`)
-  refuses the multi-turn probe.
+  checks a call id's length, and a single-turn template (the bundled `*-instruct` ones) refuses the multi-turn probe.
 
 Parsing reads empty text as no arguments and raises on other text that is not a JSON object, also under a
 single-turn template, whose render leaves the call out. Every text renderer applies the rule

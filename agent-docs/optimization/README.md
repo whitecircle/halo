@@ -6,7 +6,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 ## Foundations
 
-- **[GPU training theory](../reference/gpu-training-theory.md)** — The roofline, training-step bottlenecks, and why each kernel exists — every number measured on Blackwell (B300).
+- **[GPU training theory](../reference/gpu-training-theory.md)** — The roofline, the limits a training step hits on one GPU and across many, and why each kernel exists; each number is marked as measured on one B300, a specification or computed.
 - **[Throughput benchmarks](throughput-benchmarks.md)** — 1.2.0 against 1.1.0 on twelve shapes, the comparison with TRL, NeMo AutoModel and Megatron Bridge, then tokens/s/GPU and achieved TFLOPS on B300 across parallelism modes, sequence lengths, and model sizes.
 - **[Halo vs stock TRL](halo-vs-stock-trl.md)** — Halo 1.2.0 against `trl.SFTTrainer` 1.17.1 at matched model, rows and kernels: layouts, ratios, TRL's expert parallelism and gpt-oss long context.
 
@@ -34,11 +34,11 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[Block-sparse QSA attention](flash-attention.md#block-sparse-attention-qwen38-flash-next)** — Qwen3.8-Flash-Next's sparse-attention layers on a runtime-length Triton kernel over the selected blocks, one compile for every pack length. `HALO_QSA_KERNEL=auto` by default; `off` keeps the tiled path.
 - **[Hyper-connection kernels](hyper-connection-kernels.md)** — GLM-5 Next's and DeepSeek-V4's hyper-connections and mixes on one launch per step, at about a sixth of the time. Set `HALO_HC_KERNELS=0` to leave upstream's forwards. The same page holds Qwen3.8-Flash-Next's gated residual, on by default; `HALO_GATED_RESIDUAL_KERNELS=0` leaves upstream's forward.
 - **[Grouped GEMM](grouped-gemm.md)** — Batched MoE expert matmul via `torch.nn.functional.grouped_mm`, default on SM90+. Home to the atomic-free permute and MoE throughput playbook.
-- **[Liger kernels](liger-kernels.md)** — Triton kernels for fused cross-entropy, RMS normalization, and SwiGLU (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4, Nemotron-H and Inkling 2 run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
+- **[Liger kernels](liger-kernels.md)** — Triton kernels for a cross-entropy that keeps the logits, RMS normalization, SwiGLU and RoPE (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4, Nemotron-H and Inkling 2 run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
 - **[torch.compile](torch-compile.md)** — Inductor compilation of the spans between MoE/attention graph breaks (`torch_compile: true`) — at most 1% on EP MoE, and slower in `reduce-overhead` mode.
 - **[Checkpointing plan](../training-methods/callbacks.md#gradientcheckpointingplancallback)** — `gradient_checkpointing_plan: auto` measures one fully checkpointed step and checkpoints only the decoder layers the memory budget needs (opt-in, packed SFT rows).
 - **[Muon optimizer](muon-optimizer.md)** — Newton-Schulz orthogonalization for matrix params, with fused Triton momentum and update kernels. Set `optim: muon`.
-- **[NUMA binding](throughput-benchmarks.md#numa-binding)** — `torchrun --numa-binding node` runs each rank on its GPU's NUMA node, which helps host-bound rows on a multi-socket host. `torchrun` launches only.
+- **[NUMA binding](throughput-benchmarks.md#numa-binding)** — `torchrun --numa-binding node` runs each rank on its GPU's NUMA node, which helps overhead-bound rows (TP, small-batch EP) on a multi-socket host. `torchrun` launches only.
 
 ---
 
@@ -46,7 +46,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 Each of these ran on B300 and did not pay off; its page holds the shapes.
 
-- **Halo's fp8/fp4 paths** — QAT, not a speedup: whole steps at ep8 ran at 0.10–0.54× bf16 on B300 with the eager activation round trip, and simulated mxfp4 with the fused one runs at 0.93–0.99× on H200: [Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default).
+- **Halo's simulated fp8/fp4 path** — bf16 stays the default, and the simulated path serves quantization-aware training and its export. Its whole steps at ep8 ran at 0.10–0.45× bf16 on B300 with the eager activation round trip, and simulated mxfp4 with the fused one runs at 0.93–0.99× on H200 ([Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default)).
 - **DeepGEMM adapter** — whole steps at 0.37–0.54× bf16, since casts and row copies cost more than the kernel saves: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
 - **torch.compile on EP MoE** — at most 1%, and `reduce-overhead` is slower: [Benchmark results](torch-compile.md#benchmark-results).
 - **Sub-bf16 master weights** — parameters, checkpoints and optimizer state never go below bf16; bf16 with stochastic rounding is the floor: [BF16 optimizer](bf16-optimizer.md).

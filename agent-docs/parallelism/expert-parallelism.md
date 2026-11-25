@@ -7,7 +7,7 @@ DeepEP all-to-all.
 
 Use it when expert layers exceed single-GPU memory. Why the tokens-per-expert count sets the speed of
 every expert GEMM:
-[GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
+[GPU Training Theory → Rows per expert in an MoE layer](../reference/gpu-training-theory.md#rows-per-expert-in-an-moe-layer).
 
 EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP) — there is no NCCL fallback.
 Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`); router gradients
@@ -164,8 +164,8 @@ help** at all: it leaves `ep_group_size` untouched, so `ep4 + tp2` is rejected e
 **Across nodes**, multiple EP groups (`num_ep_groups > 1`) are data-parallel replicas — node-local
 EP across domains, or a cross-node EP group replicated within a larger cluster. Here the toolkit
 avoids the race instead of blocking: every backward-time collective stays inside the EP group and
-the cross-replica DP average is deferred to one post-backward sweep. Node-local `ep8×2` and
-cross-node `ep8` (two replicas) match single-group `ep16` on two 8-GPU machines
+the cross-replica DP average is deferred to one post-backward sweep. Node-local `ep8×2` matched
+single-group `ep16` on two 8-GPU machines in a run before 1.2.0
 ([Verified topologies](multi-node.md#verified-topologies)).
 
 That sweep covers every shape holding more than one EP group, the single-node ones (`ep2`,
@@ -212,7 +212,7 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 | `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — set `fsdp_shard_ep1_experts: false` for fp32 expert masters there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 
-`fp32_router` and `fp32_experts` are read only by the EP layers: a run that builds none (a dense model, a family with no EP layer, `use_grouped_gemm: false` at `expert_parallel_size: 1`) is refused at load.
+`fp32_router` and `fp32_experts` are read only by the EP layers: a run that builds none (a dense model, a family with no EP layer, `use_grouped_gemm: false` at `ep_group_size == 1`) is refused at load.
 
 Training checkpoints keep these masters in fp32 and exports write them bf16
 ([What gets saved](../reference/checkpoints.md#what-gets-saved)).
@@ -625,7 +625,7 @@ the training scripts seed it. A Python-API run that seeds ranks differently trai
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `reject_unsupported_run` |
 | `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `reject_peft_lora_in_ep_layers` |
 | expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads; rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `reject_lora_under_tp`, `halo/checkpoint/parallel/ep.py` |
-| `use_grouped_gemm: false` | drops the EP layers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `reject_unrealized_expert_lora` |
+| `use_grouped_gemm: false` | drops the EP layers at `ep_group_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `reject_unrealized_expert_lora` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_reject_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_reject_hsdp` |
 | `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#usage)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `reject_stock_adamw_on_mixed_params` |

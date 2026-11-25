@@ -123,7 +123,7 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
 |---|---|---|
 | SFT | `2e-6` – `2e-5` | `1e-4` |
 | SMPO / DPO | `5e-7` – `5e-6` | `5e-7` (the two shipped DPO LoRA recipes) |
-| GRPO | `1e-6` – `5e-6` | `3e-6` (every shipped LoRA async GRPO recipe under `examples/grpo/environmental/`) |
+| GRPO | `1e-6` – `5e-6` | `3e-6` (the shipped LoRA code-contests recipes under `examples/grpo/environmental/`; the two Inkling 2 exam-QA LoRA recipes run `2e-5`) |
 
 The effective-batch formula is unchanged by LoRA — see
 [SFT](../training-methods/sft.md#learning-rate-and-global-batch-size).
@@ -288,8 +288,8 @@ dominates the step, and only memory grows with rank.
 QLoRA saves ~10 GiB more than bf16 all-linear LoRA at ~5% lower throughput. It is the path onto a smaller
 GPU, since plain LoRA needs ~34 GiB at this shape even at the minimum rank.
 
-MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at EP=2, seq 4096, r=64 (full
-fine-tuning at this shape: [Throughput Benchmarks → EP-only](throughput-benchmarks.md#ep-only-batch-scaling)):
+MoE — same setup on 8× B300, `gpt-oss-20b` (32 experts, top_k=4) at `ep2`, seq 4096, r=64 (full
+fine-tuning at this shape, Halo 1.1.0: [Throughput Benchmarks → 1.2.0 against 1.1.0](throughput-benchmarks.md#120-against-110)):
 
 | Config | Trainable | tokens/s/GPU | Peak memory |
 |---|---|---|---|
@@ -302,7 +302,7 @@ state, so every variant peaks at 30–32 GiB against full fine-tuning's 79.0 GiB
 every variant runs faster than its 12,121 tok/s/GPU. Experts-only is 5% faster than attention-only, since
 the grouped expert adapters fold into the grouped-GEMM compute; attn + experts is slower than either alone.
 
-On `qwen3-30b-a3b` (128 experts) at EP=2, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
+On `qwen3-30b-a3b` (128 experts) at `ep2`, experts-only r=64 is 9.39% trainable at 9,894 tok/s/GPU and
 46.7 GiB. At batch 1 tok/s/GPU varies ±10% run-to-run.
 
 ## Reference model handling

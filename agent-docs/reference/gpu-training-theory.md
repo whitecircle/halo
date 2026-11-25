@@ -717,7 +717,7 @@ On a whole training step the gain depends on how many experts a GPU holds and ho
 
 In Halo's benchmarks grouped GEMM ran 31% to 78% faster than the loop on gpt-oss-20b, with its 32 wide experts, and 137% to 310% faster on two Qwen models with 128 and 256 narrow ones. Those runs had the experts split over 2 to 8 GPUs ([Grouped GEMM → Grouped vs the loop path](../optimization/grouped-gemm.md#grouped-vs-the-loop-path)).
 
-Row counts off a multiple of 8, which routing produces at every step, cost a grouped GEMM at most 1.23 times, in a separate measurement on a 4,096-wide expert product (recorded on Halo 1.2.0). The note in [Multiples of 8](#multiples-of-8) reports what padding row lengths to a multiple of 8 did on one run.
+Row counts off a multiple of 8, which routing produces at every step, cost a grouped GEMM at most 1.23 times, in a separate measurement on GLM-5.3-Flash's 4,096-wide `gate_up` product (recorded on Halo 1.2.0, [Grouped GEMM](../optimization/grouped-gemm.md#performance)). The note in [Multiples of 8](#multiples-of-8) reports what padding row lengths to a multiple of 8 did on one run.
 
 You can recognize an overhead-bound step from outside, and power is the clearer sign. On the B300 a loop of 1-element kernels read 52% utilization and 241 W of the 1,100 W limit, and a loop over 128 experts with two small matmuls each read 59% and 374 W. Utilization alone is weaker: the 128-row GEMM loop of the opening is paced by the CPU too, and it reads 93%. In a profile you see thousands of kernels that each take a few microseconds.
 
@@ -1650,7 +1650,7 @@ The table counts bytes per rank, with bf16 weights and bf16 moments (computed fr
 | optimizer state | `4P` | `4P/R` | `4P/R` |
 | bytes on the wire per backward pass | `2 × (R−1)/R × 2P` | the same | `3 × (R−1)/R × 2P` |
 
-![Eight small grids, one per mode, each with four rank columns and rows for weights, gradients, optimizer state, activations and tokens processed. A cell is filled whole, filled as one piece of four, split into a whole band over a piece, or empty. Plain data parallel is all whole and FSDP at rest all pieces. Under each grid are the collectives the mode adds.](../assets/diagrams/who_holds_what.png)
+![Eight small grids, one per mode, each with four rank columns and rows for weights, gradients, optimizer state, activations and tokens processed. A cell is filled whole, filled as one piece of four, split into a whole band over a piece, or empty. Plain data parallel is all whole, and FSDP at rest holds a piece of the weights, gradients and optimizer state and no activations. Under each grid are the collectives the mode adds.](../assets/diagrams/who_holds_what.png)
 
 A split cell in the figure means that a rank holds part of the object whole and the rest as a piece. Under the ZeRO-2 analog that is the gradient: whole for the layer group whose backward pass is running, and a shard for the layer groups already reduced. Read the grids for data parallelism now. The others belong to the modes that follow, and [Combining the modes](#combining-the-modes) comes back to the figure.
 
@@ -2272,7 +2272,20 @@ with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
 print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
 ```
 
-The table it prints is not shown here. It lists each operation with its time on the GPU and its number of calls. Divide one by the other to see whether a kernel is large or one of thousands of small ones.
+On one B300 it printed 15 rows. These are six of them, with the CPU columns cut:
+
+```
+Name                                                  Self CUDA   CUDA total   # of Calls
+aten::addmm                                             1.483ms      1.632ms           10
+aten::mm                                                1.616ms      1.616ms           10
+nvjet_sm103_tst_128x256_64x6_2x2f_2cta_h_bz_NTT         1.616ms      1.616ms           10
+nvjet_sm103_tst_128x256_64x6_2x1_2cta_v_bz_bias_TNT     1.483ms      1.483ms           10
+aten::copy_                                             1.622ms      1.622ms           30
+aten::mul                                               1.006ms      1.006ms           20
+Self CUDA time total: 7.620ms
+```
+
+Each row is an operation with its time on the GPU and its number of calls. The two `nvjet` rows are cuBLAS GEMM kernels, named as in [Tiles and kernel selection](#tiles-and-kernel-selection): the one with `bias` in its name is the forward pass and the other is the weight gradient. Together they take 41% of the GPU time, at 0.15 and 0.16 ms per call. Divide time by calls in this way to see whether a kernel is large or one of thousands of small ones.
 
 Take the Qwen3-4B step of [Power and utilization](#power-and-utilization) through the first five checks. It is a full fine-tuning step on one B300, on one row of 8,192 tokens with gradient checkpointing off and PyTorch's own kernels.
 
@@ -2284,7 +2297,7 @@ Take the Qwen3-4B step of [Power and utilization](#power-and-utilization) throug
 
 No kernel profile of this step was taken. The run with fused kernels in [Where fused kernels come from](#where-fused-kernels-come-from) stands in for the sixth check: the forward and backward passes of the same model got 25 to 34% shorter when four kinds of memory-bound kernel were fused, so a good part of the step is memory-bound work.
 
-Halo's own profiles show the last two checks done in full. On a gpt-oss-20b step with its experts split across GPUs, one `index_add_` kernel took about 20% of all GPU time. It was replaced by a gather and a reduction. The new path ran about 5 times faster than the old one, and board power moved from about 34% to about 56% of the power limit ([Grouped GEMM](../optimization/grouped-gemm.md#the-duplicate-index-gather-trap)). In another profile an attention backward pass took 22% of kernel time and was gone after a change of kernel ([Flash Attention](../optimization/flash-attention.md#block-sparse-attention-qwen38-flash-next)).
+Halo's own profiles show the last two checks done in full. On a gpt-oss-20b step with its experts split across GPUs, one `index_add_` kernel takes about 20% of all GPU time. A gather and a reduction in its place run about 5 times faster, and board power rises from about 34% to about 56% of the power limit ([Grouped GEMM](../optimization/grouped-gemm.md#the-duplicate-index-gather-trap)). In another profile an attention backward pass takes 22% of kernel time, and it is absent from the profile with a block-sparse kernel in its place ([Flash Attention](../optimization/flash-attention.md#block-sparse-attention-qwen38-flash-next)).
 
 > In Halo: the profiler setting writes a trace and a list of the 25 operations with the most GPU time, and it names the phases of the token exchange. The trace does not complete on a multi-GPU run with experts split and FA4 active ([Debugging](debugging.md#1-flame-graphs)). The efficiency callback computes rate, step time, memory and MFU, and MFU reaches the log only when the MFU diagnostics are on as well (`report_mfu_diagnostics`).
 
@@ -2330,7 +2343,7 @@ The two metrics answer different questions.
 >
 > - The numerator is finer than `6 × P × T`. It is tokens × (6 × trainable + 4 × frozen parameters) per rank, plus the FLOPs of the attention scores.
 > - MFU and the sparsity-aware S-MFU are computed when the efficiency metrics are on. They reach the log only when the MFU diagnostics are on as well (`report_mfu_diagnostics`). If the top-k of a model is not detected, the log carries no S-MFU fields and no `S-MFU:` line at startup ([Throughput Benchmarks → Metrics](../optimization/throughput-benchmarks.md#metrics)).
-> - The "achieved TFLOPS" column compares only configurations with the same number of parameters per rank. Going from experts over 2 ranks to experts over 8 lowers tokens/s by 36% and that column by 75%.
+> - The "achieved TFLOPS" column compares only configurations with the same number of parameters per rank. Going from experts over 2 ranks to experts over 8 lowers tokens/s per GPU by 36% and that column by 75% on gpt-oss-20b at batch 4 ([Throughput Benchmarks → Metrics](../optimization/throughput-benchmarks.md#metrics)).
 
 Check yourself:
 
@@ -2599,7 +2612,7 @@ The terms are in the order the lecture introduces them, and the symbols follow. 
 | ceiling at the maximum clock | 2,464 TFLOP/s | computed |
 | HBM bandwidth | 6.6 TB/s for a copy, read plus write, against a specified 8 TB/s | measured |
 | ridge | about 210 FLOP/byte | computed |
-| launch floor | about 5 µs for a trivial kernel, 8 to 9 µs for a `torch.mm` | measured |
+| launch floor | about 5 µs for a trivial kernel and 8 to 12 µs for a matmul, depending on the shape and the process | measured |
 | a small GEMM on the device | about 2.5 to 5 µs at small `M`, rising with `K`, plus a share that grows with the bytes of the weight | measured |
 | board power limit | 1,100 W, the board's default and maximum as the driver reports them | specification |
 

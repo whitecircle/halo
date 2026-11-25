@@ -20,7 +20,7 @@ reference.
 
 | Symptom | Cause → fix |
 | --- | --- |
-| CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true`, a smaller `per_device_train_batch_size` or `max_length`, then sharding (TP for dense, EP or ETP for MoE) or LoRA/QLoRA. |
+| CUDA out of memory | In order: `gradient_checkpointing: true`, a smaller `per_device_train_batch_size` or `max_length`, then sharding (TP for dense, EP or ETP for MoE) or LoRA/QLoRA. |
 | CUDA out of memory while a dense model loads under plain FSDP2 or DDP | Every GPU loads the whole model before sharding, so it must fit on one GPU. Use TP ([Parallelism](parallelism.md)). |
 | Config rejected at startup (`must divide`, `not supported`, …) | The validator refuses shapes that would hang or crash mid-run. The message names the rule; valid shapes are in [Parallelism](parallelism.md). |
 | `expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` | EP between 2 and the NVLink domain size on a single-domain job. Use `ep_size=2`, `ep_size` = the domain size, or `ep4 + etp2` for a 4-way split on 8 GPUs. `ep4 + tp2` is rejected the same way. |
@@ -43,7 +43,7 @@ reference.
 | Symptom | Cause → fix |
 | --- | --- |
 | Nodes never join, or the rendezvous times out | The torchrun arguments differ across nodes, a node started late, the master address is not routable on the fabric (a TCPStore connect timeout naming the host and port), or a stale process holds the port (`pkill -f torchrun`). |
-| Hang at step 0, then a watchdog timeout | A rank never reached a collective. Dump every rank's stack ([below](#getting-eyes-on-a-hung-run), once per node); the rank that is not in a collective is the culprit. |
+| Hang at step 0, then a watchdog timeout | A rank never reached a collective. Dump every rank's stack ([below](#getting-eyes-on-a-hung-run), once per node) and read the rank that is somewhere its peers are not (the data loader, another branch). A collective does not block the CPU, so a waiting rank's stack shows the first line that needed a GPU result, which can be later than the stuck collective. If every rank is waiting, PyTorch's flight recorder names the collective they disagree on ([Debugging](../agent-docs/reference/debugging.md#4-diagnosing-multi-node-hangs) ↗). |
 | Watchdog timeout during a large gathered checkpoint save | Slow work outlasted the watchdog. Raise `DIST_NCCL_TIMEOUT_MINUTES` (default 30), the one watchdog setting: a config's `ddp_timeout` is refused. |
 | A rank waits hours, then aborts during a download, a dataset map or pack, or a queued model load | The rank going first outlasted `DIST_STORE_TIMEOUT_HOURS` (default 4). Raise it. |
 | `Output filesystem is declared SHARED but …`, `Input filesystem …` (or `… declared PER-NODE …`) at startup | The filesystem flag contradicts the mount of `output_dir` (Output) or of the HF caches (Input). Set `DIST_OUTPUT_SHARED_FILESYSTEM` or `DIST_INPUT_SHARED_FILESYSTEM` (or the `DIST_SHARED_FILESYSTEM` umbrella) to `1` for a shared FS or `0` for per-node disks, or move the directory the message names. On NFS whose attribute cache outlasts the probe, raise `DIST_FS_PROBE_TIMEOUT_SECONDS`. |
@@ -97,5 +97,5 @@ training container with the flag. The `make` targets do not add it.
 
 For where the time goes, use `enable_torch_profiler: true` and
 `halo run trace-report` ([Monitoring](monitoring.md#profiling)). The full
-toolbox, including the NCCL flight recorder for mismatched collectives, is
+toolbox, including PyTorch's flight recorder for mismatched NCCL collectives, is
 [Debugging](../agent-docs/reference/debugging.md) ↗.

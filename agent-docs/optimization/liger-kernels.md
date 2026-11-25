@@ -7,7 +7,7 @@ applier covers **warns** that the run trains unfused, and an explicit `liger_ker
 model raises rather than being dropped.
 
 Why fusion pays, counted in HBM round trips:
-[GPU Training Theory §5](../reference/gpu-training-theory.md#5-memory-bound-kernels-and-why-fusion-pays).
+[GPU Training Theory → Memory-bound kernels and fusion](../reference/gpu-training-theory.md#memory-bound-kernels-and-fusion).
 
 ## Supported models
 
@@ -351,7 +351,7 @@ PP's last stage chunks its own fp32 CE ([PP fused head](../parallelism/pipeline-
 A patched head's `skip_logits` gate never fires, and FLCE would report as applied while the full logits plane
 materializes anyway. Under CP the dispatch instead stamps whether FLCE resolves on for the family
 (`LIGER_CP_FUSED_LOSS_ATTR`: requested, or the family default, and offered by its applier), and the wrapper then
-scores each chunk's hidden states through Liger's fused kernel itself
+scores its sequence chunk's hidden states through Liger's chunked fused linear cross-entropy itself
 ([CP fused head loss](../parallelism/context-parallelism.md#fused-head-loss)). The stamp, like the applied config, is
 run state that no [exported `config.json`](../reference/checkpoints.md#exported-configjson) carries.
 
@@ -413,10 +413,10 @@ The EP MoE layer's own clamped-SwiGLU is independent of Liger: every path — pe
 
 Both measured on the Blackwell image, Halo 1.1.0 or earlier. The host-time figure below is from 1.2.0, on Liger 0.8.4.
 
-**Dense — 1× B300 (SM103), Qwen3-8B, GC on, seq 16384, batch 1:** Liger+CE gives 15,966 vs 11,746
+**Dense — 1× B300 (compute capability 10.3), Qwen3-8B, GC on, seq 16384, batch 1:** Liger+CE gives 15,966 vs 11,746
 tokens/s/GPU (**+36%**) at 64.6 vs 78.6 GiB peak (**−14 GiB**).
 
-**MoE — 2× B300 (SM103) EP=2, Qwen3-30B-A3B (128 experts, top_k=8), GC on, seq 8192, batch 4,** with the
+**MoE — 2× B300 (compute capability 10.3), `ep2`, Qwen3-30B-A3B (128 experts, top_k=8), GC on, seq 8192, batch 4,** with the
 toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covered-families-the-toolkit-extends)):
 
 | Configuration | tokens/s/GPU | Peak memory | vs baseline |
@@ -426,7 +426,7 @@ toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covere
 | Liger + FusedLinearCE | 17,927 | 139.5 GiB | +31%, −29 GiB |
 
 At this shape (Halo 1.1.0 or earlier) FLCE saves only 1.5 GiB more than CE and costs 5% throughput; at 16k on EP1 in 1.2.0 the two are within 0.2%. FLCE's saving is the logits
-plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), and it scales with the tokens in the batch. Reach for plain CE when a model's FLCE patch is unavailable.
+plane: against transformers' loss with no Liger kernel, on Qwen3-4B at 32k tokens, it cuts the peak from 78.7 to 21.8 GiB with gradient checkpointing on, and without checkpointing 32k fits only with it (one B300, [GPU Training Theory → The fused loss](../reference/gpu-training-theory.md#the-fused-loss)); it scales with the tokens in the batch. Reach for plain CE when a model's FLCE patch is unavailable.
 
 **Host time per launch.** Liger 0.8.4 adds host time around each RMSNorm and SwiGLU launch: at most ~1.5%
 per step on the most host-bound row measured (dense Qwen3-8B at CP2 on 8× B300, 4,096-token rows), and GPU

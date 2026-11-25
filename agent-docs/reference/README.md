@@ -5,7 +5,7 @@
 - **[Architecture](architecture.md)** — The `halo/` component map, the import layer table, and how every trainer adds one mixin to a TRL, Transformers or SentenceTransformers base.
 - **[Trainer Architecture](trainer-architecture.md)** — The distributed mixin, trainer × CP/PP support, the per-mode wrap, gradient sync and clipping, rollout-engine weight sync, and saving across all trainers.
 - **[Why This Framework](why-this-framework.md)** — How the toolkit compares to HF TRL, Accelerate, Unsloth, Axolotl, MS-SWIFT, veRL, and Megatron-LM, plus model compatibility and key dependencies.
-- **[GPU Training Theory](gpu-training-theory.md)** — The roofline, the four bottlenecks a step can hit, and what every optimization and parallelism lever actually pulls on.
+- **[GPU Training Theory](gpu-training-theory.md)** — The roofline, the limits a step can hit (compute-, memory- and overhead-bound on one GPU; communication-bound and waiting across many), and what every optimization and parallelism lever actually pulls on, built on measurements taken on one B300.
 
 ---
 

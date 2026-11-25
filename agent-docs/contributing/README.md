@@ -379,8 +379,8 @@ measured with, and the metrics of at least five repeats. `make bench BAND=1` hol
   S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
 - **The corpus.** Every row trains on `create_benchmark_dataset` (`tests/common/datasets.py`): seeded
   uniform token ids no model can fit, so an MoE row's routing, and the hottest EP rank's step time and
-  peak, stay put (EP8, EP8 × TP2 and EP4 × ETP2 repeat within 1% in throughput and 0.02 GB in peak; on a
-  corpus the model fits, EP8 moved 4% and 1.2 GB between runs).
+  peak, stay put (the five baseline repeats of EP8, EP8 × TP2 and EP4 × ETP2 spread at most 2% in
+  throughput and 0.04 GiB in peak).
 - **A quiet host.** A row sharing the host with another job's CPU or network load runs 4–17% slow;
   recording refuses that repeat and a band run that meets one fails.
 - **Flags.** Each training line carries its rank's mean and median step time (`mean_step_time_ms`,

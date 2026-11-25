@@ -35,14 +35,15 @@ skips the ladder (writing the tokenizer through the same `save_tokenizer`), fold
 tensor as it is gathered and streams the result through `stream_gathered_checkpoint`. How it resumes,
 LoRA or full fine-tune: [Embedding — Saving](../training-methods/embedding.md#saving).
 
-Every gather is a collective, so **all** ranks run it. Only the save rank copies the result to host memory
-(`materialize_dtensor` on the others; under EP the same `retain` flag skips the layout assembly in
+Every gather is a collective, so **all** ranks run it. Only a writer copies the result to host memory, the
+save rank or, under an EP stripe, the writer that owns the chunk (`materialize_dtensor` on the others; under
+EP the same `retain` flag skips the layout assembly in
 `EPGatherMixin.gather_layer_state_dict`), so a node pays one writer's copy instead of `gpus_per_node` ×
 model. Every gathered save **streams** through `stream_gathered_checkpoint`: FSDP2, CP and TP one
 conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors and then each MoE layer as
 it is gathered. The writer holds at most one chunk, the shard it is filling and one shard per background
 write thread (`HALO_CHECKPOINT_WRITE_THREADS`, default `0`), so host memory stays well under 1× model
-([measured peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
+([computed peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
 line; opting in with a positive count writes the finished parts on that many threads while the next chunk is
 gathered and converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
 rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;

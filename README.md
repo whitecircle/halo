@@ -55,11 +55,7 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-11-24 — Halo Competition.** Dec 1–10, with tracks for making Halo faster on a model family, post-training
-  one for a task you pick, and best-use tracks from the partners and White Circle. $200k in cash prizes and $1.5M
-  in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others. Apply by Nov 30
-  ([details](https://whitecircle.com/halo/competition), [apply](https://luma.com/ykoj0t48)).
-- **2026-11-23 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention or its
+- **2026-11-25 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention or its
   routed experts while the released NVFP4/MXFP8 expert weights stay frozen, and environmental GRPO serves each
   adapter version to vLLM ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
   - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
@@ -104,6 +100,10 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     wrap, SGLang turns requeued at a weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
     Pull or build the 1.3.0rc2 tags.
+- **2026-11-24 — Halo Competition.** Dec 1–10, with tracks for making Halo faster on a model family, post-training
+  one for a task you pick, and best-use tracks from the partners and White Circle. $200k in cash prizes and $1.5M
+  in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others. Apply by Nov 30
+  ([details](https://whitecircle.com/halo/competition), [apply](https://luma.com/ykoj0t48)).
 - **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
   Qwen3.5-35B-A3B on two 8× B300 nodes, a step takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
   ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles)).
@@ -127,7 +127,7 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
     vLLM 0.32, and SGLang 0.5.22. PaliGemma SFT and distillation now use a causal mask, which 1.1.0 left off.
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume, and more reliable async RL. Fused MoE
   kernels and FlexAttention on sliding-window layers made Gemma 4 26B-A4B 1.67× faster than 1.0.0 on two
-  GPUs, and an atomic-free expert permute made gpt-oss at EP8 up to 27% faster. Checkpoint and resume problems now stop the run instead of
+  GPUs, and an atomic-free expert permute made gpt-oss-20b at EP8 24% faster. Checkpoint and resume problems now stop the run instead of
   passing silently, and offline GRPO gained context parallelism.
 - **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models
   (LLM and VLM), 15 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
@@ -339,7 +339,7 @@ These rows have no 1.2.0 measurement; read each as a 1.1.0 number.
 | Result | Configuration |
 |---|---|
 | **28,700 tok/s/GPU** | gpt-oss-20b, dense EP1, 4k, batch 4, GC off: ~230k tok/s across 8 GPUs. |
-| **16,447 tok/s/GPU at 1,908 TFLOPS** | Qwen3.5-35B-A3B, 4k, batch 4, EP2, SDPA: the highest achieved TFLOPS of any EP>1 run benchmarked on 1.1.0. |
+| **16,447 tok/s/GPU** | Qwen3.5-35B-A3B, 4k, batch 4, EP2, SDPA. |
 | **25–76 GiB/GPU at 16k tokens** | EP8+CP8, one 16k row over 8 GPUs: 24.6 GiB at 7,149 tok/s/GPU. Dense EP1, 4 × 4k per GPU: 75.8 GiB at 23,590 tok/s/GPU. |
 | **256k context** | gpt-oss-20b, dense EP1 ZeRO-3 with fused linear cross-entropy: 5,728 tok/s/GPU at 112 GiB (measured on Halo 1.0.0). |
 | **2.45× Grouped GEMM** | Qwen3-30B-A3B, 2× B300, EP2, 8k, batch 4, GC on; 4.10× at batch 1. |
@@ -357,7 +357,7 @@ Each axis has its own flag. EP combines with one of CP, TP, or ETP, and PP with 
 --expert_parallel_size=N          # MoE experts across GPUs (DeepEP)
 --context_parallel_size=N         # long sequences (Ulysses attention)
 --tensor_parallel_size=N          # model weights (DTensor; attention only on MoE)
---expert_tensor_parallel_size=N   # expert-FFN sharding (MoE, experimental)
+--expert_tensor_parallel_size=N   # expert-MLP sharding (MoE, experimental)
 --pipeline_parallel_size=N        # decoder layers in stages across nodes (registered families)
 ```
 
@@ -366,15 +366,17 @@ Each axis has its own flag. EP combines with one of CP, TP, or ETP, and PP with 
 | EP | Distribute MoE experts across GPUs        |
 | TP | Shard model weights across GPUs (a dense model past one GPU) |
 | CP | Split long sequences across GPUs          |
-| ETP | Shard individual expert FFNs              |
+| ETP | Shard individual expert MLPs              |
 | EP+CP | MoE + long-context training               |
 | EP+TP | MoE + weight sharding                     |
 | EP+ETP | MoE + sharded experts                     |
 | PP | Split a model's layers across nodes       |
 | PP+EP, PP+ETP | MoE across nodes, experts inside each stage |
 
-Over a fast link, PP is slower than data parallelism when the model fits. It pays on slower links and for
-models that do not fit at EP8 on one machine. PP does not support LoRA yet.
+Between machines on a fast link, PP is slower than data parallelism when the model fits. It is faster on slow
+links, against layouts that send attention or experts across machines, and for models that do not fit at
+EP8 on one machine. On one machine it gained only with EP, where gpt-oss-20b at PP2 + EP4 ran 9.2% above
+EP8 (8k rows, GC off, one run each). PP does not support LoRA yet.
 
 Pass them directly to `torchrun`, or after the config with `halo launch`:
 
@@ -393,7 +395,7 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 Built in. Most apply by default where supported; QAT, the Muon and FlashAdamW optimizers, LoRA and QLoRA, and the packing modes are set per run in the config:
 
 - **Attention and kernels.** Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 elsewhere, Liger fused
-  CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4 and Nemotron-H take torch's fused RMSNorm instead),
+  CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4, Nemotron-H and Inkling 2 take torch's fused RMSNorm instead),
   fused GLU kernels, and Grouped GEMM for MoE expert compute.
 
 - **GLM-5 Next and DeepSeek-V4 kernels.** DSA attention on Blackwell (`HALO_DSA_MATMUL`, GLM-5 Next) and
@@ -404,7 +406,8 @@ Built in. Most apply by default where supported; QAT, the Muon and FlashAdamW op
   MoE routing sort, and two decoder layers per FSDP2 shard group under ZeRO-2.
 
 - **Precision and optimizers.** `AdamWBF16` with stochastic rounding keeps weights and optimizer
-  state in 6 bytes/parameter instead of 12 with FP32 master weights. Muon and FlashAdamW are also
+  state in 6 bytes/parameter instead of 12 with FP32 master weights and moments, plus the 2-byte bf16
+  working copy. Muon and FlashAdamW are also
   supported. FP8/FP4 QAT runs on MoE experts and dense MLPs through a fake-quant path, with an opt-in
   DeepGEMM forward; `quantize-to-lowp` writes block-scaled mxfp8/mxfp4/nvfp4 weights.
 

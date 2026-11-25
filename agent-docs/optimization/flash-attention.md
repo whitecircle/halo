@@ -4,7 +4,7 @@
 
 FA2 is the detector's terminal default, with no availability probe — every shipped image carries it, and a host without it raises at model build. A route from FA4 to FA2 for a model FA4 cannot train ([below](#model-specific-handling)) does probe, and refuses on such a host, naming `flex_attention` and `eager`. Context Parallelism hard-requires flash-attn and raises `ImportError` when it is missing.
 
-Why tiling attention is the standard fix for the model's most memory-bound op: [GPU Training Theory §6](../reference/gpu-training-theory.md#6-attention--the-canonical-memory-bound-fix).
+Why tiling attention is the standard fix for the operation with the model's largest memory footprint at long rows: [GPU Training Theory → Attention](../reference/gpu-training-theory.md#attention).
 
 ## Supported backends
 
@@ -32,7 +32,7 @@ and the config-level choice can never disagree about a device.
 
 The order matters because CP calls the **non-varlen** forward, the path FA2 serves worst on both architectures.
 
-On B300 (Halo 1.1.0 or earlier), CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memory, the margin widening with sequence length (+19% at 32k, +63% at 128k on gpt-oss-20b ep8+cp8; +197% on dense Qwen3-4B ep1+cp8 at 128k). FA2 is faster only below ~16k, where per-call overhead dominates.
+On B300 (Halo 1.1.0 or earlier), CP on FA4 measures 1.2–3× FA2 at ≥32k tokens with equal peak memory, the margin widening with sequence length (+19% at 32k, +63% at 128k on gpt-oss-20b `ep8 × cp8`; +197% on dense Qwen3-4B `ep1 × cp8` at 128k). FA2 is faster only below ~16k, where per-call overhead dominates.
 
 ## Automatic detection
 
@@ -44,7 +44,7 @@ On B300 (Halo 1.1.0 or earlier), CP on FA4 measures 1.2–3× FA2 at ≥32k toke
 
 The detection above, the sink probe and the FA4 warm-up resolve kernels through `flash_kernel(attn_impl, varlen=...)`: one module table in transformers' dispatch order (FA3 through `flash_attn_interface` first), FA4 imported only after `ensure_fa4_kernel_cache_env`. A build missing the entry point reads as absent. Context parallelism resolves its kernel through `flash_kernel` too, in `preferred_flash_impl`'s order under its FA4 flag, then FA2 ([above](#supported-backends)); the trainable-sink rescale imports `flash_attn.cute` directly.
 
-The `major >= 10` test also admits consumer Blackwell (SM 12.x, RTX 50-series), where `flash_attn.cute`'s
+The `major >= 10` test also admits consumer Blackwell (compute capability 12.x, RTX 50-series), where `flash_attn.cute`'s
 SM100 kernels do not run. That is not a supported target — the images build for B200/B300 and H100/H200.
 
 `resolve_attn_implementation` then applies the model-level overrides below. One is precision-driven: in
@@ -75,9 +75,9 @@ The end-to-end step win is a function of attention's share of the step, which gr
 | 16,384 | 23,139 | 12,282 | 23,112 | 16,167 | 1.88× |
 | 32,768 | 17,504 | 7,497 | 17,047 | 10,607 | 2.33× |
 
-At 4k batch-1 the step is overhead-bound, so FA4 stays close to FA2 (1.19×); the gap opens with length and reaches 2.3× at 32k. SDPA (Blackwell-tuned cuDNN kernel) leads FA4 by 9% at 4k and is within 3% of it from 16k, so SDPA is a fine fallback for plain dense models. flex trails both at every length; it ties FA2 at 4k (within its own 7.9% run spread) and beats it from 16k.
+At 4k batch-1 attention is a small share of the step, so FA4 stays close to FA2 (1.19×); the gap opens with length and reaches 2.3× at 32k. SDPA (Blackwell-tuned cuDNN kernel) leads FA4 by 9% at 4k and is within 3% of it from 16k, so SDPA is a fine fallback for plain dense models. flex trails both at every length; it ties FA2 at 4k (within its own 7.9% run spread) and beats it from 16k.
 
-On sparse MoE expert work and the wait for the busiest rank take most of the step, so the kernel speedup is only **+17%** end-to-end. gpt-oss-20b, EP=8, seq 16,384, batch 1, GC on, 8× B300 (Blackwell image, median of 2): FA4 12,382 vs FA2 10,627 tok/s/GPU (1.17×); the FA4 arm is the s16384 row of the ep8 sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md). FA4 is the production default for gpt-oss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
+On sparse MoE expert work and the wait for the busiest rank take most of the step, so the kernel speedup is only **+17%** end-to-end. gpt-oss-20b, `ep8`, seq 16,384, batch 1, GC on, 8× B300 (Blackwell image, median of 2): FA4 12,382 vs FA2 10,627 tok/s/GPU (1.17×); the FA4 arm is the s16384 row of the `ep8` sequence sweep in [Throughput Benchmarks](throughput-benchmarks.md). FA4 is the production default for gpt-oss SFT; SDPA also dispatches once sinks are reset but lacks FA4's native sink/sliding-window/softcap handling.
 
 EP/long-context throughput tables live in [Throughput Benchmarks](throughput-benchmarks.md), which already run the FA4 default.
 
@@ -111,11 +111,11 @@ The resolver takes the run's `SinksPolicy` and records its reset verdict on the 
 
 **Gemma4** (5 full-attention layers at `global_head_dim=512`): FA2/FA3/FA4/cuDNN-SDPA all reject head_dim>256 (FA2 cap 256, cuDNN cap 128 on cu13, FA4's SM100 kernel overflows tensor memory and asserts in `flash_fwd_sm100`); math SDPA materializes `[B, heads, S, S]` (64 GB/layer at 32k → OOM).
 
-The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`has_head_dim_beyond_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. On that path alone (`HALO_FLEX_SLIDING=0`), Gemma4 32k EP=8 peaks at ~155 GB/rank (Halo 1.1.0 or earlier). On CUDA the model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
+The loader therefore redirects any FlashAttention impl — auto-detected or caller-supplied — to SDPA for any model whose widest head exceeds 256 (`has_head_dim_beyond_flash`, off the per-layer `head_dim`), and on SDPA `patch_sdpa_for_wide_heads` forces mem-efficient SDPA (the only backend supporting head_dim=512) and sets `transformers.integrations.sdpa_attention.use_gqa_in_sdpa → False` for manual KV repeat. On that path alone (`HALO_FLEX_SLIDING=0`), Gemma4 32k `ep8` peaks at ~155 GB/rank (Halo 1.1.0 or earlier). On CUDA the model itself is built with `sdpa_flex_sliding`, which moves the sliding and short-context global layers off that kernel ([Gemma 4](../models/gemma4.md)).
 
 **Qwen3.5 / Qwen3.6 / Qwen3-Next** train on FA4's head_dim-256 path, in every script: its general SM100 forward kernel and its dedicated head_dim-256 backward, for a 256-wide query/key head (`uses_fa4_dedicated_head_dim`, which counts MLA's `qk_nope_head_dim + qk_rope_head_dim` too; transformers' flash path pads a narrower value head up to that width). Qwen3.5's partial-rotary `torch.cat` hands that path q/k strided, which it reads as they are (below). The dedicated backward's deterministic mode is not validated here, so a run that asks for one (`FLASH_ATTENTION_DETERMINISTIC=1`, which `full_determinism` sets as the config is parsed, ahead of SFT's row plan and the model load) falls back from FA4 to **SDPA** on a head_dim-256 model FA4 otherwise trains (`supports_fa4_backward`), to FA2 under Context Parallelism, the kernel the Ulysses path then runs, and to FA2 on SFT rows that hold several documents (below).
 
-SFT rows that hold several documents (`packing`, `padding_free`) load **FA2** where FA4 gains little on them or would leave them to SDPA (`default_training_rows_attn_implementation` in `halo/entrypoints/model_setup.py`). On the GatedDeltaNet families that holds when `attn_implementation` is unset and the GPU's pick is FA4, deterministic run or not (keyed on `uses_fa4_dedicated_head_dim`): FA4 runs packed rows only 2.9% faster at 16k and 4.6% at 32k (Qwen3.5-35B-A3B EP8 packed SFT on B300, FA4 4.0.0b37), below the 5% gain a default change needs, so a pinned FA4 keeps them outside `full_determinism` (the request logs that reason and that pin). Under `full_determinism` it holds on every model the run demotes off FA4 (`is_fa4_demoted_by_determinism`), a pinned `attn_implementation: flash_attention_4` included: SDPA runs such a row as one dense `[L, L]` mask with K/V repeated per query head (a one-step packed Qwen3.5-35B-A3B EP8 run: 367 s on SDPA, 162 s on FA2). FA2 consumes the `cu_seq_lens` the collator already emits. Unpacked rows keep FA4, 1.18× FA2 at 16k and 1.33× at 32k on the same model and FA4 release (one round), and padded rows of one document keep a deterministic run's SDPA.
+SFT rows that hold several documents (`packing`, `padding_free`) load **FA2** where FA4 gains little on them or would leave them to SDPA (`default_training_rows_attn_implementation` in `halo/entrypoints/model_setup.py`). On the GatedDeltaNet families that holds when `attn_implementation` is unset and the GPU's pick is FA4, deterministic run or not (keyed on `uses_fa4_dedicated_head_dim`): FA4 runs packed rows only 2.9% faster at 16k and 4.6% at 32k (Qwen3.5-35B-A3B `ep8` packed SFT on B300, FA4 4.0.0b37), below the 5% gain a default change needs, so a pinned FA4 keeps them outside `full_determinism` (the request logs that reason and that pin). Under `full_determinism` it holds on every model the run demotes off FA4 (`is_fa4_demoted_by_determinism`), a pinned `attn_implementation: flash_attention_4` included: SDPA runs such a row as one dense `[L, L]` mask with K/V repeated per query head (a one-step packed Qwen3.5-35B-A3B `ep8` run: 367 s on SDPA, 162 s on FA2). FA2 consumes the `cu_seq_lens` the collator already emits. Unpacked rows keep FA4, 1.18× FA2 at 16k and 1.33× at 32k on the same model and FA4 release (one round), and padded rows of one document keep a deterministic run's SDPA.
 
 Qwen3.5's partial-rotary `torch.cat` leaves q/k head-major before the flash transpose, MLA hands FA4 a value sliced off a fused K/V tensor, the Ulysses all-to-all at batch 1 hands it q, k and v each sliced off the one buffer it receives (token stride their summed width), and on every family a forward with the KV cache on leaves k/v head-major. FA4's head_dim-256 path reads those strided q/k/v as they are (Dao-AILab/flash-attention#2666): `tests/gpu/kernels/test_fa4_hd256_strided_inputs.py` holds its output and gradients to FA2's error against fp64 on those layouts, and `test_fa4_hd256_family_parity.py` per head_dim-256 family. The dedicated head_dim-256 backward asserts against softcap and sliding-window attention, so the resolver keeps Gemma 2 and Gemma 3 at head_dim 256 off it, as it keeps GLM-4.7-Flash (next paragraphs).
 
@@ -147,11 +147,11 @@ Measured on Halo 1.1.0 or earlier, 8× B300, with `benchmark_smpo_ep.py` (the gp
 
 | model | seq | auto vs SDPA |
 |---|---|---|
-| gpt-oss-20b ep8 | 4096 | **1.36×** |
-| gpt-oss-20b ep8 | 8192 | **1.42×** |
-| qwen3-30b-a3b ep8 | 4096 | **1.17×** |
-| qwen3-30b-a3b ep8 | 8192 | **1.14×** |
-| qwen3-8b ep1 (dense) | 4096 | **1.26×** |
+| gpt-oss-20b `ep8` | 4096 | **1.36×** |
+| gpt-oss-20b `ep8` | 8192 | **1.42×** |
+| qwen3-30b-a3b `ep8` | 4096 | **1.17×** |
+| qwen3-30b-a3b `ep8` | 8192 | **1.14×** |
+| qwen3-8b `ep1` (dense) | 4096 | **1.26×** |
 
 FA4 wins every row, on MoE and dense alike.
 
@@ -173,7 +173,7 @@ git clone https://github.com/Dao-AILab/flash-attention.git
 cd flash-attention/hopper && pip install --no-cache-dir --no-build-isolation .
 ```
 
-On Hopper (sm_90) under CUDA 13.2, `ptxas` hangs on the 24 `flash_fwd_split_hdim*_*_sm80.cu` kernels. The Docker Hopper build replaces them with throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`) and rewrites `flash_api.cpp`'s two `/*num_splits*/ 0` arguments to `1`, asserting both: with dropout 0 the occupancy heuristic behind them picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs` (an unpadded row of a few hundred tokens at batch 1, and a decode step under GQA, whose varlen call takes split-K too), and the dense and varlen forwards then run the one-split kernel instead. The backward never uses split-K. Building FA2 for Hopper outside Docker on CUDA 13.2 needs the same two changes (or CUDA 13.1).
+On Hopper (sm_90) under CUDA 13.2, `ptxas` hangs on the 24 `flash_fwd_split_hdim*_*_sm80.cu` kernels. The Docker Hopper build replaces them with throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`) and rewrites `flash_api.cpp`'s two `/*num_splits*/ 0` arguments to `1`, asserting both: with dropout 0 the split heuristic behind them picks split-K whenever `batch*heads*ceil(seq_q/64)` is under ~`0.8*2*SMs` (an unpadded row of a few hundred tokens at batch 1, and a decode step under GQA, whose varlen call takes split-K too), and the dense and varlen forwards then run the one-split kernel instead. The backward never uses split-K. Building FA2 for Hopper outside Docker on CUDA 13.2 needs the same two changes (or CUDA 13.1).
 
 Import FA3 from `flash_attn_interface` (`import flash_attn_3` succeeds but does not guarantee a functional
 build). transformers auto-detects FA3 through `is_flash_attn_3_available()`, which reads the
@@ -214,7 +214,7 @@ tower block behind a frozen patch embedding takes an input that carries its grad
 
 ## Backend benchmark
 
-Forward+backward on B300 (SM103), seq 16,384, GC on, BF16: SDPA and FA4 tie for the lead on both Qwen3-8B
+Forward+backward on B300 (compute capability 10.3), seq 16,384, GC on, BF16: SDPA and FA4 tie for the lead on both Qwen3-8B
 dense (~11,080 tok/s/GPU) and Qwen3-30B-A3B MoE (~9,870), with flex at 1.23–1.33× their step time, FA2 at
 1.42–1.57×, and eager at 6.55× on dense while the MoE OOMs. Memory is identical across working backends —
 weights + activations dominate, not the kernel.
@@ -266,7 +266,7 @@ memory bounds the row length, as it does on `eager` (bf16 scores, about half).
 
 **flex_attention gradient overflow on dense Qwen3.** flex produces ~6e18 grad norms on Qwen3-0.6B/8B, even single-GPU without distributed wrapping; losses are fine but overflow is a stability risk. Use the auto-detected flash backend for training, not flex. Upstream PyTorch/transformers issue.
 
-**FA4 first-use compile under multi-rank parallelism.** FA4 JIT-compiles each kernel on first use (~10 s) mid-forward. A cache-miss compile on one rank stalls it while peers race ahead to the next collective (a TP `o_proj` all-reduce, an EP DeepEP dispatch), desyncing the group into a deadlock.
+**FA4 first-use compile under multi-rank parallelism.** FA4 JIT-compiles each kernel on first use mid-forward (one forward kernel took 2.4 s on one B300, [GPU Training Theory → The first call is slow](../reference/gpu-training-theory.md#the-first-call-is-slow)). A cache-miss compile on one rank stalls it while peers race ahead to the next collective (a TP `o_proj` all-reduce, an EP DeepEP dispatch), desyncing the group into a deadlock.
 
 `warm_attention_kernels` (`halo/model_loading/parallel/whole_model.py`, called at the end of `load_distributed_model`, of the frozen reference/teacher loader, of the embedding SentenceTransformer load and of a trainer's path-string model load, `resolve_trainer_model`) runs the rank-local compiles on every rank behind one fence (`barrier_on_exit`), so the training loop only hits warm kernels: `warm_fa4_kernels` (`halo/models/attention/backend_setup.py`) when FA4 is active, for each attention layer's own call (below; MLA's nope + RoPE query/key width) and each non-causal vision tower's, and `warm_flex_sliding_kernels` when the model runs `sdpa_flex_sliding` ([below](#sliding-window-and-wide-head-layers-on-sdpa)), and `warm_inkling2_relative_flex_kernels` when it runs `inkling2_relative_flex` ([Inkling 2](../models/inkling2.md)). It is a no-op at `world_size == 1`, where no peer waits on a compiling rank and each kernel compiles at its first call. [Tree packing](tree-packing.md) warms the kernel variants it adds behind the same fence (`warm_tree_attention_kernels`). The FA4 and tree warm-ups are best-effort: a failure logs a warning on that rank, which then compiles at first use. Only a failure that reaches the fence, a FlexAttention warm-up's today, raises on every rank.
 
@@ -282,7 +282,7 @@ A padded batch on any flash backend derives its unpad set (token indices, `cu_se
 
 ## Blackwell notes
 
-vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on SM 10.0. See [Online GRPO](../training-methods/grpo/online.md#vllm-on-blackwell-b200).
+vLLM on B200: set `VLLM_ATTENTION_BACKEND=FLASH_ATTN` where FlashInfer JIT-fails on compute capability 10.0. See [Online GRPO](../training-methods/grpo/online.md#vllm-on-blackwell-b200).
 
 ## Masked matmul attention
 
@@ -290,7 +290,7 @@ GLM-5 Next's DSA layers attend over a boolean `[B, 1, S, S]` mask holding about 
 
 - **The forward** runs SDPA's mem-efficient kernel, `torch._scaled_dot_product_efficient_attention`, one batch row and one tile of queries at a time, over the tile's keys and its part of the mask as an additive bias. Called directly, it takes no backend flag. Grad is off inside the autograd function, so it records no backward of its own, and it returns the tile's output and log-sum-exp. A query with no key gets a zero output and a zero log-sum-exp.
 - **The backward** replaces that kernel's, rebuilding each tile's fp32 scores and applying the closed form FlashAttention and tree sparse attention use: `d_scores = probs * (g @ v^T - sum(g * out)) * scale`, `d_q = d_scores @ k`, `d_k += d_scores^T @ q`, `d_v += probs^T @ g`, with `d_k` and `d_v` summed in fp32 by the GEMM itself. One Triton launch per tile (`halo/kernels/masked_softmax.py`) takes the scores, `g @ v^T`, the mask, the saved log-sum-exp and `sum(g * out)` to 16-bit `probs` and `d_scores`, as separate element-wise passes over every score would run at memory bandwidth; `warm_attention_kernels` compiles it at load, so no rank compiles mid-step. A frozen input skips its products. It saves `q`, `k`, `v`, the mask, the output and the log-sum-exp, no scores.
-- **Tiles and keys.** `SCORES_PER_TILE` bounds a tile at 2 GiB of fp32 scores, and a tile holds up to 6 GiB in the backward. Each tile scores keys only through the last one any of its queries selected, read off the mask, so no mask can lose a key and a causal one crops to the tile's end. Tile widths and key counts are multiples of 8 (`GEMM_ALIGNMENT`), up to at most 7 masked keys, as a bf16 GEMM runs [3–10× slower](../reference/gpu-training-theory.md#4-how-a-matmul-runs-tiles-kernels-launches) when either dimension of its second operand is off one: the keys are `N` in `q @ k^T` and `g @ v^T` and inner in `d_q`, the queries inner in `d_k` and `d_v`. A row's last tile stays unaligned, which costs under 1%.
+- **Tiles and keys.** `SCORES_PER_TILE` bounds a tile at 2 GiB of fp32 scores, and a tile holds up to 6 GiB in the backward. Each tile scores keys only through the last one any of its queries selected, read off the mask, so no mask can lose a key and a causal one crops to the tile's end. Tile widths and key counts are multiples of 8 (`GEMM_ALIGNMENT`), up to at most 7 masked keys, as a bf16 GEMM runs [4 to 9 times slower](../reference/gpu-training-theory.md#multiples-of-8) when either dimension of its second operand is off one: the keys are `N` in `q @ k^T` and `g @ v^T` and inner in `d_q`, the queries inner in `d_k` and `d_v`. A row's last tile stays unaligned, which costs under 1%.
 - **What goes to SDPA**: anything off CUDA, dropout, `output_attentions`, no mask or a non-boolean or per-head one, a KV cache (`q_len != kv_len`), differing query, key and value shapes, a head width off a multiple of 8, a `DTensor` or other tensor subclass, differing dtypes outside autocast, a dtype the kernel has no build for, and calls carrying `position_bias` or a paged `cache`. The vision tower reads the same module name and passes no mask. Under autocast the inputs take its dtype, as SDPA's do.
 
 `HALO_DSA_MATMUL=0` keeps stock SDPA. `tests/cpu/models/test_masked_matmul_attention.py` holds the backward to SDPA in fp32 and to rounding in fp64, over a stand-in for the CUDA-only forward kernel, on dense, causal, pool-shaped and padded masks at several tile budgets, with negative controls on the normalizer term and the crop, and a tiny GLM-5 Next to stock on loss and every gradient. `tests/gpu/kernels/test_masked_matmul_attention.py` holds the real kernel to stock and to an fp32 reference.
@@ -299,7 +299,7 @@ Against torch's mem-efficient kernel on real masks, on one B300 at 64 heads of 2
 
 ## Block-sparse attention (Qwen3.8-Flash-Next)
 
-A QSA layer's query attends the `block_topk` compression blocks its indexer picked, each `compress_ratio` consecutive keys of its document, and the keys after its last complete block. `halo/kernels/block_sparse_attention.py` runs that as one Triton program per query token and K/V head, which loads the head's whole query group, loops over the selected blocks in key tiles and takes the tail as one more iteration of the same loop. Softmax and the output accumulate in fp32, and the backward adds dK and dV into fp32 buffers with atomics, so it is not deterministic. The forward and dQ repeat bit for bit; two backwards of the same inputs at the release's layout leave 0.02% to 0.05% of dK and dV elements one bf16 step apart (at 512 and 4,096 tokens). That is enough that no run replays itself on the kernel: on the release cut to four layers, two identical runs part at the first step's gradient norm, and a resumed run's losses leave the unbroken run's by about 1e-3 within three steps. A run that must replay bit for bit keeps QSA on the tiled path, which `full_determinism` selects beside the run's other deterministic kernels ([Determinism](../parallelism/expert-parallelism.md#determinism)).
+A QSA layer's query attends the `block_topk` compression blocks its indexer picked, each `compress_ratio` consecutive keys of its document, and the keys after its last complete block. `halo/kernels/block_sparse_attention.py` runs that as one Triton program per query token and K/V head, which loads the head's whole query group, loops over the selected blocks in key tiles and takes the tail as one more iteration of the same loop. Softmax and the output accumulate in fp32, and the backward adds dK and dV into fp32 buffers with atomics, so it is not deterministic. The forward and dQ repeat bit for bit; two backwards of the same inputs at the release's layout leave 0.02% to 0.05% of dK and dV elements one bf16 step apart (at 512 and 4,096 tokens). That is enough that no run replays itself on the kernel: on the release cut to four layers, two identical runs part at the first step's gradient norm, and a resumed run's losses leave the unbroken run's by 9e-4 to 2.7e-3 within three steps (three runs). A run that must replay bit for bit keeps QSA on the tiled path, which `full_determinism` selects beside the run's other deterministic kernels ([Determinism](../parallelism/expert-parallelism.md#determinism)).
 
 - **What it reads.** The selection's block ids (`[B, N, block_topk]`, `-1` unused, about 1 KB per token) and `spans`, a `(first, visible)` pair per query (8 B per token) derived from the row's documents: the document's first unpadded key and how many keys the query sees. A query's valid slots are a prefix, `min(visible // compress_ratio, block_topk)` long, so no per-query key list exists. The recompute of a checkpointed layer attends the cached selection, `spans` included.
 - **Shapes** (query heads, K/V heads, head width, ratio, top-k) come from the module and its config. The head width must be a power of two of at least 16, the ratio must divide and stay under the key tile, and a K/V head's query group, rounded up to a power of two, times the head width may not exceed 16,384 fp32 accumulator elements (the register budget), and the key and value tiles, with the fp32 copy of the value tile, must fit the device's shared memory; `block_sparse_unsupported` returns the reason otherwise.

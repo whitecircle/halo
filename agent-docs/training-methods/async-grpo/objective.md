@@ -204,10 +204,10 @@ Rows carry two masks, and the loss and the DAPO normalizer use their intersectio
 
 | Knob | Sets | Sizing rule |
 |---|---|---|
-| `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and exam-QA. Trades unique prompts for samples each. |
+| `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and the Qwen3.6 and Inkling 2 exam-QA recipes. Trades unique prompts for samples each. |
 | `max_concurrent_rollouts` | Per-rank cap on one round's rollouts in flight | Defaults to the larger of a train and an eval round's rows, one wave; above the round's count it never binds. |
 | `rollout_actor_budget` | Ray actor budget per node (cluster-wide with `ray_address`), split over the rollout ranks | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
 
 ## Learning rate
 
-Learning rates sit near the SFT floor: `2e-7` on the code-contests full fine-tunes, `3e-6` on their LoRA siblings, `1e-6` on the lighter single-answer tasks, `5e-6` on the template. The code-contests recipes cap their cosine at `max_steps: 300`, the run's useful length; curriculum stage 1, the single-answer tasks and the template run it over `num_train_epochs`; stages 2 and 3 use `constant_with_warmup` ([SFT](../sft.md#learning-rate-and-global-batch-size)).
+Learning rates sit near the SFT floor: `2e-7` on the code-contests full fine-tunes, `3e-6` on their LoRA siblings, `1e-6` on the lighter single-answer full fine-tunes, `2e-5` on the Inkling 2 exam-QA LoRA runs, `5e-6` on the template. The code-contests recipes cap their cosine at `max_steps: 300`, the run's useful length; curriculum stage 1, the single-answer tasks and the template run it over `num_train_epochs`; stages 2 and 3 use `constant_with_warmup` ([SFT](../sft.md#learning-rate-and-global-batch-size)).

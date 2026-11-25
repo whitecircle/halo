@@ -37,7 +37,7 @@ Megatron-Core stores `torch_dist` sharded checkpoints split by TP/PP/EP/ETP — 
 |----------|:-----------:|-----|
 | EP+TP or pure ETP on MoE | **This Toolkit** | Expert shapes other HF-native tools don't compose |
 | Memory-constrained full fine-tuning | **This Toolkit** | AdamWBF16 — ~6 bytes/param |
-| Long-context training (scales with nGPUs) | **This Toolkit** | CP splits sequences; combines with EP |
+| Long-context training (a sequence split across up to one NVLink domain) | **This Toolkit** | CP splits sequences; combines with EP |
 | MoE wider than one NVLink domain, on HF weights | **This Toolkit** | PP across domains, EP inside each stage |
 | SMPO or Offline GRPO | **This Toolkit** | Unique methods |
 | Multi-turn RL with tool environments | **This Toolkit** | Ray actors, NCCL sync, built-in envs |

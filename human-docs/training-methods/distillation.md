@@ -44,8 +44,8 @@ halo launch self-distill examples/distillation/qwen3_5/self-distill-qwen3.5-9b.y
 - `max_length` needs headroom for the hint: neither branch is truncated, so an over-length row raises.
 - `assistant_message_template` must byte-match what the chat template renders, and
   `train_on_completions_only` must stay on while the distillation term is.
-- `reference_kl_coef: 0` loads no reference model. Raising it costs a second resident model, unsharded
-  under expert or tensor parallelism.
+- `reference_kl_coef: 0` loads no reference model. Raising it costs a second resident model, a whole
+  unsharded copy on every rank.
 
 ## Online SDPG
 

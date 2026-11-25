@@ -2,8 +2,8 @@
 
 On top of data parallelism, four strategies address different bottlenecks: model size (TP), sequence
 length (CP), expert distribution (EP), or depth across NVLink domains (PP). They combine within the
-supported set below. Each mode is a communication pattern with a price:
-[GPU Training Theory §9](../reference/gpu-training-theory.md#9-distributed-training-the-communication-wall).
+supported set below. Each mode frees one kind of memory and adds one kind of collective:
+[GPU Training Theory → Many GPUs](../reference/gpu-training-theory.md#many-gpus).
 
 Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GPU skip it);
 `DistributedTrainerMixin` selects the sharding strategy from the active mode. See the
@@ -117,7 +117,7 @@ What crosses the wire:
 | Mode | Collective | Over |
 |---|---|---|
 | FSDP2 | all-gather params (forward), reduce-scatter grads (backward) | `(dp,)` mesh |
-| HSDP | all-gather/reduce-scatter within a domain, one all-reduce across replicas per backward | `(dp_replicate, dp_shard)` mesh |
+| HSDP | all-gather/reduce-scatter within a domain, then an all-reduce of each rank's gradient shard across replicas, once per shard group per backward | `(dp_replicate, dp_shard)` mesh |
 | TP | all-reduce / all-gather per layer | `(tp,)` axis |
 | CP | Ulysses all-to-all (sequence ↔ heads) around attention | CP group |
 | EP | DeepEP all-to-all dispatch → local expert GEMM → all-to-all combine | EP dispatch group |
@@ -147,8 +147,8 @@ sequences inside attention.
 
 ### Stacking the dimensions
 
-`data_parallel_size` counts distinct batches. PP carves the world first (`stage_world_size =
-world_size / pp_size`), then TP, CP or ETP divide each stage:
+`data_parallel_size` counts distinct batches. Each pipeline stage takes `world_size / pp_size` ranks,
+and TP, CP or ETP divide each stage:
 
 ```text
 data_parallel_size = world_size / pp_size / max(tp_size, cp_size, expert_tp_size)
@@ -216,7 +216,7 @@ mode): [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## When pipeline parallelism is worth it
 
-On one 8-GPU machine, run as two 4-GPU agents, PP runs 8.5% below `dp8` on Qwen3-8B and 9.2% above `ep8` on gpt-oss-20b, where halving the dispatch group pays for the bubble. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
+On one 8-GPU machine, run as two 4-GPU agents, PP runs 8.5% below `dp8` on Qwen3-8B and 9.2% above `ep8` on gpt-oss-20b, where halving the dispatch group pays for the bubble. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack an EP group that divides the declared domain runs at node scope on NVLink, so none of its all-to-alls cross RDMA ([Large-Scale Scenarios](large-scale-scenarios.md#first-question-how-wide-is-the-nvlink-domain)).
 
 Measured on two 8-GPU B300 machines, DP, with any experts on one machine, beats PP on a fast link: PP runs 4.0% below `dp16` and 15.9% below `ep8` with DP. PP leads `dp8 × tp2` (1.63×), `ep16`, whose expert dispatch crosses the link (3.82×), a slow link (13.8× over `dp16` forced onto plain TCP sockets), and a model too large for one machine's expert group (GLM-5.3-Flash, 1.61× over `ep16`, where `ep8` with DP runs out of memory). The rows: [Measured throughput](pipeline-parallelism.md#measured-throughput).
 

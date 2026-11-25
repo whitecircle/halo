@@ -70,8 +70,8 @@ Not refusals:
   call names. The episode's last language is its `language` [metrics](../../../monitoring.md#logged-metrics)
   slice.
 - With one language, the tools declare no `language` argument and refuse a call naming one.
-- The tool descriptions name the toolchain (compile flags, Python version) on `local` and `bubblewrap`; `remote`
-  states none.
+- The tool descriptions name the toolchain (compile flags, Python version) on `local` and `bubblewrap`; `remote`,
+  `modal` and `baseten` state none.
 
 ### Evident language
 

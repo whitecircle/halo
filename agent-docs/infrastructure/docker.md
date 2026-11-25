@@ -157,7 +157,7 @@ release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `A
 - **Hopper FA2 split-K stub.** CUDA 13.2 ptxas hangs on the 24 sm_90 split-K kernels, so the build
   swaps them for throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`) and pins the dense
   and varlen forwards to one split (`num_splits` 0 → 1 in `flash_api.cpp`, asserted in the build): their
-  occupancy heuristic would otherwise pick split-K for a small unpadded batch and for decode under GQA.
+  split heuristic would otherwise pick split-K for a small unpadded batch and for decode under GQA.
   The backward never uses split-K; only `flash_attn_with_kvcache`, which nothing in Halo calls, still
   can reach a stub.
 - **No `flash_attn.cute` on Hopper.** FA2's source build also installs an old copy of FA4's CuTe DSL
@@ -182,7 +182,7 @@ DeepEP or the base image.
 |----------|-------|--------|
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import), so it must be set from PID 1. The setting EP is validated with ([DeepEP](deepep.md#environment-variables)); it does not make racy single-domain multi-group EP safe, which `ParallelismConfig` rejects. |
 | `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | `0` | The NGC base defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent RoPE positions past 2048 in remote code that computes RoPE with a matmul. |
-| `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED` | `1` | Persist the FA4 CuTe DSL kernel cache (~10 s JIT per kernel on first use). |
+| `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED` | `1` | Persist the FA4 CuTe DSL kernel cache. FA4 compiles each kernel on its first use: the first call of one forward kernel at 4,096 tokens and 16 heads took 2.4 s on one B300, and 2.9 ms from a filled cache ([GPU Training Theory → The first call is slow](../reference/gpu-training-theory.md#the-first-call-is-slow)). |
 | `CUTE_DSL_ENABLE_TVM_FFI` | `1` | TVM-FFI direct-invocation ABI for CuTe DSL kernels. Liger's CuTe DSL RoPE returns wrong results under it, so the toolkit pins Liger's RoPE to Triton ([Liger → Kernel implementation](../optimization/liger-kernels.md#kernel-implementation)). |
 | `EP_SUPPRESS_NCCL_CHECK` | `1` | Silences DeepEP's duplicate-NCCL-runtime check, which flags the NGC base's HPC-X NCCL transport plugin beside the pip `libnccl.so.2`. |
 | `NCCL_IB_DISABLE=0`, `NCCL_NET_GDR_LEVEL=2`, `NCCL_IB_HCA=mlx5`, `NCCL_P2P_LEVEL=NVL`, `NCCL_DEBUG=WARN` | — | Mellanox IB/RoCE defaults; IB clusters need no extra env. |

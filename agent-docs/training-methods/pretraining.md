@@ -15,7 +15,7 @@ init_from_scratch: true             # random weights — no checkpoint read
 torchrun --nproc_per_node=8 scripts/training/sft.py my-pretrain.yaml --init_from_scratch=true
 ```
 
-The model is built with the resolved auto class's `from_config(config)`, so weights come from `_init_weights`. The run's `seed` is set first, making init identical on every rank so FSDP2 shards and DP replicas agree.
+The model is built with the resolved auto class's `from_config(config)`, so weights come from `_init_weights`. The run's `seed` is set first, so every rank draws the same weights and each FSDP2 shard is cut from one model. The copies several ranks hold of one parameter do not depend on the seed, since DDP broadcasts rank 0's weights and the FSDP2 wrap gives every HSDP replica the first replica's shards and every FSDP-ignored parameter DP rank 0's copy ([Data Parallelism → HSDP](../parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
 
 Four refusals:
 

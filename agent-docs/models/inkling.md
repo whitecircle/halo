@@ -36,7 +36,7 @@ The lazy loaders plan their keys on the same declarative entries, as `from_pretr
 
 The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 
-The family's fp32 pin covers the **short convolutions** (`_keep_in_fp32_modules_strict`: `k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`). Every training loader casts them to the run dtype ([Load precision](README.md#load-precision)), so the sconvs train in bf16 unless the run keeps fp32 masters — a deliberate trade validated by the multi-node runs below.
+The family's fp32 pins (`_keep_in_fp32_modules_strict`) are the **short convolutions** (`k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`), the router's `gate.global_scale` and its `e_score_correction_bias` buffer. Every training loader casts the pinned parameters to the run dtype while the buffer stays fp32 ([Load precision](README.md#load-precision)), so the sconvs train in bf16 unless the run keeps fp32 masters, a deliberate trade validated by the multi-node runs below.
 
 ## Why CP and TP are out
 

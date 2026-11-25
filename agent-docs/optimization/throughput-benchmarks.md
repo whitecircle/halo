@@ -1,12 +1,12 @@
 # Throughput Benchmarks
 
-Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU count per section). tokens/s/GPU is the headline metric (hardware- and sparsity-independent); achieved TFLOPS is the diagnostic. What MFU measures and why MoE complicates it: [GPU Training Theory §11](../reference/gpu-training-theory.md#mfu-and-why-moe-complicates-it).
+Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU count per section). tokens/s/GPU is the headline metric (it divides by no hardware peak and needs no sparsity correction); achieved TFLOPS is the diagnostic. What MFU measures and why MoE complicates it: [GPU Training Theory → MFU](../reference/gpu-training-theory.md#mfu).
 
 ![Twelve bench shapes on 8× B300: 1.2.0 runs each faster than 1.1.0, from 1.11× on Qwen3-8B FSDP2 to 2.07× on gpt-oss-20b ep4 × etp2, and peak memory moves at most 1.65 GiB](../assets/benchmarks/release_comparison.png)
 
 ## Setup
 
-- **GPU**: B300 SXM6 (288 GB HBM3e, 148-SM die). Peak TFLOPS from the toolkit's registry (`halo/hardware.py`): bf16 **2250 TF**, fp8 4500 TF, fp4 9000 TF; the measured best large square bf16 GEMM is ~1800 TF (80% of peak).
+- **GPU**: B300 SXM6 (288 GB HBM3e by NVIDIA's specification; the driver reports 148 SMs, where NVIDIA's article on the chip gives 160). Peak TFLOP/s from Halo's registry (`halo/hardware.py`): bf16 **2,250**, fp8 4,500, fp4 9,000; a large square bf16 GEMM measured on one B300 runs about 1,800 TFLOP/s for its first 40 ms or so and about 1,400 sustained at the board's 1,100 W limit, 80% and 62% of the registry's bf16 value ([GPU Training Theory → The arithmetic rate](../reference/gpu-training-theory.md#the-arithmetic-rate)).
 
     The peak scales the MFU/S-MFU percentages only; the tok/s/GPU and achieved-TFLOPS columns below do not use it.
 
@@ -302,7 +302,7 @@ from the common value is left out. In a separate run set Halo measures 15,090 cl
 
 | framework | version | layout | cluster tok/s | peak GiB/GPU |
 |---|---|---|---:|---:|
-| Halo | this toolkit, with the MoE kernels and sliding-window attention | EP2 + FSDP2, bf16 experts, `sdpa_flex_sliding`, no checkpointing | **14,980** | **101.8** |
+| Halo | main branch of 2026-09-24, with the MoE kernels and sliding-window attention | EP2 + FSDP2, bf16 experts, `sdpa_flex_sliding`, no checkpointing | **14,980** | **101.8** |
 | Axolotl | 0.19.0 | FSDP2 no-reshard, FA2 sliding | 9,064 | 137.6 |
 | NeMo AutoModel | container 26.08.00 | EP2 + FSDP2, eager attention | 7,424 | 119.1 |
 | Unsloth | 2026.9.11 | DDP, bf16 AdamW | 6,100 | 238.6 |
@@ -364,8 +364,8 @@ are numerical-health evidence, not a convergence comparison. The raw 20-step tra
 ### Published numbers in similar setups
 
 Figures from outside the comparison above, with the setup stated; Halo's are from 1.1.0 or earlier. The
-transformers figure ran on H100, the others on the same B300s as Halo. B300 has 2.3× the bf16 peak of H100, so read a
-cross-GPU row as a ceiling on the gap, not the gap.
+transformers figure ran on H100, the others on the same B300s as Halo. Halo's B300 MFU reference peak (2,250 TFLOP/s) is
+2.3× H100's dense bf16 specification (989.5), so read a cross-GPU row as a ceiling on the gap, not the gap.
 
 - **Qwen3-30B-A3B, bf16.** transformers' own expert-parallel path: 3,485 tok/s/GPU at 38.6 GB
   (8× H100, seq 2048, `tp_size=8`). Halo EP2 on 8× B300 at seq 4096: 6,898 / 11,343 / 14,536 at
@@ -463,7 +463,7 @@ carries the same divisors as the tokens: `tp_size` (heads are sharded) and, unde
 (the wrapper splits the sequence's heads inside forward). Per-step wiring and the logged fields:
 [Callbacks](../training-methods/callbacks.md#efficiencycallback).
 
-**S-MFU** (sparsity-aware utilization) is the meaningful roofline fraction for MoE: it scales the *expert*
+**S-MFU** (sparsity-aware utilization) is the share of the GPU's MFU reference peak a MoE step achieves: it scales the *expert*
 FLOP term by `(top_k / num_experts) × ep_size` before dividing by `step_time × peak_gpu_flops`, so it does
 not credit experts that never fired. Shared experts, router and attention params count at full weight;
 `expert_tp_size` does not appear, since it already divides the local expert params.
@@ -473,10 +473,12 @@ the whole EP group's tokens, so per-rank active FLOPs/token is ep-invariant and 
 EP degrees. With `num_full_model_params` set, the full expert bank is reconstructed as
 `local_expert_params × ep_size × expert_tp_size`, so pure ETP is counted too.
 
-If top-k is not detected the sparsity factor stays 1.0 and S-MFU silently collapses to plain MFU; check the
-`S-MFU: N experts, top_k=K` startup line.
+If top-k is not detected the sparsity factor stays 1.0, and the log carries no S-MFU fields and no
+`S-MFU: N experts, top_k=K` startup line; check for that line.
 
-Compare configs with tok/s/GPU and achieved TFLOPS; reach for S-MFU only when you need a roofline fraction
+Compare layouts of one model on the same rows with tok/s/GPU, and achieved TFLOPS only between configurations with the
+same parameters per rank (gpt-oss-20b ep2 → ep8 at b4: −36% tok/s/GPU, −75% achieved TFLOPS); reach for S-MFU only
+when you need a share of the reference peak
 (see [Why MoE utilization reads low](#why-moe-utilization-reads-low)).
 
 **Cluster throughput** counts each of the `ParallelismConfig.data_parallel_size` replicas' batches once
@@ -488,7 +490,7 @@ PP, `1/cp_size` of it under CP).
 
 ## GPT-OSS-20B (8× B300)
 
-**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section but the EP phase split: Halo 1.1.0 or earlier, 8× B300 on the Blackwell image; the gpt-oss-20b ep8 rows (EP+CP and EP+TP included) are the median of two runs from a separate run set.
+**Model**: `unsloth/gpt-oss-20b-BF16` (20.91B total, 32 experts, top_k=4, 3.61B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section but the EP phase split: Halo 1.1.0 or earlier, 8× B300 on the Blackwell image; the gpt-oss-20b ep8 rows (EP+CP and EP+TP included) are the median of two runs from a separate run set.
 
 ### EP-only (batch scaling)
 
@@ -520,7 +522,7 @@ CP splits sequences via Ulysses attention. ep8 + CP=8 (DP=1), GC on:
 | 32,768 | 9,031 | 402 | 29.9 GiB | 0.45s |
 | 65,536 | 8,862 | 566 | 41.9 GiB | 0.92s |
 
-Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysses all-to-all); memory grows slowly (25–42 GiB) from 16k to 64k. CP trades per-GPU throughput for cheap long context.
+Achieved TFLOPS rises with sequence length. From 16k to 32k tok/s/GPU rises 26%, and the attention-score term the count charges per token grows with row length; from 32k to 64k tok/s/GPU falls 2% and that term carries the whole rise (calculated from the table). Memory grows slowly (25–42 GiB) from 16k to 64k. CP trades per-GPU throughput for cheap long context.
 
 ### EP+TP
 
@@ -534,11 +536,11 @@ On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all val
 | 16,384 | 1,638 | 301 | 68.5 GiB | 1.25s |
 | 32,768 | 1,780 | 345 | 118.7 GiB | 2.30s |
 
-Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 4,749 (6,013 on Halo 1.2.0), `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU (1.1.0 or earlier); at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
+Achieved TFLOPS rises with sequence length. The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 4,749 (6,013 on Halo 1.2.0), `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU (1.1.0 or earlier); at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
 
 ### Why MoE utilization reads low
 
-Sparsity first: gpt-oss-20b fires top-4 of 32 experts (3.5B active of 20.7B), so a sparse MoE cannot
+Sparsity first: gpt-oss-20b fires top-4 of 32 experts (3.61B active of 20.91B), so a sparse MoE cannot
 approach a dense model's plain MFU. Higher EP also shrinks `N_local` far faster than throughput (ep2 = 11.36B
 → ep8 = 4.19B, −63%, against −15% tok/s/GPU at b1): ep8 trades per-GPU utilization for memory. Part of the gap is
 idle hardware too: at ep8 ranks wait for the busiest one ([where the time goes](#where-the-ep-steps-time-goes)).
@@ -559,32 +561,35 @@ Keep more params local (low EP), then drop GC if activations fit, then add batch
 | qwen3.5-35b-a3b | ep2 | b4, s4096 | 16,447 | 1,908 | 137.8 GiB |
 | qwen3.5-35b-a3b | ep8 | b8, s4096 | 15,126 | 659 | 111.0 GiB |
 
-- **Local params set the TFLOPS figure.** ep1 keeps all 20.7B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
+- **Local params set the TFLOPS figure.** ep1 keeps all 20.91B local and tops the table; ep2 ~11.4B; ep8 ~4.2B;
   qwen3.5-35b ep2 ~17.5B. ep1 also has no dispatch group whose busiest rank it must wait for. Choose the lowest EP
   that fits. (The ep1 rows count every local expert as active,
-  so their TFLOPS are nominal — above what the silicon can issue — and over-read as a utilization fraction
-  for sparse MoE.)
+  so their TFLOPS are nominal and over-read as a utilization fraction for sparse MoE. Both exceed the 2,464 TFLOP/s
+  ceiling at the maximum clock, which is computed in
+  [GPU Training Theory → Two more numbers called the peak](../reference/gpu-training-theory.md#two-more-numbers-called-the-peak).)
 - **Sequence length raises ep8's floor** but does not close the gap to ep1/ep2 — ep8 is the memory topology.
-- **Drop GC where activations fit** — the largest single throughput lever. Past the GC-off memory wall, the
-  largest batch that fits under GC-on is the recipe.
+- **Drop GC where activations fit.** At equal batch it gains 22–32% on this page's gpt-oss-20b rows. Compare the
+  largest batch that fits without GC against the largest that fits with it, since the larger batch can win
+  ([GPU Training Theory → Gradient checkpointing](../reference/gpu-training-theory.md#gradient-checkpointing)).
 
 Picking a corner: **ep1** (sharded experts) when it fits, else **ep2 b4** for maximum throughput, **ep8 b4**
 for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 32–64k context.
 
 ## Maximizing throughput: sequence & batch
 
-Throughput is dominated by the effective per-GPU token count `M = per_device_train_batch_size × max_length` —
-bigger `M` amortizes fixed per-step costs (kernel launches, dispatch latency, optimizer step) until a
-memory wall. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b; Qwen3.5-35B-A3B is flat from s8192 to s16384 (11,726 to 11,618, Halo 1.1.0, SDPA).
-Cross-node EP is pinned to `M ≤ 8192` by the Gin dispatch ceiling
+Throughput is dominated by the tokens one rank processes per step, `T = per_device_train_batch_size × max_length` —
+more tokens per step amortize fixed per-step costs (kernel launches, dispatch latency, optimizer step) until memory
+runs out. This section's figures are from Halo 1.1.0 or earlier, except the EP phase split. **Target `T` ≥ ~8k on B300 MoE before judging throughput**; below that it still climbs fast: ep8 b1 gains 12% from s4096 to s8192 and 1% from there to s16384 on gpt-oss-20b; Qwen3.5-35B-A3B is flat from s8192 to s16384 (11,726 to 11,618, Halo 1.1.0, SDPA).
+Cross-node EP is pinned to `T ≤ 8192` by the Gin dispatch ceiling
 ([DeepEP → EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) — the floor of this range by
 construction.
 
 1. **Push `max_length` as high as data/memory allow, and pack** (`packing: true` / padding-free collator —
-   raises tokens/expert = `M × top_k × ep_size / num_experts`). Use
+   raises tokens/expert = `T × top_k × ep_size / num_experts`). Use
    [Context Parallelism](../parallelism/context-parallelism.md) when a sequence won't fit one GPU.
-2. **Raise `per_device_train_batch_size` until just below OOM** with gradient checkpointing on — the ~20–30%
-   recompute usually pays for itself through the bigger `M`.
+2. **Raise `per_device_train_batch_size` until just below OOM**, with gradient checkpointing off while the batch
+   fits, which gains 22–32% at equal batch on this page's gpt-oss-20b rows. Then run the largest batch that fits
+   under checkpointing and keep the faster of the two.
 3. **Fill with `gradient_accumulation_steps`, not more parallelism** — global batch at near-zero memory cost.
 4. **Keep DP large** — EP is orthogonal to DP; reach for TP/CP only when a model/sequence won't fit.
 5. **Measure**: `enable_efficiency_metrics: true` logs per-step tokens/s/GPU (add
@@ -634,7 +639,8 @@ around b4 (b8 only adds memory). At b1 ep8 runs 17% below ep1 (11,896 vs 14,304 
 SDPA runs GptOss only with the sinks reset (the neutralized column contributes 0) and raises with live
 sinks ([Flash Attention](flash-attention.md#model-specific-handling)); use FA4.
 
-The roofline ridge (AI ≈ 275 on B300) sits near 256–512 rows per expert at K=N=2880. This point runs 16384 rows per
+The roofline ridge (about 210 FLOP/byte on one B300) puts the crossover at about 244 rows per expert at K=N=2880
+([GPU Training Theory → The arithmetic intensity of a GEMM](../reference/gpu-training-theory.md#the-arithmetic-intensity-of-a-gemm)). This point runs 16384 rows per
 expert, so its expert GEMM is compute-bound. Expert GEMMs at the busiest rank take 46–48% of this step (calculated
 from 1.2.0 span timings).
 
@@ -671,7 +677,7 @@ GC-on for long context — pure ep8 GC-on streams to 64k (138 GiB) without Conte
 | 2 | 4 | **16,447** | 1,908 | 137.8 GiB | 1.00s |
 | 8 | 4 | 14,275 | 622 | 72.1 GiB | 1.15s |
 
-ep2 keeps ~17.5B params local and reaches **1,908 TFLOPS at batch 4** — the highest `ep ≥ 2` figure in the table, below only gpt-oss-20b at ep1, consistent with [local params setting the ceiling](#maximizing-achieved-tflops). ep8 trades achieved TFLOPS for memory: 72.1 GiB at batch 4 vs 137.8 GiB for ep2. At batch 1 on 1.2.0 and FA4, ep8 runs 8,974 tok/s/GPU at 41.6 GiB. Batch is the dominant lever (ep2 b1→b4 = 2.5×): ep2 b1 holds 256 rows per expert, at the bf16 ridge, and b4 holds 1,024.
+ep2 keeps about 17.5B params local and reaches **1,908 TFLOPS at batch 4**. That figure counts every local expert as active, so it compares only with configurations that hold the same parameters per rank ([Metrics](#metrics)). ep8 trades achieved TFLOPS for memory: 72.1 GiB at batch 4 vs 137.8 GiB for ep2. At batch 1 on 1.2.0 and FA4, ep8 runs 8,974 tok/s/GPU at 41.6 GiB. Batch is the dominant lever (ep2 b1→b4 = 2.5×): ep2 b1 holds 256 rows per expert, below its experts' computed crossovers (301 rows for the fused gate-up GEMM and 427 for the down GEMM, [GPU Training Theory → When low precision speeds training up](../reference/gpu-training-theory.md#when-low-precision-speeds-training-up)), and b4 holds 1,024.
 
 At ep2 batch 4 on 1.2.0, expert compute takes 74.3% of the EP phases ([split](#where-the-ep-steps-time-goes)). Sequence 8192 runs **17,446 tok/s/GPU** (b4).
 
@@ -708,7 +714,7 @@ Batch is the dominant lever — raise it with GC off while it fits. At a fixed 3
 
 ## GPT-OSS-120B notes
 
-**Model**: `unsloth/gpt-oss-120b-BF16` (120B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**, last run on code before 1.2.0. By calculation, local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200 at this config). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
+**Model**: `unsloth/gpt-oss-120b-BF16` (117B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**, last run on code before 1.2.0. By calculation, local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200 at this config). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
 
 ## Allocator: expandable segments
 
@@ -727,7 +733,7 @@ The dense runs hold 13–14% less, so the dense SFT, DPO and SMPO examples launc
 
 On a multi-socket host, launch with `torchrun --numa-binding node` (or `halo launch <method> <config> -n 8 --numa-binding node`). Each local rank then runs on the CPUs of the NUMA node that holds `cuda:<local_rank>`, which torchrun reads from the host topology (the GPU's PCI `numa_node` in sysfs), so the flag needs no per-host mapping. torchrun intersects that set with the CPUs the process may use (a container `--cpuset-cpus`) and fails the launch when nothing is left.
 
-On 8× B300 with two NUMA nodes, against an unbound launch (a 1.2.0 development build, two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on host-bound rows (TP, CP, small-batch EP); GPU-bound rows are flat, such as Qwen3.5-35B-A3B and Qwen3.6-35B-A3B EP8 at 16k (within ±0.1%).
+On 8× B300 with two NUMA nodes, against an unbound launch (a 1.2.0 development build, two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on overhead-bound rows (TP, small-batch EP); GPU-bound rows are flat, such as Qwen3.5-35B-A3B and Qwen3.6-35B-A3B EP8 at 16k (within ±0.1%).
 
 Only `torchrun` takes the flag. `halo launch --numa-binding <mode>` takes torchrun's modes and places the flag on its `torchrun` line, ahead of the script; with `--accelerate` or a single process it refuses the flag, since `accelerate launch` and `python` have no NUMA binding. `HALO_DATASET_NUM_PROC`'s default counts each rank's bound CPUs.
 
