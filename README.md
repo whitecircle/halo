@@ -97,9 +97,10 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
   - **Context parallelism:** CP2 SFT on dense Qwen3.5/3.6 with their native hybrid layers (text-only full
     fine-tune).
   - **MoE metrics:** each checkpoint of a MoE run that logs expert load carries `moe_expert_token_counts.json`, the
-    tokens routed to each expert over the run.
-  - **Adapters:** an adapter save records the Hub commit of its base model, and the merge and BF16-conversion
-    tools read the base at that commit (the merge tool's `--base_revision` for an adapter that records none). An
+    routed token slots of each expert over the run, so each layer sums to tokens × `top_k`.
+  - **Adapters:** an adapter save records the Hub commit of its base model, and the merge tool,
+    `export-engine-adapter` and `convert_to_bf16.py --check_inference` read the base at that commit (`--base_revision`
+    on the merge and export tools names it for an adapter that records none). An
     expert-only adapter records whether its run neutralized the attention sinks, and the streaming merge repeats it.
     A PEFT wrap that leaves no trainable adapter parameter is refused when the trainer is built.
   - **Docs:** [GPU Training Theory](agent-docs/reference/gpu-training-theory.md) is now a lecture for newcomers to
@@ -108,8 +109,11 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
   - **Also:** Transformers 5.23 and flash-linear-attention 0.6, DPO/KTO reference log-probs swept after the FSDP2
     wrap, SGLang turns requeued at a weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
   - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
-    Pull or build the 1.3.0rc2 tags. An offline chat dataset preprocessed by 1.3.0rc1 or earlier records no turn
-    terminators, so SFT refuses it until `prepare_dataset.py` runs on it again.
+    Pull or build the 1.3.0rc2 tags. An offline chat or VLM dataset preprocessed by 1.3.0rc1 or earlier records no
+    turn terminators, so SFT refuses it until `prepare_dataset.py` runs on it again. `rollout_chat_template_kwargs`
+    no longer takes `enable_thinking`, which `rollout_thinking` sets. Fused AdamWBF16 no longer repeats 1.3.0rc1's
+    runs bit for bit, and a Qwen3.8-Flash-Next run on its default attention kernel does not replay itself unless it
+    sets `full_determinism` or `HALO_QSA_KERNEL=off`.
 - **2026-11-24 — Halo Competition.** Dec 1–10, with tracks for making Halo faster on a model family, post-training
   one for a task you pick, and best-use tracks from the partners and White Circle. $200k in cash prizes and $1.5M
   in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others. Apply by Nov 30
