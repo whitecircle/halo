@@ -7,6 +7,11 @@
   Frontier-Lab Training for Everyone
 </p>
 
+<!-- Temporary, with the "Halo Competition" section: remove both when the competition ends on Dec 10. -->
+<p align="center">
+  <a href="https://whitecircle.com/halo/competition"><strong>Halo Competition, Dec 1–10: $200k in cash prizes. Apply by Nov 30</strong></a>
+</p>
+
 <p align="center">
   <a href="https://whitecircle.com/research/halo"><strong>Blog post</strong></a> ·
   <a href="https://whitecircle.com/halo/docs"><strong>Docs</strong></a> ·
@@ -28,6 +33,14 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 `Pre- & Post-Training` · `EP / CP / TP / ETP / PP` ·
 `Multi-Node` · `Verifiable & Multi-Turn RL` · `FA4 + Liger + Grouped GEMM` · `Full BF16`
+
+</br>
+
+## Halo Competition
+
+The Halo Competition runs Dec 1–10. It has tracks for making Halo faster on a model family, post-training one for a task you pick, and best-use tracks from the partners and White Circle. Prizes are $200k in cash and $1.5M in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others.
+
+Apply by Nov 30: [details](https://whitecircle.com/halo/competition) · [apply](https://luma.com/ykoj0t48).
 
 </br>
 
@@ -68,10 +81,8 @@ steps, are in [GitHub Releases](https://github.com/whitecircle/halo/releases).
     faster LoRA steps at EP8 on 8× B300), and its weights sync to vLLM and SGLang for RL.
   - **Also:** rollouts without reasoning, MaxRL advantages, chunked distillation losses, fused MXFP4 and NVFP4
     fake-quantization kernels, gpt-oss loading from its native MXFP4 release and Transformers 5.23.
-- **2026-11-24 — Halo Competition.** Dec 1–10, with tracks for making Halo faster on a model family, post-training
-  one for a task you pick, and best-use tracks from the partners and White Circle. $200k in cash prizes and $1.5M
-  in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others. Apply by Nov 30
-  ([details](https://whitecircle.com/halo/competition), [apply](https://luma.com/ykoj0t48)).
+- **2026-11-24 — Halo Competition.** Dec 1–10, with $200k in cash prizes and $1.5M in compute and API credits.
+  Apply by Nov 30 ([Halo Competition](#halo-competition)).
 - **2026-11-07 — Halo 1.3.0rc1.** Faster RL at scale: a synchronous GRPO step on Qwen3.5-35B-A3B over two 8× B300
   nodes takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
   ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles),
