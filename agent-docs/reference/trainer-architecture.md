@@ -633,13 +633,14 @@ the frozen base ([PEFT](../optimization/peft.md#online-rl--rollout-server-weight
 ## FSDP2 output capturing
 
 Transformers models capture auxiliary outputs (router logits, hidden states, attention weights) via
-a `capture_outputs` decorator keyed on `_CAN_RECORD_REGISTRY` (`str(class)` → capturable flags).
-FSDP2 `fully_shard` creates dynamic subclasses at wrap time (`GptOssModel` → `FSDPGptOssModel`) that
-are not in the registry, so capture silently fails.
+a `capture_outputs` decorator keyed on `_CAN_RECORD_REGISTRY` (`str(class)` → capturable flags; the
+registry takes the model and derives that key). FSDP2 `fully_shard` swaps in a dynamic subclass at wrap
+time (`GptOssModel` → `FSDPGptOssModel`) that is not in the registry, so an unregistered one captures
+nothing: a `router_logits` request comes back empty and the aux loss is the int 0.
 
 `_register_output_capturing_for_fsdp()` walks the wrapped model, finds modules with `_can_record_outputs` not yet registered, and adds them. It
-runs from `_configure_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path);
-accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
+runs from `_configure_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path).
+Accelerate-managed FSDP2 wraps the model inside `train()`, after this point, and registers nothing.
 
 ## Checkpoint save and load
 
