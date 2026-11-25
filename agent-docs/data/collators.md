@@ -337,7 +337,9 @@ The completion-only collators locate each turn at its role token and unmask thro
 first terminator, bounded by the next response start and by the next turn of another role. Such a turn
 opens at the marker's first token, where that token is special (gpt-oss's `<|start|>`, ChatML's
 `<|im_start|>`) and the marker does not follow it; a plain first token (`###`) bounds nothing, as it
-also opens markdown inside an answer. A truncated turn, or one the template closes with a token outside
+also opens markdown inside an answer. A first token that is itself a terminator bounds nothing either,
+as it would end each span before the reply's own terminator: a marker written from the turn before it,
+`<|im_end|>\n<|im_start|>assistant\n`, starts with one. A truncated turn, or one the template closes with a token outside
 the set (gpt-oss's `<|end|>`), therefore yields an empty span rather than borrowing a later turn's
 terminator: a gpt-oss answer followed by a user turn and a tool call never trains on through them to the
 call's `<|call|>`. An answer whose text spells the opener (a literal `<|im_start|>user`) tokenizes to it, so
