@@ -93,8 +93,8 @@ _FORWARD_MARKERS = (".generate(", ".logits", "last_hidden_state")
 # A load passing a family's own ``trust_remote_code`` is roster-generic, so it takes the families whose
 # ``_init_weights`` repairs no buffer.
 TEST_ROOT = "tests"
-# Loads every Ulysses family, Bailing among them, by its own flag.
-CP_RESUME_ORACLE = ("tests/gpu/trainers/grpo/test_offline_grpo_cp_resume.py", "_eager_oracle")
+# The offline-GRPO CP suite loads every Ulysses family through it, Bailing among them, by its own flag.
+ROSTER_ORACLE = ("tests/common/offline_grpo.py", "eager_oracle")
 
 
 def _rotary_with_reference(theta: float = 1_000_000.0) -> tuple[Qwen3RotaryEmbedding, torch.Tensor]:
@@ -303,7 +303,7 @@ def _test_oracle_loaders() -> dict[tuple[str, str], frozenset[str]]:
 
 def test_the_test_oracle_sweep_sees_the_roster_oracle():
     """Anti-vacuity: a predicate or forward marker that stopped matching would pass every oracle."""
-    assert CP_RESUME_ORACLE in _test_oracle_loaders(), f"the sweep found {sorted(_test_oracle_loaders())}"
+    assert ROSTER_ORACLE in _test_oracle_loaders(), f"the sweep found {sorted(_test_oracle_loaders())}"
 
 
 def test_every_test_side_oracle_finalizes():

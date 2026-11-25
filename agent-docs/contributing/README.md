@@ -214,6 +214,17 @@ are enforced by `tests/cpu/conventions/`.
   weights sit on their device: transformers 5 leaves a remote-code family's rotary table as uninitialized memory,
   and a bare oracle reads that noise as the parallel run's error. `tests/cpu/model_loading/test_load_finalization.py`
   fails a load by a family's own `trust_remote_code` in a module that runs a forward without it.
+- **A bf16 MoE oracle compares only rows whose routing outlasts kernel noise.** Where a router's top-k
+  margin sits inside bf16 noise, the trainer and the oracle can pick different experts, and later layers
+  then move far past any tolerance. `routing_clear_rows` (`tests/common/offline_grpo.py`) clears a row
+  where a bf16 oracle holds fp32's choices and every router's fp32 margin beats twice the largest
+  bf16-vs-fp32 logit difference at each position a scored log-prob reads. That bar covers only the
+  oracle's own kernels, and the trainer's go unmeasured, so a comparison takes only rows whose margin is
+  also `ROUTING_HEADROOM` times that difference. The KL batch takes two of them: rows with twice that
+  headroom first, then the most completion tokens. Scan the policy the check compares: doubling a tied head moves the routers. The
+  offline-GRPO KL suites train beside a random-word pool so enough rows qualify, and fail
+  `kl_rows_clear_routing_noise` (the KL batch) or `reference_rows_clear_routing_noise` (the CP suite's
+  unsharded reference rows) when too few do.
 - **Deterministic, seeded data.** GPU tests generate synthetic problems from a fixed seed; only rank 0
   prints. A seed alone does not fix a chat-templated batch, because `strftime_now` stamps the live date
   (gpt-oss's harmony system message), so build fixed batches through
