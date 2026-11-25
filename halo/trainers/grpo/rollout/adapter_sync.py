@@ -547,6 +547,8 @@ class AdapterSync:
             on_disk = self.adapter_dir is not None and os.path.isdir(self.adapter_dir)
             if on_disk:
                 left.update(name for name in os.listdir(self.adapter_dir) if name.startswith(ADAPTER_NAME_PREFIX))
+            # This run's versions may be leased on a server that kept them; they leave through _retire_unheld.
+            left.difference_update(self._loaded)
             servers.unload(sorted(left))
             self._remove_directories(sorted(left))
             if on_disk:

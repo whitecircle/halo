@@ -303,8 +303,10 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
   the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
   would wait out the broadcast deadline). The old client is dropped without a destroy, probe or request to the vanished
-  peer. Under `single_group` the group re-forms itself. A server that is down at a sync
-  fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
+  peer. That base push retires a predecessor's versions and directories as the first sync does and spares this run's:
+  a server that kept its adapters keeps each version an episode still leases until the first sync after the episode
+  ends. Under `single_group` the group re-forms itself. A server that is
+  down at a sync fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
   it takes the full push.
 - **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). On vLLM the server needs `--enable-lora`,
   `--max-lora-rank` of at least `lora_r`, `--max-loras` of at least 2, `--max-cpu-loras` of at least `prefetch_depth` + 2

@@ -743,6 +743,48 @@ def test_a_predecessors_version_no_server_lists_leaves_its_directory_at_the_firs
     assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
 
 
+@pytest.mark.parametrize("published", [False, True], ids=["tensors", "directory"])
+def test_a_base_push_mid_run_keeps_a_leased_version_on_the_server_that_kept_it(
+    published, servers, base_pushes, events, client_pool, tmp_path
+):
+    """A server restarted onto another base takes the base at the next sync, which retires a predecessor's version it
+    came back with. The server that kept its adapters still serves a later turn of an episode leasing the old version,
+    which leaves at the first sync after the episode ends."""
+    pool, [kept, restarted] = servers
+    model = _peft_model()
+    trainer = SimpleNamespace(model=model)
+    sync = _adapter_sync(model, pool, _LAUNCH_BASE, adapter_dir=str(tmp_path) if published else None)
+    manager = _manager_over(sync, [kept, restarted])
+    sync.sync(trainer, client_pool)
+    restarted.restart()
+    restarted.model_path = "/models/other"
+    leftover = "halo-adapter-0badc0de-7"
+    restarted.adapters[leftover] = kept.adapters[sync.versions.current]
+    if published:
+        (tmp_path / leftover).mkdir()
+    events.clear()
+
+    with manager._episode_config() as (config, running):
+        sync.sync(trainer, client_pool)
+
+        assert events == [("reconnect", [restarted.url]), ("push", False)], "a base push in the middle of the run"
+        current = sync.versions.current
+        held_by_kept, held_by_restarted = _held_everywhere([kept, restarted])
+        assert held_by_kept == sorted([running, current]), "the lease is live"
+        assert held_by_restarted == [current], "the predecessor's version leaves with the base push"
+        if published:
+            assert _published(tmp_path) == sorted([running, current]), "the leased version's directory alone stays"
+        later_turn = asyncio.run(manager._play_leased("p0", None, config, running))
+        assert later_turn.error is None and kept.completion_models == [f"{_BASE_MODEL}:{running}"]
+
+    sync.sync(trainer, client_pool)
+
+    assert base_pushes == [False, False]
+    assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
+    if published:
+        assert _published(tmp_path) == [sync.versions.current]
+
+
 @pytest.fixture(params=["sglang", "vllm"])
 def unsynced(request, tmp_path, base_pushes):
     """A sync on either engine's fakes that publishes to ``tmp_path`` and has not run yet, and the pool it takes."""
