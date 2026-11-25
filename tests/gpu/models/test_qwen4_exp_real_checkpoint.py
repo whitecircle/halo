@@ -359,9 +359,6 @@ def run_export(ctx, source: str, args) -> dict:
 
 
 def run_resume(ctx, source: str, args) -> dict:
-    # The block-sparse kernel sums dK and dV with fp32 atomics, so no run replays itself on it: the replay attends on
-    # the tiled path, as full_determinism does.
-    os.environ["HALO_QSA_KERNEL"] = "off"
     return run_release_resume(ctx, lambda parallelism_config: _load(source, parallelism_config, args.layers))
 
 
