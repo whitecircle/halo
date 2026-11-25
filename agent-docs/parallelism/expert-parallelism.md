@@ -327,7 +327,9 @@ Under `full_determinism: true` the EP path (dispatch, expert compute, combine) r
 expert weight gradients included, as long as each EP group sits inside one NVLink domain. The rest of
 the model needs its own deterministic kernels: the conv backward of the gated-DeltaNet families (Qwen3.5/3.6 MoE, Qwen3-Next, Qwen3.8-Flash-Next)
 takes its deterministic path under torch's deterministic-algorithms flag, which `full_determinism` turns on, unless
-the launch exports `CAUSAL_CONV1D_DETERMINISTIC=0`.
+the launch exports `CAUSAL_CONV1D_DETERMINISTIC=0`, and Qwen3.8-Flash-Next's QSA layers leave the
+[block-sparse kernel](../optimization/flash-attention.md#block-sparse-attention-qwen38-flash-next), whose dK and dV
+do not repeat, for the tiled path.
 
 DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
 arrive in changes from step to step, and with it the summation order of the expert weight gradient

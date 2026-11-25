@@ -213,7 +213,10 @@ def _resolve(**overrides):
     return resolve_qsa_kernel(**{**arguments, "ratio": 4, **overrides})
 
 
-def test_off_takes_the_tiled_path(monkeypatch):
+def test_off_takes_the_tiled_path_where_the_kernel_can_run(monkeypatch):
+    monkeypatch.setattr(sparse_attention, "qsa_kernel_refusal", lambda *arguments: None)
+    monkeypatch.setenv("HALO_QSA_KERNEL", "auto")
+    assert _resolve() is True
     monkeypatch.setenv("HALO_QSA_KERNEL", "off")
     assert _resolve() is False
 
@@ -326,6 +329,8 @@ def test_the_dispatcher_keeps_the_tiled_path_when_the_kernel_is_off(monkeypatch)
     config = tiny_qwen4_exp_text_config()
     _, inputs, selection = _selection(config, ROWS["one-document"])
     query, key, value, _ = attention_operands(config, 1, 300, SEED)
+    # Nothing but the mode keeps this call off the kernel.
+    monkeypatch.setattr(sparse_attention, "qsa_kernel_refusal", lambda *arguments: None)
     monkeypatch.setenv("HALO_QSA_KERNEL", "off")
 
     def unreachable(*arguments):
