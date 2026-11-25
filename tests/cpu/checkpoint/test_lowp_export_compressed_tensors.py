@@ -10,8 +10,8 @@ place of Halo's ``block_scaled`` manifest, which it refuses.
 - What an engine cannot load quantized is refused before any write. An nvfp4 pair whose shared scale rounds is
   written rounded, with the largest change logged, and refused only past the --verify tolerance.
 The training image does not install compressed-tensors: the expected config is the library's own serialization,
-recorded in the vLLM image ``Dockerfile.vllm`` builds (``tests.common.compressed_tensors_presets``), and the decoders
-mirror its compressors."""
+recorded in the upstream image ``Dockerfile.vllm`` builds on (``tests.common.compressed_tensors_presets``), and the
+decoders mirror its compressors."""
 
 import json
 import logging
