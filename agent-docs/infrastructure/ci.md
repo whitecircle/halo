@@ -26,11 +26,11 @@ setup), GitGuardian and CodeRabbit report on every PR from outside `.github/work
 - **`docs.yml`.** `scripts/docs/check_links.sh` blocks on a broken relative link or heading anchor across
   `agent-docs/`, `human-docs/`, `skills/` and the root markdown (an anchor must be GitHub's slug, so a
   `{#id}` heading fails), and resolves their code: a repo-root path must exist, and a dotted first-party
-  name must name a module and a name it binds, read off the source. `scripts/docs/figure_manifest.sh
-  check` blocks on a stale figure: `make diagrams` records in `agent-docs/assets/figures.sha256` the
-  SHA-256 of every figure PNG and of what it is rendered from (its page, the data folders the page names,
-  `skills/visuals/kit/`, `render.sh` and `canvas-size.sh`), and any of them changed since, or a page
-  never rendered, fails.
+  name must name a module and a name it binds, read off the source. It also blocks on a raw HTML tag in
+  an `agent-docs/` or `human-docs/` page. `scripts/docs/figure_manifest.sh check` blocks on a stale figure:
+  `make diagrams` records in `agent-docs/assets/figures.sha256` the SHA-256 of every figure PNG and of
+  what it is rendered from (its page, the data folders the page names, `skills/visuals/kit/`,
+  `render.sh` and `canvas-size.sh`), and any of them changed since, or a page never rendered, fails.
 - **`sensitive-label.yml`.** A PR whose own commits change a path listed in `.github/sensitive-paths` (a
   moved file counts under its old path) fails until it carries the `sensitive` label, which a maintainer
   adds once the change is approved as `CLAUDE.md` requires; a label change re-runs it. It runs on
