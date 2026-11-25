@@ -151,12 +151,15 @@ def test_the_saved_fingerprint_keeps_the_keys_1_1_0_wrote():
     assert list(live.to_dict()) == list(SAVED_BY_1_1_0["fingerprint"])
 
 
-@pytest.mark.parametrize("key", [key for key in SAVED_BY_1_1_0["fingerprint"] if key != "expert_replica_size"])
-def test_a_saved_fingerprint_missing_a_key_mismatches(key):
+def test_a_saved_fingerprint_missing_a_key_mismatches(subtests):
     """Any key but the replica size: it warm-restarts, or raises under PP, as a topology change does."""
-    live = _live_fp(_sgd(_TinyModel()))
-    saved = {name: value for name, value in live.to_dict().items() if name != key}
-    assert live.mismatches(saved) == [f"{key}: saved='<absent>' current={live.to_dict()[key]!r}"]
+    keys = [key for key in SAVED_BY_1_1_0["fingerprint"] if key != "expert_replica_size"]
+    assert keys, "the 1.1.0 fingerprint holds no key to drop"
+    for key in keys:
+        with subtests.test(key):
+            live = _live_fp(_sgd(_TinyModel()))
+            saved = {name: value for name, value in live.to_dict().items() if name != key}
+            assert live.mismatches(saved) == [f"{key}: saved='<absent>' current={live.to_dict()[key]!r}"]
 
 
 def test_a_saved_field_the_live_run_lacks_mismatches():

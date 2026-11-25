@@ -557,11 +557,14 @@ def test_the_eager_load_surface_is_pinned():
     assert discovered == pinned, f"the model-build surface changed: {sorted(discovered ^ pinned)}; classify each"
 
 
-@pytest.mark.parametrize("loader", sorted(EAGER_LOADERS), ids=lambda loader: loader[1])
-def test_every_eager_loader_casts_and_finalizes(loader):
-    calls = _eager_loaders()[loader]
-    assert calls & CASTS, f"{loader} builds a model without calling any of {sorted(CASTS)}"
-    assert FINALIZE in calls, f"{loader} builds a model without calling {FINALIZE}"
+def test_every_eager_loader_casts_and_finalizes(subtests):
+    assert EAGER_LOADERS, "no eager loader is pinned"
+    loaders = _eager_loaders()
+    for loader in sorted(EAGER_LOADERS):
+        with subtests.test(loader[1]):
+            calls = loaders[loader]
+            assert calls & CASTS, f"{loader} builds a model without calling any of {sorted(CASTS)}"
+            assert FINALIZE in calls, f"{loader} builds a model without calling {FINALIZE}"
 
 
 if __name__ == "__main__":

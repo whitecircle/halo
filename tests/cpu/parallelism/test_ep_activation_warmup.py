@@ -169,9 +169,10 @@ def test_the_warmup_draws_no_random_numbers():
     assert [event[0] for event in layer.events].count("warm") == 2
 
 
-@pytest.mark.parametrize(
-    ("kernel", "row_count"),
-    (
+def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(subtests):
+    """Triton compiles per class of a specializable integer (1, a multiple of 16, neither); unspecialized, one warm
+    count covers every dispatch size."""
+    rows = (
         (fused_glu._glu_fwd_kernel, "n_rows"),
         (fused_glu._glu_bwd_kernel, "n_rows"),
         (moe_permute._gather_reduce_kernel, "n_src"),
@@ -180,13 +181,12 @@ def test_the_warmup_draws_no_random_numbers():
         (moe_route_sort._scan_kernel, "n_valid"),
         (moe_route_sort._place_kernel, "n_rows"),
         (moe_route_sort._place_kernel, "n_valid"),
-    ),
-)
-def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(kernel, row_count):
-    """Triton compiles per class of a specializable integer (1, a multiple of 16, neither); unspecialized, one warm
-    count covers every dispatch size."""
-    params = {param.name: param for param in kernel.params}
-    assert params[row_count].do_not_specialize
+    )
+    assert rows, "the sweep found no kernel argument"
+    for kernel, row_count in rows:
+        with subtests.test(f"{kernel.fn.__name__}-{row_count}"):
+            params = {param.name: param for param in kernel.params}
+            assert params[row_count].do_not_specialize
 
 
 _PERMUTE_BACKWARDS = {("MoEGatherPermute", "backward"), ("MoEWeightedUnpermute", "backward")}

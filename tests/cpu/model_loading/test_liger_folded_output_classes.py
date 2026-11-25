@@ -47,13 +47,15 @@ def test_the_roster_reads_modules_that_construct_outputs():
     assert len(constructing) > 30, constructing
 
 
-@pytest.mark.parametrize("module_name", FUSED_FORWARD_MODULES)
-def test_a_fused_forward_imports_and_its_output_takes_what_it_passes(module_name):
+def test_a_fused_forward_imports_and_its_output_takes_what_it_passes(subtests):
+    assert FUSED_FORWARD_MODULES, "the sweep found no liger fused-forward module"
     ensure_folded_output_classes()
-    module = importlib.import_module(module_name)
-    for output_class, keywords in _output_constructions(module):
-        unknown = keywords - {field.name for field in fields(output_class)}
-        assert not unknown, f"{module_name} passes {sorted(unknown)} to {output_class.__name__}"
+    for module_name in FUSED_FORWARD_MODULES:
+        with subtests.test(module_name):
+            module = importlib.import_module(module_name)
+            for output_class, keywords in _output_constructions(module):
+                unknown = keywords - {field.name for field in fields(output_class)}
+                assert not unknown, f"{module_name} passes {sorted(unknown)} to {output_class.__name__}"
 
 
 @pytest.mark.parametrize("family", FOLDED_FAMILIES)

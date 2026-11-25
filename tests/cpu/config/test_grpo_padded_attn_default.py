@@ -273,16 +273,17 @@ def test_the_call_site_sweep_is_not_empty():
     assert len(_HELPER_CALL_SITES) >= 8, _HELPER_CALL_SITES
 
 
-@pytest.mark.parametrize("script", _HELPER_CALL_SITES, ids=lambda p: p.stem)
-def test_every_call_site_wires_the_exemption_to_the_runs_own_flag(script):
+def test_every_call_site_wires_the_exemption_to_the_runs_own_flag(subtests):
     """A literal here is a claim about the model at a site that cannot know it; every caller passes the run's
     reset_sinks."""
-    for call in _helper_calls(script):
-        wired = [kw.value for kw in call.keywords if kw.arg == "sinks_reset"]
-        assert wired, f"{script.name} calls an attention helper without sinks_reset"
-        assert not isinstance(wired[0], ast.Constant), (
-            f"{script.name} hardcodes sinks_reset; it must come from the run's reset_sinks flag"
-        )
+    for script in _HELPER_CALL_SITES:
+        with subtests.test(script.stem):
+            for call in _helper_calls(script):
+                wired = [kw.value for kw in call.keywords if kw.arg == "sinks_reset"]
+                assert wired, f"{script.name} calls an attention helper without sinks_reset"
+                assert not isinstance(wired[0], ast.Constant), (
+                    f"{script.name} hardcodes sinks_reset; it must come from the run's reset_sinks flag"
+                )
 
 
 if __name__ == "__main__":

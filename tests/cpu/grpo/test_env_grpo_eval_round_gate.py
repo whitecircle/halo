@@ -21,13 +21,17 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
     return GRPOConfig(output_dir=str(tmp_path / "out"), bf16=False, use_cpu=True, **overrides)
 
 
-@pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
-def test_every_env_grpo_recipe_passes_the_eval_round_gate(config):
-    parsed = parser_for(ENV_GRPO_SCRIPT).parse_yaml_file(str(config))
-    grpo_config = next(obj for obj in parsed if isinstance(obj, GRPOConfig))
-    async_config = next(obj for obj in parsed if isinstance(obj, AsyncRolloutConfig))
-    num_generations_eval = parsed_field(parsed, "num_generations_eval") or parsed_field(parsed, "num_generations")
-    reject_straddling_eval_groups(grpo_config, async_config, num_generations_eval)
+def test_every_env_grpo_recipe_passes_the_eval_round_gate(subtests):
+    assert ENV_GRPO_EXAMPLES, "no env-GRPO recipe found"
+    for config in ENV_GRPO_EXAMPLES:
+        with subtests.test(config.relative_to(EXAMPLES_ROOT).as_posix()):
+            parsed = parser_for(ENV_GRPO_SCRIPT).parse_yaml_file(str(config))
+            grpo_config = next(obj for obj in parsed if isinstance(obj, GRPOConfig))
+            async_config = next(obj for obj in parsed if isinstance(obj, AsyncRolloutConfig))
+            num_generations_eval = parsed_field(parsed, "num_generations_eval") or parsed_field(
+                parsed, "num_generations"
+            )
+            reject_straddling_eval_groups(grpo_config, async_config, num_generations_eval)
 
 
 def test_a_run_that_never_evaluates_skips_the_gate(tmp_path):

@@ -19,18 +19,22 @@ SILU_ALIASES = frozenset({"silu", "swish"})
 GELU_TANH_ALIASES = frozenset({"gelu_accurate", "gelu_fast", "gelu_new", "gelu_python_tanh", "gelu_pytorch_tanh"})
 
 
-@pytest.mark.parametrize("name", sorted(ACT2FN.keys()))
-def test_every_registered_activation_is_classified_by_behaviour(name):
+def test_every_registered_activation_is_classified_by_behaviour(subtests):
     """`hardswish`, `mish` and the `gelu_*` family are close enough that a sloppy tolerance would mis-fire the
     kernel."""
-    assert is_silu_activation(ACT2FN[name]) is (name in SILU_ALIASES)
+    assert ACT2FN, "transformers registers no activation"
+    for name in sorted(ACT2FN.keys()):
+        with subtests.test(name):
+            assert is_silu_activation(ACT2FN[name]) is (name in SILU_ALIASES)
 
 
-@pytest.mark.parametrize("name", sorted(ACT2FN.keys()))
-def test_every_registered_activation_is_classified_against_gelu_tanh_too(name):
+def test_every_registered_activation_is_classified_against_gelu_tanh_too(subtests):
     """Exact `gelu` agrees with the tanh approximation to ~1e-3, so anything but bitwise equality would arm GeGLU on
     the wrong model."""
-    assert is_gelu_tanh_activation(ACT2FN[name]) is (name in GELU_TANH_ALIASES)
+    assert ACT2FN, "transformers registers no activation"
+    for name in sorted(ACT2FN.keys()):
+        with subtests.test(name):
+            assert is_gelu_tanh_activation(ACT2FN[name]) is (name in GELU_TANH_ALIASES)
 
 
 @pytest.mark.parametrize(

@@ -62,31 +62,29 @@ def test_the_scan_finds_the_documented_commands():
     assert {verb for _, verb, _ in COMMANDS} == {"launch", "run"}
 
 
-@pytest.mark.parametrize(
-    ("where", "verb", "tokens"), COMMANDS, ids=[f"{w}:{v}:{i}" for i, (w, v, _) in enumerate(COMMANDS)]
-)
-def test_a_documented_name_resolves(where, verb, tokens):
-    names = [token for token in tokens if not token.startswith("-")]
-    if not names or _PLACEHOLDER.search(names[0]) or not _NAME.match(names[0]):
-        pytest.skip("no literal method or tool name on this line")
-    argv = [verb, names[0], ANY_CONFIG, "--dry_run"] if verb == "launch" else [verb, names[0], "--dry_run"]
-    result = runner.invoke(app, argv)
-    assert result.exit_code == 0, f"{where}: `halo {verb} {names[0]}` does not resolve:\n{result.output}"
+def test_a_documented_name_resolves(subtests):
+    for index, (where, verb, tokens) in enumerate(COMMANDS):
+        names = [token for token in tokens if not token.startswith("-")]
+        if not names or _PLACEHOLDER.search(names[0]) or not _NAME.match(names[0]):
+            continue
+        with subtests.test(f"{where}:{verb}:{index}"):
+            argv = [verb, names[0], ANY_CONFIG, "--dry_run"] if verb == "launch" else [verb, names[0], "--dry_run"]
+            result = runner.invoke(app, argv)
+            assert result.exit_code == 0, f"{where}: `halo {verb} {names[0]}` does not resolve:\n{result.output}"
 
 
-@pytest.mark.parametrize(
-    ("where", "verb", "tokens"), COMMANDS, ids=[f"{w}:{v}:{i}" for i, (w, v, _) in enumerate(COMMANDS)]
-)
-def test_the_separator_is_shown_only_before_a_launcher_flag(where, verb, tokens):
-    if "--" not in tokens:
-        pytest.skip("no separator on this line")
-    after = tokens[tokens.index("--") + 1 :]
-    assert after, f"{where}: `--` with nothing after it"
-    flag = after[0].split("=", 1)[0]
-    assert _PLACEHOLDER.search(after[0]) or flag in _launcher_flags(verb), (
-        f"{where}: `halo {verb} ... -- {after[0]}` — `{flag}` is not a launcher flag, so it passes through "
-        f"without `--`. Drop the separator."
-    )
+def test_the_separator_is_shown_only_before_a_launcher_flag(subtests):
+    for index, (where, verb, tokens) in enumerate(COMMANDS):
+        if "--" not in tokens:
+            continue
+        with subtests.test(f"{where}:{verb}:{index}"):
+            after = tokens[tokens.index("--") + 1 :]
+            assert after, f"{where}: `--` with nothing after it"
+            flag = after[0].split("=", 1)[0]
+            assert _PLACEHOLDER.search(after[0]) or flag in _launcher_flags(verb), (
+                f"{where}: `halo {verb} ... -- {after[0]}` — `{flag}` is not a launcher flag, so it passes through "
+                f"without `--`. Drop the separator."
+            )
 
 
 if __name__ == "__main__":

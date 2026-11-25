@@ -223,21 +223,22 @@ def test_the_shared_flag_module_is_reachable_to_a_bare_interpreter(tmp_path: Pat
     )
 
 
-@pytest.mark.parametrize(("relative_path", "expected_default"), _TOOLS)
-def test_trust_remote_code_default_follows_the_input_source(relative_path: str, expected_default: bool):
-    parser = _tool_parser(relative_path)
-    help_text = parser.format_help()
+def test_trust_remote_code_default_follows_the_input_source(subtests):
+    for relative_path, expected_default in _TOOLS:
+        with subtests.test(f"{relative_path}-{expected_default}"):
+            parser = _tool_parser(relative_path)
+            help_text = parser.format_help()
 
-    assert parser.get_default("trust_remote_code") is expected_default, (
-        f"{relative_path} defaults --trust_remote_code to {parser.get_default('trust_remote_code')!r}, "
-        f"expected {expected_default!r} for its input source; pass the default through "
-        f"add_trust_remote_code_arg(parser, default=...) rather than a per-tool add_argument"
-    )
-    for spelling in ("--trust_remote_code", "--no-trust_remote_code"):
-        assert spelling in help_text, (
-            f"{relative_path} exposes no {spelling}, so the operator cannot override the default for "
-            f"a source whose trust does not match it"
-        )
+            assert parser.get_default("trust_remote_code") is expected_default, (
+                f"{relative_path} defaults --trust_remote_code to {parser.get_default('trust_remote_code')!r}, "
+                f"expected {expected_default!r} for its input source; pass the default through "
+                f"add_trust_remote_code_arg(parser, default=...) rather than a per-tool add_argument"
+            )
+            for spelling in ("--trust_remote_code", "--no-trust_remote_code"):
+                assert spelling in help_text, (
+                    f"{relative_path} exposes no {spelling}, so the operator cannot override the default for "
+                    f"a source whose trust does not match it"
+                )
 
 
 def _flat_help(parser: argparse.ArgumentParser) -> str:
@@ -253,38 +254,41 @@ def _canonical_flag_help(add_arg: Callable[[argparse.ArgumentParser], object], f
     return " ".join(parser.format_help().split()).split(heading)[-1].strip()
 
 
-@pytest.mark.parametrize("relative_path", _MAX_SHARD_SIZE_TOOLS)
-def test_the_shard_cap_is_the_shared_flag(relative_path: str):
+def test_the_shard_cap_is_the_shared_flag(subtests):
     """A re-typed flag lets a tool's default drift off DEFAULT_MAX_SHARD_SIZE without anything failing."""
-    parser = _tool_parser(relative_path)
+    for relative_path in _MAX_SHARD_SIZE_TOOLS:
+        with subtests.test(relative_path):
+            parser = _tool_parser(relative_path)
 
-    assert parser.get_default("max_shard_size") == DEFAULT_MAX_SHARD_SIZE, (
-        f"{relative_path} defaults --max_shard_size to {parser.get_default('max_shard_size')!r}, not the "
-        f"toolkit-wide {DEFAULT_MAX_SHARD_SIZE!r}; add it with add_max_shard_size_arg(parser)"
-    )
-    canonical = _canonical_flag_help(add_max_shard_size_arg, "--max_shard_size")
-    assert canonical in _flat_help(parser), (
-        f"{relative_path} re-types --max_shard_size with its own help text instead of calling "
-        f"add_max_shard_size_arg(parser) — expected it to carry {canonical!r}"
-    )
+            assert parser.get_default("max_shard_size") == DEFAULT_MAX_SHARD_SIZE, (
+                f"{relative_path} defaults --max_shard_size to {parser.get_default('max_shard_size')!r}, not the "
+                f"toolkit-wide {DEFAULT_MAX_SHARD_SIZE!r}; add it with add_max_shard_size_arg(parser)"
+            )
+            canonical = _canonical_flag_help(add_max_shard_size_arg, "--max_shard_size")
+            assert canonical in _flat_help(parser), (
+                f"{relative_path} re-types --max_shard_size with its own help text instead of calling "
+                f"add_max_shard_size_arg(parser) — expected it to carry {canonical!r}"
+            )
 
 
-@pytest.mark.parametrize(("relative_path", "threads_revision"), _HUB_SOURCE_TOOLS)
-def test_the_hub_source_flags_are_the_shared_ones(relative_path: str, threads_revision: bool):
+def test_the_hub_source_flags_are_the_shared_ones(subtests):
     """An advertised ``--revision`` a tool ignores silently converts whatever the Hub's default branch holds today."""
-    help_text = _flat_help(_tool_parser(relative_path))
+    for relative_path, threads_revision in _HUB_SOURCE_TOOLS:
+        with subtests.test(f"{relative_path}-{threads_revision}"):
+            help_text = _flat_help(_tool_parser(relative_path))
 
-    assert HUB_SOURCE_HELP in help_text, (
-        f"{relative_path} re-types --model_id with its own description instead of calling "
-        f"add_hub_source_args(parser, ...) — expected it to carry {HUB_SOURCE_HELP!r}"
-    )
-    revision_help = _canonical_flag_help(lambda p: add_hub_source_args(p, source="x"), "--revision")
-    if threads_revision:
-        assert revision_help in help_text, f"{relative_path} re-types --revision: expected {revision_help!r}"
-    else:
-        assert "--revision" not in help_text, (
-            f"{relative_path} advertises --revision but threads none — it would promise a pin the conversion ignores"
-        )
+            assert HUB_SOURCE_HELP in help_text, (
+                f"{relative_path} re-types --model_id with its own description instead of calling "
+                f"add_hub_source_args(parser, ...) — expected it to carry {HUB_SOURCE_HELP!r}"
+            )
+            revision_help = _canonical_flag_help(lambda p: add_hub_source_args(p, source="x"), "--revision")
+            if threads_revision:
+                assert revision_help in help_text, f"{relative_path} re-types --revision: expected {revision_help!r}"
+            else:
+                assert "--revision" not in help_text, (
+                    f"{relative_path} advertises --revision but threads none — it would promise a pin the "
+                    "conversion ignores"
+                )
 
 
 def _declared_action(parser: argparse.ArgumentParser, flag: str) -> argparse.Action:
@@ -298,24 +302,28 @@ def _shared_action(add_arg: Callable[[argparse.ArgumentParser], object], flag: s
     return _declared_action(parser, flag)
 
 
-@pytest.mark.parametrize(
-    ("relative_path", "flag", "add_arg"),
-    [(path, "--dtype", add_dtype_arg) for path in _DTYPE_TOOLS]
-    + [(path, "--device_map", add_device_map_arg) for path in _DEVICE_MAP_TOOLS],
-)
-def test_the_load_flags_are_the_shared_ones(relative_path: str, flag: str, add_arg: Callable):
+def test_the_load_flags_are_the_shared_ones(subtests):
     """A re-typed one drifts on each (``--torch_dtype``, a ``bf16`` default beside a ``bfloat16`` one)."""
-    parser = _tool_parser(relative_path)
-    name = flag.lstrip("-")
-    spellings = sorted(option for action in parser._actions for option in action.option_strings if name in option)
-    assert spellings == [flag], f"{relative_path} spells its {name} flag {spellings}; add it with {add_arg.__name__}"
+    rows = [(path, "--dtype", add_dtype_arg) for path in _DTYPE_TOOLS] + [
+        (path, "--device_map", add_device_map_arg) for path in _DEVICE_MAP_TOOLS
+    ]
+    for relative_path, flag, add_arg in rows:
+        with subtests.test(f"{relative_path}-{flag}-{add_arg.__name__}"):
+            parser = _tool_parser(relative_path)
+            name = flag.lstrip("-")
+            spellings = sorted(
+                option for action in parser._actions for option in action.option_strings if name in option
+            )
+            assert spellings == [flag], (
+                f"{relative_path} spells its {name} flag {spellings}; add it with {add_arg.__name__}"
+            )
 
-    declared, shared = _declared_action(parser, flag), _shared_action(add_arg, flag)
-    for field in ("default", "choices", "help"):
-        assert getattr(declared, field) == getattr(shared, field), (
-            f"{relative_path} re-types {flag} ({field}={getattr(declared, field)!r}, shared "
-            f"{getattr(shared, field)!r}); add it with {add_arg.__name__}(parser)"
-        )
+            declared, shared = _declared_action(parser, flag), _shared_action(add_arg, flag)
+            for field in ("default", "choices", "help"):
+                assert getattr(declared, field) == getattr(shared, field), (
+                    f"{relative_path} re-types {flag} ({field}={getattr(declared, field)!r}, shared "
+                    f"{getattr(shared, field)!r}); add it with {add_arg.__name__}(parser)"
+                )
 
 
 @pytest.mark.parametrize(

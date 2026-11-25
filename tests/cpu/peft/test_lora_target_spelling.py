@@ -173,14 +173,18 @@ def test_a_regex_in_the_list_is_refused_when_parsed(argv, yaml_body, tmp_path):
         _parse(tmp_path, argv, yaml_body)
 
 
-@pytest.mark.parametrize("character", REGEX_CHARACTERS.values(), ids=REGEX_CHARACTERS.keys())
-def test_an_entry_spelling_any_regex_character_is_refused(character, tmp_path):
+def test_an_entry_spelling_any_regex_character_is_refused(subtests, tmp_path):
     """Each entry carries one character alone, so a character dropped from the refusal fails its own case."""
-    entry = f"{TARGET}{character}"
-    assert sum(entry.count(other) for other in REGEX_CHARACTERS.values()) == 1, "premise: one regex character"
+    assert REGEX_CHARACTERS, "no regex character to refuse"
+    for name, character in REGEX_CHARACTERS.items():
+        with subtests.test(name):
+            entry = f"{TARGET}{character}"
+            assert sum(entry.count(other) for other in REGEX_CHARACTERS.values()) == 1, "premise: one regex character"
 
-    with pytest.raises(ValueError, match="are regexes, but a list names modules"):
-        _parse(tmp_path, [], f"lora_target_modules: [q_proj, '{entry}']\n")
+            row_dir = tmp_path / name
+            row_dir.mkdir()
+            with pytest.raises(ValueError, match="are regexes, but a list names modules"):
+                _parse(row_dir, [], f"lora_target_modules: [q_proj, '{entry}']\n")
 
 
 if __name__ == "__main__":

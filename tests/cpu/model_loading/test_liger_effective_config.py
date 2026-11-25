@@ -461,12 +461,13 @@ def test_an_export_carries_no_run_scoped_halo_keys(monkeypatch, tmp_path, family
     assert get_config_field(model.config, RESOLVED_SINKS_RESET_ATTR) is True
 
 
-@pytest.mark.parametrize("model_type", ["deepseek_v4", "glm4_moe_lite", "zaya"])
-def test_the_large_vocab_families_still_default_to_flce(model_type):
+def test_the_large_vocab_families_still_default_to_flce(subtests):
     """Losing the default silently puts GLM-4.7-Flash, DeepSeek-V4 and Zaya back on the full ``[seq, vocab]`` logits
     plane."""
-    defaults = dispatch._PER_MODEL_DEFAULTS[model_type]
-    assert defaults == {"cross_entropy": False, "fused_linear_cross_entropy": True}
+    for model_type in ["deepseek_v4", "glm4_moe_lite", "zaya"]:
+        with subtests.test(model_type):
+            defaults = dispatch._PER_MODEL_DEFAULTS[model_type]
+            assert defaults == {"cross_entropy": False, "fused_linear_cross_entropy": True}
 
 
 def test_every_toolkit_applier_is_registered_in_the_toolkit_registry():

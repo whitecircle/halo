@@ -130,42 +130,36 @@ def test_vlm_probe_contract_is_not_vacuous():
     )
 
 
-@pytest.mark.parametrize(
-    "path",
-    _VLM_PROBE_CALL_SITES,
-    ids=[str(p.relative_to(REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
-)
-def test_is_vlm_model_probe_is_revision_pinned(path: Path):
+def test_is_vlm_model_probe_is_revision_pinned(subtests):
     """``probe_checkpoint`` fetches ``AutoConfig``, and hub ``main`` can name a different modality than the pinned
     commit (Zaya). The answer picks the ``Auto*`` class, processing class, collator and run prefix, so an
     unpinned probe misroutes a pinned run with no error."""
-    calls = _vlm_probe_calls(path)
-    if not calls:
-        pytest.skip("module does not probe the modality")
-    for call in calls:
-        kwargs = {kw.arg for kw in call.keywords}
-        assert kwargs & {"revision", "config", "vlm_checkpoint"}, (
-            f"{path}: modality probe pins neither revision= nor an already-loaded config= or vlm_checkpoint= — "
-            f"a model_revision-pinned run would be routed by hub main's config."
-        )
+    for path in _VLM_PROBE_CALL_SITES:
+        calls = _vlm_probe_calls(path)
+        if not calls:
+            continue
+        with subtests.test(str(path.relative_to(REPO_ROOT))):
+            for call in calls:
+                kwargs = {kw.arg for kw in call.keywords}
+                assert kwargs & {"revision", "config", "vlm_checkpoint"}, (
+                    f"{path}: modality probe pins neither revision= nor an already-loaded config= or vlm_checkpoint= "
+                    f"— a model_revision-pinned run would be routed by hub main's config."
+                )
 
 
-@pytest.mark.parametrize(
-    "path",
-    _VLM_PROBE_CALL_SITES,
-    ids=[str(p.relative_to(REPO_ROOT)) for p in _VLM_PROBE_CALL_SITES],
-)
-def test_is_vlm_model_probe_threads_trust_remote_code(path: Path):
+def test_is_vlm_model_probe_threads_trust_remote_code(subtests):
     """Left at its default the probe refuses a remote-code config the run trusted; forced on it executes code the
     run never trusted, on its first hub contact."""
-    calls = _vlm_probe_calls(path)
-    if not calls:
-        pytest.skip("module does not probe the modality")
-    for call in calls:
-        kwargs = {kw.arg for kw in call.keywords}
-        assert kwargs & {"config", "vlm_checkpoint", "trust_remote_code"}, (
-            f"{path}: modality probe fetches a config without the run's trust_remote_code="
-        )
+    for path in _VLM_PROBE_CALL_SITES:
+        calls = _vlm_probe_calls(path)
+        if not calls:
+            continue
+        with subtests.test(str(path.relative_to(REPO_ROOT))):
+            for call in calls:
+                kwargs = {kw.arg for kw in call.keywords}
+                assert kwargs & {"config", "vlm_checkpoint", "trust_remote_code"}, (
+                    f"{path}: modality probe fetches a config without the run's trust_remote_code="
+                )
 
 
 def _forced_remote_code_lines(path: Path) -> list[int]:
@@ -411,33 +405,27 @@ def test_smpo_refuses_a_vlm_run_under_cp_or_pp_before_the_model_load(tmp_path, a
             _run_main_with_yaml(module, yaml_body, tmp_path)
 
 
-@pytest.mark.parametrize(
-    "script",
-    _TRAINING_SCRIPTS,
-    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
-)
-def test_no_script_calls_bare_get_peft_model(script: Path):
+def test_no_script_calls_bare_get_peft_model(subtests):
     """A bare ``get_peft_model`` skips ``build_peft_model``'s k-bit prep, so QLoRA would silently mis-train."""
-    source = script.read_text(encoding="utf-8")
-    assert not _named_calls(ast.parse(source), "get_peft_model"), (
-        f"{script}: calls bare get_peft_model — route through build_peft_model "
-        f"(halo/model_loading/parallel/peft_setup.py) like SMPO/classification/offline-GRPO."
-    )
+    for script in _TRAINING_SCRIPTS:
+        with subtests.test(str(script.relative_to(_TRAINING_DIR))):
+            source = script.read_text(encoding="utf-8")
+            assert not _named_calls(ast.parse(source), "get_peft_model"), (
+                f"{script}: calls bare get_peft_model — route through build_peft_model "
+                f"(halo/model_loading/parallel/peft_setup.py) like SMPO/classification/offline-GRPO."
+            )
 
 
-@pytest.mark.parametrize(
-    "script",
-    _TRAINING_SCRIPTS,
-    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
-)
-def test_no_script_calls_bare_get_peft_config(script: Path):
+def test_no_script_calls_bare_get_peft_config(subtests):
     """A bare ``get_peft_config`` never sees the model, so target names spelling a module PEFT cannot adapt reach
     injection and kill the run."""
-    source = script.read_text(encoding="utf-8")
-    assert not _named_calls(ast.parse(source), "get_peft_config"), (
-        f"{script}: calls bare get_peft_config — route through build_peft_config "
-        f"(halo/model_loading/parallel/peft_setup.py), directly or via configure_adapter_training."
-    )
+    for script in _TRAINING_SCRIPTS:
+        with subtests.test(str(script.relative_to(_TRAINING_DIR))):
+            source = script.read_text(encoding="utf-8")
+            assert not _named_calls(ast.parse(source), "get_peft_config"), (
+                f"{script}: calls bare get_peft_config — route through build_peft_config "
+                f"(halo/model_loading/parallel/peft_setup.py), directly or via configure_adapter_training."
+            )
 
 
 _TOKENIZER_SEAMS = (
@@ -462,33 +450,30 @@ def _assigned_targets(tree: ast.AST, call: ast.Call) -> list[ast.expr] | None:
     return None
 
 
-@pytest.mark.parametrize(
-    "script",
-    _TRAINING_SCRIPTS,
-    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
-)
-def test_scripts_bind_the_tokenizer_their_length_seam_returns(script: Path):
+def test_scripts_bind_the_tokenizer_their_length_seam_returns(subtests):
     """The length seams resolve the tokenizer (``tokenizer_backend`` swaps in a proxy) and return it; dropping the
     return leaves the knob doing nothing. ``apply_prompt_completion_window`` returns ``(tokenizer, window)``, so
     a tuple target counts."""
-    seen = 0
-    for tree in _seam_trees(script):
-        for seam in _TOKENIZER_SEAMS:
-            for call in _named_calls(tree, seam):
-                seen += 1
-                targets = _assigned_targets(tree, call)
-                assert targets is not None, (
-                    f"{script}: {seam}() result is discarded — tokenizer_backend is a silent no-op there."
-                )
-                names = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
-                assert "tokenizer" in names, (
-                    f"{script}: {seam}() result is bound to {sorted(names)}, not `tokenizer` — the "
-                    f"backend-resolved tokenizer never reaches the trainer."
-                )
-    if script.name in _NO_TOKENIZER_SEAM:
-        assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
-    else:
-        assert seen, f"{script}: calls no tokenizer length seam ({', '.join(_TOKENIZER_SEAMS)})."
+    for script in _TRAINING_SCRIPTS:
+        with subtests.test(str(script.relative_to(_TRAINING_DIR))):
+            seen = 0
+            for tree in _seam_trees(script):
+                for seam in _TOKENIZER_SEAMS:
+                    for call in _named_calls(tree, seam):
+                        seen += 1
+                        targets = _assigned_targets(tree, call)
+                        assert targets is not None, (
+                            f"{script}: {seam}() result is discarded — tokenizer_backend is a silent no-op there."
+                        )
+                        names = {n.id for t in targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+                        assert "tokenizer" in names, (
+                            f"{script}: {seam}() result is bound to {sorted(names)}, not `tokenizer` — the "
+                            f"backend-resolved tokenizer never reaches the trainer."
+                        )
+            if script.name in _NO_TOKENIZER_SEAM:
+                assert not seen, f"{script}: now calls a length seam — drop it from _NO_TOKENIZER_SEAM."
+            else:
+                assert seen, f"{script}: calls no tokenizer length seam ({', '.join(_TOKENIZER_SEAMS)})."
 
 
 def test_a_script_rendering_rows_through_its_processor_marks_its_tokenizer_before_the_length_seam():
@@ -509,24 +494,21 @@ def test_a_script_rendering_rows_through_its_processor_marks_its_tokenizer_befor
     assert not unmarked, f"these scripts probe the tokenizer's template for an image run's rows: {unmarked}"
 
 
-@pytest.mark.parametrize(
-    "script",
-    _TRAINING_SCRIPTS,
-    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
-)
-def test_init_training_script_takes_the_parsed_parallelism_arguments(script: Path):
+def test_init_training_script_takes_the_parsed_parallelism_arguments(subtests):
     """It builds the ``ParallelismConfig`` from its fourth argument, so any other dataclass fails the run after the
     process group is up."""
-    tree = ast.parse(script.read_text(encoding="utf-8"))
-    (parse_call,) = _named_calls(tree, "parse_script_args")
-    slot = [argument.id for argument in parse_call.args].index("ParallelismArguments")
-    (target,) = _assigned_targets(tree, parse_call)
-    parsed_name = target.elts[slot].id
-    (init_call,) = _named_calls(tree, "init_training_script")
-    assert ast.unparse(init_call.args[3]) == parsed_name, (
-        f"{script}: init_training_script gets {ast.unparse(init_call.args[3])!r}, not the parsed "
-        f"ParallelismArguments {parsed_name!r}"
-    )
+    for script in _TRAINING_SCRIPTS:
+        with subtests.test(str(script.relative_to(_TRAINING_DIR))):
+            tree = ast.parse(script.read_text(encoding="utf-8"))
+            (parse_call,) = _named_calls(tree, "parse_script_args")
+            slot = [argument.id for argument in parse_call.args].index("ParallelismArguments")
+            (target,) = _assigned_targets(tree, parse_call)
+            parsed_name = target.elts[slot].id
+            (init_call,) = _named_calls(tree, "init_training_script")
+            assert ast.unparse(init_call.args[3]) == parsed_name, (
+                f"{script}: init_training_script gets {ast.unparse(init_call.args[3])!r}, not the parsed "
+                f"ParallelismArguments {parsed_name!r}"
+            )
 
 
 @pytest.mark.parametrize("rel_path", ["grpo/online.py", "grpo/environmental.py"])
@@ -561,12 +543,13 @@ def _parses_vision_arguments(tree: ast.AST) -> bool:
     )
 
 
-@pytest.mark.parametrize("script", _TRAINING_SCRIPTS, ids=lambda path: path.name)
-def test_a_script_taking_the_vision_arguments_applies_them(script: Path):
+def test_a_script_taking_the_vision_arguments_applies_them(subtests):
     """They would otherwise parse and do nothing: a tower the run asked to freeze keeps training."""
-    tree = ast.parse(script.read_text(encoding="utf-8"))
-    if _parses_vision_arguments(tree):
-        assert _named_calls(tree, "apply_vision_options"), f"{script}: its vision arguments reach nothing"
+    for script in _TRAINING_SCRIPTS:
+        with subtests.test(script.name):
+            tree = ast.parse(script.read_text(encoding="utf-8"))
+            if _parses_vision_arguments(tree):
+                assert _named_calls(tree, "apply_vision_options"), f"{script}: its vision arguments reach nothing"
 
 
 def test_the_vision_arguments_contract_is_not_vacuous():
@@ -600,23 +583,24 @@ _INSTALLS_PROCESSING_CLASS = (
 )
 
 
-@pytest.mark.parametrize("rel_path", _INSTALLS_PROCESSING_CLASS)
-def test_vlm_capable_scripts_install_the_resolved_tokenizer(rel_path: str):
+def test_vlm_capable_scripts_install_the_resolved_tokenizer(subtests):
     """A VLM processor holds its own inner tokenizer, so the resolved object must be installed into
     ``processing_class`` on both branches, by ``install_resolved_tokenizer``."""
-    calls = [
-        (tree, call)
-        for tree in _seam_trees(_TRAINING_DIR / rel_path)
-        for call in _named_calls(tree, "install_resolved_tokenizer")
-    ]
-    assert calls, f"{rel_path}: never calls install_resolved_tokenizer — processing_class is unresolved."
-    for tree, call in calls:
-        targets = _assigned_targets(tree, call)
-        names = {n.id for t in (targets or []) for n in ast.walk(t) if isinstance(n, ast.Name)}
-        assert "processing_class" in names, (
-            f"{rel_path}: install_resolved_tokenizer() result is bound to {sorted(names)}, "
-            f"not `processing_class` — the resolved tokenizer never reaches the trainer."
-        )
+    for rel_path in _INSTALLS_PROCESSING_CLASS:
+        with subtests.test(rel_path):
+            calls = [
+                (tree, call)
+                for tree in _seam_trees(_TRAINING_DIR / rel_path)
+                for call in _named_calls(tree, "install_resolved_tokenizer")
+            ]
+            assert calls, f"{rel_path}: never calls install_resolved_tokenizer — processing_class is unresolved."
+            for tree, call in calls:
+                targets = _assigned_targets(tree, call)
+                names = {n.id for t in (targets or []) for n in ast.walk(t) if isinstance(n, ast.Name)}
+                assert "processing_class" in names, (
+                    f"{rel_path}: install_resolved_tokenizer() result is bound to {sorted(names)}, "
+                    f"not `processing_class` — the resolved tokenizer never reaches the trainer."
+                )
 
 
 _COMPLETION_COLLATORS = sorted(
@@ -630,26 +614,25 @@ def test_the_completion_collator_roster_is_derived_and_nonempty():
     assert "DataCollatorForCompletionOnlyLM" in _COMPLETION_COLLATORS
 
 
-@pytest.mark.parametrize(
-    "script",
-    _TRAINING_SCRIPTS,
-    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _TRAINING_SCRIPTS],
-)
-def test_no_script_builds_a_completion_only_collator_directly(script: Path):
+def test_no_script_builds_a_completion_only_collator_directly(subtests):
     """``select_data_collator`` owns the guards; built directly, a marker no template emits masks every token and
     the run trains on nothing under the same log line."""
-    tree = ast.parse(script.read_text(encoding="utf-8"))
-    direct = sorted(
-        {
-            node.func.id
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in _COMPLETION_COLLATORS
-        }
-    )
-    assert not direct, (
-        f"{script.relative_to(_TRAINING_DIR)}: constructs {direct} directly, bypassing "
-        f"select_data_collator's assistant-marker guards."
-    )
+    for script in _TRAINING_SCRIPTS:
+        with subtests.test(str(script.relative_to(_TRAINING_DIR))):
+            tree = ast.parse(script.read_text(encoding="utf-8"))
+            direct = sorted(
+                {
+                    node.func.id
+                    for node in ast.walk(tree)
+                    if isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id in _COMPLETION_COLLATORS
+                }
+            )
+            assert not direct, (
+                f"{script.relative_to(_TRAINING_DIR)}: constructs {direct} directly, bypassing "
+                f"select_data_collator's assistant-marker guards."
+            )
 
 
 def _sft_trainer_builds(script: Path) -> list[tuple[ast.FunctionDef, ast.Call]]:

@@ -568,9 +568,10 @@ def test_non_processor_carrying_a_tokenizer_is_not_keyed_as_that_tokenizer():
     )
 
 
-@pytest.mark.parametrize(
-    "knob,value",
-    [
+def test_self_distill_cache_signature_covers_every_render_knob(subtests):
+    """A knob missing from ``collator.cache_signature()`` serves ids under its previous value, or lets a stale cache
+    skip the VLM audit, whose refusals then revert to collate time, rank-local, hanging the peers."""
+    variants = [
         ("max_length", 4096),
         ("conversation_field", "dialogue"),
         ("hint_template", "the answer is {answer}"),
@@ -585,11 +586,7 @@ def test_non_processor_carrying_a_tokenizer_is_not_keyed_as_that_tokenizer():
         ("model_supports_system_role", False),
         ("tools_field", "tools"),
         ("interleaved_thinking", True),
-    ],
-)
-def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
-    """A knob missing from ``collator.cache_signature()`` serves ids under its previous value, or lets a stale cache
-    skip the VLM audit, whose refusals then revert to collate time, rank-local, hanging the peers."""
+    ]
     baseline = {
         "tokenizer": _LeafTok(),
         "max_length": 2048,
@@ -608,10 +605,12 @@ def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
         "tools_field": None,
         "interleaved_thinking": False,
     }
-    assert baseline[knob] != value, "the variant must actually differ from the baseline"
     fp_base = kwargs_fingerprint(SelfDistillTextCollator(**baseline).cache_signature())
-    fp_variant = kwargs_fingerprint(SelfDistillTextCollator(**{**baseline, knob: value}).cache_signature())
-    assert fp_base != fp_variant, f"{knob} changes what the prep map writes or accepts but not the cache key"
+    for knob, value in variants:
+        with subtests.test(f"{knob}-{value}"):
+            assert baseline[knob] != value, "the variant must actually differ from the baseline"
+            fp_variant = kwargs_fingerprint(SelfDistillTextCollator(**{**baseline, knob: value}).cache_signature())
+            assert fp_base != fp_variant, f"{knob} changes what the prep map writes or accepts but not the cache key"
 
 
 def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cache_key():
@@ -632,25 +631,29 @@ def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cach
         )
 
 
-@pytest.mark.parametrize(
-    "helper",
-    [
+def test_the_self_distill_encode_map_key_covers_the_encoder_source(subtests, monkeypatch):
+    """The key folds in only the source of helpers the function reaches by bare name: an encoder behind a collator
+    method drops out, and an edited render rule would serve the previous rows."""
+    helpers = [
         render_conversation,
         tokenize_rendered,
         build_training_labels,
         teacher_history,
         privileged_hint,
         require_aligned_responses,
-    ],
-    ids=lambda helper: helper.__name__,
-)
-def test_the_self_distill_encode_map_key_covers_the_encoder_source(helper, monkeypatch):
-    """The key folds in only the source of helpers the function reaches by bare name: an encoder behind a collator
-    method drops out, and an edited render rule would serve the previous rows."""
+    ]
     before = function_cache_id(encode_self_distill_row)
     getsource = inspect.getsource
-    monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
-    assert function_cache_id(encode_self_distill_row) != before, f"editing {helper.__name__} keeps the cache key"
+    for helper in helpers:
+        with subtests.test(helper.__name__), monkeypatch.context() as patch:
+            patch.setattr(
+                inspect,
+                "getsource",
+                lambda func, helper=helper: getsource(func) + ("\n# edited" if func is helper else ""),
+            )
+            assert function_cache_id(encode_self_distill_row) != before, (
+                f"editing {helper.__name__} keeps the cache key"
+            )
 
 
 def _through_a_nested_def(rows):

@@ -120,10 +120,12 @@ def test_the_sweep_reaches_the_knobs_of_every_parsed_config():
     } <= knobs
 
 
-@pytest.mark.parametrize(("config", "knob", "kwargs"), _NUMERIC_KNOBS)
-def test_a_numeric_knob_refuses_a_bool_or_a_non_finite_value(config, knob, kwargs):
-    with pytest.raises(ValueError, match=knob):
-        config(**kwargs)
+def test_a_numeric_knob_refuses_a_bool_or_a_non_finite_value(subtests):
+    for param in _NUMERIC_KNOBS:
+        config, knob, kwargs = param.values
+        with subtests.test(param.id):
+            with pytest.raises(ValueError, match=knob):
+                config(**kwargs)
 
 
 def test_a_rescore_budget_is_read_only_beside_the_engine_reference():

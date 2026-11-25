@@ -27,12 +27,15 @@ def test_every_spec_is_held_by_exactly_one_family_class():
     assert set(held) == set(MOE_FAMILY_SPECS)
 
 
-@pytest.mark.parametrize("cls", _family_classes(), ids=lambda cls: cls.__name__)
-def test_the_live_balancing_slot_names_the_spec_slot(cls):
+def test_the_live_balancing_slot_names_the_spec_slot(subtests):
     """A drift would adopt one tensor and save another key."""
-    slot = cls.FAMILY.balancing_slot
-    if slot:
-        assert set(slot.attrs) == {slot.attrs[0], cls.FAMILY.to_hub_key(slot.attrs[0])}
+    classes = _family_classes()
+    assert classes, "the sweep found no EP family layer class"
+    for cls in classes:
+        with subtests.test(cls.__name__):
+            slot = cls.FAMILY.balancing_slot
+            if slot:
+                assert set(slot.attrs) == {slot.attrs[0], cls.FAMILY.to_hub_key(slot.attrs[0])}
 
 
 def test_a_model_type_two_specs_claim_is_refused():

@@ -568,16 +568,22 @@ def test_torchrun_reads_numa_binding_only_before_the_script():
     assert parsed.training_script_args == ["config.yaml", "--numa-binding", "node"]
 
 
-@pytest.mark.parametrize("mode", [mode.value for mode in AffinityMode])
-def test_every_numa_mode_reaches_torchrun(tmp_path, mode):
+def test_every_numa_mode_reaches_torchrun(tmp_path, subtests):
     """torchrun's choices are these modes; its parser exits on a value it does not take."""
-    write_script(tmp_path / "scripts/training/sft.py")
-    write_config(tmp_path / "config.yaml")
+    modes = [affinity.value for affinity in AffinityMode]
+    assert modes, "torch.numa.binding.AffinityMode declares no mode"
+    for mode in modes:
+        with subtests.test(mode):
+            root = tmp_path / mode
+            write_script(root / "scripts/training/sft.py")
+            write_config(root / "config.yaml")
 
-    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", "-n", "2", "--port", "29752", "--numa-binding", mode])
+            tokens = _dry_run(
+                root, ["launch", "sft", "config.yaml", "-n", "2", "--port", "29752", "--numa-binding", mode]
+            )
 
-    assert parse_args(tokens[1:]).numa_binding == mode
-    assert tokens[:4] == ["torchrun", "--nproc_per_node=2", "--master_port=29752", f"--numa-binding={mode}"]
+            assert parse_args(tokens[1:]).numa_binding == mode
+            assert tokens[:4] == ["torchrun", "--nproc_per_node=2", "--master_port=29752", f"--numa-binding={mode}"]
 
 
 def test_an_unknown_numa_mode_is_refused_before_launch(tmp_path):

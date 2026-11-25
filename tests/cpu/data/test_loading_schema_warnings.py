@@ -22,21 +22,20 @@ from tests.common.repo import REPO_ROOT
 _CORPUS_LOGGER = "halo.data.sources.corpus"
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
+def test_data_source_loggers_are_pinned_at_info(subtests):
+    """``halo`` pins the root to WARNING, so an unset module logger silences the run's only record of what data
+    trained. The logger's own level, since the effective one passes on any ambient root configuration."""
+    names = [
         "halo.data.sources.loading",
         _CORPUS_LOGGER,
         "halo.data.sources.dataset_cache",
         "halo.data.sources.s3_client",
         "halo.data.sources.s3_dataset_store",
         "halo.data.sources.sharded_dataset",
-    ],
-)
-def test_data_source_loggers_are_pinned_at_info(name):
-    """``halo`` pins the root to WARNING, so an unset module logger silences the run's only record of what data
-    trained. The logger's own level, since the effective one passes on any ambient root configuration."""
-    assert logging.getLogger(name).level == logging.INFO
+    ]
+    for name in names:
+        with subtests.test(name):
+            assert logging.getLogger(name).level == logging.INFO
 
 
 def test_schema_warning_names_only_columns_actually_lost(caplog):

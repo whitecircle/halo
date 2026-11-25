@@ -281,24 +281,26 @@ def test_the_nudge_roster_reaches_every_protocol():
     } <= set(_NUDGES)
 
 
-@pytest.mark.parametrize("name", sorted(_NUDGES))
-def test_the_nudge_never_asks_for_shorter_reasoning(name):
-    # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
-    lowered = _NUDGES[name].lower()
-    assert "think brief" not in lowered
-    assert "short" not in lowered and "concise" not in lowered and "briefly" not in lowered
-    # The plain cut nudge answers an engine abort as well, so it must not name a cause it cannot know; the
-    # in-call one is sent on a token-cap cut alone.
-    if "IN_CALL_NUDGE" not in name:
-        assert "length limit" not in lowered
+def test_the_nudge_never_asks_for_shorter_reasoning(subtests):
+    for name in sorted(_NUDGES):
+        with subtests.test(name):
+            # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
+            lowered = _NUDGES[name].lower()
+            assert "think brief" not in lowered
+            assert "short" not in lowered and "concise" not in lowered and "briefly" not in lowered
+            # The plain cut nudge answers an engine abort as well, so it must not name a cause it cannot know; the
+            # in-call one is sent on a token-cap cut alone.
+            if "IN_CALL_NUDGE" not in name:
+                assert "length limit" not in lowered
 
 
-@pytest.mark.parametrize("name", sorted(name for name in _NUDGES if ".TOOLLESS_" in name))
-def test_a_tool_less_nudge_never_asks_for_a_tool_call(name):
-    # Sent only where the registry is empty: a call is a move the model cannot make there, and the turn
-    # that answers the nudge is trained.
-    lowered = _NUDGES[name].lower()
-    assert "tool" not in lowered and "call" not in lowered
+def test_a_tool_less_nudge_never_asks_for_a_tool_call(subtests):
+    for name in sorted(name for name in _NUDGES if ".TOOLLESS_" in name):
+        with subtests.test(name):
+            # Sent only where the registry is empty: a call is a move the model cannot make there, and the turn
+            # that answers the nudge is trained.
+            lowered = _NUDGES[name].lower()
+            assert "tool" not in lowered and "call" not in lowered
 
 
 # Sent after a turn that carried reasoning, pinned byte for byte: running recipes train on them.

@@ -109,32 +109,37 @@ def _liger_rms_norm_reference(x, weight, eps, offset, casting_mode):
     return (offset + weight) * normed.to(x.dtype)
 
 
-@pytest.mark.parametrize("model_type", sorted(_roster_model_types()))
-def test_every_roster_family_resolves_an_applier(model_type):
-    if model_type in RESOLVED_THROUGH_TEXT_CONFIG:
-        text_type = RESOLVED_THROUGH_TEXT_CONFIG[model_type]
-        assert liger_applier(text_type) is not None, (
-            f"{model_type} resolves Liger through its text sub-config {text_type}, which now has no applier"
-        )
-        return
-    assert liger_applier(model_type) is not None, (
-        f"no Liger applier covers {model_type}; add a LigerFamilySpec to LIGER_FAMILY_SPECS"
-    )
+def test_every_roster_family_resolves_an_applier(subtests):
+    roster = sorted(_roster_model_types())
+    assert roster, "the MoE roster lists no model type"
+    for model_type in roster:
+        with subtests.test(model_type):
+            if model_type in RESOLVED_THROUGH_TEXT_CONFIG:
+                text_type = RESOLVED_THROUGH_TEXT_CONFIG[model_type]
+                assert liger_applier(text_type) is not None, (
+                    f"{model_type} resolves Liger through its text sub-config {text_type}, which now has no applier"
+                )
+                continue
+            assert liger_applier(model_type) is not None, (
+                f"no Liger applier covers {model_type}; add a LigerFamilySpec to LIGER_FAMILY_SPECS"
+            )
 
 
-@pytest.mark.parametrize("spec", LIGER_FAMILY_SPECS, ids=lambda s: s.model_types[0])
-def test_a_listed_wrapper_can_only_wrap_the_family_it_is_listed_under(spec):
+def test_a_listed_wrapper_can_only_wrap_the_family_it_is_listed_under(subtests):
     """A wrapper pinned to the wrong sibling patches classes the model never instantiates and reports every kernel
     as applied."""
-    for model_type in spec.model_types:
-        config_cls = CONFIG_MAPPING.get(model_type)
-        if config_cls is None or "text_config" not in (getattr(config_cls, "sub_configs", None) or {}):
-            continue
-        tower = config_cls().text_config.model_type
-        assert tower in spec.model_types, (
-            f"{model_type} is a composite wrapper whose default text tower is {tower!r}, outside this "
-            f"spec's {spec.model_types}; drop it and let dispatch resolve it through text_config"
-        )
+    assert LIGER_FAMILY_SPECS, "no Liger family spec is declared"
+    for spec in LIGER_FAMILY_SPECS:
+        with subtests.test(spec.model_types[0]):
+            for model_type in spec.model_types:
+                config_cls = CONFIG_MAPPING.get(model_type)
+                if config_cls is None or "text_config" not in (getattr(config_cls, "sub_configs", None) or {}):
+                    continue
+                tower = config_cls().text_config.model_type
+                assert tower in spec.model_types, (
+                    f"{model_type} is a composite wrapper whose default text tower is {tower!r}, outside this "
+                    f"spec's {spec.model_types}; drop it and let dispatch resolve it through text_config"
+                )
 
 
 @pytest.mark.parametrize(
@@ -170,12 +175,16 @@ def test_no_liger_expressible_norm_is_left_undeclared(spec):
     )
 
 
-@pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda s: s.model_types[0])
-def test_every_declared_class_exists(spec):
+def test_every_declared_class_exists(subtests):
     """A transformers bump that renames a class must fail here, before model load on a GPU node."""
-    module = importlib.import_module(spec.modeling_module)
-    for name in spec.rms_norm + spec.gated_rms_norm + spec.glu_mlp + spec.causal_lm:
-        assert isinstance(getattr(module, name, None), type), f"{spec.modeling_module} defines no class {name!r}"
+    assert NATIVE_SPECS, "no Liger family spec names a modeling module"
+    for spec in NATIVE_SPECS:
+        with subtests.test(spec.model_types[0]):
+            module = importlib.import_module(spec.modeling_module)
+            for name in spec.rms_norm + spec.gated_rms_norm + spec.glu_mlp + spec.causal_lm:
+                assert isinstance(getattr(module, name, None), type), (
+                    f"{spec.modeling_module} defines no class {name!r}"
+                )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
@@ -231,33 +240,34 @@ def test_the_norm_check_rejects_the_wrong_liger_variant():
     assert not torch.equal(gemma, llama), "casting_mode makes no difference here — the check is blind to it"
 
 
-@pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.rms_norm], ids=lambda s: s.model_types[0])
-def test_no_norm_output_is_a_direct_operand_of_an_addition(spec):
+def test_no_norm_output_is_a_direct_operand_of_an_addition(subtests):
     """Liger's llama-mode backward writes dX into the incoming dY buffer, and ``AddBackward`` hands one gradient
     object to both inputs, so a post-norm silently overwrites its sibling's gradient.
     A transformers bump adding a post-norm must fail here and switch that family to ``in_place=False``."""
-    if spec.rms_norm_casting_mode == "gemma":
-        pytest.skip("the gemma casting mode already uses in_place=False")
-    module = importlib.import_module(spec.modeling_module)
-    for name, cls in vars(module).items():
-        if not isinstance(cls, type) or getattr(cls, "__module__", None) != module.__name__:
-            continue
-        forward = getattr(cls, "forward", None)
-        if forward is None or not inspect.isfunction(forward):
-            continue
-        for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(forward)))):
-            if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
-                continue
-            for side in (node.left, node.right):
-                is_norm_call = (
-                    isinstance(side, ast.Call)
-                    and isinstance(side.func, ast.Attribute)
-                    and "norm" in side.func.attr.lower()
-                )
-                assert not is_norm_call, (
-                    f"{name}.forward adds a norm output directly (`{ast.unparse(node)[:80]}`); Liger's "
-                    f"in-place RMSNorm backward would overwrite the sibling branch's gradient"
-                )
+    specs = [s for s in NATIVE_SPECS if s.rms_norm and s.rms_norm_casting_mode != "gemma"]
+    assert specs, "no native Liger spec declares an in-place RMSNorm"
+    for spec in specs:
+        with subtests.test(spec.model_types[0]):
+            module = importlib.import_module(spec.modeling_module)
+            for name, cls in vars(module).items():
+                if not isinstance(cls, type) or getattr(cls, "__module__", None) != module.__name__:
+                    continue
+                forward = getattr(cls, "forward", None)
+                if forward is None or not inspect.isfunction(forward):
+                    continue
+                for node in ast.walk(ast.parse(textwrap.dedent(inspect.getsource(forward)))):
+                    if not (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)):
+                        continue
+                    for side in (node.left, node.right):
+                        is_norm_call = (
+                            isinstance(side, ast.Call)
+                            and isinstance(side.func, ast.Attribute)
+                            and "norm" in side.func.attr.lower()
+                        )
+                        assert not is_norm_call, (
+                            f"{name}.forward adds a norm output directly (`{ast.unparse(node)[:80]}`); Liger's "
+                            f"in-place RMSNorm backward would overwrite the sibling branch's gradient"
+                        )
 
 
 @pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.gated_rms_norm], ids=lambda s: s.model_types[0])
@@ -284,17 +294,19 @@ def test_a_grouped_gated_norm_is_never_declared():
     assert not [name for name in declared if "Group" in name], f"a grouped gated norm is declared: {declared}"
 
 
-@pytest.mark.parametrize("spec", NATIVE_SPECS, ids=lambda s: s.model_types[0])
-def test_declared_glu_mlps_are_the_canonical_gated_body(spec):
+def test_declared_glu_mlps_are_the_canonical_gated_body(subtests):
     """Inkling's ``global_scale``, the ``swiglu_limit`` clamps and LFM-2's ``w1``/``w3``/``w2`` would be dropped or
     missed by the fused forward."""
-    module = importlib.import_module(spec.modeling_module)
-    for name in spec.glu_mlp:
-        attributes = _self_attributes(_forward_ast(getattr(module, name)))
-        assert attributes == CANONICAL_GLU_ATTRIBUTES, (
-            f"{name}.forward touches {sorted(attributes)}, not the canonical "
-            f"{sorted(CANONICAL_GLU_ATTRIBUTES)} — the fused GLU would compute a different function"
-        )
+    assert NATIVE_SPECS, "no Liger family spec names a modeling module"
+    for spec in NATIVE_SPECS:
+        with subtests.test(spec.model_types[0]):
+            module = importlib.import_module(spec.modeling_module)
+            for name in spec.glu_mlp:
+                attributes = _self_attributes(_forward_ast(getattr(module, name)))
+                assert attributes == CANONICAL_GLU_ATTRIBUTES, (
+                    f"{name}.forward touches {sorted(attributes)}, not the canonical "
+                    f"{sorted(CANONICAL_GLU_ATTRIBUTES)} — the fused GLU would compute a different function"
+                )
 
 
 @pytest.mark.parametrize("spec", [s for s in REMOTE_SPECS if s.glu_mlp], ids=lambda s: s.model_types[0])
@@ -330,17 +342,20 @@ def _declared_head_attributes(spec, head_class_name: str) -> set[str]:
     return {"logit_scale"} if transform.logit_scale is not None else set()
 
 
-@pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
-def test_declared_heads_do_nothing_the_fused_loss_would_drop(spec):
+def test_declared_heads_do_nothing_the_fused_loss_would_drop(subtests):
     """The fused loss replaces both calls, so anything applied in between vanishes."""
-    module = importlib.import_module(spec.modeling_module)
-    for name in spec.causal_lm:
-        allowed = _declared_head_attributes(spec, name)
-        between = _attributes_between_head_and_loss(_forward_ast(getattr(module, name)), name)
-        assert between <= allowed, (
-            f"{name}.forward applies {sorted(between - allowed)} between lm_head and the loss; the "
-            f"fused loss replaces both and would drop it. Declare it on the spec or drop causal_lm."
-        )
+    specs = [s for s in NATIVE_SPECS if s.causal_lm]
+    assert specs, "no native Liger spec declares a causal LM head"
+    for spec in specs:
+        with subtests.test(spec.model_types[0]):
+            module = importlib.import_module(spec.modeling_module)
+            for name in spec.causal_lm:
+                allowed = _declared_head_attributes(spec, name)
+                between = _attributes_between_head_and_loss(_forward_ast(getattr(module, name)), name)
+                assert between <= allowed, (
+                    f"{name}.forward applies {sorted(between - allowed)} between lm_head and the loss; the "
+                    f"fused loss replaces both and would drop it. Declare it on the spec or drop causal_lm."
+                )
 
 
 @pytest.mark.parametrize("spec", [s for s in REMOTE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
@@ -384,12 +399,15 @@ def _head_casts_logits_to_fp32(forward: ast.FunctionDef) -> bool:
     return any(isinstance(node, ast.Attribute) and node.attr == "float" for node in ast.walk(head))
 
 
-@pytest.mark.parametrize("spec", [s for s in NATIVE_SPECS if s.causal_lm], ids=lambda s: s.model_types[0])
-def test_a_head_casting_its_logits_declares_it(spec):
+def test_a_head_casting_its_logits_declares_it(subtests):
     """Undeclared, a forward with no labels would hand a log-softmax bf16 logits the family's own head never returns."""
-    module = importlib.import_module(spec.modeling_module)
-    for name in spec.causal_lm:
-        assert _head_casts_logits_to_fp32(_forward_ast(getattr(module, name))) == spec.fp32_logits, name
+    specs = [s for s in NATIVE_SPECS if s.causal_lm]
+    assert specs, "no native Liger spec declares a causal LM head"
+    for spec in specs:
+        with subtests.test(spec.model_types[0]):
+            module = importlib.import_module(spec.modeling_module)
+            for name in spec.causal_lm:
+                assert _head_casts_logits_to_fp32(_forward_ast(getattr(module, name))) == spec.fp32_logits, name
 
 
 def test_the_head_check_rejects_inklings_rescaled_head():
@@ -474,18 +492,20 @@ def test_rope_is_only_declared_where_the_rotary_is_ligers(spec):
     )
 
 
-@pytest.mark.parametrize("spec", LIGER_FAMILY_SPECS, ids=lambda s: s.model_types[0])
-def test_the_applier_offers_only_the_roles_the_spec_fills(spec):
+def test_the_applier_offers_only_the_roles_the_spec_fills(subtests):
     """An offered role the spec cannot serve would be accepted and do nothing; a delegating spec offers upstream's
     roles instead."""
-    parameters = set(inspect.signature(liger_applier(spec.model_types[0])).parameters)
-    if spec.delegates_to_upstream:
-        upstream = set(inspect.signature(MODEL_TYPE_TO_APPLY_LIGER_FN[spec.model_types[0]]).parameters)
-        assert parameters == upstream, f"{spec.model_types[0]} no longer offers upstream's kernel set"
-        return
-    assert ("rms_norm" in parameters) == bool(spec.rms_norm or spec.gated_rms_norm)
-    assert ("swiglu" in parameters) == bool(spec.glu_mlp)
-    assert ("fused_linear_cross_entropy" in parameters) == bool(spec.causal_lm)
+    assert LIGER_FAMILY_SPECS, "no Liger family spec is declared"
+    for spec in LIGER_FAMILY_SPECS:
+        with subtests.test(spec.model_types[0]):
+            parameters = set(inspect.signature(liger_applier(spec.model_types[0])).parameters)
+            if spec.delegates_to_upstream:
+                upstream = set(inspect.signature(MODEL_TYPE_TO_APPLY_LIGER_FN[spec.model_types[0]]).parameters)
+                assert parameters == upstream, f"{spec.model_types[0]} no longer offers upstream's kernel set"
+                continue
+            assert ("rms_norm" in parameters) == bool(spec.rms_norm or spec.gated_rms_norm)
+            assert ("swiglu" in parameters) == bool(spec.glu_mlp)
+            assert ("fused_linear_cross_entropy" in parameters) == bool(spec.causal_lm)
 
 
 def test_the_fused_head_forwards_the_router_flag_where_the_head_adds_no_aux_loss():

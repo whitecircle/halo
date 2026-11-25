@@ -44,7 +44,7 @@ from halo.trainers.sft_rules import reject_unsupported_mtp_options
 from tests.common.hub_seed import is_hub_repo
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint, word_level_tokenizer
-from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
+from tests.common.tokenizers import load_cached_config, try_cached_config, try_cached_tokenizer
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
     ENV_GRPO_EXAMPLES,
@@ -85,8 +85,13 @@ _ALLOCATOR_DOC = "agent-docs/optimization/throughput-benchmarks.md#allocator-exp
 # The methods whose dense runs the allocator setting was measured on (_ALLOCATOR_DOC).
 _EXPANDABLE_SEGMENTS_SCRIPTS = frozenset({"sft.py", "preference/dpo.py", "preference/smpo.py"})
 
-# Parametrization ids: the example's path under examples/, so a failure names the file to open.
-_ID = {"ids": lambda config: config.relative_to(EXAMPLES_ROOT).as_posix()}
+
+def example_id(config: Path) -> str:
+    """The example's path under examples/, so a failure names the file to open."""
+    return config.relative_to(EXAMPLES_ROOT).as_posix()
+
+
+_ID = {"ids": example_id}
 _MTP_EXAMPLES = [
     config for config in _EXAMPLES if "mtp_loss_weight" in (yaml.safe_load(config.read_text(encoding="utf-8")) or {})
 ]
@@ -227,6 +232,11 @@ def build_parallelism_config(config: Path, *, train_batch: int | None = None):
         return parsed, built[0]
 
 
+def try_model_config_for(parsed: tuple):
+    """The example's model config from the local HF cache, or None when this host cannot resolve it."""
+    return try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
+
+
 def model_config_for(config: Path, parsed: tuple):
     """The example's model config from the local HF cache, or a skip when this host cannot resolve it."""
     return load_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
@@ -269,64 +279,73 @@ def test_an_expandable_segments_example_exists():
     )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_allocator_setting_follows_expert_parallelism(config):
+def test_example_allocator_setting_follows_expert_parallelism(subtests):
     """On dense runs the setting lowers peak reserved memory at unchanged throughput; under EP it costs throughput.
     Other methods and a MoE run without EP are unmeasured, so neither rule binds them. Measurements:
     ``_ALLOCATOR_DOC``."""
-    commands = launch_commands(config)
-    if uses_expert_parallelism(raw_config(config)):
-        exports = [line for line in comment_block(config).splitlines() if _EXPORT_LINE.match(line)]
-        assert not any(_EXPANDABLE_SEGMENTS.search(line) for line in commands + exports), (
-            f"this EP example launches with expandable_segments, which costs throughput under EP ({_ALLOCATOR_DOC}); "
-            "drop it"
-        )
-        return
-    script = script_for(config)
-    if script not in _EXPANDABLE_SEGMENTS_SCRIPTS:
-        return
-    parsed = parser_for(script).parse_yaml_file(str(config))
-    if has_routed_experts(model_config_for(config, parsed)):
-        return
-    bare = [line for line in commands if not _EXPANDABLE_SEGMENTS_PREFIX.search(line)]
-    assert commands and not bare, (
-        "this dense example's launch commands must start with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
-        f"in front of the launcher ({_ALLOCATOR_DOC}); without it: {bare or 'no launch command found'}"
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            commands = launch_commands(config)
+            if uses_expert_parallelism(raw_config(config)):
+                exports = [line for line in comment_block(config).splitlines() if _EXPORT_LINE.match(line)]
+                assert not any(_EXPANDABLE_SEGMENTS.search(line) for line in commands + exports), (
+                    "this EP example launches with expandable_segments, which costs throughput under EP "
+                    f"({_ALLOCATOR_DOC}); drop it"
+                )
+                continue
+            script = script_for(config)
+            if script not in _EXPANDABLE_SEGMENTS_SCRIPTS:
+                continue
+            parsed = parser_for(script).parse_yaml_file(str(config))
+            model_config = try_model_config_for(parsed)
+            if model_config is None or has_routed_experts(model_config):
+                continue
+            bare = [line for line in commands if not _EXPANDABLE_SEGMENTS_PREFIX.search(line)]
+            assert commands and not bare, (
+                "this dense example's launch commands must start with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+                f"in front of the launcher ({_ALLOCATOR_DOC}); without it: {bare or 'no launch command found'}"
+            )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_parallelism_shape_is_accepted(config):
+def test_example_parallelism_shape_is_accepted(subtests):
     """A racy single-domain multi-group EP topology, an unlisted axis combination or an unsupported CP/PP request
     would otherwise burn a booked host at step 0."""
-    build_parallelism_config(config)
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            build_parallelism_config(config)
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_thinking_budget_has_a_server_side_parser(config):
+def test_example_thinking_budget_has_a_server_side_parser(subtests):
     """A turn's reasoning cap (``rollout_max_thinking_tokens``, or on vLLM the turn less its
     ``rollout_max_answer_tokens``) rides on vLLM's ``thinking_token_budget``, which needs a reasoning parser loaded,
     so the launch instructions must name its flag. Without it every episode errors with a 400 and nothing raises at
     config time."""
-    raw = raw_config(config)
-    answer_room_cap = raw.get("rollout_max_answer_tokens") is not None and raw.get("rollout_backend") != "sglang"
-    if raw.get("rollout_max_thinking_tokens") is None and not answer_room_cap:
-        return
-    assert "--reasoning-parser" in comment_block(config), (
-        "this config sends a thinking budget but its launch instructions name no --reasoning-parser; "
-        "vLLM refuses thinking_token_budget with a 400 on every rollout without one"
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            raw = raw_config(config)
+            answer_room_cap = (
+                raw.get("rollout_max_answer_tokens") is not None and raw.get("rollout_backend") != "sglang"
+            )
+            if raw.get("rollout_max_thinking_tokens") is None and not answer_room_cap:
+                continue
+            assert "--reasoning-parser" in comment_block(config), (
+                "this config sends a thinking budget but its launch instructions name no --reasoning-parser; "
+                "vLLM refuses thinking_token_budget with a 400 on every rollout without one"
+            )
 
 
-@pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, **_ID)
-def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
+def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(subtests):
     """A marker the tokenizer does not write (``</think>`` on Gemma 4 or gpt-oss) only warns at startup, and every
     forced close then trains with the episode's advantage. SGLang enforces no budget, so forces no close to find."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    if parsed_field(parsed, "rollout_backend") == "sglang":
-        return
-    tokenizer = load_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
-    resolve_reasoning_end_ids(tokenizer, parsed_field(parsed, "rollout_reasoning_end_token"))
+    for config in ENV_GRPO_EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            if parsed_field(parsed, "rollout_backend") == "sglang":
+                continue
+            tokenizer = try_cached_tokenizer(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
+            if tokenizer is None:
+                continue
+            resolve_reasoning_end_ids(tokenizer, parsed_field(parsed, "rollout_reasoning_end_token"))
 
 
 # Run-wide spellings of what each level's effort profile carries (``reasoning_budget``, ``reasoning_price``).
@@ -353,103 +372,120 @@ def test_a_weight_sync_example_exists():
     assert _WEIGHT_SYNC_EXAMPLES and ENV_GRPO_EXAMPLES, "no shipped example drives a rollout engine"
 
 
-@pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, **_ID)
-def test_sampled_token_example_names_the_server_flag(config):
+def test_sampled_token_example_names_the_server_flag(subtests):
     """A server that returns no ids is no error: every turn re-tokenizes a chat-template re-render, and the vLLM
     importance-sampling correction goes silently with it. Read through the parser, since the file usually leaves
     the knob at its default. Only vLLM takes a flag."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    if not parsed_field(parsed, "train_on_sampled_tokens") or parsed_field(parsed, "rollout_backend") == "sglang":
-        return
-    assert "--return-tokens-as-token-ids" in comment_block(config), (
-        "this config trains on the engine's sampled tokens but its launch instructions name no "
-        "--return-tokens-as-token-ids; without it every turn silently falls back to a re-tokenized "
-        "re-render and the IS correction is disabled"
-    )
+    for config in ENV_GRPO_EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            if (
+                not parsed_field(parsed, "train_on_sampled_tokens")
+                or parsed_field(parsed, "rollout_backend") == "sglang"
+            ):
+                continue
+            assert "--return-tokens-as-token-ids" in comment_block(config), (
+                "this config trains on the engine's sampled tokens but its launch instructions name no "
+                "--return-tokens-as-token-ids; without it every turn silently falls back to a re-tokenized "
+                "re-render and the IS correction is disabled"
+            )
 
 
-@pytest.mark.parametrize("config", _WEIGHT_SYNC_EXAMPLES, **_ID)
-def test_custom_chat_template_example_hands_it_to_the_server(config):
+def test_custom_chat_template_example_hands_it_to_the_server(subtests):
     """The rollout prompt renders server-side, so a template forced on the trainer alone diverges in the context the
     policy is sampled under: the gpt-oss built-in serves every tool-carrying turn quoted-and-escaped, and nothing
     raises."""
-    if not raw_config(config).get("chat_template"):
-        return
-    comments = comment_block(config)
-    assert "--chat-template" in comments or "CHAT_TEMPLATE" in comments, (
-        "this config forces its own chat template on the trainer but its launch instructions never "
-        "pass the same file to the server, which then serves the checkpoint's built-in template"
-    )
-    # The container's working directory holds no templates, so a relative path raises at start and compose loops it.
-    assert not re.search(r"(CHAT_TEMPLATE=|--chat-template[ =])jinja-templates/", comments), (
-        "the launch header names a path relative to the repo, which the server's container cannot see: use "
-        "/jinja-templates/..., which both compose files mount"
-    )
+    for config in _WEIGHT_SYNC_EXAMPLES:
+        with subtests.test(example_id(config)):
+            if not raw_config(config).get("chat_template"):
+                continue
+            comments = comment_block(config)
+            assert "--chat-template" in comments or "CHAT_TEMPLATE" in comments, (
+                "this config forces its own chat template on the trainer but its launch instructions never "
+                "pass the same file to the server, which then serves the checkpoint's built-in template"
+            )
+            # The container's working directory holds no templates, so a relative path raises at start and compose loops it.
+            assert not re.search(r"(CHAT_TEMPLATE=|--chat-template[ =])jinja-templates/", comments), (
+                "the launch header names a path relative to the repo, which the server's container cannot see: use "
+                "/jinja-templates/..., which both compose files mount"
+            )
 
 
-@pytest.mark.parametrize("config", _WEIGHT_SYNC_EXAMPLES, **_ID)
-def test_moe_weight_sync_example_names_the_triton_moe_backend(config):
+def test_moe_weight_sync_example_names_the_triton_moe_backend(subtests):
     """An auto-selected backend holds the experts in a repacked layout while the push writes the bf16 unpacked one.
     The engine accepts the update and the served policy stops being the trained one."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
-    if not layer_classes:
-        return
-    # Only the environmental script declares the field.
-    adapter_sync = any(getattr(config_object, "rollout_adapter_sync", False) for config_object in parsed)
-    if adapter_sync and any(cls.FAMILY.weight_sync_refusal for cls in layer_classes):
-        return  # a base no push carries: the engine's experts are only read
-    comments = comment_block(config)
-    assert "--moe-backend triton" in comments or "--moe-runner-backend triton" in comments, (
-        "this config syncs weights into an engine serving a MoE model but its launch instructions "
-        "name no triton MoE backend; the auto-selected ones repack the expert weights and every "
-        "update after the first lands corrupted"
-    )
+    for config in _WEIGHT_SYNC_EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            model_config = try_model_config_for(parsed)
+            if model_config is None:
+                continue
+            layer_classes = ep_layer_classes_for_config(model_config)
+            if not layer_classes:
+                continue
+            # Only the environmental script declares the field.
+            adapter_sync = any(getattr(config_object, "rollout_adapter_sync", False) for config_object in parsed)
+            if adapter_sync and any(cls.FAMILY.weight_sync_refusal for cls in layer_classes):
+                continue  # a base no push carries: the engine's experts are only read
+            comments = comment_block(config)
+            assert "--moe-backend triton" in comments or "--moe-runner-backend triton" in comments, (
+                "this config syncs weights into an engine serving a MoE model but its launch instructions "
+                "name no triton MoE backend; the auto-selected ones repack the expert weights and every "
+                "update after the first lands corrupted"
+            )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
+def test_moe_example_declares_the_reentrant_checkpointing_it_runs(subtests):
     """CP's and EP's collectives do not survive non-reentrant recompute and a MoE routes in its recompute, so the
     mixin forces ``use_reentrant: True``; a config saying ``false`` contradicts what runs. Pipeline parallelism
     is the opposite rule and is excluded."""
-    raw = raw_config(config)
-    if (raw.get("pipeline_parallel_size") or 1) > 1:
-        return
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    model_config = try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
-    if not uses_expert_parallelism(raw) and not has_routed_experts(model_config):
-        return
-    declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
-    assert declared is not False, (
-        "a MoE force-promotes use_reentrant to True (halo/trainers/distributed_trainer.py), so this config's "
-        "use_reentrant: false is silently overridden — write true, or drop the kwarg"
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            raw = raw_config(config)
+            if (raw.get("pipeline_parallel_size") or 1) > 1:
+                continue
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            model_config = try_model_config_for(parsed)
+            if not uses_expert_parallelism(raw) and not has_routed_experts(model_config):
+                continue
+            declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
+            assert declared is not False, (
+                "a MoE force-promotes use_reentrant to True (halo/trainers/distributed_trainer.py), so this config's "
+                "use_reentrant: false is silently overridden — write true, or drop the kwarg"
+            )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_launch_lines_fit_the_config(config):
+def test_example_launch_lines_fit_the_config(subtests):
     """The header is the run's only launch instruction, so each line names this config's script, under a launcher and
     at a width its axes take. Accelerate's FSDP2 wrap cannot flatten a 4-bit base."""
-    raw = raw_config(config)
-    commands = launch_commands(config)
-    assert commands, "no comment line launches this config"
-    for line in commands:
-        if method := _HALO_METHOD.search(line):
-            script = training_methods().get(method[1])
-            assert script is not None, f"halo launch names no training method: {line}"
-            assert script == REPO_ROOT / "scripts/training" / script_for(config), f"launches another script: {line}"
-            nproc = _HALO_NPROC.search(line)
-        else:
-            assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
-            nproc = _NPROC.search(line)
-        if uses_expert_parallelism(raw):
-            assert nproc, f"expert parallelism needs a multi-process width: {line}"
-        devices = _VISIBLE_DEVICES.search(line)
-        if devices and nproc:
-            assert len(devices[1].split(",")) == int(nproc[1]), f"exposes another GPU count than it launches: {line}"
-        if accelerate_config := _ACCELERATE_CONFIG.search(line):
-            distributed_type = yaml.safe_load((REPO_ROOT / accelerate_config[1]).read_text())["distributed_type"]
-            assert not (raw.get("load_in_4bit") and distributed_type == "FSDP"), line
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            raw = raw_config(config)
+            commands = launch_commands(config)
+            assert commands, "no comment line launches this config"
+            for line in commands:
+                if method := _HALO_METHOD.search(line):
+                    script = training_methods().get(method[1])
+                    assert script is not None, f"halo launch names no training method: {line}"
+                    assert script == REPO_ROOT / "scripts/training" / script_for(config), (
+                        f"launches another script: {line}"
+                    )
+                    nproc = _HALO_NPROC.search(line)
+                else:
+                    assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
+                    nproc = _NPROC.search(line)
+                if uses_expert_parallelism(raw):
+                    assert nproc, f"expert parallelism needs a multi-process width: {line}"
+                devices = _VISIBLE_DEVICES.search(line)
+                if devices and nproc:
+                    assert len(devices[1].split(",")) == int(nproc[1]), (
+                        f"exposes another GPU count than it launches: {line}"
+                    )
+                if accelerate_config := _ACCELERATE_CONFIG.search(line):
+                    distributed_type = yaml.safe_load((REPO_ROOT / accelerate_config[1]).read_text())[
+                        "distributed_type"
+                    ]
+                    assert not (raw.get("load_in_4bit") and distributed_type == "FSDP"), line
 
 
 def eval_forward_rows(parsed: tuple, parallelism, trainer_cls: type) -> int:
@@ -462,17 +498,18 @@ def eval_forward_rows(parsed: tuple, parallelism, trainer_cls: type) -> int:
     return math.ceil(rows)
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_eval_batch_fits_the_dispatch_budget(config):
+def test_example_eval_batch_fits_the_dispatch_budget(subtests):
     """The load gate sizes a forward off the training batch, and an evaluation forward dispatches under the same
     Gin ceiling across NVLink domains. An eval batch past it fails at the first eval."""
-    parsed, parallelism = build_parallelism_config(config)
-    row_length = bounded_row_length(*parsed)
-    if parallelism.ep_size <= 1 or row_length is None:
-        pytest.skip("no expert dispatch, or a run that declares no row length")
-    for trainer_cls in script_trainer_classes(script_for(config)):
-        tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length
-        reject_oversized_dispatch(ep_dispatch_capacity(tokens), spans_domains=parallelism.requires_rdma)
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed, parallelism = build_parallelism_config(config)
+            row_length = bounded_row_length(*parsed)
+            if parallelism.ep_size <= 1 or row_length is None:
+                continue
+            for trainer_cls in script_trainer_classes(script_for(config)):
+                tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length
+                reject_oversized_dispatch(ep_dispatch_capacity(tokens), spans_domains=parallelism.requires_rdma)
 
 
 def test_a_train_batch_past_the_dispatch_budget_is_refused():
@@ -508,21 +545,22 @@ def test_a_rollout_example_exists():
     assert _ROLLOUT_EXAMPLES, "no shipped example declares episode_timeout"
 
 
-@pytest.mark.parametrize("config", _ROLLOUT_EXAMPLES, **_ID)
-def test_rollout_timeouts_fit_the_documented_nccl_watchdog(config, monkeypatch):
+def test_rollout_timeouts_fit_the_documented_nccl_watchdog(subtests, monkeypatch):
     """``episode_timeout`` at or above the NCCL timeout is refused only at training start, after every rank loaded
     the model. An example raising it documents ``DIST_NCCL_TIMEOUT_MINUTES`` in its launch line."""
-    declared = declared_nccl_timeout_minutes(config)
-    if declared is None:
-        monkeypatch.delenv("DIST_NCCL_TIMEOUT_MINUTES", raising=False)
-    else:
-        monkeypatch.setenv("DIST_NCCL_TIMEOUT_MINUTES", declared)
-    async_config = next(
-        obj
-        for obj in parser_for(script_for(config)).parse_yaml_file(str(config))
-        if type(obj).__name__ == "AsyncRolloutConfig"
-    )
-    async_config.get_rollout_config()
+    for config in _ROLLOUT_EXAMPLES:
+        with subtests.test(example_id(config)), monkeypatch.context() as patch:
+            declared = declared_nccl_timeout_minutes(config)
+            if declared is None:
+                patch.delenv("DIST_NCCL_TIMEOUT_MINUTES", raising=False)
+            else:
+                patch.setenv("DIST_NCCL_TIMEOUT_MINUTES", declared)
+            async_config = next(
+                obj
+                for obj in parser_for(script_for(config)).parse_yaml_file(str(config))
+                if type(obj).__name__ == "AsyncRolloutConfig"
+            )
+            async_config.get_rollout_config()
 
 
 def test_some_example_model_is_cached():
@@ -538,129 +576,150 @@ def test_some_example_model_is_cached():
     )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_balancing_mode_matches_the_family_export_contract(config):
+def test_example_balancing_mode_matches_the_family_export_contract(subtests):
     """Both directions raise at run start. The verdict is the family spec's ``balancing_slot``, off the checkpoint's
     own ``model_type``."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    mode = parsed_field(parsed, "moe_balancing")
-    if mode not in BIAS_UPDATE_MODES:
-        return
-    layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
-    transient = sorted(
-        cls.__name__ for cls in layer_classes if cls.SUPPORTS_BIAS_BALANCING and not cls.FAMILY.balancing_slot
-    )
-    if mode == "bias_update":
-        assert not transient, (
-            f"moe_balancing=bias_update trains a routing bias no export carries on {', '.join(transient)}: "
-            f"the served model would route on raw gate scores and flip near-tied top-k picks. Use "
-            f"moe_balancing=bias_update_transient to accept trainer-only balancing, or none."
-        )
-    else:
-        assert transient, (
-            f"moe_balancing=bias_update_transient, but every EP layer here ({', '.join(c.__name__ for c in layer_classes)}) "
-            f"carries its bias in checkpoint-exported state — nothing is transient. Use moe_balancing=bias_update."
-        )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            mode = parsed_field(parsed, "moe_balancing")
+            if mode not in BIAS_UPDATE_MODES:
+                continue
+            model_config = try_model_config_for(parsed)
+            if model_config is None:
+                continue
+            layer_classes = ep_layer_classes_for_config(model_config)
+            transient = sorted(
+                cls.__name__ for cls in layer_classes if cls.SUPPORTS_BIAS_BALANCING and not cls.FAMILY.balancing_slot
+            )
+            if mode == "bias_update":
+                assert not transient, (
+                    f"moe_balancing=bias_update trains a routing bias no export carries on {', '.join(transient)}: "
+                    f"the served model would route on raw gate scores and flip near-tied top-k picks. Use "
+                    f"moe_balancing=bias_update_transient to accept trainer-only balancing, or none."
+                )
+            else:
+                assert transient, (
+                    f"moe_balancing=bias_update_transient, but every EP layer here ({', '.join(c.__name__ for c in layer_classes)}) "
+                    f"carries its bias in checkpoint-exported state — nothing is transient. Use moe_balancing=bias_update."
+                )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_max_length_fits_the_model_context_window(config):
+def test_example_max_length_fits_the_model_context_window(subtests):
     """Above the model's position budget a sequence truncates or indexes past RoPE. The window is read off the text
     sub-config, where a composite config keeps it."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    declared = [
-        (name, parsed_field(parsed, name))
-        for name in ("max_length", "max_prompt_length", "max_completion_length")
-        if any(hasattr(obj, name) for obj in parsed)
-    ]
-    if not any(is_bounded_length(value) for _, value in declared):
-        return
-    decoder = text_config(model_config_for(config, parsed))
-    window = next(
-        (
-            int(getattr(decoder, attr))
-            for attr in ("max_position_embeddings", "max_seq_length", "n_positions")
-            if is_bounded_length(getattr(decoder, attr, None))
-        ),
-        None,
-    )
-    if window is None:
-        pytest.skip("model config states no position budget; the tokenizer resolves it at load")
-    for name, value in declared:
-        if is_bounded_length(value):
-            assert value <= window, f"{name}={value} exceeds the model's context window ({window})"
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            declared = [
+                (name, parsed_field(parsed, name))
+                for name in ("max_length", "max_prompt_length", "max_completion_length")
+                if any(hasattr(obj, name) for obj in parsed)
+            ]
+            if not any(is_bounded_length(value) for _, value in declared):
+                continue
+            model_config = try_model_config_for(parsed)
+            if model_config is None:
+                continue
+            decoder = text_config(model_config)
+            window = next(
+                (
+                    int(getattr(decoder, attr))
+                    for attr in ("max_position_embeddings", "max_seq_length", "n_positions")
+                    if is_bounded_length(getattr(decoder, attr, None))
+                ),
+                None,
+            )
+            if window is None:
+                continue
+            for name, value in declared:
+                if is_bounded_length(value):
+                    assert value <= window, f"{name}={value} exceeds the model's context window ({window})"
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_parallelism_fits_the_model_shape(config):
+def test_example_parallelism_fits_the_model_shape(subtests):
     """Model-dependent, so the production path defers it to the load, after a multi-GPU job is booked and every rank
     has begun materializing weights."""
-    parsed, parallelism = build_parallelism_config(config)
-    model_config = model_config_for(config, parsed)
-    reject_unsupported_model(
-        parallelism,
-        model_config,
-        sinks_policy=SinksPolicy.NEUTRALIZED,
-        wraps_experts=wraps_experts(model_config, ep_layers_requested=parallelism.needs_ep_layers),
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed, parallelism = build_parallelism_config(config)
+            model_config = try_model_config_for(parsed)
+            if model_config is None:
+                continue
+            reject_unsupported_model(
+                parallelism,
+                model_config,
+                sinks_policy=SinksPolicy.NEUTRALIZED,
+                wraps_experts=wraps_experts(model_config, ep_layers_requested=parallelism.needs_ep_layers),
+            )
 
 
 # Knobs the VLM data path refuses outright (sft_rules.reject_unsupported_vlm_sft_options, prepare_vlm_dataset).
 _VLM_REFUSED_KNOBS = ("packing", "padding_free", "train_on_last_assistant_only", "interleaved_thinking")
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_image_declaring_example_asks_for_nothing_the_vlm_path_refuses(config):
+def test_image_declaring_example_asks_for_nothing_the_vlm_path_refuses(subtests):
     """Modality follows the run (``is_vlm_run_across_ranks``), so a multimodal checkpoint on text-only rows may pack;
     an images column plus a knob the VLM path refuses cannot run."""
-    raw = raw_config(config)
-    if not raw.get("images_field"):
-        pytest.skip("example declares no image column")
-    refused = [knob for knob in _VLM_REFUSED_KNOBS if raw.get(knob)]
-    assert not refused, f"{refused} are refused on the VLM data path, which images_field selects"
+    image_examples = [config for config in _EXAMPLES if raw_config(config).get("images_field")]
+    assert image_examples, "no example declares an image column"
+    for config in image_examples:
+        with subtests.test(example_id(config)):
+            raw = raw_config(config)
+            refused = [knob for knob in _VLM_REFUSED_KNOBS if raw.get(knob)]
+            assert not refused, f"{refused} are refused on the VLM data path, which images_field selects"
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_attention_carries_the_sinks_it_keeps_live(config):
+def test_example_attention_carries_the_sinks_it_keeps_live(subtests):
     """``reset_sinks: false`` keeps the sinks in the softmax, and kernels exposing no sink argument silently drop
     them, shifting every log-prob against the served policy. The validator reads the kernel's signature, so a
     flash upgrade moves this test with it."""
-    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
-    attn_implementation = parsed_field(parsed, "attn_implementation")
-    if attn_implementation is None:
-        return  # unset: the resolver picks a sink-carrying candidate itself
-    model_config = model_config_for(config, parsed)
-    if not uses_gpt_oss_sinks(model_config):
-        return
-    if is_flash_attn_implementation(attn_implementation):
-        try:
-            flash_kernel(attn_implementation)
-        except ImportError:
-            pytest.skip(f"{attn_implementation} is not built into this image (the recipe targets another GPU)")
-    select_supported_attn_implementation(
-        model_config, attn_implementation, SinksPolicy.from_flags(reset_sinks=parsed_field(parsed, "reset_sinks"))
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+            attn_implementation = parsed_field(parsed, "attn_implementation")
+            if attn_implementation is None:
+                continue  # unset: the resolver picks a sink-carrying candidate itself
+            model_config = try_model_config_for(parsed)
+            if model_config is None or not uses_gpt_oss_sinks(model_config):
+                continue
+            if is_flash_attn_implementation(attn_implementation):
+                try:
+                    flash_kernel(attn_implementation)
+                except ImportError:
+                    pytest.skip(f"{attn_implementation} is not built into this image (the recipe targets another GPU)")
+            select_supported_attn_implementation(
+                model_config,
+                attn_implementation,
+                SinksPolicy.from_flags(reset_sinks=parsed_field(parsed, "reset_sinks")),
+            )
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_weight_sync_example_keeps_a_pushable_sink_parameter(config):
+def test_weight_sync_example_keeps_a_pushable_sink_parameter(subtests):
     """The flash_attention_2 reset assigns ``sinks = None`` and the sync ships ``named_parameters`` only, so the
     engine keeps the pretrained sinks against a sink-free trainer, permanently off-policy.
     ``reject_unsyncable_model`` refuses that at construction."""
-    script = script_for(config)
-    if not script_call_kwargs(script, "configure_balancing_and_build_callbacks", ("syncs_to_external_generator",)).get(
-        "syncs_to_external_generator"
-    ):
-        return
-    parsed = parser_for(script).parse_yaml_file(str(config))
-    if parsed_field(parsed, "attn_implementation") != "flash_attention_2" or not parsed_field(parsed, "reset_sinks"):
-        return
-    assert not uses_gpt_oss_sinks(model_config_for(config, parsed)), (
-        "weight-sync RL with the flash_attention_2 reset_sinks reset removes the sinks parameter, so "
-        "the sync never pushes it and the generator stays on the pretrained sinks. Set reset_sinks: "
-        "false with a sink-carrying implementation (flash_attention_4 on Blackwell; eager or "
-        "flex_attention on Hopper)."
-    )
+    for config in _EXAMPLES:
+        with subtests.test(example_id(config)):
+            script = script_for(config)
+            if not script_call_kwargs(
+                script, "configure_balancing_and_build_callbacks", ("syncs_to_external_generator",)
+            ).get("syncs_to_external_generator"):
+                continue
+            parsed = parser_for(script).parse_yaml_file(str(config))
+            if parsed_field(parsed, "attn_implementation") != "flash_attention_2" or not parsed_field(
+                parsed, "reset_sinks"
+            ):
+                continue
+            model_config = try_model_config_for(parsed)
+            if model_config is None:
+                continue
+            assert not uses_gpt_oss_sinks(model_config), (
+                "weight-sync RL with the flash_attention_2 reset_sinks reset removes the sinks parameter, so "
+                "the sync never pushes it and the generator stays on the pretrained sinks. Set reset_sinks: "
+                "false with a sink-carrying implementation (flash_attention_4 on Blackwell; eager or "
+                "flex_attention on Hopper)."
+            )
 
 
 def test_each_mtp_scope_a_recipe_ships_is_on_a_family_with_a_head():

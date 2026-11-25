@@ -156,6 +156,10 @@ are enforced by `tests/cpu/conventions/`.
   other entry, a hand-listed runner or a printed pass/fail summary.
 - **The `cpu` marker is applied by path.** `tests/conftest.py` marks every item under `tests/cpu/`, so no
   file re-declares it in `pytestmark`.
+- **A sweep over files, recipes or registry rows is one test.** It loops over the rows and wraps each one in
+  `subtests.test(<row id>)`, pytest's built-in fixture, so a failing row is reported by its id with its
+  assertion and the other rows still run. Assert first that the row list is not empty: an empty loop passes.
+  One parametrized case per row is for rows that build a model, run a step or start a process.
 - **Imports resolve from the image, not from `sys.path` surgery.** `PYTHONPATH=/workspace` is baked in
   and `tests/conftest.py` puts the repo root on the path, so `from halo...` / `from tests.common...` work
   under `pytest` and a standalone `torchrun`. A tool's driver lives in `halo/` and a test imports it from
