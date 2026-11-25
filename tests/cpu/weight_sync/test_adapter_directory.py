@@ -233,6 +233,8 @@ def test_a_directory_a_server_cannot_read_names_the_setting_and_the_mount(engine
         f"mount rollout_adapter_dir ({tmp_path}) at the same path in the trainer and in every rollout server"
         in message
     )
+    # vLLM's workers keep their replies to a refused load queued; SGLang has no such state to clear.
+    assert ("restart the server before the next load" in message) == (engine == "vllm")
 
 
 def test_an_unload_the_engine_refuses_names_no_mount(sglang_server):

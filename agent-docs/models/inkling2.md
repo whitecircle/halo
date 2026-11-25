@@ -113,7 +113,7 @@ The server is the one [above](#rollouts), launched on the release the adapter wa
 
 On Inkling-2-Small, the adapter a 30-step SFT run saved (r8 on `o_proj` and the experts) loads only once converted. The saved directory is refused with HTTP 500 (`...experts.down_proj.lora_A is unsupported LoRA weight`). The converted one moves the log-probs of a 137-token text by 0.16 nats per token on average against the base, and by 0.045 against the same adapter with its expert B zeroed.
 
-After a refused load, a server at `--tensor-parallel-size 2` answers the next load with the refused one's error, so restart it before loading again. The tool refuses, before any write, an adapter of expert targets alone, which adapter sync serves only beside an attention adapter (train `o_proj` with the experts), and expert adapters at another rank or scaling than the attention ones.
+After a refused load, restart a server at tensor-parallel size above 1 before loading again ([Troubleshooting](../infrastructure/rollout-servers.md#troubleshooting)). The tool refuses, before any write, an adapter of expert targets alone, which adapter sync serves only beside an attention adapter (train `o_proj` with the experts), and expert adapters at another rank or scaling than the attention ones.
 
 ### Memory on two B300s
 

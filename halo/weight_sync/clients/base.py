@@ -188,6 +188,8 @@ class WeightSyncClientBase(UpdateStream, ABC):
     # The engine's routes for a load from a published directory and for an unload; ``None`` where it serves no adapter.
     ADAPTER_DIRECTORY_LOAD_ROUTE: str | None = None
     ADAPTER_UNLOAD_ROUTE: str | None = None
+    # What a refused directory load leaves to do on the engine besides the mount, as a sentence without its full stop.
+    ADAPTER_REFUSED_LOAD_REMEDY = ""
     # Whether a load past the loaded limit unloads an adapter the engine lists, which one loaded from tensors does not
     # survive; ``False`` where the limit sizes a cache the engine refills from each adapter's directory.
     ADAPTER_LIMIT_UNLOADS_LISTED = False
@@ -438,6 +440,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
             remedy = (
                 f". The server reads the adapter from {payload}: if it cannot, mount rollout_adapter_dir "
                 f"({payload.parent}) at the same path in the trainer and in every rollout server"
+                f"{self.ADAPTER_REFUSED_LOAD_REMEDY}"
             )
         else:
             route, body = self._tensors_load_request(name, config, payload)

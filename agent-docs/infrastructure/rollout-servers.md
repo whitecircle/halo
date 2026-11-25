@@ -284,9 +284,11 @@ Inkling 2, the one family validated on it (`adapter_sync_backends` on the family
   quantization and MoE-runner checks, and the trainer forms no weight-sync group. A server that serves another base
   fails the sync.
 - **Retirement.** After each load the ranks join the versions their episodes still hold, and rank 0 unloads the
-  others. An episode cancelled at its deadline can outlive its lease; the engine's unload then waits for its request.
-  An unload frees the adapter's slot and its host copy, and GPU memory stays flat, since the adapter pool is allocated
-  at launch (86,103 MiB through ten load and unload cycles of Qwen3-0.6B on SGLang 0.5.22). SGLang loads an
+  others. An episode cancelled at its deadline can outlive its lease; SGLang's unload then waits for its request.
+  On SGLang an unload frees the adapter's slot and its host copy, and GPU memory stays flat, since the adapter pool is
+  allocated at launch (86,103 MiB through ten load and unload cycles of Qwen3-0.6B on SGLang 0.5.22). vLLM's
+  `/v1/unload_lora_adapter` only drops the name in the API server: the workers keep the adapter until `--max-cpu-loras`
+  evicts it. SGLang loads an
   unregistered name back from its recorded path when a request names it, which is how an adapter evicted past
   `--max-loaded-loras` returns; upstream 0.5.22 does so for an explicitly unloaded adapter too and serves it again.
   The toolkit's image forgets the name on an explicit unload (`lora_unload_forgets_name` on `/server_info`), so such
@@ -1189,3 +1191,4 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 | Log-ratio drifts on SGLang while the server log stays clean | The MoE loaders skip unmapped expert names without a warning → a clean log proves nothing; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild (`make build-vllm`) |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → a stranded communicator per connection; rebuild and recreate the container |
+| After a refused adapter load or a failed weight-sync call, the next one answers 500 with the earlier call's error (vLLM at tensor-parallel size above 1, either tag) | vLLM's multiprocess executor raises at the first failed reply and leaves the later workers' replies queued: until the server restarts, every later call that all workers answer (an adapter load, `/init_weight_transfer_engine`, `/pause`, `/update_weights`, the session open and close) reads those workers' replies to an earlier one, and one only a later worker refuses can answer 200 → restart the server after a refused call; the trainer's error for a refused adapter load says so |

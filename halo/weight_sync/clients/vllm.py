@@ -95,6 +95,11 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     # The runtime routes, which the server takes with VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.
     ADAPTER_DIRECTORY_LOAD_ROUTE = "/v1/load_lora_adapter"
     ADAPTER_UNLOAD_ROUTE = "/v1/unload_lora_adapter"
+    # The executor raises at the first worker's refusal and leaves the other workers' replies queued for the next call.
+    ADAPTER_REFUSED_LOAD_REMEDY = (
+        ". At a tensor-parallel size above 1, restart the server before the next load, which its workers would "
+        "answer with this refusal"
+    )
     # The adapted names the engine's packed LoRA layers take; Inkling 2 packs q/k/v/r into qkvr itself.
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
     # Inkling 2's quantized experts take an adapter with Halo's source patch (docker/vllm/patches/patch_vllm_inkling2.py).
