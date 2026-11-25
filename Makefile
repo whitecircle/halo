@@ -357,6 +357,9 @@ INKLING2_ADAPTER_DIR     ?= $(scratch_dir)/adapters
 INKLING2_LORA            ?= attention
 INKLING2_SERVER_DEVICES  ?= 2,3
 INKLING2_TRAINER_DEVICES ?= 0,1
+# The server's tensor-parallel size and the trainer's process count are the lengths of their device lists.
+comma := ,
+device_count = $(words $(subst $(comma), ,$(1)))
 INKLING2_CONFIG           = examples/grpo/environmental/inkling2/vllm/inkling2-small-exam-qa-$(INKLING2_LORA)-lora-ep2.yaml
 # Attention LoRA leaves the experts unwrapped, which spares their LoRA kernels.
 INKLING2_LORA_ARGS        = --enable-lora --max-loras 2 --max-cpu-loras 4 \
@@ -365,7 +368,8 @@ INKLING2_LORA_ARGS        = --enable-lora --max-loras 2 --max-cpu-loras 4 \
 up-vllm-inkling2: ## download Inkling-2-Small into INKLING2_DIR (once) and serve it from INKLING2_VLLM_IMAGE on INKLING2_SERVER_DEVICES (2,3), port VLLM_PORT, for train-inkling2
 	mkdir -p $(INKLING2_ADAPTER_DIR)
 	$(DOCKER_RUN) bash -lc "hf download thinkingmachines/Inkling-2-Small --local-dir $(INKLING2_DIR) --quiet"
-	HALO_SCRATCH=$(scratch_dir) VLLM_IMAGE=$(INKLING2_VLLM_IMAGE) VLLM_MODEL=$(INKLING2_DIR) VLLM_TP=2 \
+	HALO_SCRATCH=$(scratch_dir) VLLM_IMAGE=$(INKLING2_VLLM_IMAGE) VLLM_MODEL=$(INKLING2_DIR) \
+	  VLLM_TP=$(call device_count,$(INKLING2_SERVER_DEVICES)) \
 	  VLLM_PORT=$(VLLM_PORT) VLLM_CUDA_DEVICES=$(INKLING2_SERVER_DEVICES) \
 	  VLLM_TOOL_PARSER=inkling VLLM_REASONING_PARSER=inkling \
 	  VLLM_EXTRA_ARGS="--quantization inkling2 --max-model-len 16384 $(INKLING2_LORA_ARGS)" \
@@ -375,7 +379,8 @@ train-inkling2: EXTRA_DOCKER_ENV = -e CUDA_VISIBLE_DEVICES=$(INKLING2_TRAINER_DE
 train-inkling2: ## environmental GRPO on Inkling 2 against up-vllm-inkling2 at VLLM_SERVER_URL, on INKLING2_TRAINER_DEVICES (0,1); INKLING2_LORA=attention|expert
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No Inkling 2 server at $(VLLM_SERVER_URL): make \
 	  up-vllm-inkling2 INKLING2_LORA=$(INKLING2_LORA) (it takes ~5 minutes to load)"; exit 1; }
-	$(DOCKER_RUN) bash -lc "halo launch grpo/environmental $(INKLING2_CONFIG) --nproc 2 \
+	$(DOCKER_RUN) bash -lc "halo launch grpo/environmental $(INKLING2_CONFIG) \
+	  --nproc $(call device_count,$(INKLING2_TRAINER_DEVICES)) \
 	  --model_name_or_path=$(INKLING2_DIR) --rollout_adapter_dir=$(INKLING2_ADAPTER_DIR) \
 	  --rollout_server_url=$(VLLM_SERVER_URL) $(EXTRA)"
 

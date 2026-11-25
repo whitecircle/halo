@@ -1129,6 +1129,7 @@ Other checkpoints, async GRPO at 2 ranks:
 | Gemma 4 26B-A4B | `ep1`, EP=2, `ep1` attention LoRA | `ep1`, EP=2, `ep1` attention LoRA |
 | Laguna-XS-2.1 | `ep1`, EP=2, R2 and R3 at EP=2 | refused |
 | Ling-mini-2.0 | `ep1`, EP=2, R2 and R3 at EP=2 | R2 and R3 at EP=2 |
+| Inkling-2-Small | attention and expert LoRA at EP=2 through adapter sync, on `halo:vllm-0.1.dev25249` at TP=2 | refused |
 
 Online GRPO and SDPG ran on Qwen3-30B-A3B (`ep1`, EP=2, EP=2 × DP=2, EP=2 on two simulated domains, EP=2 + TP=2, EP=2 +
 ETP=2, attention and expert LoRA) and Qwen3-0.6B (FSDP2, one rank, TP=2, TP=2 × DP=2, ZeRO-3, HSDP on two simulated

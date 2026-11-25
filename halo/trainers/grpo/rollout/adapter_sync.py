@@ -251,11 +251,12 @@ def _unadaptable_reasons(model: torch.nn.Module, parallelism_config: Parallelism
             f"adapters in {wrong_dtype}: the engine stores {ADAPTER_WIRE_DTYPE}, so it would score a rounded copy of "
             f"what the trainer trains (fp32_non_ep_params)"
         )
+    image = client_cls.image_for(config_model_types(getattr(base_transformers_model(model), "config", None)))
     for name, module in _adapted_modules(model).items():
         suffix = name.rsplit(".", 1)[-1]
         if type(module) is not Linear or suffix not in client_cls.ADAPTER_SERVABLE_MODULES:
             reasons.append(
-                f"the adapted module {name!r} is not one {client_cls.ENGINE_RELEASE} serves "
+                f"the adapted module {name!r} is not one {image.tag if image else client_cls.ENGINE_RELEASE} serves "
                 f"({', '.join(client_cls.ADAPTER_SERVABLE_MODULES)} as plain linears)"
             )
             break
@@ -417,7 +418,7 @@ class AdapterSync:
         """Whether the base must be pushed; reconnects the clients of servers that lost the newest adapter first."""
         current = self.versions.current
         if self.base_refusal is not None:
-            return self._plan_launch_base_only(pool, current)
+            return self._plan_launch_base_only()
         if not self._base_pushed or current is None:
             pool.reconnect_servers()
             return BasePlan(True, {})
@@ -430,9 +431,9 @@ class AdapterSync:
             pool.reconnect_servers(restarted)
         return BasePlan(bool(restarted), holdings)
 
-    def _plan_launch_base_only(self, pool, current: str | None) -> BasePlan:
-        """For a base no push can carry: every server must hold the trainer's launch base, and one that lost the
-        newest adapter is marked restarted so it loads again."""
+    def _plan_launch_base_only(self) -> BasePlan:
+        """For a base no push can carry, which forms no weight-sync group: every server must hold the trainer's launch
+        base, and each takes the new version the sync loads."""
         holdings = self._bound_servers().require_all_answering()
         foreign = [url for url in holdings if not self._serves_trainers_base(url)]
         if foreign:
@@ -441,9 +442,6 @@ class AdapterSync:
                 f"Rollout server(s) {foreign} do not serve the trainer's base, and this model's base cannot be pushed "
                 f"({self.base_refusal}). Launch them on {launch} under the rollout model_name."
             )
-        restarted = [url for url, names in holdings.items() if current is not None and current not in names]
-        if restarted and pool is not None:
-            pool.mark_servers_restarted(restarted)
         return BasePlan(False, holdings)
 
     def _restore_restarted(self, pool) -> dict[str, list[str] | None]:

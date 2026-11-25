@@ -69,7 +69,7 @@ make up-vllm-inkling2      # download the release once, serve it on GPUs 2,3
 make train-inkling2        # the trainer on GPUs 0,1, through halo launch
 ```
 
-`INKLING2_LORA=expert` on `up-vllm-inkling2` and `train-inkling2` trains and serves LoRA on the routed experts too. The release and the adapters live under `HALO_SCRATCH` (`INKLING2_DIR`, `INKLING2_ADAPTER_DIR`); `INKLING2_SERVER_DEVICES` and `INKLING2_TRAINER_DEVICES` pick the GPUs, and `VLLM_PORT` (default 8000) moves the server's port and the URL the trainer dials together. The runs are the examples under `examples/grpo/environmental/inkling2/vllm/`:
+`INKLING2_LORA=expert` on `up-vllm-inkling2` and `train-inkling2` trains and serves LoRA on the routed experts too. The release and the adapters live under `HALO_SCRATCH` (`INKLING2_DIR`, `INKLING2_ADAPTER_DIR`); `INKLING2_SERVER_DEVICES` and `INKLING2_TRAINER_DEVICES` pick the GPUs, and their lengths set the server's tensor-parallel size and the trainer's process count; `VLLM_PORT` (default 8000) moves the server's port and the URL the trainer dials together. The runs are the examples under `examples/grpo/environmental/inkling2/vllm/`:
 
 | Example | LoRA | Server LoRA modules |
 |---|---|---|

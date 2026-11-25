@@ -209,13 +209,21 @@ def serves_family_as_adapter(config, backend: str) -> bool:
     return any(backend in cls.FAMILY.adapter_sync_backends for cls in ep_layer_classes_for_config(config))
 
 
+def _named_families(
+    model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]
+) -> list[tuple[str, type[EPMoELayerBase]]]:
+    """Each live EP layer's class by its path; without live layers (the stock module tree), the registry's classes for
+    the model's config, which carry the same contract."""
+    if ep_layers:
+        return [(name, type(module)) for name, module in ep_layers.items()]
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    return [(f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)]
+
+
 def base_push_refusal(model: torch.nn.Module) -> str | None:
     """Why no engine takes this model's full weights (its family's ``weight_sync_refusal``), ``None`` where they push."""
-    families = {type(module) for _name, module in named_ep_layers(model)}
-    config = getattr(unwrap_framework_wrappers(model), "config", None)
-    if not families and config is not None:
-        families = set(ep_layer_classes_for_config(config))
-    return next((cls.FAMILY.weight_sync_refusal for cls in families if cls.FAMILY.weight_sync_refusal), None)
+    families = _named_families(model, dict(named_ep_layers(model)))
+    return next((cls.FAMILY.weight_sync_refusal for _where, cls in families if cls.FAMILY.weight_sync_refusal), None)
 
 
 def pushes_base(model: torch.nn.Module, *, adapter_sync: bool) -> bool:
@@ -260,13 +268,7 @@ def _reject_engine_fit(
     client_cls = resolve_weight_sync_client(backend)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     _reject_unservable_model_types(config, backend, client_cls)
-    # Without live EP layers (the stock module tree) the registry's classes for the config carry the contract.
-    if ep_layers:
-        families = [(name, type(module)) for name, module in ep_layers.items()]
-    else:
-        families = [
-            (f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)
-        ]
+    families = _named_families(model, ep_layers)
     _reject_refused_families(families, client_cls, adapter_sync=adapter_sync)
     if not ep_layers:
         _reject_stock_tree(config, sorted({cls.__name__ for _where, cls in families}), client_cls)

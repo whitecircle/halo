@@ -1206,6 +1206,24 @@ def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, cli
         assert any(reason in each for each in reasons), reasons
 
 
+@pytest.mark.parametrize(
+    ("family", "client_cls", "server"),
+    [
+        ("inkling2_text", VLLMWeightSyncClient, VLLMWeightSyncClient.INKLING2_IMAGE.tag),
+        ("qwen3_moe", VLLMWeightSyncClient, VLLMWeightSyncClient.IMAGE.tag),
+        ("inkling2_text", SGLangWeightSyncClient, SGLangWeightSyncClient.ENGINE_RELEASE),
+    ],
+    ids=["inkling2-vllm", "qwen3_moe-vllm", "inkling2-sglang"],
+)
+def test_an_unservable_adapted_module_names_the_server_the_model_needs(family, client_cls, server, monkeypatch):
+    """vLLM serves Inkling 2 from its own tag, so the refusal names that tag, not the release every other family
+    runs on."""
+    model = _inkling2_peft(family, ("q_proj",))
+    monkeypatch.setattr(adapter_sync, "_adapted_modules", lambda _: {"layers.0.mlp.gate": torch.nn.Linear(2, 2)})
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
+    assert any(f"is not one {server} serves" in each for each in reasons), reasons
+
+
 def test_expert_adapters_reach_vllm_per_expert_with_gate_and_up_interleaved():
     """Halo's grouped ``[E, in, r]`` / ``[E, r, out]`` adapters become vLLM's ``[E, r, in]`` / ``[E, out, r]`` on
     ``w13_weight`` / ``w2_weight`` under the release's layer path, the w13 B rows alternating gate and up."""

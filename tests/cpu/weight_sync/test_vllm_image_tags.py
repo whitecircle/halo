@@ -7,6 +7,7 @@ import ast
 import dataclasses
 import importlib.util
 import re
+import subprocess
 import sys
 import types
 
@@ -89,6 +90,23 @@ def test_the_inkling2_targets_serve_and_dial_one_port():
     assert not re.search(r"\b8000\b", serve + train), "a port is spelled by hand"
     assert re.search(r"^VLLM_SERVER_URL \?= http://localhost:\$\(VLLM_PORT\)$", MAKEFILE, re.MULTILINE)
     assert "rollout_server_url" in {field.name for field in dataclasses.fields(AsyncRolloutConfig)}
+
+
+@pytest.mark.parametrize(("server", "trainer"), [("2,3", "0,1"), ("4,5,6,7", "0,1,2,3"), ("7", "0,1,2,3,4,5")])
+def test_the_inkling2_targets_size_the_server_and_trainer_by_their_device_lists(server, trainer):
+    """A fixed tensor-parallel size or process count beside an overridden device list launches a server or trainer
+    that disagrees with the GPUs it sees."""
+    overrides = [f"INKLING2_SERVER_DEVICES={server}", f"INKLING2_TRAINER_DEVICES={trainer}", "HALO_SCRATCH=/scratch"]
+    serve, train = (
+        subprocess.run(
+            ["make", "-n", "-C", str(REPO_ROOT), target, *overrides], capture_output=True, text=True, check=True
+        ).stdout
+        for target in ("up-vllm-inkling2", "train-inkling2")
+    )
+    assert re.findall(r"VLLM_TP=(\d+)", serve) == [str(len(server.split(",")))]
+    assert re.findall(r"VLLM_CUDA_DEVICES=(\S+)", serve) == [server]
+    assert re.findall(r"--nproc (\d+)", train) == [str(len(trainer.split(",")))]
+    assert re.findall(r"-e CUDA_VISIBLE_DEVICES=(\S+)", train) == [trainer]
 
 
 def test_each_tag_carries_its_own_engine_specifics():
