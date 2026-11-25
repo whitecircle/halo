@@ -332,19 +332,25 @@ _MARKER_LOGGER = "halo.data.turn_markers"
 _ASSISTANT_MARKER = "<|assistant|>"
 _TURN_TEMPLATE = "{% for m in messages %}<|{{ m.role }}|> {{ m.content }} {{ CLOSE }}{% endfor %}"
 _TURN_END = "{% if m.role == 'assistant' %}<eos> {% endif %}"
+# Ends a plain assistant turn with <eos> and leaves a reasoning one open.
+_OPEN_REASONING_TEMPLATE = (
+    "{% for m in messages %}<|{{ m.role }}|> {% if m.thinking %}<think> {{ m.thinking }} </think> {% endif %}"
+    "{{ m.content }} {% if m.role == 'assistant' and not m.thinking %}<eos> {% endif %}{% endfor %}"
+)
+
+
+def _word_level_tokenizer(chat_template: str) -> PreTrainedTokenizerFast:
+    tokens = ["<pad>", "<eos>", "<|user|>", _ASSISTANT_MARKER, "q", "a", "<unk>", "<think>", "</think>", "t"]
+    backend = Tokenizer(models.WordLevel({token: i for i, token in enumerate(tokens)}, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend, pad_token="<pad>", eos_token="<eos>", chat_template=chat_template
+    )
 
 
 def _template_tokenizer(*, closes_turns: bool) -> PreTrainedTokenizerFast:
     """A word-level tokenizer whose template ends an assistant turn with ``<eos>``, or with nothing."""
-    vocab = {token: i for i, token in enumerate(["<pad>", "<eos>", "<|user|>", _ASSISTANT_MARKER, "q", "a", "<unk>"])}
-    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
-    return PreTrainedTokenizerFast(
-        tokenizer_object=backend,
-        pad_token="<pad>",
-        eos_token="<eos>",
-        chat_template=_TURN_TEMPLATE.replace("{{ CLOSE }}", _TURN_END if closes_turns else ""),
-    )
+    return _word_level_tokenizer(_TURN_TEMPLATE.replace("{{ CLOSE }}", _TURN_END if closes_turns else ""))
 
 
 def _select_completion_only(tokenizer, model_config=None, **flags):
@@ -362,6 +368,19 @@ def test_a_template_ending_no_turn_is_refused_at_construction():
     assert _select_completion_only(_template_tokenizer(closes_turns=True)) is not None
     with pytest.raises(ValueError, match="ends in a turn terminator"):
         _select_completion_only(_template_tokenizer(closes_turns=False))
+
+
+def test_the_probe_refuses_only_a_marker_no_matched_conversation_trains_under():
+    """The plain probe ends its assistant turns in ``<eos>``, so ``<|assistant|>`` trains there and builds although the
+    reasoning probe trains nothing; ``</think>`` matches only the reasoning probe, which trains nothing, so it is
+    refused with that render."""
+    tokenizer = _word_level_tokenizer(_OPEN_REASONING_TEMPLATE)
+    assert _select_completion_only(tokenizer) is not None
+    refusal = r"ends in a turn terminator \['<eos>'\].* renders '<\|user\|> q <\|assistant\|> <think> t </think>"
+    with pytest.raises(ValueError, match=refusal):
+        select_data_collator(
+            tokenizer=tokenizer, train_on_completions_only=True, assistant_message_template="</think>"
+        )
 
 
 @pytest.mark.parametrize("flags", [{"packing": True}, {"padding_free": True}], ids=("packed", "flat"))

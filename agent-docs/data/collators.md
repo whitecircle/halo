@@ -285,16 +285,21 @@ A family outside the table above and the family specs gets a warning on every ba
     zero tokens at loss ≈ 0. The text probe renders both a plain and a `thinking` assistant turn, so a
     marker gpt-oss harmony emits only under thinking passes it and is caught per batch instead.
 
-    `select_data_collator` and the VLM collators also refuse assistant turns that end in no turn
-    terminator (`reject_untrainable_completions`): they render two exchanges through the chat template
-    and mask them under the route's span policy (packed and padding-free rows run the packed policy, the
-    rest the padded one), so a template borrowed from another family (a Gemma template on PaliGemma,
+    `select_data_collator`, the VLM collators and the text self-distillation collator also refuse
+    assistant turns that end in no turn terminator (`reject_untrainable_completions`). They render two
+    exchanges through the chat template and mask them under the route's span policy: the packed one for
+    packed and padding-free rows, self-distillation's own, else the padded one. They refuse only when no
+    probed conversation the marker matches trains a span. A text tokenizer without a chat template is not
+    probed. A template borrowed from another family (a Gemma template on PaliGemma,
     whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused until `eos_token` names
     the token it closes a turn with. A template that ends a turn at the next role marker (GLM's) passes
     through the model config's terminator set. The self-distillation policy runs a terminator-less span
-    to the row end, so it passes there. The packed and padding-free routes still accept a terminator-less template
-    (their policy trains the final turn), and the offline bake and tree packing do not go through this probe, so the
-    refusal holds for padded rows.
+    to the row end unless another role's turn opens first, so it refuses only a setup where every span
+    meets such a turn. A marker written from the turn before (`<|im_end|>\n<|im_start|>assistant\n`) on a
+    base checkpoint whose only terminator is `<|endoftext|>` is one: each reply's own `<|im_end|>` opens
+    the next turn. The packed and padding-free routes still accept a terminator-less template (their
+    policy trains the final turn), and the offline bake and tree packing do not go through this probe, so
+    the refusal holds for padded rows.
 
 ## EOS, pad, and the response template
 

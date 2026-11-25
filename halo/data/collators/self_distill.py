@@ -11,8 +11,13 @@ from trl.trainer.utils import pad
 
 from halo.data.chat_render import tokenize_training_conversation
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.completion_spans import SELF_DISTILL_SPAN_POLICY, build_training_labels, resolve_span_bounds
-from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
+from halo.data.completion_spans import (
+    SELF_DISTILL_SPAN_POLICY,
+    build_training_labels,
+    reject_untrainable_text_completions,
+    resolve_span_bounds,
+)
+from halo.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
@@ -199,9 +204,12 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         model_config=None,
         generation_config=None,
     ):
-        reject_unusable_response_marker(
-            tokenizer, response_prompt_template, train_on_completions_only, "Self-distillation"
-        )
+        reject_missing_response_marker(response_prompt_template, train_on_completions_only, "Self-distillation")
+        eos_token_ids = resolve_eos_token_ids(tokenizer, model_config, generation_config)
+        if train_on_completions_only:
+            reject_untrainable_text_completions(
+                tokenizer, response_prompt_template, eos_token_ids, SELF_DISTILL_SPAN_POLICY, "Self-distillation"
+            )
         self._init_self_distill_fields(
             hint_template, answer_field, solution_field, confidence_field, confidence_power, confidence_normalizer
         )
@@ -215,7 +223,7 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
         self.interleaved_thinking = interleaved_thinking
         self.response_prompt_template = response_prompt_template
         self.train_on_completions_only = train_on_completions_only
-        self.eos_token_ids = resolve_eos_token_ids(tokenizer, model_config, generation_config)
+        self.eos_token_ids = eos_token_ids
         self.span_bounds = (
             resolve_span_bounds(tokenizer, response_prompt_template, self.eos_token_ids)
             if train_on_completions_only
