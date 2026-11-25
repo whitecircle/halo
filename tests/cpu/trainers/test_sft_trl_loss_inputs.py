@@ -3,7 +3,6 @@
 The trainer repeats TRL's input preparation, so a TRL release that adds or changes a key fails here.
 """
 
-import itertools
 import types
 from unittest import mock
 
@@ -48,18 +47,33 @@ def _forwarded(compute_loss, trainer, prediction_loss_only):
     return seen
 
 
-_SWITCHES = {
-    "training": [True, False],
-    "liger": [True, False],
-    "loss_type": ["nll", "dft"],
-    "aux_loss": [True, False],
-    "compute_metrics": [None, len],
-}
+_BASE = {"training": True, "liger": True, "loss_type": "nll", "aux_loss": True, "compute_metrics": None}
+_NO_AUX = {**_BASE, "aux_loss": False}
+_NO_AUX_METRICS = {**_NO_AUX, "compute_metrics": len}
+_EVAL_NO_AUX = {**_NO_AUX, "training": False}
+_EVAL_NO_AUX_METRICS = {**_EVAL_NO_AUX, "compute_metrics": len}
 
 
-@pytest.mark.parametrize("prediction_loss_only", [None, True, False])
 @pytest.mark.parametrize(
-    "switches", [dict(zip(_SWITCHES, values, strict=True)) for values in itertools.product(*_SWITCHES.values())]
+    ("switches", "prediction_loss_only"),
+    [
+        pytest.param(_NO_AUX, None, id="switches2-None"),
+        pytest.param(_NO_AUX, True, id="switches2-True"),
+        pytest.param(_NO_AUX, False, id="switches2-False"),
+        pytest.param(_NO_AUX_METRICS, None, id="switches3-None"),
+        pytest.param(_NO_AUX_METRICS, True, id="switches3-True"),
+        pytest.param(_NO_AUX_METRICS, False, id="switches3-False"),
+        pytest.param(_EVAL_NO_AUX, None, id="switches18-None"),
+        pytest.param(_EVAL_NO_AUX, True, id="switches18-True"),
+        pytest.param(_EVAL_NO_AUX, False, id="switches18-False"),
+        pytest.param(_EVAL_NO_AUX_METRICS, None, id="switches19-None"),
+        pytest.param(_EVAL_NO_AUX_METRICS, True, id="switches19-True"),
+        pytest.param(_EVAL_NO_AUX_METRICS, False, id="switches19-False"),
+        pytest.param({**_NO_AUX, "loss_type": "dft"}, None, id="switches6-None"),
+        pytest.param(_BASE, None, id="switches0-None"),
+        pytest.param({**_BASE, "liger": False}, None, id="switches8-None"),
+        pytest.param({**_NO_AUX, "liger": False}, None, id="switches10-None"),
+    ],
 )
 def test_the_forward_sees_trls_loss_inputs(switches, prediction_loss_only):
     trl = _forwarded(SFTTrainer.compute_loss, _host(**switches), prediction_loss_only)

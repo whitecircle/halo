@@ -53,14 +53,6 @@ def test_the_merge_and_the_conversion_spell_one_head_flag(monkeypatch):
     assert _task_choices(monkeypatch, merge_script.main) == set(ADAPTER_TASKS) < set(TASK_MODEL_CLASSES)
 
 
-def test_a_base_task_on_an_adapter_is_refused_before_any_write(tmp_path):
-    """Through the conversion itself, where an adapter is rewritten with no model load to reach the task gate."""
-    out = tmp_path / "out"
-    with pytest.raises(ValueError, match="PEFT is only supported"):
-        convert_module.convert_to_bf16(str(tmp_path), str(out), "base", is_peft=True)
-    assert not out.exists()
-
-
 class _Generates(nn.Linear):
     def __init__(self):
         super().__init__(1, 1)

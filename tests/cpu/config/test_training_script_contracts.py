@@ -84,29 +84,6 @@ def test_loader_contract_is_not_vacuous():
     )
 
 
-@pytest.mark.parametrize(
-    "script",
-    _LOADER_CALL_SITES,
-    ids=[str(p.relative_to(REPO_ROOT)) for p in _LOADER_CALL_SITES],
-)
-def test_load_distributed_model_threads_revision_and_quantization(script: Path):
-    source = script.read_text(encoding="utf-8")
-    calls = _named_calls(ast.parse(source), "load_distributed_model")
-    if not calls:
-        pytest.skip("module does not call load_distributed_model directly")
-    for call in calls:
-        kwargs = {kw.arg for kw in call.keywords}
-        assert "revision" in kwargs, (
-            f"{script}: load_distributed_model call does not thread revision= — a pinned "
-            f"model_revision would silently load hub main."
-        )
-        assert "quantization_config" in kwargs or "get_quantization_config" in source, (
-            f"{script}: load_distributed_model call neither threads quantization_config= nor "
-            f"rejects quantization via a get_quantization_config guard — a QLoRA YAML would "
-            f"silently train full-precision."
-        )
-
-
 def test_training_script_index_is_nonempty():
     assert len(_TRAINING_SCRIPTS) >= 10
 

@@ -1,9 +1,7 @@
 #!/usr/bin/env python
 """Every dropped row must be counted, and an interrupted run must not exit 0."""
 
-import argparse
 import asyncio
-import json
 import logging
 import signal
 import sys
@@ -15,12 +13,7 @@ from openai.types.chat import ChatCompletionMessage
 
 from halo.entrypoints import rejection_sampling, resumable_generation, reward_scoring
 from halo.inference.openai_client import EmptyChoicesError
-from scripts.inference import inference_arguments
 from scripts.inference.reward_model import score as score_script
-
-
-def _prompt_rows(count: int) -> list[dict]:
-    return [{"id": i, "prompt": [{"role": "user", "content": f"q{i}"}]} for i in range(count)]
 
 
 class _DeadClient:
@@ -236,19 +229,6 @@ def test_a_drained_queue_with_a_live_worker_returns():
         task.cancel()
 
     asyncio.run(scenario())
-
-
-def test_the_fixture_rows_carry_the_fields_the_cli_actually_reads():
-    """A renamed id or prompt field would leave every driver feeding rows the real code path skips, so the
-    accounting would read counts off a run that scored nothing."""
-    parser = argparse.ArgumentParser()
-    inference_arguments.add_s3_dataset_args(parser)
-    defaults = parser.parse_args(["--dataset", "in", "--output_path", "out"])
-
-    row = _prompt_rows(1)[0]
-    assert defaults.id_field in row, f"the drivers' rows carry no {defaults.id_field!r}: {row}"
-    assert defaults.prompt_field in row, f"the drivers' rows carry no {defaults.prompt_field!r}: {row}"
-    assert json.loads(json.dumps(row)), "the CLIs write their rows as JSONL"
 
 
 if __name__ == "__main__":

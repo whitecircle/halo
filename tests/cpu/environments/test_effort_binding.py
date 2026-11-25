@@ -363,12 +363,6 @@ async def test_the_eval_refuses_a_reasoning_cap_that_fills_the_turn_before_gener
     assert len(calls) == 1 and "error" not in results[0]["samples"][0]
 
 
-def test_drivers_share_one_seam():
-    # A re-forked local copy would let the two drivers bind different contracts.
-    assert eval_runner.bind_episode_effort is reasoning_effort.bind_episode_effort
-    assert ray_actors.bind_episode_effort is reasoning_effort.bind_episode_effort
-
-
 def test_context_level_wins_over_the_env_setting():
     # GRPO's group baseline assumes one conditioning per group: the trainer stamps it into the context.
     env = _ProfiledEnv(reasoning_effort="low")

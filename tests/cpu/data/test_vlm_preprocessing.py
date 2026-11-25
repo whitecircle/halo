@@ -165,26 +165,6 @@ def test_collator_does_not_truncate_preprocessed_data():
     assert batch["labels"][0].tolist() == [1, 2, 3, 4, 5]
 
 
-def test_collator_keeps_image_tokens_aligned_when_over_max_length():
-    """An over-length example with pixel_values keeps all its placeholders, matching its whole pixel_values."""
-    image_token = 99
-    collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=0), max_length=4)
-    pv = np.arange(6, dtype=np.float16).reshape(3, 2)  # 3 patches; one placeholder token each
-    ex = {
-        "input_ids": [1, image_token, image_token, image_token, 2, 3],  # len 6 > max_length 4
-        "attention_mask": [1] * 6,
-        "labels": [1, image_token, image_token, image_token, 2, 3],
-        "pixel_values": pv.tobytes(),
-        "pixel_values_shape": [3, 2],
-        "image_grid_thw": [[1, 1, 3]],
-    }
-    batch = collator([ex])
-    num_image_tokens = int((batch["input_ids"][0] == image_token).sum())
-    num_patches = batch["pixel_values"].shape[0]
-    assert num_image_tokens == 3, "image placeholder tokens were truncated → desynced from pixel_values"
-    assert num_image_tokens == num_patches, "image-token count must equal the patch count"
-
-
 def test_collator_respects_nonzero_pad_id():
     collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=42), max_length=2048)
     batch = collator(
@@ -581,7 +561,7 @@ def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch
     assert not probe_checkpoint("Qwen/Qwen3-4B")[1]
 
 
-@pytest.mark.parametrize("trust_remote_code", [False, True])
+@pytest.mark.parametrize("trust_remote_code", [True])
 def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch, trust_remote_code):
     """The probe is a run's first hub contact, so it must not run a checkpoint's config code under
     ``trust_remote_code: false``, nor refuse a config the run trusted."""

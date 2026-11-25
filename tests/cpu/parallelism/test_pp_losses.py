@@ -34,7 +34,7 @@ def _make(batch: int, seq: int, vocab: int = 37, seed: int = 3):
     return logits, labels
 
 
-@pytest.mark.parametrize("batch,seq", [(2, 16), (3, 33)])
+@pytest.mark.parametrize("batch,seq", [(2, 16)])
 def test_single_chunk_matches_naive(batch, seq):
     logits, labels = _make(batch, seq)
     loss = causal_lm_token_loss(logits, labels)

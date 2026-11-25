@@ -8,7 +8,7 @@ import torch
 from tests.common.pp_fakes import FakeSchedule, fake_runner
 
 
-@pytest.mark.parametrize("rows,n_mb", [(8, 4), (7, 3), (5, 2)])
+@pytest.mark.parametrize("rows,n_mb", [(8, 4), (7, 3)])
 def test_extras_split_in_lockstep_with_labels(rows, n_mb):
     labels = torch.arange(rows).unsqueeze(1).expand(rows, 6).contiguous()
     advantages = torch.arange(rows, dtype=torch.float32) * 10

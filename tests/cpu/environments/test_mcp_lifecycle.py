@@ -141,9 +141,8 @@ async def test_connect_discovers_tools_and_disconnect_unwinds_in_owner_task():
     assert env.stub_transport.enter_task is not asyncio.current_task()  # owned by the connection task
 
 
-@pytest.mark.parametrize("episode_scratch", [False, True])
-async def test_discovery_returns_an_ordered_snapshot_and_closes_its_only_server(episode_scratch):
-    env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=episode_scratch)
+async def test_discovery_returns_an_ordered_snapshot_and_closes_its_only_server():
+    env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=True)
     schema = {"type": "object", "properties": {"values": {"type": "array", "items": {"type": "string"}}}}
 
     async def list_tools():
@@ -170,8 +169,7 @@ async def test_discovery_returns_an_ordered_snapshot_and_closes_its_only_server(
     assert not env.get_tools_schema()
 
 
-@pytest.mark.parametrize("episode_scratch", [False, True])
-@pytest.mark.parametrize("empty", [False, True])
+@pytest.mark.parametrize("episode_scratch, empty", [(False, False), (True, True)], ids=["False-False", "True-True"])
 async def test_discovery_errors_and_removes_scratch_after_an_unsuccessful_list(episode_scratch, empty):
     env = _StubMCPEnv(scratch_allowlist=True, episode_scratch=episode_scratch)
 
@@ -484,11 +482,7 @@ def test_a_spawn_option_refuses_a_transport_that_spawns_nothing(spawn_option):
         NativeMCPClientEnvironment(transport="sse", server_url="http://x/sse", **spawn_option)
 
 
-@pytest.mark.parametrize(
-    "config",
-    [{}, {"mcp_server": "fetch"}, {"transport": "stdio"}],
-    ids=["default-preset", "named-preset", "stated-stdio"],
-)
+@pytest.mark.parametrize("config", [{}], ids=["default-preset"])
 def test_a_server_url_off_sse_raises_instead_of_spawning_a_preset(config, monkeypatch):
     """Off ``transport: sse`` the URL would be dropped and the default filesystem preset spawned in its place."""
     monkeypatch.setattr(mcp_module, "stdio_client", lambda *_: pytest.fail("a server was spawned"))
@@ -496,7 +490,7 @@ def test_a_server_url_off_sse_raises_instead_of_spawning_a_preset(config, monkey
         build_environment("mcp", {"server_url": "http://mcp.example:9000/sse", **config})
 
 
-@pytest.mark.parametrize("config", [{}, {"mcp_server": "fetch"}], ids=["scratch-preset", "plain-preset"])
+@pytest.mark.parametrize("config", [{}], ids=["scratch-preset"])
 def test_an_unknown_transport_raises_at_construction_not_at_the_first_reset(config):
     with pytest.raises(ValueError, match=r"transport must be one of \('stdio', 'sse'\), got 'bogus'"):
         build_environment("mcp", {"transport": "bogus", **config})

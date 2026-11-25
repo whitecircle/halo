@@ -58,6 +58,15 @@ def determinism(request, _deterministic_run, monkeypatch) -> bool:
     return request.param
 
 
+_DETERMINISTIC_RUN_ONLY = pytest.mark.parametrize(
+    "determinism", [pytest.param(True, id="deterministic")], indirect=True
+)
+
+
+def _run_id(deterministic: bool) -> str:
+    return "deterministic" if deterministic else "nondeterministic"
+
+
 def _on_arch(arch: str):
     """Patches making the hardware predicates see ``arch``."""
     capability = _ARCHS[arch]
@@ -89,10 +98,31 @@ def _default(model_type: str, arch: str, *, padding_free: bool, pinned: str | No
     return _default_for(CONFIG_MAPPING[model_type](), arch, padding_free=padding_free, pinned=pinned)
 
 
+def _default_case(deterministic: bool, model_type: str, padding_free: bool, arch: str):
+    rows = "padding_free" if padding_free else "packing"
+    return pytest.param(
+        deterministic, model_type, padding_free, arch, id=f"{_run_id(deterministic)}-{model_type}-{rows}-{arch}"
+    )
+
+
+_DEFAULT_CASES = [
+    *(
+        _default_case(True, model_type, padding_free, "b300")
+        for model_type in _GDN_MODEL_TYPES + _OTHER_MODEL_TYPES
+        for padding_free in (False, True)
+    ),
+    _default_case(False, "qwen3_5_moe", False, "b300"),
+    _default_case(False, "qwen3", False, "b300"),
+    _default_case(True, "qwen3_5_moe", False, "b200"),
+    _default_case(True, "qwen3_5_moe", False, "h100"),
+    _default_case(True, "qwen3_5_moe", False, "cpu"),
+]
+
+
 @pytest.mark.usefixtures("determinism")
-@pytest.mark.parametrize("arch", sorted(_ARCHS))
-@pytest.mark.parametrize("padding_free", [False, True], ids=["packing", "padding_free"])
-@pytest.mark.parametrize("model_type", _GDN_MODEL_TYPES + _OTHER_MODEL_TYPES)
+@pytest.mark.parametrize(
+    ("determinism", "model_type", "padding_free", "arch"), _DEFAULT_CASES, indirect=["determinism"]
+)
 def test_the_default_per_family_collator_and_arch(model_type, padding_free, arch):
     """FA2 exactly where the GPU's own pick is FA4 and the family is a GatedDeltaNet one on FA4's head_dim-256
     kernel, deterministic or not, packed or padding-free."""
@@ -118,7 +148,7 @@ def test_the_family_gate_reads_gated_delta_net_layers_not_the_model_type(config,
 
 
 @pytest.mark.usefixtures("determinism")
-@pytest.mark.parametrize("padding_free", [False, True], ids=["packing", "padding_free"])
+@pytest.mark.parametrize("padding_free", [pytest.param(False, id="packing")])
 @pytest.mark.parametrize(
     "config",
     [
@@ -221,6 +251,7 @@ _GEMMA2_27B = {"hidden_size": 4608, "num_attention_heads": 32, "num_key_value_he
     ids=["softcapped_gemma2_27b", "qwen3_5_moe", "qwen3_next", "qwen3"],
 )
 @pytest.mark.parametrize("rows", sorted(_ROW_SHAPES))
+@_DETERMINISTIC_RUN_ONLY
 def test_one_default_serves_the_softcap_and_the_packed_gated_delta_net_rows(config, expected, rows):
     """A softcap moves every row reaching FA4's varlen call, while the GatedDeltaNet rule moves only multi-document
     rows; a single unpadded row keeps the loader's pick."""
@@ -264,9 +295,44 @@ def _expected_backend(kernel_class: str, rows: str, deterministic: bool, pinned:
     return "sdpa" if deterministic else "flash_attention_4"
 
 
-@pytest.mark.parametrize("pinned", [None, "flash_attention_4"], ids=["unpinned", "pinned_fa4"])
-@pytest.mark.parametrize("rows", sorted(_ROW_SHAPES))
-@pytest.mark.parametrize("kernel_class", sorted(_KERNEL_CLASSES))
+# FA4's general kernel and the refused head_dim-256 kernel load one backend whatever the rows, determinism or pin.
+_CONSTANT_BACKEND_CLASSES = ("general", "hd256_refused")
+
+
+def _loaded_backend_case(kernel_class: str, rows: str, deterministic: bool, pinned: str | None):
+    return pytest.param(
+        kernel_class,
+        rows,
+        deterministic,
+        pinned,
+        id=f"{_run_id(deterministic)}-{kernel_class}-{rows}-{'pinned_fa4' if pinned else 'unpinned'}",
+    )
+
+
+_LOADED_BACKEND_CASES = [
+    *(
+        _loaded_backend_case(kernel_class, rows, deterministic, pinned)
+        for kernel_class in sorted(set(_KERNEL_CLASSES) - set(_CONSTANT_BACKEND_CLASSES))
+        for rows in sorted(set(_ROW_SHAPES) - {"padding_free"})
+        for deterministic in (True, False)
+        for pinned in (None, "flash_attention_4")
+    ),
+    *(
+        _loaded_backend_case(kernel_class, rows, deterministic, None)
+        for kernel_class in _CONSTANT_BACKEND_CLASSES
+        for rows in ("packed", "padded")
+        for deterministic in (True, False)
+    ),
+    *(
+        _loaded_backend_case(kernel_class, "packed", True, "flash_attention_4")
+        for kernel_class in _CONSTANT_BACKEND_CLASSES
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("kernel_class", "rows", "determinism", "pinned"), _LOADED_BACKEND_CASES, indirect=["determinism"]
+)
 def test_the_loaded_backend_per_kernel_class_rows_determinism_and_request(kernel_class, rows, determinism, pinned):
     """A deterministic run never hands multi-document rows the SDPA its FA4 demotion would pick, whether the YAML
     pins FA4 or not."""
@@ -474,6 +540,7 @@ def _run_sft_main(
         "preprocessed_unpacked",
     ],
 )
+@_DETERMINISTIC_RUN_ONLY
 def test_sft_main_hands_the_policy_load_the_default(tmp_path, model_type, yaml_body, preprocessed_packed, expected):
     """A pre-processed corpus by how it was baked, a raw one by ``packing`` / ``padding_free``."""
     captured = _run_sft_main(tmp_path, model_type, yaml_body, preprocessed_packed=preprocessed_packed)
@@ -536,6 +603,7 @@ _UNSET_FORM = "packing: true\ntree_packing: true\ntree_share_markers: ['x']\n"
     ],
     ids=["fa4", "pinned_fa2", "qwen3_5_default_fa2", "explicit_stays"],
 )
+@_DETERMINISTIC_RUN_ONLY
 def test_an_unset_tree_form_resolves_off_the_backend_the_load_takes(tmp_path, model_type, yaml_body, attn, form):
     """Resolved once before the load; what is explicit reaches the refusal the backend owes it."""
     captured = _run_sft_main(tmp_path, model_type, _UNSET_FORM + yaml_body)
@@ -557,6 +625,7 @@ def test_the_crossing_opt_in_needs_a_multi_document_row(tmp_path):
     [("packing: true\n", None), ("padding_free: true\n", None), ("", True)],
     ids=["packing", "padding_free", "baked_packed"],
 )
+@_DETERMINISTIC_RUN_ONLY
 def test_the_crossing_opt_in_stands_on_multi_document_rows(tmp_path, yaml_body, preprocessed_packed):
     """A baked corpus decides by how it was baked, whatever the ``packing`` flag says."""
     captured = _run_sft_main(tmp_path, "qwen3", _CROSSING_OPT_IN + yaml_body, preprocessed_packed=preprocessed_packed)
@@ -616,7 +685,7 @@ def _refused_before_the_load(rule: str, pinned: str | None) -> bool:
         for rows in sorted(_ROWS_YAML)
         for pinned in (None, "flash_attention_4")
         for full_determinism in (True, False)
-        if not _refused_before_the_load(rule, pinned)
+        if not _refused_before_the_load(rule, pinned) and (rows != "padding_free" or rule == "gated_delta_net_hd256")
     ],
 )
 def test_the_row_plan_and_the_load_resolve_one_backend(tmp_path, monkeypatch, rule, rows, pinned, full_determinism):

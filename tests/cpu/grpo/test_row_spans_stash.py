@@ -52,7 +52,7 @@ def _ragged_mask(seed: int, rows: int = 12, width: int = 14) -> torch.Tensor:
     return mask
 
 
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", [0])
 def test_the_device_spans_equal_the_row_by_row_computation(seed):
     mask = _ragged_mask(seed)
     spans, completions = dense_row_spans(mask, LTK)

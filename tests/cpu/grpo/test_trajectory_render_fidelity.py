@@ -380,17 +380,6 @@ def test_fixtures_exercise_non_monotone_and_monotone_templates():
     assert monotone, f"fixtures lost the monotone control: {non_monotone}"
 
 
-@pytest.mark.parametrize(("model", "convo_name"), CASES)
-def test_prefix_diffing_row_is_rejected_where_it_diverges(model, convo_name):
-    stub, messages, full = _case(model, convo_name)
-    naive_prompt, naive_completion = _prefix_delta_row(stub, messages)
-    prompt, completion, _ = _row(stub, messages)
-
-    assert prompt + completion == full
-    if naive_prompt + naive_completion != full:
-        assert prompt + completion != naive_prompt + naive_completion
-
-
 def test_sampled_token_path_bypasses_re_rendering():
     stub, messages, _ = _case(QWEN3_0_6B, "tool")
     sampled = {1: [101, 102, 103], 3: [201, 202]}

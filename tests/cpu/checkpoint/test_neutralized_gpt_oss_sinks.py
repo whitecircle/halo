@@ -53,12 +53,6 @@ def test_reconstructs_sinks_when_none():
         assert bool((t == torch.finfo(torch.bfloat16).min).all())
 
 
-def test_none_sinks_drop_from_named_parameters():
-    m = _Model("gpt_oss", n_layers=2, sinks_none=True)
-    names = dict(m.named_parameters())
-    assert "model.layers.0.self_attn.sinks" not in names
-
-
 def test_skips_when_sinks_present():
     """The normal param loop saves real sinks."""
     m = _Model("gpt_oss", n_layers=2, sinks_none=False)

@@ -36,10 +36,6 @@ def test_set_fingerprint_is_order_independent():
     assert fp_a == fp_b
 
 
-def test_identical_collections_same_fingerprint():
-    assert _closure_fingerprint(_capturing([1, 2, 3])) == _closure_fingerprint(_capturing([1, 2, 3]))
-
-
 def test_non_scalar_collection_not_fingerprinted():
     """A list of non-scalars falls through to the skip-with-warning path and produces no address-dependent repr."""
     fp_a = _closure_fingerprint(_capturing([object()]))

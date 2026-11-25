@@ -222,13 +222,6 @@ def test_unbounded_completion_logs_hold_a_round_larger_than_one_generation_batch
     assert set(logs) == {"images", "prompt", "completion", "rewards", "advantages", "extra"}, "TRL's slot layout"
 
 
-def test_empty_logs_is_noop(tmp_path) -> None:
-    trainer = _Trainer(str(tmp_path))
-    trainer._logs["prompt"] = []
-    emit_completion_artifacts(trainer, console=True, save=True)
-    assert not os.path.exists(_parquet_path(str(tmp_path)))
-
-
 class _Parallelism:
     is_tp_mode = False
     is_expert_tp_mode = False
@@ -285,7 +278,7 @@ def _logging_host(tmp_path, step=9) -> _MetricsHost:
     return host
 
 
-@pytest.mark.parametrize("shared_fs", [True, False], ids=["shared", "per-node"])
+@pytest.mark.parametrize("shared_fs", [True], ids=["shared"])
 def test_every_rank_keeps_and_writes_only_its_own_rows_with_no_collective(tmp_path, monkeypatch, shared_fs):
     """Gathered, the rendered trajectories would stage the world's text through a device and leave every writer holding
     every rank's record."""

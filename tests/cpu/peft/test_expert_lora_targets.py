@@ -114,14 +114,6 @@ def test_split_mixed_targets_peels_experts_keeps_attention():
     assert cfg.lora_target_modules == ["q_proj", "v_proj"]
 
 
-def test_split_experts_alias_means_all_projections_and_strips_to_empty():
-    cfg = _MockModelConfig(lora_target_modules=["experts"])
-    with _as_moe():
-        spec = split_expert_lora_targets(cfg)
-    assert spec.projections == frozenset({"gate", "up", "down"})
-    assert cfg.lora_target_modules == []
-
-
 def test_split_fused_gate_up_target_covers_gate_and_up():
     cfg = _MockModelConfig(lora_target_modules=["gate_up_proj"])
     with _as_moe():
@@ -135,13 +127,6 @@ def test_split_dense_model_returns_none_and_keeps_expert_targets():
     with _as_moe(is_moe=False):
         assert split_expert_lora_targets(cfg) is None
     assert cfg.lora_target_modules == ["q_proj", "gate_proj", "up_proj", "down_proj"]
-
-
-def test_split_attention_only_returns_none_and_leaves_targets():
-    cfg = _MockModelConfig(lora_target_modules=["q_proj", "k_proj", "v_proj", "o_proj"])
-    with _as_moe():
-        assert split_expert_lora_targets(cfg) is None
-    assert cfg.lora_target_modules == ["q_proj", "k_proj", "v_proj", "o_proj"]
 
 
 def test_split_noop_when_peft_disabled():

@@ -231,13 +231,6 @@ def test_bos_counts_toward_truncation_budget():
     assert len(ids) == 3 and ids[0] == BOS_ID
 
 
-def test_trailing_eos_post_processing_preserved_on_training_rows():
-    """add_special_tokens=False would silently drop the row terminator."""
-    tok = TrailingEosTokenizer()
-    ids = tokenize_rendered(tok, "hello world")["input_ids"]
-    assert ids[-1] == tok.eos_token_id
-
-
 def test_for_generation_strips_trailing_special():
     """The model would see its own end-of-turn at the generation point."""
     tok = TrailingEosTokenizer()

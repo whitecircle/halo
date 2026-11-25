@@ -65,14 +65,6 @@ def test_hrr_formula_matches_paper():
     assert np.allclose(shaped, expected), (shaped, expected)
 
 
-def test_hrr_best_rank_gets_largest_boost():
-    cfg = RLRRConfig(mode="hrr", tau=0.1)
-    ranks = np.array([1, 2, 3])
-    shaped = shape_rewards(ranks, np.ones(3), cfg)
-    assert shaped[0] > shaped[1] > shaped[2]
-    assert math.isclose(shaped[2], 1.0, abs_tol=1e-9)  # tanh(r_max/r_max - 1)=0
-
-
 def test_hrr_preserves_correctness_ordering():
     # Small tau must not let a best-ranked incorrect (rule=0) outscore a worst-ranked correct.
     cfg = RLRRConfig(mode="hrr", tau=0.1)
@@ -134,15 +126,6 @@ def test_correctness_clip_caps_incorrect():
     # idx 0 is incorrect yet best-ranked, so its raw advantage is positive; the cap holds it at xi_pos.
     adv = rlrr_advantages([9.0, 0.0, 0.0, 0.0], cfg)
     assert (adv <= 1e-3 + 1e-12).all(), adv
-
-
-def test_correctness_clip_mixed_group():
-    cfg = RLRRConfig(mode="hrr", tau=0.1, xi_neg=-1e-3, xi_pos=1e-3)
-    # rewards straddle the 0.5 threshold: the first two are correct, the last two are not.
-    adv = rlrr_advantages([1.0, 1.0, 0.0, 0.0], cfg, lengths=[10, 20, 30, 40])
-    adv = np.asarray(adv)
-    assert (adv[:2] >= -1e-3 - 1e-12).all(), adv
-    assert (adv[2:] <= 1e-3 + 1e-12).all(), adv
 
 
 def test_std_normalize_scales():

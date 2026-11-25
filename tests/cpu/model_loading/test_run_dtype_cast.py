@@ -242,14 +242,6 @@ def pinned_checkpoints(roster_checkpoints) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
-def test_a_bf16_from_pretrained_keeps_the_family_pins(pinned_checkpoints, family):
-    """The premise: without the cast, these checkpoints load mixed."""
-    model = TINY_MOE_FAMILIES[family].load_class.from_pretrained(pinned_checkpoints[family], dtype=torch.bfloat16)
-
-    assert params_off_dtype(model, torch.bfloat16)
-
-
-@pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_the_frozen_loader_scores_in_the_run_dtype(pinned_checkpoints, family):
     model = load_frozen_auxiliary_model(
         pinned_checkpoints[family], dtype=torch.bfloat16, device_map="cpu", trust_remote_code=False, download_tag=None

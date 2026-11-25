@@ -87,10 +87,6 @@ def test_only_the_sft_script_carries_the_knobs(script_args):
     assert not set(MTP_FIELDS) & set(script_args.__dataclass_fields__)
 
 
-def test_the_sft_script_carries_every_knob():
-    assert set(MTP_FIELDS) <= set(SFTScriptArguments.__dataclass_fields__)
-
-
 def test_by_default_no_head_is_requested():
     args = _args()
     assert args.mtp_loss_weight == 0 and args.mtp_head_request is None

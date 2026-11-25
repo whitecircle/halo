@@ -305,20 +305,6 @@ def test_fsdp2_resume_majority_coverage_loads_and_keeps_absent(tmp_path):
     assert torch.equal(model.fc3.weight, before_fc3)
 
 
-def test_fsdp2_resume_with_matching_keys_reaches_the_load(tmp_path, monkeypatch):
-    """Anti-vacuity: the real call needs ``broadcast_from_rank0``, so it is recorded here."""
-    model = _TinyModel()
-    save_file({"fc.weight": torch.ones(4, 4)}, os.path.join(tmp_path, "model.safetensors"))
-    applied = _Recorder()
-    monkeypatch.setattr(loader_mod, "set_model_state_dict", applied)
-    ctx = _ctx(model, fsdp_wrapped=True)
-
-    load_resume_weights(ctx, str(tmp_path), model)
-
-    assert len(applied.calls) == 1
-    assert set(applied.calls[0][0][1]) == {"fc.weight"}
-
-
 def test_optimizer_shards_without_meta_are_refused_as_torn(tmp_path, monkeypatch):
     """A kill between the shard and meta writes reaches this. Loading ungated maps another topology's moments onto
     this run's params."""

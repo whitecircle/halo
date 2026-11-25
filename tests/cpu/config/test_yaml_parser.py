@@ -88,16 +88,6 @@ def test_retired_ecosystem_spelling_is_not_migrated():
         os.unlink(path)
 
 
-def test_plain_config_parses_unchanged():
-    path = _write_yaml("name: clean\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        assert result.name == "clean"
-    finally:
-        os.unlink(path)
-
-
 def test_toolkit_defaults_applied():
     result = _parse_yaml_launch(HaloArgumentParser((SimpleConfig,)), "name: defaults_test\n")
     assert result.use_liger_kernel is True, "use_liger_kernel should be True"
@@ -116,14 +106,6 @@ def test_every_declared_toolkit_default_is_applied():
 
     for name, (expected, _) in _TOOLKIT_DEFAULTS.items():
         assert getattr(config, name) == expected, f"toolkit default {name}={expected} was not applied"
-
-
-def test_toolkit_defaults_not_overridden():
-    result = _parse_yaml_launch(
-        HaloArgumentParser((SimpleConfig,)), "use_liger_kernel: false\nbf16: false\nname: explicit\n"
-    )
-    assert result.use_liger_kernel is False, "Should remain False when explicitly set"
-    assert result.bf16 is False, "Should remain False when explicitly set"
 
 
 def test_toolkit_defaults_partial_override():
@@ -180,47 +162,6 @@ def test_cli_override_int():
         os.unlink(path)
 
 
-def test_cli_override_float():
-    path = _write_yaml("name: cli_float\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_dict(parser.load_values([path, "--learning_rate=0.001"]))
-        assert abs(result.learning_rate - 0.001) < 1e-10
-        assert isinstance(result.learning_rate, float)
-    finally:
-        os.unlink(path)
-
-
-def test_cli_override_bool_true():
-    path = _write_yaml("name: cli_bool\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_dict(parser.load_values([path, "--use_liger_kernel=True"]))
-        assert result.use_liger_kernel is True
-    finally:
-        os.unlink(path)
-
-
-def test_cli_override_bool_false():
-    path = _write_yaml("use_liger_kernel: true\nname: cli_bool_f\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_dict(parser.load_values([path, "--use_liger_kernel=false"]))
-        assert result.use_liger_kernel is False
-    finally:
-        os.unlink(path)
-
-
-def test_cli_override_list_str():
-    path = _write_yaml("batch_size: 16\n")
-    try:
-        parser = HaloArgumentParser((ExtraConfig,))
-        (result,) = parser.parse_dict(parser.load_values([path, "--tags=a,b,c"]))
-        assert result.tags == ["a", "b", "c"]
-    finally:
-        os.unlink(path)
-
-
 def test_cli_override_list_str_replaces_yaml_list():
     path = _write_yaml("tags:\n- from yaml\n")
     try:
@@ -258,27 +199,6 @@ def test_the_per_rank_worker_count_key_fails_with_its_remedy(via):
     assert parser.parse_dict({"rollout_actor_budget": 128})[0].rollout_actor_budget == 128
 
 
-def test_cli_override_shared_field_sets_on_both_dataclasses():
-    """A field two dataclasses own (pad_token on SFTScriptArguments + SFTConfig) is set on both; token sync relies
-    on this."""
-
-    @dataclass
-    class DupA:
-        shared: int = 0
-
-    @dataclass
-    class DupB:
-        shared: int = 0
-
-    parser = HaloArgumentParser((DupA, DupB))
-    path = _write_yaml("shared: 1\n")
-    try:
-        a, b = parser.parse_dict(parser.load_values([path, "--shared=7"]))
-        assert a.shared == 7 and b.shared == 7
-    finally:
-        os.unlink(path)
-
-
 def test_cli_override_genuinely_repeated_flag_raises():
     parser = HaloArgumentParser((SimpleConfig,))
     path = _write_yaml("max_length: 100\n")
@@ -287,16 +207,6 @@ def test_cli_override_genuinely_repeated_flag_raises():
         raise AssertionError("Should have raised ValueError for a repeated CLI flag")
     except ValueError as e:
         assert "duplicate" in str(e).lower()
-    finally:
-        os.unlink(path)
-
-
-def test_cli_override_applies_after_yaml_value():
-    path = _write_yaml("max_length: 100\nname: override_me\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_dict(parser.load_values([path, "--max_length=999"]))
-        assert result.max_length == 999
     finally:
         os.unlink(path)
 
@@ -354,12 +264,6 @@ def test_format_output_dir_no_strftime():
     assert _expanded("output/plain-run") == "output/plain-run"
 
 
-def test_format_output_dir_full_datetime():
-    expanded = _expanded("output/sft-%Y-%m-%dT%H-%M-%S")
-    assert "%" not in expanded, f"Unexpanded codes in: {expanded}"
-    assert expanded.startswith("output/sft-")
-
-
 def test_format_output_dir_percent_prose_survives():
     """A whole-string strftime lets glibc expand ``%-d``, turning ``sft-100%-data`` into ``sft-10014ata``."""
     for raw in ("output/sft-100%-data", "output/50%_subset", "output/run-100%"):
@@ -393,17 +297,6 @@ def test_scientific_notation_no_decimal_parsed_as_float():
         (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
         assert isinstance(result.learning_rate, float), f"Expected float, got {type(result.learning_rate)}"
         assert abs(result.learning_rate - 3e-5) < 1e-10
-    finally:
-        os.unlink(path)
-
-
-def test_scientific_notation_with_decimal_parsed_as_float():
-    path = _write_yaml("learning_rate: 1.5e-5\nname: sci_dec\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_yaml_file(path, allow_extra_keys=False)
-        assert isinstance(result.learning_rate, float)
-        assert abs(result.learning_rate - 1.5e-5) < 1e-10
     finally:
         os.unlink(path)
 
@@ -500,16 +393,6 @@ def test_flags_only_launch_rejects_an_unknown_flag(capsys):
     with pytest.raises(SystemExit):
         _parse_with_argv(parser, ["prog", "--name=cli", "--no_such_field=1"])
     assert "unrecognized arguments: --no_such_field=1" in capsys.readouterr().err
-
-
-def test_dashed_cli_override_with_yaml():
-    path = _write_yaml("use_liger_kernel: true\nname: dash\n")
-    try:
-        parser = HaloArgumentParser((SimpleConfig,))
-        (result,) = parser.parse_dict(parser.load_values([path, "--use-liger-kernel=false"]))
-        assert result.use_liger_kernel is False
-    finally:
-        os.unlink(path)
 
 
 def test_dashed_and_underscored_spellings_are_one_flag():

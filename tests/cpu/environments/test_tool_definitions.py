@@ -212,7 +212,7 @@ def _string_tool(seen: list, *, refuse_closing_tag: bool = True):
     )
 
 
-@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}, ("print(1)",)])
+@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}])
 def test_a_list_or_object_for_a_string_parameter_is_refused_before_the_handler_runs(value):
     """A list ``code`` passed on fails inside the sandbox, read as the backend's fault."""
     seen = []

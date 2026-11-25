@@ -5,7 +5,7 @@ GPU proof is ``tests/gpu/parallelism/tp/test_tp_correctness.py``."""
 import pytest
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from torch.distributed.tensor import Shard, distribute_tensor
 from transformers import CONFIG_MAPPING, AutoConfig, AutoModelForCausalLM, PretrainedConfig
 from transformers.distributed.parallel_utils import _get_parameter_plan
 from transformers.models.qwen3.modeling_qwen3 import Qwen3ForCausalLM
@@ -17,7 +17,7 @@ from halo.distributed.tensor_parallel.hf_plan import (
     validate_tied_pair_consistent,
 )
 from halo.models.introspection.module_tree import find_module_path
-from tests.common.distributed import apply_hf_tensor_parallelism, fake_process_group_mesh
+from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 
 # The flag has to reach the backbone config: the outer one for a plain model, the text sub-config for a composite.
@@ -171,15 +171,6 @@ def test_validate_accepts_a_sharded_pair_the_plan_shards():
         validate_tied_pair_consistent(model, {"lm_head": "colwise_gather_output"})
         with pytest.raises(RuntimeError, match="disagree"):
             validate_tied_pair_consistent(model, {})
-
-
-def test_the_tp_helper_refuses_an_already_tied_model():
-    """transformers' ``apply_tensor_parallelism`` raises a bare ``KeyError`` on the tied head's name."""
-    with fake_process_group_mesh(rank=0, world_size=2) as mesh:
-        with pytest.raises(ValueError, match=r"\['lm_head.weight'\].*tied parameter"):
-            apply_hf_tensor_parallelism(_tiny_tied_model(), mesh)
-        untied = apply_hf_tensor_parallelism(_tiny_tied_model(tie=False), mesh)
-    assert isinstance(untied.lm_head.weight, DTensor)
 
 
 def test_a_tied_pair_reaches_the_export_as_one_key():

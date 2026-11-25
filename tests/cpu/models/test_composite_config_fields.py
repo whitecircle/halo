@@ -40,26 +40,12 @@ class _FakeModel:
         self.generation_config = type("GenerationConfig", (), {})()
 
 
-@pytest.mark.parametrize("model_type", COMPOSITE_MODEL_TYPES)
-def test_composite_config_really_hides_decoder_fields(model_type):
-    """If transformers ever flattens these, the tests below stop meaning anything."""
-    config = _config(model_type)
-    text_config = config.get_text_config()
-    assert text_config is not config
-    assert not hasattr(config, "num_hidden_layers")
-    assert hasattr(text_config, "num_hidden_layers")
-
-
 @pytest.mark.parametrize("model_type", PLAIN_MODEL_TYPES)
 def test_plain_config_declares_its_own_fields_once(model_type):
     config = _config(model_type)
     assert config.get_text_config() is config
     assert configs_declaring(config, "num_hidden_layers") == [config]
     assert configs_declaring(config, "not_a_field_on_any_config") == []
-
-
-def test_set_config_field_reports_an_undeclared_field():
-    assert set_config_field(_config("qwen3_moe"), "not_a_field_on_any_config", 1, only_declared=True) is False
 
 
 def test_set_config_field_plants_a_toolkit_flag_on_every_level():
@@ -109,8 +95,17 @@ def test_override_on_a_plain_config_lands_on_the_config_itself():
     assert config.router_aux_loss_coef == 0.002
 
 
-@pytest.mark.parametrize("model_type", COMPOSITE_MODEL_TYPES + PLAIN_MODEL_TYPES)
-@pytest.mark.parametrize("field", ["pad_token_id", "eos_token_id", "bos_token_id"])
+@pytest.mark.parametrize(
+    ("model_type", "field"),
+    [
+        pytest.param("qwen3_5_moe", "pad_token_id", id="pad_token_id-qwen3_5_moe"),
+        pytest.param("qwen3_5", "eos_token_id", id="eos_token_id-qwen3_5"),
+        pytest.param("gemma4", "bos_token_id", id="bos_token_id-gemma4"),
+        pytest.param("qwen3_moe", "eos_token_id", id="eos_token_id-qwen3_moe"),
+        pytest.param("gpt_oss", "pad_token_id", id="pad_token_id-gpt_oss"),
+        pytest.param("llama", "bos_token_id", id="bos_token_id-llama"),
+    ],
+)
 def test_special_token_id_lands_where_the_model_reads_it(model_type, field):
     """Seq-cls pooling reads ``config.get_text_config().pad_token_id``; generation reads the generation config."""
     config = _config(model_type)

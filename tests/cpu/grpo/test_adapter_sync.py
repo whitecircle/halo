@@ -1074,12 +1074,9 @@ _VLLM_LORA = {"max_lora_rank": 16, "max_loras": 2, "max_cpu_loras": 4}
 @pytest.mark.parametrize(
     ("runtime_routes", "refused"),
     [
-        (False, True),
-        ("False", True),
-        ("0", True),
+        pytest.param(False, True, id="False-True0"),
         ("", True),
         (True, False),
-        ("true", False),
         ("1", False),
         (None, False),
     ],

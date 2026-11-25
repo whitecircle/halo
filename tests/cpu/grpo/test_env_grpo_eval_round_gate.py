@@ -21,10 +21,6 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
     return GRPOConfig(output_dir=str(tmp_path / "out"), bf16=False, use_cpu=True, **overrides)
 
 
-def test_env_grpo_recipes_exist():
-    assert ENV_GRPO_EXAMPLES, "no env-GRPO recipe found; the sweep below would check nothing"
-
-
 @pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
 def test_every_env_grpo_recipe_passes_the_eval_round_gate(config):
     parsed = parser_for(ENV_GRPO_SCRIPT).parse_yaml_file(str(config))

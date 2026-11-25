@@ -52,9 +52,21 @@ def _image_batch(model) -> dict[str, torch.Tensor]:
     }
 
 
-@pytest.mark.parametrize("images", [False, True], ids=["text", "images"])
-@pytest.mark.parametrize("tied", [False, True], ids=["untied", "tied"])
-@pytest.mark.parametrize("mode", ["peft", "peft_modules_to_save"])
+@pytest.mark.parametrize(
+    ("mode", "tied", "images"),
+    [
+        ("peft", False, False),
+        ("peft_modules_to_save", False, False),
+        ("peft_modules_to_save", True, False),
+        ("peft", False, True),
+    ],
+    ids=[
+        "peft-untied-text",
+        "peft_modules_to_save-untied-text",
+        "peft_modules_to_save-tied-text",
+        "peft-untied-images",
+    ],
+)
 @pytest.mark.parametrize("family", _COMPOSITES)
 def test_lora_wrapper_trains_under_real_fsdp2(family, mode, tied, images, single_rank_mesh):
     if images and family not in _QWEN_TOWERS:

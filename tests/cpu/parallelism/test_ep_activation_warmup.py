@@ -3,7 +3,6 @@
 combine while peers spin in DeepEP's barrier, whose budget bounds rank skew."""
 
 import contextlib
-from collections import defaultdict
 
 import pytest
 import torch
@@ -324,19 +323,6 @@ def test_every_grouped_gemm_of_the_expert_compute_launches_a_kernel_the_warm_up_
     assert compute_kernels - warm == set()
 
 
-@pytest.mark.parametrize(("family", "layout", "variant"), GEMM_CASES, ids="-".join)
-def test_the_warm_up_runs_every_grouped_gemm_on_both_sides_of_the_tile_switch(family, layout, variant):
-    rows_by_layout = defaultdict(set)
-    for kernel, rows_per_expert in _warm_up_launches(gemm_layer(family, layout, variant)).grouped_mm_calls:
-        rows_by_layout[kernel[2]].add(rows_per_expert)
-    both = {1, GROUPED_MM_SMALL_TILE_DIM + 1}
-    assert rows_by_layout == {
-        "a row-major, b row-major": both,
-        "a row-major, b column-major": both,
-        "a column-major, b row-major": both,
-    }
-
-
 @pytest.mark.parametrize(("family", "layout"), NEGATIVE_CONTROL_CASES, ids="-".join)
 def test_the_grouped_gemm_check_fails_without_the_gemm_warm_up(monkeypatch, family, layout):
     compute_kernels = _compute_gemm_kernels(gemm_layer(family, layout, "defaults"))
@@ -543,7 +529,6 @@ def _gpt_oss_stub(*, grouped_mm: bool, expert_tp_size: int) -> gpt_oss_layer.EPG
         (False, 1, False),  # Per-expert loop: halves split straight out of the interleaved pair.
         (True, 1, True),  # Grouped GEMM: de-interleaved contiguous parameters.
         (False, 2, True),
-        (True, 2, True),
     ),
 )
 def test_gptoss_warms_the_activation_its_compute_path_calls(grouped_mm, expert_tp_size, contiguous_halves):

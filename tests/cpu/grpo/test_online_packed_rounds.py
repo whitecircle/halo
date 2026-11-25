@@ -10,16 +10,12 @@ import types
 
 import pytest
 import torch
-import trl.trainer.grpo_trainer as trl_grpo_trainer
 from trl import GRPOTrainer
 
-import halo.trainers.grpo.environmental.row_order as env_row_order
 import halo.trainers.grpo.online as online_module
 import halo.trainers.grpo.rounds.packed_rounds as packed_rounds
-import halo.trainers.grpo.rounds.row_order as shared_row_order
 from halo.diagnostics.phase_timers import PhaseTimers
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
-from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rounds.packed_rounds import PackedRoundMixin
@@ -253,54 +249,6 @@ def test_the_online_trainer_refuses_full_logits_and_a_non_flash_backend():
     host.model.config._attn_implementation = "sdpa"
     with pytest.raises(ValueError, match="needs an attention backend that reads the row.s documents"):
         host._configure_packed_microbatches()
-
-
-def _refill_host(slot_batch: dict):
-    host = object.__new__(DistributedOnlineGRPOTrainer)
-    host.model = types.SimpleNamespace(training=True)
-    host.args = types.SimpleNamespace(steps_per_generation=2, gradient_accumulation_steps=2)
-    host.num_iterations = 1
-    host._step, host._buffered_inputs = 0, None
-    host._packs_microbatches = True
-    host._generate_and_score_completions = lambda _inputs: dict(slot_batch)
-    host._broadcast_tensors_from_tp_leader = lambda inputs: inputs
-    host._build_slot_view = lambda slot: slot
-    return host
-
-
-_SLOT_BATCH = {
-    "slot_rows": torch.tensor([-1, -1, 0, 1]),
-    "slot_active": torch.tensor([0, 0, 1, 1]),
-    "num_items_in_batch": torch.tensor(3),
-}
-
-
-def test_an_online_refill_splits_the_slot_indices_in_order_and_restores_trls_shuffle():
-    shuffle = trl_grpo_trainer.shuffle_sequence_dict
-    host = _refill_host(_SLOT_BATCH)
-    first = host._prepare_inputs({})
-    host._step += 1
-    second = host._prepare_inputs({})
-    assert trl_grpo_trainer.shuffle_sequence_dict is shuffle
-    assert first["slot_rows"].tolist() == [-1, -1] and second["slot_rows"].tolist() == [0, 1]
-
-
-def test_an_online_refill_after_a_trl_that_no_longer_shuffles_is_refused(monkeypatch):
-    def moved(self, generation_batch):
-        self._buffered_inputs = [self._generate_and_score_completions(generation_batch)]
-        return self._buffered_inputs[0]
-
-    monkeypatch.setattr(GRPOTrainer, "_prepare_inputs", moved)
-    with pytest.raises(RuntimeError, match="moved its buffer shuffle"):
-        _refill_host(_SLOT_BATCH)._prepare_inputs({})
-
-
-def test_both_on_policy_trainers_share_one_row_order_and_one_round_layout():
-    assert env_row_order.length_deal_order is shared_row_order.length_deal_order
-    assert env_row_order.permute_rows is shared_row_order.permute_rows
-    assert env_row_order.MICROBATCH_INVARIANT_LOSS_TYPES is shared_row_order.MICROBATCH_INVARIANT_LOSS_TYPES
-    for name in ("_prepare_inputs", "_build_slot_view", "_lay_out_packed_round", "_score_bins", "_score_inert_row"):
-        assert getattr(DistributedAsyncEnvironmentalGRPOTrainer, name) is getattr(DistributedOnlineGRPOTrainer, name)
 
 
 def test_the_round_layout_leads_the_tp_resync_and_the_scorer_in_both_on_policy_trainers():

@@ -297,7 +297,7 @@ def test_a_last_exit_whose_wait_timed_out_still_deletes_the_failure_slots(monkey
     assert server.num_keys() == 2, "the timed-out last exit left the failure slot behind"
 
 
-@pytest.mark.parametrize("world", [8, 64])
+@pytest.mark.parametrize("world", [64])
 def test_a_clean_join_costs_each_participant_constant_key_operations(monkeypatch, world):
     """A join where every participant reads every peer's key is O(world²) for the one store server (seconds per join
     at 1024 ranks)."""

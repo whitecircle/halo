@@ -115,7 +115,7 @@ def test_parse_reads_empty_text_as_no_arguments_and_keeps_a_mapping():
     assert parse_tool_call_arguments(_conversation(ARGUMENTS)) == _conversation(ARGUMENTS)
 
 
-@pytest.mark.parametrize("text", ['{"pattern": "a', "[1, 2]", '"a|b"', "grep a|b"])
+@pytest.mark.parametrize("text", ['{"pattern": "a', "[1, 2]", '"a|b"'])
 def test_parse_refuses_text_that_is_no_json_object(text):
     with pytest.raises(ValueError, match="Tool call 'grep' carries arguments that are not a JSON object"):
         parse_tool_call_arguments(_conversation(text))

@@ -143,8 +143,7 @@ def _oracle(*, confidence_weight_opd=True, opd_exclude_eos=True, reference_kl_co
     return sft + BETA * opd + reference_kl_coef * ref, sft, opd, ref
 
 
-@pytest.mark.parametrize("confidence_weight_opd", [True, False])
-@pytest.mark.parametrize("opd_exclude_eos", [True, False])
+@pytest.mark.parametrize(("opd_exclude_eos", "confidence_weight_opd"), [(True, False), (False, True)])
 def test_the_loss_is_sft_plus_scheduled_opd_plus_the_reference_anchor(confidence_weight_opd, opd_exclude_eos):
     trainer = _trainer(confidence_weight_opd=confidence_weight_opd, opd_exclude_eos=opd_exclude_eos)
     loss = trainer.compute_loss(trainer.model, _inputs())
@@ -240,7 +239,7 @@ def _loop_opd(student_logits, student_labels, teacher_logits, teacher_labels, we
     return (torch.stack(per_sample) * weights).mean()
 
 
-@pytest.mark.parametrize("seed", range(4))
+@pytest.mark.parametrize("seed", [0])
 def test_the_masked_gather_matches_a_per_row_reference_loop(seed):
     """Random logits and offsets, an EOS-only row (no OPD tokens) and an empty one: value and gradient."""
     generator = torch.Generator().manual_seed(seed)

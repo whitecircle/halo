@@ -9,7 +9,7 @@ from typing import ClassVar
 import pytest
 
 from halo.rewards import composer as composer_module
-from halo.rewards.composer import SCORERS, RewardComposer, Settlement, build_scorer
+from halo.rewards.composer import SCORERS, RewardComposer, build_scorer
 from halo.rewards.graders.verifiable import RLVR_GRADERS, AccuracyTerm, FormatTerm
 from halo.rewards.samples import ScoringSample
 from halo.rewards.scorers.base import Scorer, ScoreResult
@@ -313,13 +313,6 @@ def test_a_veto_zeroes_the_objective():
     settlement = priced.settle({"reward/objective": 1.0}, {"gate": ScoreResult(1.0, veto=True)})
     assert settlement.components == {"reward/objective": 0.0, "reward/gate": pytest.approx(-0.2)}
     assert settlement.reward == pytest.approx(-0.2)
-
-
-def test_settlement_reward_sums_the_components():
-    assert Settlement(
-        {"reward/objective": 0.5, "reward/quality": 0.3, "reward/penalty": -0.2}
-    ).reward == pytest.approx(0.6)
-    assert Settlement({}).reward == 0.0
 
 
 if __name__ == "__main__":

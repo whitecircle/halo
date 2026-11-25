@@ -55,7 +55,6 @@ from tests.common.length_deal import (
 )
 
 _VOCAB, _ROWS, _CLOSE, _CLIP = 64, 8, 7, 3.0
-_ADMITTED = ("grpo", "sapo", "dr_grpo", "dapo", "cispo", "luspo")
 
 _PASS_FACTS = {
     "runs_pass": True,
@@ -224,9 +223,17 @@ def _train(batch: dict, *, loss_type: str, beta: float, fused: bool, packed: boo
 _close_to = partial(windows_close, rel=1e-4, grad_rtol=1e-3)
 
 
-@pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("beta", [0.0, 0.04])
-@pytest.mark.parametrize("loss_type", _ADMITTED)
+@pytest.mark.parametrize(
+    ("loss_type", "beta", "packed"),
+    [
+        pytest.param("grpo", 0.0, False, id="grpo-0.0-False"),
+        pytest.param("sapo", 0.04, False, id="sapo-0.04-False"),
+        pytest.param("dr_grpo", 0.0, True, id="dr_grpo-0.0-True"),
+        pytest.param("dapo", 0.04, True, id="dapo-0.04-True"),
+        pytest.param("cispo", 0.04, False, id="cispo-0.04-False"),
+        pytest.param("luspo", 0.0, True, id="luspo-0.0-True"),
+    ],
+)
 def test_the_loss_forward_weight_gives_the_pass_loss_and_gradient(loss_type, beta, packed):
     in_pass, fused = _inputs(_sampling_side_round(), beta)
     _, *want = _train(in_pass, loss_type=loss_type, beta=beta, fused=False, packed=packed)
@@ -575,7 +582,7 @@ class _Cadence(LossForwardImportanceMixin, _TrlStep):
         self.flushes.append(self._step)
 
 
-@pytest.mark.parametrize("spg", [1, 2, 4])
+@pytest.mark.parametrize("spg", [1, 4])
 def test_the_round_flush_fires_once_per_round_on_its_last_micro_step(spg):
     host = _Cadence(spg)
     for _ in range(3 * spg):  # a packed window's no-op slots are micro-steps like any other

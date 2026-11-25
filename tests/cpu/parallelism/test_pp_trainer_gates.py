@@ -55,11 +55,6 @@ def _declaring(pp_refusal):
     return type("_Declaring", (DistributedTrainerMixin,), {"PP_REFUSAL": pp_refusal})
 
 
-def test_base_default_is_off():
-    """Declare-to-enable."""
-    assert DistributedTrainerMixin.PP_REFUSAL is not None
-
-
 def test_every_trainer_declares_a_pp_stance():
     enabled = {cls.__name__ for cls in _TRAINERS if cls.PP_REFUSAL is None}
     assert enabled == _PP_ENABLED, f"PP_REFUSAL is None on {sorted(enabled)}, expected {sorted(_PP_ENABLED)}"

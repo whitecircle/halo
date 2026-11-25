@@ -121,16 +121,19 @@ def _merge_both(adapter_dir: Path, tmp_path: Path, dtype: torch.dtype) -> tuple[
     return streamed, reference
 
 
-@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 @pytest.mark.parametrize(
-    "lora",
+    ("dtype", "lora"),
     [
-        {},
-        {"use_dora": True},
-        {"use_rslora": True, "alpha_pattern": {"v_proj": 32}, "rank_pattern": {"q_proj": 2}},
-        {"lora_bias": True},
+        pytest.param(torch.float32, {}, id="plain-fp32"),
+        pytest.param(torch.bfloat16, {}, id="plain-bf16"),
+        pytest.param(torch.bfloat16, {"use_dora": True}, id="dora-bf16"),
+        pytest.param(
+            torch.float32,
+            {"use_rslora": True, "alpha_pattern": {"v_proj": 32}, "rank_pattern": {"q_proj": 2}},
+            id="rslora-patterns-fp32",
+        ),
+        pytest.param(torch.float32, {"lora_bias": True}, id="lora-bias-fp32"),
     ],
-    ids=["plain", "dora", "rslora-patterns", "lora-bias"],
 )
 def test_a_dense_linear_merge_equals_the_in_memory_merge(tmp_path, dtype, lora):
     base, adapter = tmp_path / "base", tmp_path / "adapter"

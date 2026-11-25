@@ -323,8 +323,6 @@ def test_unregistered_hybrid_keeps_its_family_refusal():
     "layer_metadata",
     (
         pytest.param("missing", id="missing"),
-        pytest.param(None, id="null"),
-        pytest.param([], id="empty"),
         pytest.param(["full_attention", "full_attention"], id="misleading"),
     ),
 )

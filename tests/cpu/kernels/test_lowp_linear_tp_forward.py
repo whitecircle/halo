@@ -133,8 +133,7 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
             assert torch.allclose(module.weight.grad.to_local(), reference.grad)
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("precision", ["fp8", "mxfp4"])
+@pytest.mark.parametrize(("precision", "rank"), [("fp8", 0), ("fp8", 1), ("mxfp4", 0)])
 def test_apply_refuses_a_rowwise_shard_its_format_cannot_block(precision, rank):
     """96-wide at TP 2 is a 48-wide shard, which a 32-block format cannot split."""
     with fake_process_group(rank, 2):

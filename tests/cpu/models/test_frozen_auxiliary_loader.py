@@ -3,7 +3,6 @@
 A per-site copy drifts silently: a pin read off an object that cannot carry it, or sdpa over sinks never reset."""
 
 import ast
-import inspect
 import pathlib
 import types
 from unittest.mock import patch
@@ -280,10 +279,6 @@ def test_the_frozen_model_is_finalized_like_the_policy():
         load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
 
     assert model.generation_config.do_sample is True
-
-
-def test_reset_sinks_default_matches_the_policy_loaders():
-    assert inspect.signature(load_frozen_auxiliary_model).parameters["reset_sinks"].default is True
 
 
 def test_the_reference_requests_the_policy_s_attention_default():

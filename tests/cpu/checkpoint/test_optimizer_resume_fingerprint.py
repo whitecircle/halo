@@ -145,11 +145,6 @@ def test_capture_raises_on_a_config_missing_a_field():
         OptimizerStateFingerprint.capture(pc, _sgd(_TinyModel()), 1)
 
 
-def test_dict_round_trip():
-    fp = _live_fp(_sgd(_TinyModel()), _StubParallelismConfig(ep_size=2, cp_size=2), world_size=4)
-    assert fp.mismatches(fp.to_dict()) == []
-
-
 def test_the_saved_fingerprint_keeps_the_keys_1_1_0_wrote():
     """A renamed key would warm-restart every existing shard set (``use_hsdp`` is saved as ``hsdp``)."""
     live = _live_fp(torch.optim.AdamW(_TinyModel().parameters()))

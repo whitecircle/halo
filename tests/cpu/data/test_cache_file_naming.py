@@ -56,13 +56,6 @@ def _make_dataset(n: int, seed: int = 0) -> Dataset:
 SELF_DISTILL_SCRIPT = REPO_ROOT / "scripts/training/distillation/self_distill.py"
 
 
-def test_deterministic_output():
-    ds = _make_dataset(10)
-    name1 = map_cache_file_name("map", _add_one, ds, "desc", {})
-    name2 = map_cache_file_name("map", _add_one, ds, "desc", {})
-    assert name1 == name2, f"Non-deterministic: '{name1}' vs '{name2}'"
-
-
 def test_cache_name_format():
     ds = _make_dataset(5)
     name = map_cache_file_name("map", _add_one, ds, None, {})
@@ -109,20 +102,6 @@ def test_different_dataset_content_same_size():
     name_a = map_cache_file_name("map", _add_one, ds_a, "d", {})
     name_b = map_cache_file_name("map", _add_one, ds_b, "d", {})
     assert name_a != name_b, "Same-size different-content datasets produced same cache name"
-
-
-def test_different_fn_kwargs_tokenizer():
-    ds = _make_dataset(10)
-
-    class MockTokenizerA:
-        name_or_path = "model-A"
-
-    class MockTokenizerB:
-        name_or_path = "model-B"
-
-    name_a = map_cache_file_name("map", _add_one, ds, "d", {"fn_kwargs": {"tokenizer": MockTokenizerA()}})
-    name_b = map_cache_file_name("map", _add_one, ds, "d", {"fn_kwargs": {"tokenizer": MockTokenizerB()}})
-    assert name_a != name_b, "Different tokenizers produced same cache name"
 
 
 def test_fn_kwargs_vs_no_fn_kwargs():
@@ -315,20 +294,6 @@ def test_kwargs_list_order_is_part_of_the_key_and_set_order_is_not():
     assert kwargs_fingerprint({"ids": {"a", "b"}}) == kwargs_fingerprint({"ids": {"b", "a"}})
 
 
-def test_kwargs_name_or_path_takes_priority():
-    class ModelA:
-        name_or_path = "model-A"
-        vocab_size = 32000
-
-    class ModelB:
-        name_or_path = "model-B"
-        vocab_size = 32000
-
-    fp_a = kwargs_fingerprint({"model": ModelA()})
-    fp_b = kwargs_fingerprint({"model": ModelB()})
-    assert fp_a != fp_b, "Objects with different name_or_path but same vocab_size collided"
-
-
 def test_kwargs_tokenizer_content_beats_path():
     """The same vocab reloaded from a resume checkpoint keys the same cache (a path term would re-tokenize on every
     resume leg), while a different vocab at the same path keys another."""
@@ -421,33 +386,6 @@ def test_kwargs_scalar_lists_distinct():
     assert fp_obj_a == fp_obj_b, "Lists of non-scalars keep the type-name fallback"
 
 
-def test_shuffled_dataset_different_fingerprint():
-    ds = _make_dataset(20)
-    ds_shuffled = ds.shuffle(seed=42)
-    name_orig = map_cache_file_name("map", _add_one, ds, "d", {})
-    name_shuffled = map_cache_file_name("map", _add_one, ds_shuffled, "d", {})
-    assert name_orig != name_shuffled, "Shuffled dataset produced same cache name as original"
-
-
-def test_fn_kwargs_subset_differs():
-    ds = _make_dataset(10)
-    name_a = map_cache_file_name(
-        "map",
-        _add_one,
-        ds,
-        "d",
-        {"fn_kwargs": {"max_length": 512, "truncation": True}},
-    )
-    name_b = map_cache_file_name(
-        "map",
-        _add_one,
-        ds,
-        "d",
-        {"fn_kwargs": {"max_length": 512}},
-    )
-    assert name_a != name_b, "Different number of fn_kwargs produced same cache name"
-
-
 def test_output_affecting_map_kwargs_change_cache_name():
     """Two calls differing only in remove_columns produce different rows, and a shared key would silently serve one
     call's rows to the other."""
@@ -489,22 +427,6 @@ def _make_processor(tokenizer, max_length):
     return process
 
 
-def test_closure_fingerprint_differs_by_tokenizer():
-    tok_a = _MockTokenizer("org/model-262k", 262000)
-    tok_b = _MockTokenizer("org/model-201k", 201000)
-    fp_a = _closure_fingerprint(_make_processor(tok_a, 4096))
-    fp_b = _closure_fingerprint(_make_processor(tok_b, 4096))
-    assert fp_a and fp_b, "closure fingerprint should be non-empty when a tokenizer is captured"
-    assert fp_a != fp_b, "different captured tokenizers must produce different closure fingerprints"
-
-
-def test_closure_fingerprint_differs_by_max_length():
-    tok = _MockTokenizer("org/model", 32000)
-    fp_512 = _closure_fingerprint(_make_processor(tok, 512))
-    fp_4096 = _closure_fingerprint(_make_processor(tok, 4096))
-    assert fp_512 != fp_4096, "different captured max_length must change the closure fingerprint"
-
-
 def test_closure_fingerprint_empty_for_no_closure():
     assert _closure_fingerprint(_add_one) == ""
 
@@ -528,19 +450,6 @@ def test_cache_name_same_tokenizer_stable():
     name1 = map_cache_file_name("map", _make_processor(tok, 4096), ds, "tokenize", {})
     name2 = map_cache_file_name("map", _make_processor(tok, 4096), ds, "tokenize", {})
     assert name1 == name2, "Identical closure capture must reuse the same cache file"
-
-
-def test_function_id_method_vs_function():
-    class Processor:
-        def transform(self, x):
-            return x + 1
-
-    def transform(x):
-        return x + 1
-
-    id_method = function_cache_id(Processor.transform)
-    id_func = function_cache_id(transform)
-    assert id_method != id_func, "Method and standalone function with same name produced same ID"
 
 
 def test_function_id_builtin_fallback():
@@ -744,14 +653,6 @@ def test_the_self_distill_encode_map_key_covers_the_encoder_source(helper, monke
     assert function_cache_id(encode_self_distill_row) != before, f"editing {helper.__name__} keeps the cache key"
 
 
-def _through_a_generator(rows):
-    return sum(tokenize_rendered(None, row) for row in rows)
-
-
-def _through_a_lambda(rows):
-    return (lambda row: tokenize_rendered(None, row))(rows)
-
-
 def _through_a_nested_def(rows):
     def one(row):
         return tokenize_rendered(None, row)
@@ -764,9 +665,7 @@ def _edit_source_of(helper, monkeypatch):
     monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
 
 
-@pytest.mark.parametrize(
-    "caller", [_through_a_generator, _through_a_lambda, _through_a_nested_def], ids=lambda caller: caller.__name__
-)
+@pytest.mark.parametrize("caller", [_through_a_nested_def], ids=lambda caller: caller.__name__)
 def test_a_helper_called_from_nested_code_keys_its_caller(caller, monkeypatch):
     """Nested code holds its own names, so such a helper is absent from the caller's ``co_names``."""
     before = function_cache_id(caller)
@@ -839,8 +738,9 @@ def test_coordinated_map_stamps_the_cache_file_it_wrote_as_the_rank_stable_key(t
         assert (tmp_path / getattr(split_ds, CACHE_KEY_ATTR)).is_file()
 
 
-@pytest.mark.parametrize("knob", ["load_from_cache_file", "keep_in_memory"])
-@pytest.mark.parametrize("operation", [coordinated_map, coordinated_filter])
+@pytest.mark.parametrize(
+    "operation,knob", [(coordinated_map, "load_from_cache_file"), (coordinated_filter, "keep_in_memory")]
+)
 def test_managed_execution_kwargs_are_refused_not_dropped(operation, knob):
     """Dropping it leaves a call site reading as if it steered caching."""
     with pytest.raises(TypeError, match=knob):

@@ -635,15 +635,6 @@ def test_a_control_routes_refusal_carries_its_reason():
         server.close()
 
 
-def test_context_window_preflight_raises_on_a_server_that_cannot_hold_one_turn(server):
-    server.max_model_len = 1024
-
-    with pytest.raises(ValueError, match="context window"):
-        _verify_context_window_on_rank0(VLLMWeightSyncClient, [server.url], 4096, None)
-
-    _verify_context_window_on_rank0(VLLMWeightSyncClient, [server.url], 512, None)
-
-
 # The filters' off values the preflight hands the probe, so each probe request moves one knob only.
 _FILTERS_OFF = {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
 

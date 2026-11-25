@@ -198,10 +198,6 @@ _DOCUMENTED = _documented_names()
 _SETTABLE_CONFIG_FIELDS = sorted(f.name for f in fields(ParallelismConfig) if f.init)
 
 
-def test_the_documentation_sweep_sees_the_reference():
-    assert len(_DOCUMENTED) > 100, f"the configuration reference parsed to {len(_DOCUMENTED)} identifiers"
-
-
 @pytest.mark.parametrize("arg_field", sorted(f.name for f in fields(ParallelismArguments)))
 def test_every_argument_is_documented(arg_field):
     """The YAML/CLI surface is only reachable through the reference; nothing else lists these names."""

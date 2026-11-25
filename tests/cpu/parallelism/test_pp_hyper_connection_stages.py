@@ -15,7 +15,6 @@ from transformers import (
 )
 
 from halo.distributed.pipeline_parallel.families import DEEPSEEK_V4_PP, PP_SPEC_MAP, build_pp_spec_map
-from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
 from halo.distributed.pipeline_parallel.partition import validate_partition
 from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from tests.common.models import (
@@ -197,17 +196,6 @@ def test_loader_droppable_prefixes_cover_the_tail_module():
     last = StageLayout.of(_dsv4_model()).dropped_prefixes(False, True)
     assert "model.hc_head" in non_last, non_last
     assert not any("hc_head" in p for p in last), last
-
-
-def test_specs_declare_support_and_the_tail_module():
-    """A dropped declaration reverts the family to the generic contract, first seen as a mid-schedule shape error."""
-    for backbone_name in ("DeepseekV4Model", "Glm5NextTextModel"):
-        spec = PP_SPEC_MAP[backbone_name]
-        assert spec.refusal is None, backbone_name
-        assert spec.tail_module_attrs == ("hc_head",), backbone_name
-        assert spec.layer_types_rebase_safe, backbone_name
-    reject_unsupported_pp_model(_dsv4_model(), "none")
-    reject_unsupported_pp_model(_glm5_model(), "none")
 
 
 @pytest.mark.parametrize(

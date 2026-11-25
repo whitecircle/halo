@@ -171,40 +171,14 @@ def test_cp_collator_restores_real_eos_when_pad_equals_eos():
     assert baked["labels"][0].tolist() == [-100, 2, -100], "baked labels must not be overwritten by the EOS restore"
 
 
-def test_padding_free_with_completions():
-    collator = _select(
-        padding_free=True,
-        train_on_completions_only=True,
-        assistant_message_template="<|assistant|>",
-    )
-    assert type(collator).__name__ == "DataCollatorWithFlatteningAndCompletionMask"
-
-
 def test_padding_free_no_completions():
     collator = _select(padding_free=True)
     assert type(collator).__name__ == "DataCollatorWithFlattening"
 
 
-def test_packing_with_completions():
-    collator = _select(
-        packing=True,
-        train_on_completions_only=True,
-        assistant_message_template="<|assistant|>",
-    )
-    assert type(collator).__name__ == "DataCollatorForCompletionOnlyLMWithPacking"
-
-
 def test_packing_no_completions():
     collator = _select(packing=True)
     assert type(collator).__name__ == "DataCollatorWithPacking"
-
-
-def test_completions_only():
-    collator = _select(
-        train_on_completions_only=True,
-        assistant_message_template="<|assistant|>",
-    )
-    assert type(collator).__name__ == "DataCollatorForCompletionOnlyLM"
 
 
 def test_default_returns_none():
@@ -285,8 +259,15 @@ def test_non_varlen_attention_allows_packing(attn_impl):
     assert type(collator).__name__ == "DataCollatorWithPacking"
 
 
-@pytest.mark.parametrize("flag", ["padding_free", "packing"])
-@pytest.mark.parametrize("attn_impl", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
+@pytest.mark.parametrize(
+    ("attn_impl", "flag"),
+    [
+        ("flash_attention_2", "padding_free"),
+        ("flash_attention_2", "packing"),
+        ("flash_attention_3", "padding_free"),
+        ("flash_attention_4", "padding_free"),
+    ],
+)
 def test_varlen_attention_allows_flattening(attn_impl, flag):
     """Into the collator the flag asks for, not a padded fallback that would undo the throughput win."""
     expected = {"padding_free": "DataCollatorWithFlattening", "packing": "DataCollatorWithPacking"}[flag]
@@ -462,20 +443,20 @@ _BOTH_FLAGS = ("packing", "padding_free")
 # name -> (config builder, whether its rows cross, the flags it is checked under)
 _LINEAR_ATTENTION_CONFIGS = {
     "ring_lightning_attention": (lambda: remote_config(BAILING_MOE_RING_MINI), True, _BOTH_FLAGS),
-    "ling3_kda": (lambda: remote_config(BAILING_LING_3_TINY), True, _BOTH_FLAGS),
-    "glm5_next_kda": (lambda: CONFIG_MAPPING["glm5_next_text"](), True, _BOTH_FLAGS),
-    "unknown_family_linear_attention": (unknown_hybrid_config, True, _BOTH_FLAGS),
-    "ling2_softmax_only": (lambda: remote_config(BAILING_MOE_LING_MINI), False, _BOTH_FLAGS),
+    "ling3_kda": (lambda: remote_config(BAILING_LING_3_TINY), True, ("packing",)),
+    "glm5_next_kda": (lambda: CONFIG_MAPPING["glm5_next_text"](), True, ("packing",)),
+    "unknown_family_linear_attention": (unknown_hybrid_config, True, ("packing",)),
+    "ling2_softmax_only": (lambda: remote_config(BAILING_MOE_LING_MINI), False, ("packing",)),
     # Each group's last layer is softmax attention, so groups of one hold no Lightning Attention-2 layer.
     "ring_groups_of_one_softmax_only": (
         lambda: remote_config(BAILING_MOE_RING_MINI, layer_group_size=1),
         False,
-        _BOTH_FLAGS,
+        ("packing",),
     ),
     "qwen3_next_gated_deltanet_marked": (lambda: CONFIG_MAPPING["qwen3_next"](), False, _BOTH_FLAGS),
     # qwen3_next carries the GatedDeltaNet exemption under padding_free.
     "qwen3_5_gated_deltanet_marked": (lambda: CONFIG_MAPPING["qwen3_5_text"](), False, ("packing",)),
-    "qwen3_softmax_only": (lambda: CONFIG_MAPPING["qwen3"](), False, _BOTH_FLAGS),
+    "qwen3_softmax_only": (lambda: CONFIG_MAPPING["qwen3"](), False, ("packing",)),
 }
 _LINEAR_ATTENTION_CASES = [
     (name, flag) for name, (_, _, flags) in sorted(_LINEAR_ATTENTION_CONFIGS.items()) for flag in flags

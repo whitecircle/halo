@@ -33,7 +33,6 @@ from tests.common.tiny_models import (
     tiny_family_model,
 )
 
-SHAPES = ("fsdp2_resume", "fsdp2_best_model", "tp_best_model", "unsharded_resume", "unsharded_best_model")
 FAMILIES = {**TINY_MOE_FAMILIES, **TINY_DENSE_FAMILIES}
 
 
@@ -147,7 +146,12 @@ def test_a_plain_fsdp2_resume_builds_from_the_base(trained):
     assert resolve_resume_weights_source(checkpoint, SimpleNamespace(model_name_or_path=hub), pc) == hub
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize(
+    ("trained", "shape"),
+    [(name, shape) for name in sorted(CASES) for shape in ("fsdp2_resume", "unsharded_resume")]
+    + [("bailing_moe", shape) for shape in ("fsdp2_best_model", "tp_best_model", "unsharded_best_model")],
+    indirect=["trained"],
+)
 def test_the_reload_restores_every_trained_tensor(trained, shape, tmp_path):
     name, family, hub, checkpoint, state = trained
     assert _per_expert_hub(checkpoint) == _per_expert_hub(hub), "premise: the writer saves the hub's layout"

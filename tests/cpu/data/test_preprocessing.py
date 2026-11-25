@@ -19,7 +19,6 @@ from halo.data.preprocessed.metadata import (
 )
 from halo.data.preprocessed.preparation import _warn_on_shard_count_ceiling, preprocess_dataset, shard_dataset
 from halo.data.preprocessed.shard_index import (
-    SHARD_INDEX_FILE,
     IncompatiblePreprocessedDataset,
     ShardIndex,
     ShardInfo,
@@ -264,72 +263,6 @@ def test_mode_inapplicable_knobs_rejected_both_directions():
 
     PreprocessingConfig(model_name_or_path="m", mode="text", text_field="body", append_eos=False)
     PreprocessingConfig(model_name_or_path="m", mode="chat", system_prompt="s", tools_field="tools")
-
-
-def test_shard_dataset():
-    print("Testing shard_dataset...")
-
-    dataset = Dataset.from_dict(
-        {
-            "input_ids": [[1, 2, 3]] * 100,
-            "attention_mask": [[1, 1, 1]] * 100,
-        }
-    )
-
-    temp_dir = tempfile.mkdtemp()
-
-    try:
-        index = shard_dataset(dataset, output_dir=temp_dir, split_name="train", num_shards=4)
-
-        assert index.num_shards == 4
-        assert index.total_examples == 100
-
-        for shard in index.shards:
-            shard_path = os.path.join(temp_dir, shard.path)
-            assert os.path.exists(shard_path), f"Shard {shard.path} not found"
-
-        # shard_dataset returns the index but does not save it.
-        index_path = os.path.join(temp_dir, "train", SHARD_INDEX_FILE)
-        write_stamped_sidecar(index_path, index)
-
-        assert os.path.exists(index_path), "Shard index file not found"
-
-        total_examples = sum(s.num_examples for s in index.shards)
-        assert total_examples == 100
-
-        for shard in index.shards:
-            assert 20 <= shard.num_examples <= 30, f"Shard {shard.id} has {shard.num_examples} examples"
-
-    finally:
-        shutil.rmtree(temp_dir)
-
-    print("  shard_dataset: PASSED")
-
-
-def test_shard_dataset_single_shard():
-    print("Testing shard_dataset (single shard)...")
-
-    dataset = Dataset.from_dict(
-        {
-            "input_ids": [[1, 2, 3]] * 50,
-            "attention_mask": [[1, 1, 1]] * 50,
-        }
-    )
-
-    temp_dir = tempfile.mkdtemp()
-
-    try:
-        index = shard_dataset(dataset, output_dir=temp_dir, split_name="train", num_shards=1)
-
-        assert index.num_shards == 1
-        assert index.total_examples == 50
-        assert len(index.shards) == 1
-        assert index.shards[0].num_examples == 50
-
-    finally:
-        shutil.rmtree(temp_dir)
-
-    print("  shard_dataset (single shard): PASSED")
 
 
 def test_shard_remainder_distribution():

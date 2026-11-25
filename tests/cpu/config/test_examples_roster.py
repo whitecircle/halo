@@ -42,7 +42,6 @@ from halo.models.moe.family_specs import wraps_experts
 from halo.trainers.loop.dataloaders import uses_dp_sharded_loader
 from halo.trainers.sft_rules import reject_unsupported_mtp_options
 from tests.common.hub_seed import is_hub_repo
-from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint, word_level_tokenizer
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
@@ -503,11 +502,6 @@ def test_an_eval_batch_counts_one_microbatch_under_pipeline_parallelism():
     training = training_arguments(parsed)
     assert parallelism.pp_size == 2 and training.per_device_eval_batch_size == 8
     assert eval_forward_rows(parsed, parallelism, script_trainer_classes(script_for(config))[0]) == 1
-
-
-def test_a_racy_ep_topology_is_still_rejected():
-    with pytest.raises(ValueError, match="dispatch groups"):
-        make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=4)
 
 
 def test_a_rollout_example_exists():

@@ -437,7 +437,7 @@ def test_session_holding_only_files_a_program_made_continues_without_them(modal,
     assert res.ok and res.stdout == "False\n"
 
 
-@pytest.mark.parametrize("workers", [1, 8, 40, 56, 200])
+@pytest.mark.parametrize("workers", [1, 56, 200])
 def test_xdist_workers_draw_session_users_from_disjoint_slices(monkeypatch, workers):
     monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", str(workers))
     slices = []

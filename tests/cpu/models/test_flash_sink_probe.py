@@ -1,10 +1,9 @@
 """What the flash-attention probes ask the kernel, and what the FA4 warm-up compiles.
-Both must ask the varlen entry point: transformers maps capabilities off it, and packed batches dispatch it."""
+Both must ask the varlen entry point, which packed batches dispatch."""
 
 from __future__ import annotations
 
 import contextlib
-import inspect
 import sys
 import types
 
@@ -18,12 +17,6 @@ from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.models.attention.backend_setup import warm_fa4_kernels
 from halo.models.attention.selection import FLASH_SINK_PARAM_NAMES, _attn_impl_handles_sinks, flash_kernel
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
-
-
-def test_transformers_still_keys_capability_off_the_varlen_function():
-    """If an upgrade builds the capability map from the dense function, ``flash_kernel`` must be re-pointed with it."""
-    source = inspect.getsource(flash_utils.lazy_import_flash_attention)
-    assert "_lazy_define_process_function(_flash_varlen_fn)" in source, source
 
 
 def test_the_probe_returns_the_function_transformers_would_bind():

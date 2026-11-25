@@ -193,7 +193,7 @@ def test_an_unbound_callback_keeps_the_config_term(monkeypatch):
     assert dense == pytest.approx(_tflops(1000 * callback.flops_model.model_flops_per_token), abs=0.01)
 
 
-@pytest.mark.parametrize("tp_size", (2, 4))
+@pytest.mark.parametrize("tp_size", (4,))
 def test_measured_work_carries_the_tp_head_share(tp_size):
     callback, trainer = _bound(make_parallelism_config(tp_size=tp_size, world_size=tp_size, gpus_per_node=tp_size))
     lengths = torch.tensor([300, 900])

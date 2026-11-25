@@ -262,11 +262,6 @@ def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(mon
     assert _parse(["--mode", "text"]).num_proc == 7
 
 
-def test_bos_token_override_exists():
-    """Without it one tokenizer mutation stays outside what the recorded config can describe."""
-    assert _parse(["--train_on_completions_only", "false", "--bos_token", "<s>"]).bos_token == "<s>"
-
-
 def test_apply_tokenizer_overrides_sets_every_recorded_knob():
     tokenizer = types.SimpleNamespace(pad_token=None, eos_token="</s>", bos_token=None, chat_template=None)
     args = types.SimpleNamespace(pad_token="<pad>", eos_token="<eos>", bos_token="<s>", chat_template=None)

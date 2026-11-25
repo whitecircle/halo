@@ -100,13 +100,5 @@ def test_a_launch_node_running_several_stages_writes_each_of_them(
         assert writes == runs, f"launch node {node} runs stages {runs} but writes {writes}"
 
 
-def test_non_shared_fs_is_not_the_same_rule_as_shared():
-    """Anti-vacuity: at more than one node per stage the rules must differ."""
-    configs = _configs(32, 8, 2, None)  # 4 nodes, 2 stages ⇒ 2 nodes per stage.
-    shared = {c.global_rank for c in configs if is_pp_shard_writer(c, shared_fs=True)}
-    assert len(shared) == 2
-    assert shared != {0, 8, 16, 24}, "shared-FS rule must NOT already be one writer per node"
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

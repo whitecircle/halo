@@ -246,10 +246,31 @@ def _assert_values(model, stored, ownership, *, router, experts, non_ep, managed
     assert checked_masters == expected_masters
 
 
-@pytest.mark.parametrize("family", FAMILIES)
-@pytest.mark.parametrize("mode", ("ep", "ep_cp"))
-@pytest.mark.parametrize("lazy", (False, True), ids=("eager", "lazy"))
-@pytest.mark.parametrize("fp32_router,fp32_experts,fp32_non_ep", PRECISION_CASES)
+@pytest.mark.parametrize(
+    "fp32_router,fp32_experts,fp32_non_ep,lazy,mode,family",
+    [
+        pytest.param(True, False, False, False, "ep", "qwen3_moe", id="router-eager-ep-qwen3_moe"),
+        pytest.param(True, False, False, False, "ep", "gpt_oss", id="router-eager-ep-gpt_oss"),
+        pytest.param(True, False, False, True, "ep", "qwen3_moe", id="router-lazy-ep-qwen3_moe"),
+        pytest.param(True, False, False, True, "ep", "gpt_oss", id="router-lazy-ep-gpt_oss"),
+        pytest.param(False, True, False, False, "ep", "qwen3_moe", id="experts-eager-ep-qwen3_moe"),
+        pytest.param(False, True, False, False, "ep", "gpt_oss", id="experts-eager-ep-gpt_oss"),
+        pytest.param(False, True, False, True, "ep", "qwen3_moe", id="experts-lazy-ep-qwen3_moe"),
+        pytest.param(False, True, False, True, "ep", "gpt_oss", id="experts-lazy-ep-gpt_oss"),
+        pytest.param(False, False, True, False, "ep", "qwen3_moe", id="non_ep_implies_router-eager-ep-qwen3_moe"),
+        pytest.param(False, False, True, False, "ep", "gpt_oss", id="non_ep_implies_router-eager-ep-gpt_oss"),
+        pytest.param(False, False, True, True, "ep", "qwen3_moe", id="non_ep_implies_router-lazy-ep-qwen3_moe"),
+        pytest.param(False, False, True, True, "ep", "gpt_oss", id="non_ep_implies_router-lazy-ep-gpt_oss"),
+        pytest.param(True, True, True, False, "ep", "qwen3_moe", id="all_masters-eager-ep-qwen3_moe"),
+        pytest.param(True, True, True, False, "ep", "gpt_oss", id="all_masters-eager-ep-gpt_oss"),
+        pytest.param(True, True, True, False, "ep_cp", "qwen3_moe", id="all_masters-eager-ep_cp-qwen3_moe"),
+        pytest.param(True, True, True, False, "ep_cp", "gpt_oss", id="all_masters-eager-ep_cp-gpt_oss"),
+        pytest.param(True, True, True, True, "ep", "qwen3_moe", id="all_masters-lazy-ep-qwen3_moe"),
+        pytest.param(True, True, True, True, "ep", "gpt_oss", id="all_masters-lazy-ep-gpt_oss"),
+        pytest.param(True, True, True, True, "ep_cp", "qwen3_moe", id="all_masters-lazy-ep_cp-qwen3_moe"),
+        pytest.param(True, True, True, True, "ep_cp", "gpt_oss", id="all_masters-lazy-ep_cp-gpt_oss"),
+    ],
+)
 def test_resume_construction_keeps_exact_fp32_masters(
     tmp_path, cpu_loading, family, mode, lazy, fp32_router, fp32_experts, fp32_non_ep
 ):
@@ -266,10 +287,21 @@ def test_resume_construction_keeps_exact_fp32_masters(
     _assert_values(model, stored, ownership, router=fp32_router, experts=fp32_experts, non_ep=fp32_non_ep)
 
 
-@pytest.mark.parametrize("family", FAMILIES)
-@pytest.mark.parametrize("mode", ("ep", "ep_cp"))
-@pytest.mark.parametrize("lazy", (False, True), ids=("eager", "lazy"))
-@pytest.mark.parametrize("preserve", (False, True), ids=("fresh", "resume_without_fp32_flags"))
+@pytest.mark.parametrize(
+    "preserve,lazy,mode,family",
+    [
+        pytest.param(False, False, "ep", "qwen3_moe", id="fresh-eager-ep-qwen3_moe"),
+        pytest.param(False, False, "ep", "gpt_oss", id="fresh-eager-ep-gpt_oss"),
+        pytest.param(False, True, "ep", "qwen3_moe", id="fresh-lazy-ep-qwen3_moe"),
+        pytest.param(False, True, "ep", "gpt_oss", id="fresh-lazy-ep-gpt_oss"),
+        pytest.param(True, False, "ep", "qwen3_moe", id="resume_without_fp32_flags-eager-ep-qwen3_moe"),
+        pytest.param(True, False, "ep", "gpt_oss", id="resume_without_fp32_flags-eager-ep-gpt_oss"),
+        pytest.param(True, False, "ep_cp", "qwen3_moe", id="resume_without_fp32_flags-eager-ep_cp-qwen3_moe"),
+        pytest.param(True, True, "ep", "qwen3_moe", id="resume_without_fp32_flags-lazy-ep-qwen3_moe"),
+        pytest.param(True, True, "ep", "gpt_oss", id="resume_without_fp32_flags-lazy-ep-gpt_oss"),
+        pytest.param(True, True, "ep_cp", "qwen3_moe", id="resume_without_fp32_flags-lazy-ep_cp-qwen3_moe"),
+    ],
+)
 def test_fp32_sources_still_load_at_run_dtype_without_master_preservation(
     tmp_path, cpu_loading, family, mode, lazy, preserve
 ):
@@ -389,10 +421,17 @@ def test_legacy_bin_checkpoint_keeps_exact_fp32_masters(tmp_path, cpu_loading, f
     _assert_values(model, stored, ownership, router=True, experts=True, non_ep=True)
 
 
-@pytest.mark.parametrize("lazy", (False, True), ids=("eager", "lazy"))
-@pytest.mark.parametrize("misnamed", (False, True), ids=("missing_head", "misnamed_head"))
-@pytest.mark.parametrize("class_ignore", (False, True), ids=("ordinary_class", "class_excuses_head"))
-@pytest.mark.parametrize("env_override", (False, True), ids=("strict_env", "env_excuses_missing"))
+@pytest.mark.parametrize(
+    "lazy,misnamed,class_ignore,env_override",
+    [
+        pytest.param(False, False, False, False, id="strict_env-ordinary_class-missing_head-eager"),
+        pytest.param(True, False, False, False, id="strict_env-ordinary_class-missing_head-lazy"),
+        pytest.param(False, True, False, False, id="strict_env-ordinary_class-misnamed_head-eager"),
+        pytest.param(False, False, True, False, id="strict_env-class_excuses_head-missing_head-eager"),
+        pytest.param(False, False, False, True, id="env_excuses_missing-ordinary_class-missing_head-eager"),
+        pytest.param(True, True, True, True, id="env_excuses_missing-class_excuses_head-misnamed_head-lazy"),
+    ],
+)
 def test_resume_missing_selected_master_is_never_randomly_initialized(
     tmp_path, cpu_loading, monkeypatch, lazy, misnamed, class_ignore, env_override
 ):

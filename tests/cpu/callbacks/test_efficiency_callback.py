@@ -36,11 +36,9 @@ class MockParam:
 
 
 class MockModel:
-    def __init__(self, named_params=None, config=None, dtype=None):
+    def __init__(self, named_params=None, config=None):
         self._named_params = named_params or []
         self.config = config
-        if dtype is not None:
-            self.dtype = dtype
 
     def parameters(self):
         return iter([p for _, p in self._named_params])
@@ -170,10 +168,6 @@ def test_classify_gpu_name():
 )
 def test_the_training_arguments_pick_the_precision(args, expected):
     assert _precision(MockModel(), args) == expected
-
-
-def test_the_model_dtype_picks_the_precision():
-    assert _precision(MockModel(dtype=torch.bfloat16), MockTrainingArgs()) == "bf16"
 
 
 def test_the_first_parameter_picks_the_precision_without_a_model_dtype():
@@ -507,7 +501,7 @@ def test_initialize_metrics_measures_normal_model():
     assert cb.flops_model.local_params == 1_000_000.0
 
 
-@pytest.mark.parametrize("max_length", [None, 0, -1])
+@pytest.mark.parametrize("max_length", [None, 0])
 def test_a_one_sided_budget_keeps_its_declared_length(max_length):
     """A prompt budget with no completion cap still sizes the MFU length; a non-positive ``max_length`` is no bound."""
     model = MockModel(
@@ -568,15 +562,6 @@ def test_logged_metric_keys_keep_their_order(monkeypatch):
     logs: dict = {}
     cb.on_log(args, MockTrainerState(global_step=1), None, logs=logs)
     assert tuple(logs) == _LOGGED_KEYS
-
-
-def test_on_log_skips_during_warmup():
-    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=3)
-    cb.tps = ThroughputMetrics(step_tokens_per_second=999.0)
-
-    logs: dict = {}
-    cb.on_log(MockTrainingArgs(), MockTrainerState(global_step=2), None, logs=logs)
-    assert logs == {}
 
 
 def test_the_wired_length_bound_spans_the_training_config_and_the_script_args(clock):

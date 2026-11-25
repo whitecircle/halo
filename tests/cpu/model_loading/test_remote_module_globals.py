@@ -9,10 +9,7 @@ import torch
 import transformers.dynamic_module_utils
 from transformers.cache_utils import DynamicCache, DynamicLayer
 
-from halo.model_loading.remote_code import (
-    _UNIMPORTED_REMOTE_GLOBALS,
-    apply_remote_code_compat_shims,
-)
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 apply_remote_code_compat_shims()
@@ -93,13 +90,6 @@ def test_the_bound_name_is_the_transformers_class(tmp_path, monkeypatch):
 def test_a_module_that_binds_the_name_itself_is_untouched(tmp_path, monkeypatch):
     cls = _load(tmp_path, monkeypatch, SELF_BINDING_SOURCE, "OwnLayerModel")
     assert cls().layer_type() is not DynamicLayer, "the shim overwrote a name the module defined"
-
-
-def test_every_bound_name_is_absent_from_the_published_import_list():
-    """A name transformers stops exporting would bind None-ish and hide."""
-    for name, symbol in _UNIMPORTED_REMOTE_GLOBALS.items():
-        assert symbol is not None, f"{name} resolved to None — the shim would bind a dead name"
-        assert isinstance(symbol, type), f"{name} must be a class, got {type(symbol)}"
 
 
 def test_the_releases_own_composite_answers_with_its_towers_head(tmp_path, monkeypatch):

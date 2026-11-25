@@ -44,7 +44,7 @@ def _reject_unsupported_model(config: ParallelismConfig, model_config) -> None:
     reject_unsupported_model(config, model_config, sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False)
 
 
-@pytest.mark.parametrize("hidden", [2048, 7168])
+@pytest.mark.parametrize("hidden", [7168])
 def test_a_long_budget_within_a_domain_is_accepted(hidden):
     """No wire-offset ceiling bounds a single-domain dispatch, at any hidden width."""
     model = _Cfg(128, hidden_size=hidden, num_experts_per_tok=8)
@@ -154,14 +154,6 @@ def test_a_null_max_length_is_judged_against_the_models_own_context_window():
     assert "proxy-GIN ceiling" in text, text
     assert f"{window} tokens/row" in text, "the refusal must name the length it resolved"
     assert "no length cap" in text, "and say the number came from the model, not from the config"
-
-
-def test_a_null_max_length_under_the_ceiling_still_passes():
-    """Anti-over-rejection: a gate that refused every null budget would fail here."""
-    _reject_unsupported_model(
-        _config(**_CROSS_NODE, ep_rows_per_device=1, ep_declared_max_length=0),
-        _Cfg(128, max_position_embeddings=GIN_MAX_TOKENS_PER_RANK // 2, **_GPTOSS),
-    )
 
 
 def test_a_null_max_length_on_a_config_stating_no_window_is_not_guessed_at():

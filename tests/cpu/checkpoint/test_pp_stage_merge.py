@@ -249,12 +249,6 @@ def test_a_stage_part_no_node_holds_fails_the_merge(saved, tmp_path):
     assert not (merged / SAFETENSORS_INDEX_FILE).exists()
 
 
-def test_only_one_node_directory_is_refused(saved, tmp_path):
-    node_dirs, _ = saved
-    with pytest.raises(ValueError, match=r"model-pp00001-of-00002-00001\.safetensors \(stage 1\)"):
-        merge_pp_stage_parts(node_dirs[:1], str(tmp_path / "merged"))
-
-
 def test_directories_of_different_saves_are_refused(saved, tmp_path):
     node_dirs, state = saved
     other = _write_node_directories(

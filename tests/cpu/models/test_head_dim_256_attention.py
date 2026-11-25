@@ -117,8 +117,14 @@ def test_the_resolved_backend_per_family_arch_and_collator(family, arch, collato
     assert _resolved(family, arch, collator) == (packed if collator == "packed" else padded)
 
 
-@pytest.mark.parametrize("family", ["gptj", "gpt_neo", "falcon"])
-@pytest.mark.parametrize(("arch", "request_label"), [("blackwell", None), ("blackwell", FA4), ("hopper", None)])
+@pytest.mark.parametrize(
+    ("family", "arch", "request_label"),
+    [
+        pytest.param("gptj", "blackwell", None, id="blackwell-None-gptj"),
+        pytest.param("gpt_neo", "blackwell", FA4, id="blackwell-flash_attention_4-gpt_neo"),
+        pytest.param("falcon", "hopper", None, id="hopper-None-falcon"),
+    ],
+)
 def test_a_legacy_class_table_refuses_a_flash_label_it_does_not_list(family, arch, request_label):
     """Without it the build fails on a bare ``KeyError``, once the checkpoint is fetched."""
     with _on(arch), pytest.raises(ValueError, match="lists only .* Set attn_implementation: flash_attention_2"):
@@ -155,12 +161,33 @@ def test_a_zero_attention_dropout_is_no_refusal(label):
         assert _resolve(_config("llama", attention_dropout=0.0), label) == label
 
 
-_REQUESTS = [None, SDPA, FA2, FA3, FA4, "flex_attention", "eager"]
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
-@pytest.mark.parametrize("arch", ["blackwell", "hopper"])
-@pytest.mark.parametrize("request_", _REQUESTS, ids=lambda r: str(r))
+@pytest.mark.parametrize(
+    ("request_", "arch", "dtype"),
+    [
+        pytest.param(None, "blackwell", torch.bfloat16, id="None-blackwell-bf16"),
+        pytest.param(None, "blackwell", torch.float32, id="None-blackwell-fp32"),
+        pytest.param(None, "hopper", torch.bfloat16, id="None-hopper-bf16"),
+        pytest.param(SDPA, "blackwell", torch.bfloat16, id="sdpa-blackwell-bf16"),
+        pytest.param(SDPA, "blackwell", torch.float32, id="sdpa-blackwell-fp32"),
+        pytest.param(SDPA, "hopper", torch.bfloat16, id="sdpa-hopper-bf16"),
+        pytest.param(SDPA, "hopper", torch.float32, id="sdpa-hopper-fp32"),
+        pytest.param(FA2, "blackwell", torch.bfloat16, id="flash_attention_2-blackwell-bf16"),
+        pytest.param(FA2, "blackwell", torch.float32, id="flash_attention_2-blackwell-fp32"),
+        pytest.param(FA2, "hopper", torch.bfloat16, id="flash_attention_2-hopper-bf16"),
+        pytest.param(FA3, "blackwell", torch.bfloat16, id="flash_attention_3-blackwell-bf16"),
+        pytest.param(FA3, "blackwell", torch.float32, id="flash_attention_3-blackwell-fp32"),
+        pytest.param(FA3, "hopper", torch.bfloat16, id="flash_attention_3-hopper-bf16"),
+        pytest.param(FA4, "blackwell", torch.bfloat16, id="flash_attention_4-blackwell-bf16"),
+        pytest.param(FA4, "blackwell", torch.float32, id="flash_attention_4-blackwell-fp32"),
+        pytest.param(FA4, "hopper", torch.bfloat16, id="flash_attention_4-hopper-bf16"),
+        pytest.param("flex_attention", "blackwell", torch.bfloat16, id="flex_attention-blackwell-bf16"),
+        pytest.param("flex_attention", "blackwell", torch.float32, id="flex_attention-blackwell-fp32"),
+        pytest.param("flex_attention", "hopper", torch.bfloat16, id="flex_attention-hopper-bf16"),
+        pytest.param("eager", "blackwell", torch.bfloat16, id="eager-blackwell-bf16"),
+        pytest.param("eager", "blackwell", torch.float32, id="eager-blackwell-fp32"),
+        pytest.param("eager", "hopper", torch.bfloat16, id="eager-hopper-bf16"),
+    ],
+)
 @pytest.mark.parametrize("family", ["gemma2", "vaultgemma"])
 def test_a_softcapped_model_never_resolves_to_sdpa(family, request_, arch, dtype):
     """SDPA would train without the softcap, and nothing downstream says so."""

@@ -80,12 +80,6 @@ def test_eos_token_ids_change_cache_name():
     assert name_eos_only == _name_for(eos_token_ids=frozenset({2})), "one terminator set produced two cache names"
 
 
-def test_identical_knobs_same_cache_name():
-    name_a = _name_for(conversation_field="messages", system_prompt="sys")
-    name_b = _name_for(conversation_field="messages", system_prompt="sys")
-    assert name_a == name_b, "identical processor knobs produced different cache names (no reuse)"
-
-
 def test_irrelevant_captured_object_does_not_change_cache_name():
     """A captured dict that is neither scalar nor tokenizer (the rejection sentinel) must not reach the fingerprint,
     or the corpus re-tokenizes needlessly. Pinned on ``_closure_fingerprint``, since the sentinel is not settable

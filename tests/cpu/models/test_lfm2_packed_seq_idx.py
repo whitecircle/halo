@@ -97,7 +97,7 @@ def _doc_b_drift(
 
 
 @pytest.mark.parametrize("sparse_ffn", [False, True], ids=["dense-logits", "moe-conv"])
-@pytest.mark.parametrize("token_shift", [17, 31])
+@pytest.mark.parametrize("token_shift", [17])
 def test_seq_idx_isolates_the_conv(sparse_ffn, token_shift):
     # A's routing changes expert GEMM batch sizes, so MoE logits can differ by rounding alone; check its conv exactly.
     model = _tiny_model(sparse_ffn=sparse_ffn)

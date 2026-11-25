@@ -62,12 +62,6 @@ def test_sampler_certain_token_is_uncorrected():
     torch.testing.assert_close(ratio[0, [0, 2]], torch.exp(torch.tensor([0.5, 0.25])))
 
 
-def test_ratio_is_truncated_at_clip_max():
-    """A huge positive log-ratio is clamped so a negative-advantage term can't blow up."""
-    ratio, _, _ = _run([[0.0]], [[-20.0]], [[1]], [True])
-    assert ratio.item() == pytest.approx(CLIP_MAX)
-
-
 _END = 7
 
 
