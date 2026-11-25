@@ -337,6 +337,8 @@ _OPEN_REASONING_TEMPLATE = (
     "{% for m in messages %}<|{{ m.role }}|> {% if m.thinking %}<think> {{ m.thinking }} </think> {% endif %}"
     "{{ m.content }} {% if m.role == 'assistant' and not m.thinking %}<eos> {% endif %}{% endfor %}"
 )
+# The reverse: ends a reasoning assistant turn with <eos> and leaves a plain one open.
+_OPEN_PLAIN_TEMPLATE = _OPEN_REASONING_TEMPLATE.replace("not m.thinking", "m.thinking")
 
 
 def _word_level_tokenizer(chat_template: str) -> PreTrainedTokenizerFast:
@@ -372,8 +374,9 @@ def test_a_template_ending_no_turn_is_refused_at_construction():
 
 def test_the_probe_refuses_only_a_marker_no_matched_conversation_trains_under():
     """The plain probe ends its assistant turns in ``<eos>``, so ``<|assistant|>`` trains there and builds although the
-    reasoning probe trains nothing; ``</think>`` matches only the reasoning probe, which trains nothing, so it is
-    refused with that render."""
+    reasoning probe trains nothing, and it builds the other way round too; ``</think>`` matches only the reasoning
+    probe, which trains nothing, so it is refused with that render."""
+    assert _select_completion_only(_word_level_tokenizer(_OPEN_PLAIN_TEMPLATE)) is not None
     tokenizer = _word_level_tokenizer(_OPEN_REASONING_TEMPLATE)
     assert _select_completion_only(tokenizer) is not None
     refusal = r"ends in a turn terminator \['<eos>'\].* renders '<\|user\|> q <\|assistant\|> <think> t </think>"
