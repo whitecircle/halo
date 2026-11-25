@@ -699,14 +699,9 @@ def test_weight_sync_example_keeps_a_pushable_sink_parameter(subtests):
     """The flash_attention_2 reset assigns ``sinks = None`` and the sync ships ``named_parameters`` only, so the
     engine keeps the pretrained sinks against a sink-free trainer, permanently off-policy.
     ``reject_unsyncable_model`` refuses that at construction."""
-    for config in _EXAMPLES:
+    for config in _WEIGHT_SYNC_EXAMPLES:
         with subtests.test(example_id(config)):
-            script = script_for(config)
-            if not script_call_kwargs(
-                script, "configure_balancing_and_build_callbacks", ("syncs_to_external_generator",)
-            ).get("syncs_to_external_generator"):
-                continue
-            parsed = parser_for(script).parse_yaml_file(str(config))
+            parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
             if parsed_field(parsed, "attn_implementation") != "flash_attention_2" or not parsed_field(
                 parsed, "reset_sinks"
             ):
