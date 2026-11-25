@@ -29,6 +29,7 @@ from halo.models.attention.gpt_oss_sinks import (
     uses_gpt_oss_sinks,
 )
 from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.runtime.collectives import combine_across_ranks
 from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
@@ -388,6 +389,7 @@ def run(ctx) -> dict:
     train, evaluation = kl_oracle_training_set(8, SEED), offline_grpo_dataset(4, 6)
 
     trainer = _build_trainer(ctx, base, output, tokenizer, train, evaluation, fields=FIELDS, save=True)
+    initial_masters = _expert_masters(trainer.model) if fp32_masters else {}
     saved_state = _OptimizerSnapshot("save", trainer, capture_optimizer=True)
     trainer.add_callback(saved_state)
     checks = {"run_start_reference_swept": REF_PER_TOKEN_LOGPS_COLUMN in trainer.train_dataset.column_names}
@@ -469,10 +471,19 @@ def run(ctx) -> dict:
     if fp32_masters:
         expected_masters = at_save.get("expert_masters", {})
         restored_masters = _expert_masters(resumed.model)
+        off_grid = {
+            name for name, value in expected_masters.items() if not torch.equal(value, value.bfloat16().float())
+        }
+        trained = {name for name, value in expected_masters.items() if not torch.equal(value, initial_masters[name])}
+        log(f"fp32 expert masters: {len(trained)}/{len(expected_masters)} trained, {len(off_grid)} off the bf16 grid")
+        some_rank_off_grid = combine_across_ranks(bool(off_grid), any, what="fp32 expert masters off the bf16 grid")
+        # A group-limited router can send three steps of tokens to one rank's experts alone, and a master no step
+        # touched stays on the grid it loaded on: every trained one must have left it, and some rank must hold one.
         checks["fp32_expert_masters_off_bf16_grid"] = (
             bool(expected_masters)
             and all(value.dtype == torch.float32 for value in expected_masters.values())
-            and any(not torch.equal(value, value.bfloat16().float()) for value in expected_masters.values())
+            and trained <= off_grid
+            and some_rank_off_grid
         )
         checks["fp32_expert_masters_exact_before_resumed_forward"] = (
             expected_masters.keys() == restored_masters.keys()
