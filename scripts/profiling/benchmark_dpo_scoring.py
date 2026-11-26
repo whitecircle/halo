@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Matched-batch DPO step benchmark with a synthetic large vocabulary on two GPUs."""
+"""Benchmark matched DPO steps with a synthetic large vocabulary on two GPUs."""
 
 import argparse
 import time
