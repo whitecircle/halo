@@ -7,6 +7,7 @@ import os
 import pickle
 import tempfile
 import threading
+import time
 from contextvars import ContextVar
 from types import SimpleNamespace
 
@@ -210,48 +211,36 @@ async def test_a_node_without_a_scorers_key_fails_the_pool_start(monkeypatch):
         ray.shutdown()
 
 
-class _NeverBuiltActor:
-    """The actor class of a pool whose environments never finish building."""
+async def test_a_pool_whose_actors_never_build_fails_its_start_and_kills_them():
+    """Unbounded, the start would hold rank 0 while its peers wait in the next collective; left alive, the blocked
+    actors would hold the trainer's teardown, whose shutdown call they never run."""
 
-    @classmethod
-    def options(cls, **_):
-        return cls
+    class _NeverBuilt:
+        def __init__(self, **_):
+            time.sleep(3600)
 
-    @classmethod
-    def remote(cls, *_):
-        return cls()
-
-    @property
-    def build_scorers(self):
-        return SimpleNamespace(remote=asyncio.get_running_loop().create_future)
-
-    @property
-    def shutdown(self):
-        async def stopped():
-            return None
-
-        return SimpleNamespace(remote=stopped)
-
-
-async def test_a_pool_whose_actors_never_build_fails_its_start_at_the_episode_deadline(monkeypatch):
-    """Unbounded, the start would hold rank 0 while its peers wait in the next collective."""
-    monkeypatch.setattr(ray_actors, "EnvironmentActor", _NeverBuiltActor)
     if ray.is_initialized():
         ray.shutdown()
     ray.init(**ray_init_kwargs(num_cpus=2))
     try:
         manager = RolloutManager(
             num_workers=2,
-            env_type="react_math",
+            env_type=(_NeverBuilt, {}),
             env_config={},
             server_urls=["http://localhost:8000"],
-            rollout_config=RolloutConfig(episode_timeout=0.5),
+            rollout_config=RolloutConfig(episode_timeout=2),
             max_concurrent_rollouts=2,
         )
-        with pytest.raises(RuntimeError, match="did not build their environments within episode_timeout=0.5s"):
+        start = asyncio.create_task(manager.start())
+        await asyncio.sleep(0)  # the start has spawned its actors and waits on their builds
+        actors = list(manager._actors)
+        with pytest.raises(RuntimeError, match="did not build their environments within episode_timeout=2s"):
             # Bounded here as well: a start with no deadline would hang this test, not fail it.
-            await asyncio.wait_for(manager.start(), 60)
-        await manager.shutdown()
+            await asyncio.wait_for(start, 60)
+        for actor in actors:
+            with pytest.raises(ray.exceptions.RayActorError):
+                await asyncio.wait_for(actor.shutdown.remote(), 30)
+        await asyncio.wait_for(manager.shutdown(), 30)
     finally:
         ray.shutdown()
 

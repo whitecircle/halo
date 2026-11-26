@@ -504,6 +504,10 @@ class RolloutManager:
             # Bounded as an episode is: an actor Ray cannot place, or a constructor that hangs, would hold the start.
             await asyncio.wait_for(built, self.rollout_config.episode_timeout)
         except TimeoutError:
+            # Killed, not shut down: an actor Ray has not placed, or one still inside its constructor, runs no call.
+            for actor in (*self._actors, self._actor_pause_clock):
+                ray.kill(actor)
+            self._actors, self._actor_pause_clock, self._started = [], None, False
             raise RuntimeError(
                 f"The {self.num_workers} environment actors did not build their environments within episode_timeout="
                 f"{self.rollout_config.episode_timeout}s: Ray could not place them all, or an environment constructor "
