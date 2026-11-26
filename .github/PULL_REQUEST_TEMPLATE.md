@@ -13,6 +13,8 @@
 
 <!-- What does this change do, and why? Link any issue. -->
 
+- [ ] This change comes from Halo Competition work.
+
 ## Type of change
 
 - [ ] Bug fix

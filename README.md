@@ -7,7 +7,11 @@
   Frontier-Lab Training for Everyone
 </p>
 
-<!-- Temporary, with the "Halo Competition" section: remove both when the competition ends on Dec 10. -->
+<!-- Temporary, for the Halo Competition. On Dec 1, drop "apply by Nov 30" from this banner and the section.
+     After the winners are announced on Dec 18, remove this banner, the "Halo Competition" sections here and
+     in CONTRIBUTING.md, and each line that grep -rn "Halo Competition" .github finds, with the lines its
+     comment names. Keep the Latest updates entry but drop its #halo-competition link, or the docs link
+     check fails. -->
 <p align="center">
   <a href="https://whitecircle.com/halo/competition"><strong>Halo Competition, Dec 1–10 · $200k in cash prizes · apply by Nov 30</strong></a>
 </p>
@@ -41,6 +45,9 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 The Halo Competition runs Dec 1–10. There are tracks for making Halo faster on a model family and for post-training one on a task you pick, and best-use tracks from the partners and White Circle. The prizes are $200k in cash and $1.5M in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others.
 
 Apply by Nov 30: [details](https://whitecircle.com/halo/competition) · [apply](https://luma.com/ykoj0t48).
+
+[CONTRIBUTING.md](CONTRIBUTING.md#halo-competition) says where Halo bugs and competition questions go
+during the competition.
 
 </br>
 

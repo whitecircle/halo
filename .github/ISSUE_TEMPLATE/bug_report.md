@@ -9,6 +9,8 @@ labels: bug
      Question / support (a how-to), or Documentation (a docs error). Opening a PR needs an accepted
      issue + maintainer approval — see CONTRIBUTING.md; unapproved PRs are auto-closed. -->
 
+- [ ] I'm taking part in the Halo Competition
+
 ## Summary
 
 <!-- One or two sentences. -->
@@ -17,7 +19,7 @@ labels: bug
 
 - GPU(s): <!-- e.g. 8x B300 / 8x H200 -->
 - Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.3.0rc2 -->
-- Halo version / commit: <!-- git rev-parse --short HEAD, or the release tag -->
+- Halo version / commit: <!-- git rev-parse --short HEAD in a clone, the release tag, or the Version line of `pip show halo` in the image -->
 - Parallelism: <!-- FSDP / EP=? / CP=? / TP=? / ETP=? / PP=? -->
 - Model + config: <!-- HF id + the YAML / command -->
 

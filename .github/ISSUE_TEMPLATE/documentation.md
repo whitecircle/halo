@@ -9,6 +9,8 @@ labels: documentation
      propose a code change use Feature request / proposal. Fixing docs still goes through the gate — an
      accepted issue + maintainer approval before a PR (see CONTRIBUTING.md). -->
 
+- [ ] I'm taking part in the Halo Competition
+
 ## Page / section
 
 <!-- The doc page(s) or README section — a path under human-docs/ or agent-docs/, or a URL. -->

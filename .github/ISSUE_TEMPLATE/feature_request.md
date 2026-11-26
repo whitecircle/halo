@@ -10,6 +10,8 @@ labels: enhancement
      maintainer comments `/approve @your-handle` here, which clears you to open a PR (see CONTRIBUTING.md).
      Interest alone does not reserve or approve the work; unapproved PRs are auto-closed. -->
 
+- [ ] I'm taking part in the Halo Competition
+
 ## What & why
 
 <!-- What should change, and what problem it solves. Who benefits? -->

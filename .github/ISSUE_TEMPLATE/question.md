@@ -9,6 +9,8 @@ labels: question
      Use Bug report. Proposing a change? Use Feature request / proposal. Idle issues are auto-closed
      by the stale bot — comment to keep yours active; a maintainer can reopen a closed one. -->
 
+- [ ] I'm taking part in the Halo Competition
+
 ## What are you trying to do?
 
 <!-- The goal, not just the error. -->
@@ -21,4 +23,5 @@ labels: question
 
 - GPU(s): <!-- e.g. 8x B300 / 8x H200 -->
 - Image tag: <!-- halo:blackwell / hopper, or public.ecr.aws/whitecircle/halo:blackwell-1.3.0rc2 -->
+- Halo version / commit: <!-- git rev-parse --short HEAD in a clone, the release tag, or the Version line of `pip show halo` in the image -->
 - Model + parallelism: <!-- HF id + FSDP / EP=? / CP=? / TP=? / ETP=? / PP=? -->

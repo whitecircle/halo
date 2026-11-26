@@ -3,3 +3,7 @@ contact_links:
   - name: Security vulnerability
     url: https://github.com/whitecircle/halo/security/policy
     about: Report vulnerabilities privately — never in a public issue. See SECURITY.md.
+  # Temporary, for the Halo Competition: after Dec 18 remove this comment and the entry's three lines below.
+  - name: Halo Competition rules, teams and submissions
+    url: https://whitecircle.com/halo/competition
+    about: Ask the organizers on the competition Discord or at hello@whitecircle.com, and report to them a loophole in a track's benchmark or a bug that changes a track's score. Any other Halo bug or question goes in an issue here.
