@@ -111,10 +111,12 @@ notes' size ([default](README.md#configuration)).
   [episode output budget](../../../episodes.md#episode-output-budget) affords no further turn, ends the episode
   truncated, which pays the overflow. Counters: [Behavior counters](reward.md#behavior-counters).
 - The [audit judge](reward.md#audit-judge) reads the messages and the notes as the policy's working, beside its
-  reasoning where one is shown (`NOTES_CHECK_DESCRIPTIONS`): `reasoning_in_actions` covers programs alone, a notes call
-  is never a `notepad_run`, and `verdict_probe` reads intent from the messages and notes too. Two logged checks audit
-  the notes, `false_record` and `unexplained_program`. The no-thinking recipes give the judge `notes-no-thinking.txt`
-  as its [context](reward.md#audit-judge).
+  reasoning where one is shown (`NOTES_CHECK_DESCRIPTIONS`): `reasoning_in_actions` covers submitted and cut programs
+  alone, a scratchpad call refused for the spent budget is `reasoning_in_runs` whatever its
+  [mark](reward.md#audit-judge), a notes call is never a `notepad_run`, and `verdict_probe` reads intent from the
+  messages and notes too and leaves a run the policy misread and recorded as matching to `false_record`. Two logged
+  checks audit the notes, `false_record` and `unexplained_program`. The no-thinking recipes give the judge `notes-no-thinking.txt`
+  as its [context](reward.md#audit-judge), the thinking one `notes-thinking.txt`.
 - The prompt is a function of the history alone (`observation_view`). Its notes turn moves to the end of every prompt,
   so no prompt extends the one before it and training needs `train_on_sampled_tokens: true`
   ([Single-row fallback](../../../objective.md#single-row-fallback)).

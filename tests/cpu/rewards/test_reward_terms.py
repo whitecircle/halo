@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """Reward terms parsed from a ``rewards:`` list and priced as ``weight * score ** exponent``."""
 
+import dataclasses
 import math
 
 import pytest
@@ -9,8 +10,9 @@ from halo.configs.grpo_environmental import EnvironmentConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 from halo.rewards.composer import RewardComposer
-from halo.rewards.graders.verifiable import AccuracyTerm, FormatTerm
+from halo.rewards.graders.verifiable import RLVR_REWARD_SOURCES, AccuracyTerm, FormatTerm
 from halo.rewards.terms import (
+    ENVIRONMENT_REWARD_SOURCES,
     Check,
     EnvironmentTerm,
     JudgeReasoningEffort,
@@ -370,6 +372,17 @@ def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
     assert [type(term) for term in args.reward_terms] == [AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm]
     with pytest.raises(ValueError, match="unknown reward source 'environment'"):
         OnlineGRPOScriptArguments(rewards=[{"source": "environment"}])
+
+
+@pytest.mark.parametrize(
+    ("config", "sources"),
+    [(OnlineGRPOScriptArguments, RLVR_REWARD_SOURCES), (EnvironmentConfig, ENVIRONMENT_REWARD_SOURCES)],
+    ids=["online", "environment"],
+)
+def test_each_arms_rewards_help_names_every_source_it_admits(config, sources):
+    """``--help`` is where a user looks up the sources; one it leaves out reads as unsupported."""
+    help_text = next(field for field in dataclasses.fields(config) if field.name == "rewards").metadata["help"]
+    assert [source for source in sources if f"'{source}'" not in help_text] == []
 
 
 def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():

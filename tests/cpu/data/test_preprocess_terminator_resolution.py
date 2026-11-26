@@ -8,12 +8,17 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from halo.data.preprocessed import tokenization
-from halo.data.preprocessed.metadata import PreprocessingConfig, load_preprocessed_metadata
+from halo.data.preprocessed.metadata import (
+    PreprocessingConfig,
+    load_preprocessed_metadata,
+    verify_preprocessed_dataset,
+)
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.prepare_dataset_tool import apply_tokenizer_overrides
 from halo.data.turn_markers import resolve_eos_token_ids
 from halo.model_loading.tokenizer_setup import sync_special_token_id
 from tests.common.models import GEMMA4_26B_A4B, GLM4_FLASH, GPT_OSS_20B_OPENAI, QWEN3_0_6B
+from tests.common.open_turn_templates import GLM_ANSWER_CLOSER, GLM_CALL_CLOSER, load_open_turn_tokenizer
 from tests.common.tokenizers import (
     load_cached_config,
     load_cached_generation_config,
@@ -121,6 +126,34 @@ def test_a_chat_bake_records_the_terminators_it_closed_its_rows_against(tmp_path
     text_config = PreprocessingConfig(model_name_or_path=QWEN3_0_6B, max_length=128, mode="text", num_proc=1)
     text = preprocess_dataset(Dataset.from_dict({"text": ["Two plus two is four."]}), tokenizer, text_config)
     assert text["metadata"].eos_token_ids is None
+
+
+def test_a_chat_bake_records_what_closes_an_open_last_turn(monkeypatch, tmp_path):
+    """GLM's role marker after a call and after an answer, with or without tools, which a run on the same template
+    and terminators accepts; a raw-text bake closes no turn and records none."""
+    tokenizer, model_config = load_open_turn_tokenizer("hub")
+    monkeypatch.setattr(tokenization.AutoConfig, "from_pretrained", lambda *args, **kwargs: model_config)
+    config = PreprocessingConfig(model_name_or_path=GLM4_FLASH, max_length=128, num_proc=1)
+    output_dir = tmp_path / "chat"
+    preprocess_dataset(_corpus(), tokenizer, config, output_dir=str(output_dir))
+    metadata = load_preprocessed_metadata(str(output_dir))
+    answer, call = tokenizer.convert_tokens_to_ids([GLM_ANSWER_CLOSER, GLM_CALL_CLOSER])
+    assert metadata.final_turn_closer_ids == {
+        "answer": answer,
+        "answer_with_tools": answer,
+        "call": call,
+        "call_with_tools": call,
+    }
+    verify_preprocessed_dataset(
+        metadata,
+        required_max_length=128,
+        run_processing_class=tokenizer,
+        required_eos_token_ids=frozenset(metadata.eos_token_ids),
+    )
+
+    text_config = PreprocessingConfig(model_name_or_path=GLM4_FLASH, max_length=128, mode="text", num_proc=1)
+    text = preprocess_dataset(Dataset.from_dict({"text": ["Two plus two is four."]}), tokenizer, text_config)
+    assert text["metadata"].final_turn_closer_ids is None
 
 
 @pytest.mark.parametrize(

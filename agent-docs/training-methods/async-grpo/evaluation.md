@@ -110,7 +110,7 @@ python scripts/environments/inference/regrade_trajectories.py \
     "$HALO_DATA_ROOT/eval/trajectories"/*.jsonl --max_workers 64 --output_path regraded.jsonl
 ```
 
-It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection` and replays every admitted `submit_solution` (a refused call, a mislabelled language or a repeat of a graded program takes no slot) under the recorded `env_grading` (the grading settings the meta line records):
+It rebuilds each problem's hidden tests by `index` under the meta line's contest `selection` and replays every admitted `submit_solution` (a refused call or a mislabelled language takes no slot; a repeat of a graded program takes its slot and the earlier grade) under the recorded `env_grading` (the grading settings the meta line records):
 
 - up to the episode's own submission budget (the rebuilt environment's `max_submissions` for an episode that stamped none);
 - stopping at the first failing test, without `max_grading_seconds`.

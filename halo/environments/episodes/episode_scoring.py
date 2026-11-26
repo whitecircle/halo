@@ -20,7 +20,13 @@ from halo.environments.episodes.episode_keys import (
 )
 from halo.environments.episodes.messages import Message, Trajectory
 from halo.rewards.composer import RewardComposer
-from halo.rewards.samples import CUT_TOOL_CALLS_KEY, REFUSED_CALL_IDS_KEY, TURN_FLAG_NOTES, ScoringSample
+from halo.rewards.samples import (
+    CALL_NOTES_KEY,
+    CUT_TOOL_CALLS_KEY,
+    REFUSED_CALL_IDS_KEY,
+    TURN_FLAG_NOTES,
+    ScoringSample,
+)
 from halo.rewards.scorers.base import ScoreResult
 from halo.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
@@ -132,6 +138,11 @@ class EpisodeScoringMixin:
         if self._rewards.external_terms:
             asyncio.run(self._rewards.verify())
 
+    def build_scorers(self) -> None:
+        """Build every external term's scorer ahead of the first settlement, so one this host cannot build (its key
+        unset) raises here and not in each settlement."""
+        self._rewards.build_scorers()
+
     async def settle_async(self, episode_ids: list[int]) -> None:
         """Every scorer runs concurrently over the batch; an episode without a pending reward is a no-op."""
         pending = [trajectory for trajectory in self._episodes(episode_ids) if REWARD_PENDING_KEY in trajectory.info]
@@ -237,6 +248,8 @@ class EpisodeScoringMixin:
             rendered[CUT_TOOL_CALLS_KEY] = message.cut_tool_calls
         if message.refused_call_ids:
             rendered[REFUSED_CALL_IDS_KEY] = list(message.refused_call_ids)
+        if message.call_notes:
+            rendered[CALL_NOTES_KEY] = dict(message.call_notes)
         return rendered
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:

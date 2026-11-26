@@ -25,7 +25,7 @@ from halo.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME, RUN_LOG_FILE
 from halo.model_loading.dtype import configure_float32_matmul_precision
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import reject_across_ranks
-from halo.runtime.filesystem import FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank
+from halo.runtime.filesystem import FS_PROBE_PREFIX, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -115,8 +115,7 @@ def configure_training_run(args, training_config, script_name: str, *, overwrite
     if not (getattr(training_config, "resume_from_checkpoint", None) or overwrite_output_dir):
         _validate_output_dir_across_ranks(training_config.output_dir)
 
-    # Read-side election, unlike the per-node default the coordinated dataset ops use.
-    hf_datasets_cache = ensure_cache_dir(writer_rank=is_fs_load_rank)
+    hf_datasets_cache = ensure_cache_dir()
     datasets.config.HF_DATASETS_CACHE = Path(hf_datasets_cache)
     os.environ["HF_DATASETS_CACHE"] = hf_datasets_cache
 

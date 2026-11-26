@@ -97,6 +97,16 @@ a [notes SFT checkpoint](#notes-sft-checkpoint). It has no length terms: the pro
 `resubmission_penalty` 0.1: a failure there has no free stop, so spending every submission left must cost less than
 running out ([Economy invariants](reward.md#economy-invariants)).
 
+`qwen3.6-35b-a3b-code-contests-notes-full-ep1-codeforces.yaml` runs the stage-1 pool with the notes harness and the
+reasoning step on, from the base. It keeps the thinking curriculum's caps and length terms, with the notes recipes'
+`resubmission_penalty` 0.1, so its `reasoning_floor` (0.15) and `reasoning_price_cap` (0.18) stay under one more failed
+submission at 0.2, and its per-level prices (0.005, 0.004, 0.003 per 1,000 tokens) fall with the cap. No turn sees an
+earlier turn's reasoning (`carry_reasoning` stays off): the notes carry what later turns need, and the judge reads
+`notes-thinking.txt` as its context.
+
+Every notes recipe grades with `stop_on_first_failure: true`. Each test runs in a fresh sandbox jail, so grading a wrong
+program to the end would spend the [grading budget](grading.md#grading-budget) on tests already decided.
+
 ### Notes SFT checkpoint
 
 The model fine-tuned on teacher episodes of the notes harness, rendered with the recipe's chat template, one row per

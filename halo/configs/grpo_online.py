@@ -77,7 +77,7 @@ class OnlineGRPOScriptArguments(
         metadata={
             "help": "Reward terms, each {source, name?, weight?, exponent?, ...} and one TRL reward function: "
             "'accuracy' (the last \\boxed{} equals the answer), 'format' (pattern), 'judge' (a veto judge listing "
-            "checks is refused here) or 'reward_model'. YAML-only. "
+            "checks is refused here), 'reward_model' or 'whitecircle'. YAML-only. "
             "See agent-docs/training-methods/grpo/rewards/README.md."
         },
     )

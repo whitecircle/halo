@@ -110,7 +110,7 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | `model.safetensors` (or sharded + index) | Yes | Yes | Weights, a trained [MTP head](../optimization/mtp-heads.md#checkpoints) under its release keys included |
 | `config.json`, `tokenizer.*` (full processor for VLMs and for RL runs on a multimodal checkpoint, whose `processing_class` stays the tokenizer) | Yes | Yes | Architecture config + `processing_class` |
 | `generation_config.json` | Yes | Yes | Sampling defaults, stop strings and the custom `eos_token_id` set — written for a generative model only, and paired with `config.json` by `save_model_config`. `PretrainedConfig` does not carry it, so a save that writes only `config.json` serves with defaults. |
-| `trainer_state.json` | Yes | Yes | Step count, epoch, loss history — published last ([Interrupted saves](#interrupted-saves)) |
+| `trainer_state.json` | Yes | Yes | Step count, epoch, loss history, and a `token_sources` run's mix fingerprint ([Pre-training](../training-methods/pretraining.md#training-from-datatrove-token-folders)) — published last ([Interrupted saves](#interrupted-saves)) |
 | `optimizer_shard_XXXXX.pt` | Yes | No | Per-rank optimizer shard — every torchrun sharded mode. Under multi-group EP only the replica group's lowest rank carries the replicated (FSDP-ignored) expert state; its peers read it from that shard |
 | `optimizer_meta.pt` | Yes | No | Topology fingerprint gating exact resume |
 | `scheduler.pt` | Yes | Yes | LR scheduler state — re-persisted on every mode so resume continues the schedule |

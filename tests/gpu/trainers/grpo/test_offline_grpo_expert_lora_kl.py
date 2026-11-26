@@ -4,6 +4,7 @@ Qwen3-MoE."""
 
 import math
 import os
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -31,10 +32,13 @@ from tests.common.distributed import pin_deterministic_ep_dispatch, shared_outpu
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
+    agree_kl_rows,
     completion_logps,
     doubled_head_kl_verdict,
     doubled_output_head,
+    eager_oracle,
     export_scores_finite,
+    kl_oracle_training_set,
     offline_grpo_config,
     offline_grpo_dataset,
     offline_grpo_trainer,
@@ -125,7 +129,9 @@ def _reference_oracle(ctx, reference, base, checkpoint, checks):
 
 
 def _kl_oracle(ctx, trainer, export, checks):
-    batch = pure_kl_batch(trainer)
+    rows = agree_kl_rows(partial(eager_oracle, export, ctx.device), trainer.train_dataset)
+    checks["kl_rows_clear_routing_noise"] = rows.clear
+    batch = pure_kl_batch(trainer, rows.rows)
     oracle = _fa2_model(export, ctx.device)
     with doubled_output_head(oracle), torch.no_grad():
         policy = completion_logps(oracle, batch)
@@ -144,7 +150,7 @@ def run(ctx):
     if ctx.rank == 0:
         save_offline_moe_base(base, SEED)
     dist.barrier()
-    train, evaluation = offline_grpo_dataset(24), offline_grpo_dataset(8, 4)
+    train, evaluation = kl_oracle_training_set(24, SEED), offline_grpo_dataset(8, 4)
     trainer = _build(ctx, base, output, train, evaluation)
     only_adapters, reason = check_only_adapters_trainable(trainer.model)
     checks = {

@@ -152,8 +152,9 @@ _ROLE_DELIMITED_TEMPLATE = (
 
 @pytest.mark.parametrize("completions_only", [True, False], ids=["completions-only", "all-tokens"])
 def test_an_open_last_turn_is_closed_ahead_of_the_newline_the_processor_appends(completions_only):
-    """The eos goes into the text the processor takes, so the row ends as one whose template writes its own eos:
-    the eos trains, the newline after it does not, and the suffix opens where it did."""
+    """The ``<|user|>`` the template writes after an answer goes into the text the processor takes, so the row ends as
+    one whose template writes its own terminator: it trains, the newline after it does not, and the suffix opens where
+    it did."""
     processor = _newline_keeping_processor()
     tokenizer = processor.tokenizer
     tokenizer.add_special_tokens(
@@ -161,7 +162,8 @@ def test_an_open_last_turn_is_closed_ahead_of_the_newline_the_processor_appends(
     )
     processor.chat_template = _ROLE_DELIMITED_TEMPLATE
     config = tiny_paligemma_config(processor)
-    config.eos_token_id = [tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|user|>")]
+    closer = tokenizer.convert_tokens_to_ids("<|user|>")
+    config.eos_token_id = [tokenizer.eos_token_id, closer]
     collator = VLMDataCollator(
         processor,
         tokenizer,
@@ -174,8 +176,8 @@ def test_an_open_last_turn_is_closed_ahead_of_the_newline_the_processor_appends(
     batch = collator([digit_row(3)])
 
     tokens = tokenizer.convert_ids_to_tokens(batch["input_ids"][0].tolist())
-    assert tokens[-4:] == ["3", ".", "<eos>", "\n"]
-    assert batch["labels"][0, -2] == tokenizer.eos_token_id and batch["labels"][0, -1] == IGNORE
+    assert tokens[-4:] == ["3", ".", "<|user|>", "\n"]
+    assert batch["labels"][0, -2] == closer and batch["labels"][0, -1] == IGNORE
     _assert_suffix_from_first_scored(batch["labels"][0], batch["token_type_ids"][0])
 
 

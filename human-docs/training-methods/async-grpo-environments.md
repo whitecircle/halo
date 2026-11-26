@@ -20,7 +20,8 @@ advantage, and the loss drives the optimizer step](../../agent-docs/assets/diagr
 `environment_type` picks one: `react_math` and `react_search` (plain-text actions), `native_math`,
 `native_coding` and `native_combined` (native tool calls), `qa_search`, `exam_qa`, `swe` (an
 edit-run-test loop over a workspace), `code_contests`, `codeforces`, or `mcp` (whatever tools an MCP
-server advertises). The
+server advertises). Your own environment class registers alongside these
+([Custom Environments](../../agent-docs/training-methods/async-grpo/environments/custom.md) ↗). The
 [registry](../../agent-docs/training-methods/async-grpo/environments/README.md#registry) ↗ lists each
 one's tools and turn budget. An environment that grades against `answer` refuses a dataset without that
 column at startup
@@ -28,8 +29,10 @@ column at startup
 
 The Ray actor hosts need what their environment needs: a sandbox and a large `TMPDIR` for the code
 environments, outbound network and usually a search API key for the search ones, and the MCP server's
-launcher on `PATH` for `mcp`. Your own environment class registers alongside these
-([Custom Environments](../../agent-docs/training-methods/async-grpo/environments/custom.md) ↗).
+launcher on `PATH` for `mcp`. The actors also score the `judge`, `reward_model` and `whitecircle` terms, so
+their hosts need those terms' keys, a route to their services and a reward model's tokenizer. On a cluster
+joined with `ray_address`, export the keys before `ray start` on each node: actors take that daemon's
+environment, not the trainer's.
 
 > [!WARNING]
 > The default `local` sandbox does not confine the program it runs. Policy-written code can read the
@@ -63,14 +66,17 @@ rewards:
   - source: environment    # the env's grade in [0, 1]: a solved problem, an answer match, a passing test
 ```
 
-`judge`, `reward_model` and `whitecircle` terms take the same options as on the [online arm](online-grpo.md#rewards).
+`judge`, `reward_model` and `whitecircle` terms work here as in online GRPO ([GRPO Rewards](rewards.md)).
 Only this arm also accepts a **veto judge**, a `judge` that lists `checks`: a fired veto check strips the
 episode of its credit
 ([Veto judge](../../agent-docs/training-methods/grpo/rewards/judge.md#veto-judge) ↗).
 
-Every code-contests recipe audits the whole episode this way, vetoing hacks and tool misuse. These recipes
-set `on_error: invalid`, so a judge outage trains nothing, and a second step in a row with no valid
-episode stops the run
+Every code-contests recipe audits the whole episode this way, vetoing hacks and tool misuse. The auditor is
+`openai/gpt-6-luna` through OpenRouter: every training and eval episode sends it the whole transcript,
+reasoning included, so the run needs `OPENROUTER_API_KEY` and makes one judge request per episode
+(`judge/audit/completion_tokens` and `judge/audit/cost_usd` show what they cost). These recipes set
+`on_error: invalid`, so a judge outage trains nothing, and a second step in a row with no valid episode stops
+the run
 ([Audit judge](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/reward.md#audit-judge) ↗).
 
 Each component logs as `reward/<name>` (`reward/objective` for the environment term)
@@ -200,8 +206,8 @@ the same loop: set `eval_strategy`, and `num_generations_eval: 1` for a fast pas
   KL-free run is drifting instead: arm the early stop with `early_stop_entropy_band` or
   `early_stop_logratio_gap` (`balance_token_mass` cancels the net push, whose measured
   entropy effect is small).
-- `episode/reward_scored` below 1 means a judge or reward model is failing; `<source>/<name>/scored`
-  names which one. Under `on_error: invalid` those episodes also leave training, and
+- `episode/reward_scored` below 1 means a judge, reward model or White Circle check is failing;
+  `<source>/<name>/scored` names which one. Under `on_error: invalid` those episodes also leave training, and
   `sampling/invalid_episode_frac` rises.
 
 Rollouts land in `<output_dir>/completions/` as parquet, one directory per logged step holding a part

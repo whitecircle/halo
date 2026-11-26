@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 """Tree packing trains exactly the rows it is given: every root-to-leaf path carries the tokens and labels the flat
 packed pipeline gives that row, compared example by example with the production GPT-OSS tokenizer and template.
-Also pins the share key, its ordering and the collator's refusals."""
+Also pins the share key, its ordering, the collator's refusals and the rows of nodes deriving other worker counts."""
 
+import json
+import os
 import random
 import sys
 from types import SimpleNamespace
@@ -47,8 +49,10 @@ from halo.models.attention import selection
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table
 from scripts.training import sft as sft_script
 from scripts.training.sft import _prepare_text_data
+from tests.common.gloo import run_gloo_ranks
 from tests.common.models import GPT_OSS_20B
 from tests.common.open_turn_templates import (
+    GLM_ANSWER_CLOSER,
     GLM_ASSISTANT_MARKER,
     OPEN_FINAL_TURN_TEMPLATES,
     TWO_EXCHANGES,
@@ -70,6 +74,9 @@ REQUIRES = "\nDocument:\n"
 WEATHER = (
     "Weather: does the document say it will rain, snow or blow in any city? Use the document alone, never memory."
 )
+# Two one-rank nodes on per-node storage, whose hosts derive these map worker counts.
+NODE_WORKER_COUNTS = (3, 1)
+PER_NODE_ENV = {"LOCAL_RANK": "0", "LOCAL_WORLD_SIZE": "1", "DIST_SHARED_FILESYSTEM": "0"}
 
 
 def _question_row(menu: str, answer: str, *, document: str = DOCUMENT, menu_first: bool = False) -> list[dict]:
@@ -91,12 +98,16 @@ def _conversations() -> list[list[dict]]:
     ]
 
 
-@pytest.fixture(scope="module")
-def tokenizer():
+def _load_tokenizer():
     tokenizer = load_cached_tokenizer(GPT_OSS_20B)
     tokenizer.chat_template = (REPO_ROOT / "jinja-templates" / "gpt-oss" / "gpt-oss-multiturn.jinja").read_text()
     tokenizer.padding_side = "right"
     return tokenizer
+
+
+@pytest.fixture(scope="module")
+def tokenizer():
+    return _load_tokenizer()
 
 
 def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, last_only=True) -> list[dict]:
@@ -247,7 +258,7 @@ def test_a_row_opening_on_the_response_marker_leaves_its_first_token_untrained_a
 @pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
 def test_a_tree_path_ending_on_an_open_assistant_turn_is_closed_and_trains_its_stop(name):
     """GLM's templates end an assistant turn only at the next role marker: every tree path, as a flat row, closes its
-    last turn with the terminator and trains it."""
+    last answer with the ``<|user|>`` the template writes after one and trains it."""
     glm, model_config = load_open_turn_tokenizer(name)
     glm.padding_side = "right"
     eos_token_ids = resolve_eos_token_ids(glm, model_config)
@@ -267,8 +278,9 @@ def test_a_tree_path_ending_on_an_open_assistant_turn_is_closed_and_trains_its_s
     trees = list(Dataset.from_dict(processor({"conversation": rows}), features=TREE_ROW_FEATURES))
     assert len(trees) == 1, "the two rows share their history up to the marker"
     examples = _tree_examples(_collate(glm, trees))
-    assert sorted(tokens for tokens, _ in examples) == sorted([*ids, glm.eos_token_id] for ids in plain)
-    assert all(labels[-1] == glm.eos_token_id for _, labels in examples), "a path's stop is not trained"
+    closer = glm.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    assert sorted(tokens for tokens, _ in examples) == sorted([*ids, closer] for ids in plain)
+    assert all(labels[-1] == closer for _, labels in examples), "a path's stop is not trained"
 
 
 def _run_sft_main(tmp_path, yaml_body: str) -> None:
@@ -496,6 +508,58 @@ def test_an_empty_split_is_refused_by_name(tokenizer):
             share_requires=REQUIRES,
             num_proc=None,
         )
+
+
+def _city_rows() -> DatasetDict:
+    """Ten runs of six rows, each over its own document: three map workers cut two of the runs, one worker none."""
+    rows = [
+        _question_row(
+            f'{{\n  "1": "Question {question}."\n}}',
+            f'{{"1": "no {question}"}}',
+            document=DOCUMENT.replace("rain", f"rain in city {city}"),
+        )
+        for city in range(10)
+        for question in range(6)
+    ]
+    return DatasetDict(
+        {"train": Dataset.from_dict({"conversation": rows}), "test": Dataset.from_dict({"conversation": rows[:6]})}
+    )
+
+
+def _built_trees(tokenizer, num_proc: int) -> list[dict]:
+    trees = prepare_tree_dataset(
+        _city_rows(),
+        tokenizer,
+        MAX_LENGTH,
+        conversation_field="conversation",
+        share_markers=MARKERS,
+        share_requires=REQUIRES,
+        num_proc=num_proc,
+        eos_token_ids=resolve_eos_token_ids(tokenizer),
+        assistant_message_template=RESPONSE,
+        train_on_last_assistant_only=True,
+    )
+    return trees["train"].to_list()
+
+
+def _node_worker(rank: int, tmp_dir: str) -> None:
+    """One node's load rank: its own cache, and the worker count its host derives."""
+    os.environ["HF_DATASETS_CACHE"] = os.path.join(tmp_dir, f"node{rank}")
+    trees = _built_trees(_load_tokenizer(), NODE_WORKER_COUNTS[rank])
+    with open(os.path.join(tmp_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump(trees, handle)
+
+
+def test_nodes_whose_hosts_derive_other_worker_counts_build_the_same_trees(tokenizer, tmp_path, monkeypatch):
+    """A worker boundary cuts a run into two trees, so per-node load ranks agree one count, and a node's cache built
+    under another count is not served: either way the nodes would hold other rows, and other row counts."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "node0"))
+    earlier = _built_trees(tokenizer, NODE_WORKER_COUNTS[0])  # node 0 alone, on its own count, in an earlier run
+    run_gloo_ranks(_node_worker, len(NODE_WORKER_COUNTS), str(tmp_path), env=PER_NODE_ENV)
+    built = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(len(NODE_WORKER_COUNTS))]
+
+    assert len(earlier) != len(built[1]), "the fixture must cut a run at one count and not at the other"
+    assert built[0] == built[1], f"the nodes hold other tree rows: {len(built[0])} against {len(built[1])}"
 
 
 def test_the_collator_refuses_a_node_that_starts_on_a_trained_token(tokenizer):

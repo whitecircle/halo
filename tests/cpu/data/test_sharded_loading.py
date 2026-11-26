@@ -9,6 +9,7 @@ from botocore.exceptions import ClientError, NoCredentialsError
 from datasets import Dataset, DatasetDict
 
 import halo.data.sources.loading as loading
+from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata
 from halo.data.preprocessed.preparation import shard_dataset
 from halo.data.preprocessed.shard_index import (
     SHARD_INDEX_FILE,
@@ -18,6 +19,7 @@ from halo.data.preprocessed.shard_index import (
     write_stamped_sidecar,
 )
 from halo.data.sources.loading import load_datasets, load_preprocessed_dataset
+from halo.data.sources.paths import METADATA_FILE
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 
 
@@ -36,6 +38,11 @@ def create_test_sharded_dataset(num_examples: int, num_shards: int, temp_dir: st
     write_stamped_sidecar(index_path, index)
 
     return temp_dir
+
+
+def _stamp_sharded(temp_dir: str, num_shards: int) -> None:
+    """The stamp a sharded bake writes beside its shard indexes; the preprocessed loader holds the layout to it."""
+    write_stamped_sidecar(os.path.join(temp_dir, METADATA_FILE), PreprocessedDatasetMetadata(num_shards=num_shards))
 
 
 def test_shard_assignment_multi_rank():
@@ -276,6 +283,7 @@ def test_load_preprocessed_dataset_empty_test_split_raises():
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # non-empty train
+        _stamp_sharded(temp_dir, 2)
         empty = Dataset.from_dict({"input_ids": [], "attention_mask": [], "example_id": []})
         index = shard_dataset(empty, output_dir=temp_dir, split_name="test", num_shards=2)
         assert index.total_examples == 0
@@ -299,6 +307,7 @@ def test_load_preprocessed_dataset_empty_train_split_raises(monkeypatch):
     )
     monkeypatch.setattr(loading, "_load_replicated", lambda path, test_size, placeholder_test: ds)
     monkeypatch.setattr(loading, "is_sharded_dataset_across_ranks", lambda path: False)
+    monkeypatch.setattr(loading, "load_preprocessed_metadata", lambda path: PreprocessedDatasetMetadata())
 
     with pytest.raises(ValueError, match="(?i)train"):
         loading.load_preprocessed_dataset("unused", data_parallel_rank=0, data_parallel_size=1)
@@ -309,6 +318,7 @@ def test_load_preprocessed_dataset_missing_test_split_fails_loud():
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)  # writes only the train split
+        _stamp_sharded(temp_dir, 2)
         with pytest.raises(ValueError, match="missing the .*test.*split"):
             load_preprocessed_dataset(temp_dir, data_parallel_rank=0, data_parallel_size=1)
     finally:
@@ -319,6 +329,7 @@ def test_load_preprocessed_dataset_nonempty_test_split_loads():
     temp_dir = tempfile.mkdtemp()
     try:
         create_test_sharded_dataset(20, 2, temp_dir)
+        _stamp_sharded(temp_dir, 2)
         test_ds = Dataset.from_dict(
             {
                 "input_ids": [[i, i + 1, i + 2] for i in range(6)],

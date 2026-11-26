@@ -214,6 +214,17 @@ are enforced by `tests/cpu/conventions/`.
   weights sit on their device: transformers 5 leaves a remote-code family's rotary table as uninitialized memory,
   and a bare oracle reads that noise as the parallel run's error. `tests/cpu/model_loading/test_load_finalization.py`
   fails a load by a family's own `trust_remote_code` in a module that runs a forward without it.
+- **A bf16 MoE oracle compares only rows whose routing outlasts kernel noise.** Where a router's top-k
+  margin sits inside bf16 noise, the trainer and the oracle can pick different experts, and later layers
+  then move far past any tolerance. `routing_clear_rows` (`tests/common/offline_grpo.py`) clears a row
+  where a bf16 oracle holds fp32's choices and every router's fp32 margin beats twice the largest
+  bf16-vs-fp32 logit difference at each position a scored log-prob reads. That bar covers only the
+  oracle's own kernels, and the trainer's go unmeasured, so a comparison takes only rows whose margin is
+  also `ROUTING_HEADROOM` times that difference. The KL batch takes two of them: rows with twice that
+  headroom first, then the most completion tokens. Scan the policy the check compares: doubling a tied head moves the routers. The
+  offline-GRPO KL suites train beside a random-word pool so enough rows qualify, and fail
+  `kl_rows_clear_routing_noise` (the KL batch) or `reference_rows_clear_routing_noise` (the CP suite's
+  unsharded reference rows) when too few do.
 - **Deterministic, seeded data.** GPU tests generate synthetic problems from a fixed seed; only rank 0
   prints. A seed alone does not fix a chat-templated batch, because `strftime_now` stamps the live date
   (gpt-oss's harmony system message), so build fixed batches through
@@ -426,6 +437,7 @@ python -m tests.common.goldens.<name> --regen  # rewrites it from today's code
 | `weight_sync_wire` | The vLLM weight-transfer bootstrap: the rendezvous `TCPStore` arguments, its one write (the pickled `ncclUniqueId` under `broadcast_from/0/0`), the id the communicator initializes with, and the class's module, qualname and fields | `tests/cpu/weight_sync/test_wire_pins.py` |
 | `weight_sync_transcript` | What each engine's client sends through its public lifecycle in twelve scenarios per engine (dense and MoE syncs, formation and finish failures, aborts before and mid-stream, an unusable client at exit): every request with its route, body, timeout and retry policy, what went on the NCCL wire, and the at-exit hooks left | `tests/cpu/weight_sync/test_request_transcript.py` |
 | `registry_order` | What each toolkit registry holds, in its own order: the EP layer classes and their claims, the CP, PP and head claims, the weight-sync clients, the Liger and MoE family specs, the sequence-classification heads, the named optimizers and the environment types | `tests/cpu/conventions/test_registry_order.py` |
+| `token_mix_stream` | The source and window each of the first 12,288 samples of a fixed weighted mix over two task files of the recorded 4-byte datatrove folder reads, and a digest of their rows | `tests/cpu/data/test_token_mix.py` |
 
 The grid (`tests/common/goldens/shape_grid.py`) is every shape `ParallelismConfig` accepts with a pipeline
 stage of at most 32 ranks, at every NVLink domain dividing the stage, plus the same sweep at 64, 72, 128,
@@ -449,6 +461,12 @@ per shape plus the full record of a readable subset, so a failure reads as a dif
   the class, and move the shim with it.
 - **`weight_sync_transcript`.** The clients run against `FakeVLLMServer` and `FakeSGLangServer`
   (`tests/common/fake_engines.py`) with NCCL and CUDA faked on the CPU.
+- **`token_mix_stream`.** A checkpoint resumes by sample index, so a change to the order resumes runs onto other
+  rows and comes with a raised `ORDER_VERSION` (`halo/data/sources/token_mix.py`). Its two sources are the two task
+  files of the 4-byte source in `tests/common/datatrove_shards.json`, since a mix holds one token width. That record
+  is the files datatrove 0.10.1 wrote for two sources (2- and 4-byte ids) beside each document tokenized apart from
+  datatrove. No image ships datatrove, so that record is re-written by hand with it
+  importable: `python -m tests.common.datatrove_shards --write`.
 - **`registry_order`.** The check renders in a fresh interpreter, so the order is the one the code and
   the generator's imports produce, and classes are recorded by name, so a move that keeps each name and
   its order leaves the file unchanged.

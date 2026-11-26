@@ -23,7 +23,7 @@ The `scripts.*` flag helpers are the shared flag surfaces:
 
 The generation CLIs' runs live in `halo/entrypoints/`: `resumable_generation.py` (the S3 prompt dataset and its resume, the merged push, the empty-run refusal, the batched generation run and `run_async_cli`), `reward_scoring.py` (the reward-model load, built on a CUDA device through `apply_family_patches` as a training load is and on CPU with the backend as given, and refused when the backend drops the live sinks a GptOss checkpoint holds, plus the batched scorer and the `score.py` run) and `rejection_sampling.py` (the `rejection_sample.py` run).
 
-Multi-word flags use underscores (`--base_url`), matching the YAML field names a training flag overrides; a training script also takes the dashed spelling of an override ([CLI overrides](configuration-reference.md#cli-overrides)). A tool's on/off flag is negated by argparse's `--no-` prefix (`--no-trust_remote_code`), and a tool flag that is itself a negative keeps underscores (`--no_overwrite`). A training script's flags-only command line also takes transformers' `--no_<field>` for a field that defaults to true (`--no_gradient_checkpointing`); with a YAML, override it as `--<field>=false`. Beyond argparse's `-h`, short options exist only on `s3.py` (`-b`, `-s`, `-v`, `-q`, `-r`, `-n`, `-y`), `gradio_openai_chatbot.py` (`-m`) and `halo launch` (`-n`, `-a`, `-p`). One concept has one spelling across the tools: `--output_dir` for an output directory, `--output_path` for an output file, `--dataset` / `--split` / `--config` for a dataset source, `--model_id` for a model that may be a Hub repo (the reward-model scorers prefix it, `--rm_model_id`, beside the served `--model`; `prepare_dataset.py`'s flags are its config's fields, so it spells `--model_name_or_path`), `--max_tokens` for a generation cap and `--max_workers` for request or episode concurrency.
+Multi-word flags use underscores (`--base_url`), matching the YAML field names a training flag overrides; a training script also takes the dashed spelling of an override ([CLI overrides](configuration-reference.md#cli-overrides)). A tool's on/off flag is negated by argparse's `--no-` prefix (`--no-trust_remote_code`), and a tool flag that is itself a negative keeps underscores (`trace_report.py --no_collective`). A training script's flags-only command line also takes transformers' `--no_<field>` for a field that defaults to true (`--no_gradient_checkpointing`); with a YAML, override it as `--<field>=false`. Beyond argparse's `-h`, short options exist only on `s3.py` (`-b`, `-s`, `-v`, `-q`, `-r`, `-n`, `-y`), `gradio_openai_chatbot.py` (`-m`) and `halo launch` (`-n`, `-a`, `-p`). One concept has one spelling across the tools: `--output_dir` for an output directory, `--output_path` for an output file, `--dataset` / `--split` / `--config` for a dataset source, `--model_id` for a model that may be a Hub repo (the reward-model scorers prefix it, `--rm_model_id`, beside the served `--model`; `prepare_dataset.py`'s flags are its config's fields, so it spells `--model_name_or_path`), `--max_tokens` for a generation cap and `--max_workers` for request or episode concurrency.
 
 The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, `reset_sinks.py`). `reattach_vision_tower.py` takes both: `--input_dir` for the text-only export, `--model_id` for the multimodal base. A Hub `--model_id` is fetched without its vendor weight dumps (gpt-oss's `original/` and `metal/`), which no tool reads or carries into its output.
 
@@ -155,9 +155,9 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     `patch_vocab.py`, whose save would overwrite the source's shards in place with no undo, and
     whose post-save sweep then deletes every source shard the save did not rewrite.
 
-    `prepare_dataset.py` is not one of them: it bakes into a staging sibling of its `--output` (a temp
-    directory for S3 or the Hub) and publishes with a swap once the bake is done, so its `--output` is
-    guarded by `--overwrite`, not by this refusal.
+    `prepare_dataset.py` is not one of them: it bakes into a staging sibling of its `--output` (a
+    directory under `HF_DATASETS_CACHE` for S3 or the Hub) and publishes with a swap once the bake is done, so
+    its `--output` is guarded by `--overwrite`, not by this refusal.
 
     `reset_sinks.py` is the exception: it stages and verifies every shard it rewrites before any
     replaces its target, so in-place is safe there, but never implicit. It takes `--in_place`; an `--output_dir` aimed at
@@ -235,7 +235,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 | `scripts/before_training/score_offline_grpo.py` | Write an offline-GRPO JSONL's `rewards` with a training YAML's `rewards` list, through the online arm's reward functions; a completion a term left unscored is dropped and counted ([White Circle → Offline GRPO](../training-methods/grpo/rewards/whitecircle.md#offline-grpo)) |
 | `scripts/before_training/create_whitecircle_policies.py` | Create the policy sets of a JSON file in a White Circle environment, select them with the `halo-grpo` condition, and print the matching `rewards:` block. A same-named policy is reused when its rules match and replaced when `halo-grpo` alone selects it; any other stops the run before a write. `--dry-run` prints what a run would reuse, replace and create ([White Circle](../training-methods/grpo/rewards/whitecircle.md)) |
 | `scripts/before_training/prepare_baxbench_prompts.py` | Write BaxBench's single-file backend tasks as GRPO prompts into `--output-dir`: `train.jsonl` and `heldout.jsonl`, split by scenario so the held-out apps are ones training never saw (`--heldout-scenarios`, default 8 of 28; `--seed` of the split, default 0) |
-| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder at a bare key under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`) or at a full `s3://bucket/key` URI. `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
+| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder at a bare key under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`) or at a full `s3://bucket/key` URI. `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. `push` and `download` refuse an existing destination unless `--overwrite`. See [S3 Utilities](../data/s3-utilities.md) |
 | `scripts/before_training/deduplicate_dataset.py` | FAISS-based semantic deduplication. Keyed on `--text_field` alone: two rows with the same text collapse to one however they differ elsewhere, so an images column does **not** make them distinct — deduplicate a VLM dataset before pairing its images, or on a field that carries the difference. `--dataset` is a Hub dataset id, an `s3://` URI, a local data file or a `save_to_disk` directory, read at `--config`/`--split` like the eval CLIs' (`load_dataset_split`), and `--output_path` a local path |
 | `scripts/before_training/patch_vocab.py` | Add `--patterns` (a JSON list, inline or in a file) to `--model_id`'s vocabulary and resize its embeddings, new rows the mean of the existing ones, into a fresh `--output_dir`. Growth only; a pattern already one token is skipped, and a DeepSeek-V4 whose tokens outgrow the embedding is refused, as its `gate.tid2eid` has no row for them. `--chat_template` sets the tokenizer's template, `--reset_sinks` resets attention sinks to their minimum before the save. A stored [MTP head](../optimization/mtp-heads.md#checkpoints) of a family with one is written back, GLM-4's trunk copies off the grown embeddings; any other family's tail drops, with a warning. A source with no tokenizer file is refused |
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; a source storing no fp8 tensor is refused; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |
@@ -263,9 +263,14 @@ python scripts/before_training/patch_vocab.py \
 `deduplicate_dataset.py` embeds `--text_field` with `--model_id` (default `sentence-transformers/all-MiniLM-L6-v2`,
 capped at `--model_max_length` tokens, `--batch_size` per forward on `--device`), or reads `--load_embeddings <file.npy>`
 instead; `--save_embeddings [PATH]` keeps what it computed (default `<output_path>.embeddings.npy`) and is refused
-beside `--load_embeddings`. A row whose cosine similarity to an earlier one exceeds `--similarity_threshold` (`0.95`)
-is dropped, over `--dedup_steps` reshuffled passes (`3`) of `--dedup_batch_size` rows per search batch (`100000`) on
-`--max_workers` threads. `--sample_size N` runs on a seeded sample and `--keep_fields` whitelists the output columns.
+beside `--load_embeddings`. A row whose cosine similarity to an earlier row of its search block exceeds
+`--similarity_threshold` (`0.95`) is dropped, over `--dedup_steps` reshuffled passes (`3`) of `--dedup_batch_size` rows
+per block (`100000`) on `--max_workers` OpenMP threads (default: the CPUs the process may use).
+
+Rows in different blocks are never compared, so a duplicate pair meets with probability about `1 - (1 - batch/N)^steps` over `N` rows,
+which the run logs: at the defaults, about 27% of the pairs in a million rows. `--sample_size N` runs on a seeded
+sample and `--keep_fields` whitelists the output columns. The output is written beside `--output_path` and renamed
+into place, so a killed run leaves no truncated file.
 
 ## Profiling & benchmarks
 
@@ -298,7 +303,7 @@ torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8 --cp
 
 | Script | Description |
 |--------|-------------|
-| `scripts/docs/check_links.py` | The docs link gate (`scripts/docs/check_links.sh`, `make docs`): every relative link, heading anchor and code reference in the given markdown files or directories (default: `agent-docs`, `human-docs`, `skills` and the root markdown) must resolve; exits 1 naming each one that does not |
+| `scripts/docs/check_links.py` | The docs link gate (`scripts/docs/check_links.sh`, `make docs`): every relative link, heading anchor and code reference in the given markdown files or directories (default: `agent-docs`, `human-docs`, `skills` and the root markdown) must resolve, and a page under `agent-docs/` or `human-docs/` holds no raw HTML tag; exits 1 naming each one that fails |
 | `scripts/docs/figure_manifest.sh` | The stale-figure gate: `write` (run by `make diagrams`) records the SHA-256 of every figure under `agent-docs/assets/` and of what it is rendered from in `agent-docs/assets/figures.sha256`; `check` (`make docs`, the docs workflow) exits 1 naming each file changed since, or a page never rendered |
 
 ## Related pages

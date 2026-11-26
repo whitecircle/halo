@@ -12,7 +12,7 @@ from botocore.exceptions import ClientError
 from datasets import Dataset, DatasetDict
 
 from halo.data.preprocessed.shard_index import ShardInfo
-from halo.data.sources import s3_dataset_store
+from halo.data.sources import s3_client, s3_dataset_store
 from halo.data.sources.dataset_cache import DOWNLOAD_COMPLETE_MARKER
 from halo.data.sources.s3_client import S3Client
 from halo.data.sources.s3_dataset_store import _PUSH_COMPLETE_MARKER, _PUSH_INFIX
@@ -30,6 +30,7 @@ class FakeBoto:
         self._clock = 0
         self.mtimes: dict[str, int] = {}
         self.ops: list[tuple[str, str]] = []
+        self.delete_requests: list[list[str]] = []
 
     def _write(self, key: str, body: bytes) -> None:
         self._clock += 1
@@ -50,8 +51,10 @@ class FakeBoto:
         self.mtimes.pop(Key, None)
 
     def delete_objects(self, Bucket, Delete):
+        self.delete_requests.append([entry["Key"] for entry in Delete["Objects"]])
         for entry in Delete["Objects"]:
             self.delete_object(Bucket, entry["Key"])
+        return {"Deleted": Delete["Objects"]}
 
     def get_paginator(self, name):
         assert name == "list_objects_v2"
@@ -238,6 +241,16 @@ def test_promote_ordering_gates_last_and_sweep_after_gates():
     assert sweep_deletes and dict_copy[0] < min(sweep_deletes), "the stale sweep must wait for the gates"
 
 
+def test_the_promote_sweeps_stale_objects_in_one_request():
+    """One request per stale object would cost a re-bake from thousands of shards to a few thousands of requests."""
+    client, fake = _client()
+    _seed_old_copy(fake)
+    s3_dataset_store.push_dataset(client, _mock_dataset(_fake_dataset_dict_save(fake)), KEY)
+
+    stale = [f"{KEY}/train/data-0000{i}-of-00002.arrow" for i in range(2)]
+    assert stale in fake.delete_requests, fake.delete_requests
+
+
 def test_crash_during_staging_upload_leaves_the_destination_untouched():
     client, fake = _client()
     _seed_old_copy(fake)
@@ -421,6 +434,17 @@ def test_folder_marker_objects_are_not_downloaded_as_files(tmp_path):
         fake._write(marker, b"")
     with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")):
         assert s3_dataset_store.load_s3_dataset(client, KEY)["train"]["x"] == [4]
+
+
+def test_a_folder_larger_than_the_free_space_is_refused_before_any_download(tmp_path, monkeypatch):
+    """A token folder is hundreds of GB; started on a volume that cannot hold it, it fills the disk and dies."""
+    client, fake = _client()
+    _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[4]), KEY)
+    monkeypatch.setattr(s3_client, "free_disk_bytes", lambda path: 1)
+    with pytest.raises(OSError, match=r"GB free.*HALO_S3_DATASET_CACHE_DIR"):
+        client.download_folder(KEY, str(tmp_path / "local"))
+    assert not [op for op, _ in fake.ops if op == "download"]
+    assert not (tmp_path / "local").exists(), "a retry without overwrite would be refused on the directory left"
 
 
 def test_a_torn_destination_is_never_published_and_recovers_from_the_sealed_push(tmp_path):

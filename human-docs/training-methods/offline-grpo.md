@@ -20,9 +20,11 @@ trains nothing).
 completion, in the same order. The method is text-only. No dataset yet?
 `halo run inference/reward-model/rejection-sample --output_format offline_grpo` generates candidates
 against a served model, scores them with a reward model, and writes this shape. Rows with completions
-but no rewards: `halo run score-offline-grpo <yaml> --input rows.jsonl --output scored.jsonl` prices
-them with the YAML's `rewards` list, a `whitecircle` policy check included
-([White Circle](../../agent-docs/training-methods/grpo/rewards/whitecircle.md#offline-grpo) ↗).
+but no rewards: `halo run score-offline-grpo <yaml> --input rows.jsonl --output scored.jsonl --answer_field answer`
+scores them with the YAML's `rewards` list ([GRPO Rewards](rewards.md)). `--answer_field` names the
+ground-truth column; without it an `accuracy` term is refused before anything is sent, and a judge
+grades with no reference. The command does not resume, so a rerun scores every row again
+([Offline GRPO scoring](../../agent-docs/training-methods/grpo/rewards/whitecircle.md#offline-grpo) ↗).
 
 ## Run
 

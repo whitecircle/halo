@@ -23,6 +23,13 @@ This recipe trains Qwen3-4B on GSM8K with a vLLM server started as in [Online GR
 `environment_id` first. `halo run create-whitecircle-policies` creates the policies of a JSON file in an environment
 and prints the matching `rewards:` block; `human-docs/cookbooks/halo-whitecircle-cookbook.md` walks through a full run.
 
+The tool attaches policies through one condition, `halo-grpo`, shared by every environment it has run for. Each run
+makes that condition select exactly the file's policies and adds the environment to it, so running it for a second
+environment, or with another file, changes what the first environment checks: a term there that lists a policy the new
+file lacks fails every check (`whitecircle/<name>/scored` drops to 0), and a term that lists none scores against the
+new set with no error. One file must therefore hold every policy that any environment attached to `halo-grpo` still
+needs; `--dry-run` shows what a run would change.
+
 ## Score
 
 Only the verdicts on the completion's own events count: its assistant text and the arguments of its tool calls. A
@@ -37,7 +44,7 @@ flagged verdict on the prompt or on a tool output does not lower the score.
 - With `policies` or `checklist`, verdicts of policies outside the list do not affect the score, so several terms
   can share one environment, each with its own policies.
 - A term lists `policies` or `checklist`, not both.
-- A completion with no text and no tool call scores 0, and Halo sends no request: it violates nothing, and full credit for it would reward an empty reply.
+- A completion with nothing to check scores 0, and Halo sends no request: under `view: final` one without a final answer (on the environment arm, an episode that delivered none, whatever it wrote), under `view: full` one with no text and no tool call. It violates nothing, and full credit for it would reward an empty reply.
 
 ### Checklist
 
@@ -61,6 +68,13 @@ for a separate fault, so that one fault matches one item.
 - Headers: `Authorization: Bearer $WHITECIRCLE_API_KEY` and `whitecircle-version: 2026-06-01`. Halo reads the key
   from the environment variable when it creates the HTTP client and never logs it. If the variable is unset,
   creating the term's scorer raises an error.
+- Requests go only to `https://us.whitecircle.com` or `https://eu.whitecircle.com`; there is no URL option. They carry
+  the environment id, a random session id per completion and term, and message text: the prompt turns, system prompt
+  included, then the final answer or, with `full`, every turn with its tool-call arguments and tool outputs. Tool
+  schemas, the reference answer and, on the environment arm, the turns' reasoning are not sent.
+- Each term sends its own request for each completion, plus one more for every further 50 events, and the request
+  names no policies: the API checks every policy that the environment's conditions select, and the term then reads its
+  own. Three terms on one environment check each completion three times against the whole set.
 
 ## Options
 
@@ -81,6 +95,12 @@ for a separate fault, so that one fault matches one item.
 Halo retries a timeout, a transport error, and an HTTP 408, 429 or 5xx up to `max_retries` times. The wait before
 each retry is the `Retry-After` value of the response (at most 60 s), or else `retry_wait × 2^attempt`. Any other
 error status, such as 400 for a malformed request or 401 or 403 for the key, fails immediately.
+
+Requests in flight reach `max_concurrency` × terms × scorers: one scorer per trainer rank on the online arm, one per
+Ray actor on the environment arm. Halo applies no request-rate limit of its own. A completion keeps its slot while it
+waits between attempts, so at the defaults one request can hold its step for about 165 s (five 30 s attempts plus
+1 + 2 + 4 + 8 s of backoff), or 390 s when the server asks for the 60 s maximum between attempts. On the environment
+arm that time counts against `episode_timeout` ([Settlement](README.md#settlement)).
 
 A completion gets no score when:
 
@@ -116,10 +136,11 @@ WHITECIRCLE_API_KEY=wc-... halo run score-offline-grpo \
     --input rows.jsonl --output scored.jsonl --answer_field answer
 ```
 
-- Each row has `prompt` and `completions`. `--answer_field` names the ground-truth column for an `accuracy` term or
-  a judge term.
+- Each row has `prompt` and `completions`. `--answer_field` names the ground-truth field an `accuracy` term compares
+  with and a judge reads as its reference. Without it, an `accuracy` term is refused before any request or write.
 - The reward of a completion is the sum of `weight × score ^ exponent` over the terms, computed by the same reward
   functions as in online GRPO.
 - Halo probes every external term first. A completion that any term cannot score is dropped and counted, not
   written with a substitute reward; with `on_error: neutral` that term contributes 0 and the completion is kept. A
   row with no completions left is dropped.
+- The output file is rewritten from the start and there is no resume: a rerun sends every completion again.

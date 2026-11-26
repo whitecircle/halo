@@ -320,7 +320,7 @@ def _encode_branch(
 ) -> tuple[list[int], list[int]]:
     """Token ids, the last assistant turn closed where the template leaves it open and the row refused rather than
     truncated past ``max_length``, and labels masked outside completions with ``train_on_completions_only``. Both
-    branches end on the same turn, so both take the closing eos and stay response-aligned."""
+    branches end on the same turn, so both take the same closing token and stay response-aligned."""
     encoded = tokenize_training_conversation(
         collator.tokenizer,
         conversation,

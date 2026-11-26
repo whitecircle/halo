@@ -139,6 +139,7 @@ writes a lone `</think>` GLM-5 never does.
 
 Tool-use data renders with the hub template (leave `chat_template` unset, `assistant_message_template: "<|assistant|>"`):
 it keeps the `Reasoning Effort` line and each turn's `<think>` block as served, its generation prompt is the engines'
-own, and the row maps close the last assistant turn it leaves open ([Collators](../data/collators.md#eos-pad-and-the-response-template)).
+own, and the row maps close the last assistant turn it leaves open with the role marker the template writes after
+such a turn ([Collators](../data/collators.md#eos-pad-and-the-response-template)).
 
 The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes two 8-GPU machines ([rates](#throughput)), through `pp2 × ep8` on padded rows or cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).

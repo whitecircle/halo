@@ -131,6 +131,18 @@ Pipeline: load → filter empties → apply chat template → tokenize (sequence
 
 Offline pre-processing (tokenization, packing, sharding) is optional, see [SFT Dataset Pre-Processing](dataset-preparation.md).
 
+## datatrove token folders
+
+`token_sources` reads a folder that datatrove's `DocumentTokenizer` or `DocumentTokenizerMerger` wrote, flat, its files in name order (`halo/data/sources/token_shards.py`). Each non-empty `<name>.ds` needs two files beside it:
+
+| File | Holds |
+|---|---|
+| `<name>.ds` | Token ids back to back, little-endian, with no header: 2 bytes each for a vocabulary of at most 65,536 ids, else 4 |
+| `<name>.ds.index` | The end of every document in tokens, cumulative within the file, as little-endian `uint64` with no leading 0 |
+| `<name>.ds.metadata` | First line `<tokenizer>\|<bytes per token>`, then the token count |
+
+An empty `.ds` is skipped, as is everything else in the folder: the empty files a task with no input leaves, the merger's total `<name>.ds.metadata` with no `.ds` beside it, and `.ds.loss` masks, which no row reads. The token width comes from each file's metadata, and all files of one folder, and all folders of one run, must share it. How the folders train, mix and resume, and what a folder is refused for: [Pre-training](../training-methods/pretraining.md#training-from-datatrove-token-folders).
+
 ## SFT-VLM
 
 Messages carry text and images:
