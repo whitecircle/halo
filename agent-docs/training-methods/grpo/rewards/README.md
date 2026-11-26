@@ -71,10 +71,10 @@ The probe runs in global rank 0's process alone, while every scorer sends its ow
 
 Judge requests retry at two levels (`halo/inference/openai_client.py`):
 
-- the SDK retries a timeout, a connection error or a 408, 409, 429 or 5xx status up to four times, with `request_timeout` bounding each attempt, after about 0.5, 1, 2 and 4 s (or the server's `Retry-After`, up to 60 s);
+- the SDK retries a timeout, a connection error or a 408, 409, 429 or 5xx status up to four times, with `request_timeout` bounding each wait within an attempt (connecting, sending, each gap in the reply), not the attempt itself, after about 0.5, 1, 2 and 4 s (or the server's `Retry-After`, up to 60 s);
 - a reply with no choices that carries a 408, 429, 500, 502, 503 or 504 error code (how OpenRouter reports a rate-limited model) sends the whole request again, up to four times, after 2, 4, 8 and 16 s.
 
-The levels nest, so one judge call makes at most 25 attempts, each up to `request_timeout`, and nothing bounds the call as a whole: at the default 120 s, 50 minutes plus the backoff. Lower the timeout first. White Circle requests retry on their own schedule ([Failures](whitecircle.md#failures)), and reward-model requests never retry ([Requests](reward-model.md#requests)).
+The levels nest, so one judge call makes at most 25 attempts, and nothing bounds the call as a whole: each attempt can wait `request_timeout` for its reply to start, 50 minutes plus the backoff over 25 at the default 120 s, and a reply that arrives in pieces stretches its attempt further. Lower the timeout first. White Circle requests retry on their own schedule ([Failures](whitecircle.md#failures)), and reward-model requests never retry ([Requests](reward-model.md#requests)).
 
 ## Environment arm
 
@@ -115,7 +115,7 @@ Three `EnvironmentBase` hooks fill the episode-specific parts:
 
 External terms are scored after the episode ends. At the terminal step the environment prices its own side and marks the reward pending. The episode dispatcher (Ray actor and eval runner alike) then awaits `settle_async`; a synchronous caller uses `env.settle(ids)`. Settlement prices each term, applies a fired veto and books a missing verdict by its `on_error`.
 
-- Settlement runs on the actor that played the episode, inside its `episode_timeout`. A judge call can spend up to 25 attempts of `request_timeout` before it books an outage ([Probe and retries](#probe-and-retries)), so an episode whose scoring outlasts the deadline is cancelled as an error row (`episode/error_rate`), which `on_error` never sees. Keep each term's timeout and retries well inside what generation leaves.
+- Settlement runs on the actor that played the episode, inside its `episode_timeout`. A judge call can spend 25 attempts before it books an outage ([Probe and retries](#probe-and-retries)), so an episode whose scoring outlasts the deadline is cancelled as an error row (`episode/error_rate`), which `on_error` never sees. Keep each term's timeout and retries well inside what generation leaves.
 - Reading `rollout_metrics` on an unsettled episode raises.
 - `episode/reward_scored` is 1 only when every external term reached a verdict; a miss settled `neutral` still logs 0.
 - Judge concurrency is `max_concurrency` per Ray actor (one scorer per environment instance).
@@ -124,7 +124,7 @@ Some episodes never reach a scorer:
 
 - **A generation that failed past its retries.** The training actor returns an error row at reward 0. The eval driver grades what the episode earned, but reports a [generation error](../../async-grpo/evaluation.md#failed-generations) instead unless its own request caused the failure.
 - **A [sandbox fault](../../async-grpo/environments/sandbox.md#sandbox-faults).** The episode logs no `episode/reward_scored`.
-- **An episode that outgrew the served window.** It keeps its row and its environment grade ([Context window](../../async-grpo/episodes.md#context-window)), but every external term prices 0 and the episode stays valid in its group; it logs no `episode/reward_scored`.
+- **An episode that outgrew the served window.** Every external term prices 0 for it without marking it invalid, and it logs no `episode/reward_scored`. Its environment grade stands, an invalid one included; when its row trains is on [Context window](../../async-grpo/episodes.md#context-window).
 
 ## Failure and cost
 

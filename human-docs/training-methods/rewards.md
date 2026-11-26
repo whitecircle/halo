@@ -124,7 +124,8 @@ a made-up 0. Choose `neutral` for a side check you can lose for a while. In onli
 where every term failed, so next to a rule or a second working scorer they train the same. Offline scoring
 leaves out a completion that any term could not score, unless that term is `neutral`.
 
-A judge call can take up to 25 attempts, each bounded by `request_timeout`, and each source retries on its own
+A judge call can take up to 25 attempts, `request_timeout` capping each wait for the endpoint rather than an
+attempt's length, and each source retries on its own
 schedule ([Probe and retries](../../agent-docs/training-methods/grpo/rewards/README.md#probe-and-retries) ↗).
 In Async GRPO the scoring runs as the episode ends, inside its `episode_timeout`, so a scorer still retrying at
 that deadline loses the episode as an error, which `on_error` does not cover.

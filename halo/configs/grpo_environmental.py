@@ -398,8 +398,8 @@ class AsyncRolloutConfig(
             "help": "Raise after this many train rounds in a row in which no token anywhere carries a policy gradient, "
             "while no earlier round of this run has (a resume keeps that verdict): every group tied or dropped, or "
             "every token masked, trains on nothing while logging loss 0. Past the first round that trained, a streak "
-            "this long only warns. Warns on the first such round and logs sampling/zero_gradient_round. Positive; "
-            "null never raises."
+            "this long only warns. Warns on the first such round of a run that has not trained yet, and logs "
+            "sampling/zero_gradient_round. Positive; null never raises."
         },
     )
     episode_error_rate_limit: float | None = field(

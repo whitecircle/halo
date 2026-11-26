@@ -42,7 +42,7 @@ that preamble fails the run at startup.
 
 An episode that grows past the served window closes on what it earned, as in an [eval](evaluation.md), so the longest
 failures keep their row and reward; `episode/context_overflow` counts them. Such an episode is never sent to an
-external reward term: each prices 0 for it, and the episode keeps its place in the group
+external reward term: each prices 0 for it, and that alone never takes it out of the group
 ([Settlement](../grpo/rewards/README.md#settlement)). SGLang refuses any request whose prompt plus `max_tokens` passes
 the window where vLLM clamps `max_tokens`, so there such an episode ends up to `rollout_max_tokens` earlier. Under
 `train_on_sampled_tokens: false` its whole render can pass the window, ending on a tool result no engine served, and
