@@ -35,7 +35,8 @@ submissions go through the competition platform, in the format your track's rule
 
 - A Halo bug or a question about Halo goes in an issue here. Tick the Halo Competition box at the top of
   the template and give the Halo version or commit you run, since your track's rules name the version a
-  submission must use.
+  submission must use. A security vulnerability is the exception: report it privately, as
+  [SECURITY.md](SECURITY.md) says.
 - Questions about the rules, teams, submissions or compute credits go to the organizers on the
   competition Discord or at hello@whitecircle.com. A loophole in a track's benchmark, or a bug that
   changes a track's score, goes to them too and not into a public issue (Terms, section 5.2).

@@ -6,4 +6,4 @@ contact_links:
   # Temporary, for the Halo Competition: after Dec 18 remove this comment and the entry's three lines below.
   - name: Halo Competition rules, teams and submissions
     url: https://whitecircle.com/halo/competition
-    about: Ask the organizers on the competition Discord or at hello@whitecircle.com, and report to them a loophole in a track's benchmark or a bug that changes a track's score. Any other Halo bug or question goes in an issue here.
+    about: Ask the organizers on the competition Discord or at hello@whitecircle.com, and report benchmark loopholes and bugs that change a track's score to them. Other Halo bugs and questions go in an issue here, and security reports use the private route above.
