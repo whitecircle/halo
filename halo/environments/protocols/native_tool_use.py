@@ -24,7 +24,13 @@ from halo.environments.tools.accounting import (
     tool_call_outcome,
     validate_tool_budgets,
 )
-from halo.environments.tools.definitions import NativeToolCall, NativeToolRegistry, NativeToolResult, is_refused_unrun
+from halo.environments.tools.definitions import (
+    NativeToolCall,
+    NativeToolRegistry,
+    NativeToolResult,
+    ToolBudgetExhausted,
+    is_refused_unrun,
+)
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS
 from halo.rewards.graders.matching import is_correct_answer
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
@@ -159,6 +165,7 @@ class NativeToolUseEnvironment(EnvironmentBase):
             content=self._truncate_observation(content),
             success=success,
             refused=is_refused_unrun(outcome),
+            budget_spent=isinstance(outcome, ToolBudgetExhausted),
             sandbox_fault=fault,
         )
 

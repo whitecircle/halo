@@ -20,7 +20,13 @@ from halo.environments.episodes.episode_keys import (
 )
 from halo.environments.episodes.messages import Message, Trajectory
 from halo.rewards.composer import RewardComposer
-from halo.rewards.samples import CUT_TOOL_CALLS_KEY, REFUSED_CALL_IDS_KEY, TURN_FLAG_NOTES, ScoringSample
+from halo.rewards.samples import (
+    CALL_NOTES_KEY,
+    CUT_TOOL_CALLS_KEY,
+    REFUSED_CALL_IDS_KEY,
+    TURN_FLAG_NOTES,
+    ScoringSample,
+)
 from halo.rewards.scorers.base import ScoreResult
 from halo.rewards.terms import (
     ENVIRONMENT_REWARD_SOURCES,
@@ -237,6 +243,8 @@ class EpisodeScoringMixin:
             rendered[CUT_TOOL_CALLS_KEY] = message.cut_tool_calls
         if message.refused_call_ids:
             rendered[REFUSED_CALL_IDS_KEY] = list(message.refused_call_ids)
+        if message.call_notes:
+            rendered[CALL_NOTES_KEY] = dict(message.call_notes)
         return rendered
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:

@@ -19,6 +19,11 @@ SCRATCHPAD_TIME_LIMIT_NOTE = "(the per-test time limit this problem is graded at
 SCRATCHPAD_BUDGET_SPENT_REPLY = (
     f"Not run: this task's scratchpad budget is spent. Submit your solution with {SUBMIT_TOOL}."
 )
+# What the judge's view says beside a call about the scratchpad budget, never shown to the policy: a scratchpad call
+# refused for it before or after a reply had said so, and a submission whose turn began with no run left.
+FIRST_RUN_REFUSAL_NOTE = "refused for the spent scratchpad budget before any reply had said so"
+LATER_RUN_REFUSAL_NOTE = "sent after a reply had said the scratchpad budget was spent"
+NO_RUN_LEFT_NOTE = "no scratchpad run left"
 # Leads a reply to a submission that was not graded and spent no slot.
 NOT_GRADED_PREFIX = "Not graded:"
 SUBMISSION_BUDGET_SPENT_REPLY = f"{NOT_GRADED_PREFIX} this task's submission budget is spent."

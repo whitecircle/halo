@@ -85,6 +85,12 @@ vetoed: a veto there would teach a policy to submit untested. `untested_submissi
 it is unsure, so within a group an outcome-only reward charges testing, and pricing the untested failure is what pays for testing
 beyond the samples. `false_record` is only logged: independent verdicts agree on too few of its flags for a veto, which
 would erase real solves at random. Prices add when several checks fire. A call the environment refused unrun is marked so in the judge's view: it ran nothing and spent no submission or run, but a closing-tag refusal is priced as a tool error (`tool_error_penalty`).
+The view also marks where the hidden scratchpad budget ran out, from the environment's own count: a scratchpad call
+refused for it, as `refused for the spent scratchpad budget before any reply had said so` (every such call of the first
+refusal's turn) or `sent after a reply had said the scratchpad budget was spent`, and every submission whose turn began
+with no run left, as `no scratchpad run left`, whether or not a refusal was ever shown. A submission in the same turn
+as the last run is not marked. Under a zero scratchpad budget a run carries its budget mark without the refused one.
+The policy sees none of these marks; each context quotes them.
 
 ### Judge outages
 

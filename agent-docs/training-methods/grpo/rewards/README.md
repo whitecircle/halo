@@ -94,6 +94,7 @@ One sample serves every external term, each through its own view. It carries:
 - the prompt turns (everything before the first assistant turn) and the tool schemas;
 - the policy's turns, with reasoning and the capped, cut, empty or rejected flags;
 - the calls a cut turn never ran (`Message.cut_tool_calls`), which only the judge's `full` and `digest` views show;
+- the environment's notes on single calls (`Message.call_notes`), shown beside each call in those views;
 - the final answer and the reference.
 
 Three `EnvironmentBase` hooks fill the episode-specific parts:
