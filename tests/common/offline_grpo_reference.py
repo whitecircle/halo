@@ -155,7 +155,7 @@ def _uninterrupted_run(ctx, parallelism, label, dirs, train, evaluation, expecte
         swept_reference_error(trainer.train_dataset[REF_PER_TOKEN_LOGPS_COLUMN], expected) < TOL.logprob_atol
     )
     references = {split: storage.values.clone() for split, storage in trainer._reference_storage_by_split.items()}
-    rows = agree_kl_rows(ctx, partial(eager_oracle, dirs.base, ctx.device), trainer.train_dataset)
+    rows = agree_kl_rows(partial(eager_oracle, dirs.base, ctx.device), trainer.train_dataset)
     checks["kl_rows_clear_routing_noise"] = rows.clear
     batch = pure_kl_batch(trainer, rows.rows)
     checks["independent_kl_oracle_is_nonzero"], checks["kl_matches_independent_full_logits"] = doubled_head_kl_verdict(

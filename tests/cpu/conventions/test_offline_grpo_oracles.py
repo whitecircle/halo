@@ -5,6 +5,7 @@ only rows whose routing leads bf16 noise with headroom on the policy compared, a
 export's dtype."""
 
 import copy
+import datetime
 import json
 import random
 from functools import partial
@@ -351,7 +352,7 @@ def _unloadable(dtype):
 def _agree_on_rank(rank: int, root: str) -> None:
     """Rank 1 holds no oracle and a dataset of its own: every rank must collate rank 0's choice."""
     rows = _table_rows([WIDE, TIGHT, WIDE], [WIDE, ROOMY, WIDE], [WIDE, WIDE, WIDE])
-    selected = agree_kl_rows(SimpleNamespace(rank=rank), _TableMoE if rank == 0 else _unloadable, rows[rank:])
+    selected = agree_kl_rows(_TableMoE if rank == 0 else _unloadable, rows[rank:])
     (Path(root) / f"rank_{rank}.json").write_text(json.dumps(selected._asdict()))
 
 
@@ -359,6 +360,20 @@ def test_every_rank_collates_rank_zeros_kl_rows(tmp_path):
     run_gloo_ranks(_agree_on_rank, 2, str(tmp_path))
     first, second = (json.loads((tmp_path / f"rank_{rank}.json").read_text()) for rank in range(2))
     assert first == second and first["rows"] == [2, 1] and first["clear"]
+
+
+def _scan_without_router_logits_on_rank(rank: int, root: str) -> None:
+    with pytest.raises(RuntimeError, match="router_logits"):
+        agree_kl_rows(
+            lambda dtype: _TableMoE(dtype, declared=False, returns_logits=False), _table_rows([WIDE, CLEAR, WIDE])
+        )
+    (Path(root) / f"raised_{rank}").touch()
+
+
+def test_a_scan_that_raises_on_rank_zero_raises_on_every_rank(tmp_path):
+    """A peer left in the broadcast would wait there while rank 0 goes on to its next collective."""
+    run_gloo_ranks(_scan_without_router_logits_on_rank, 2, str(tmp_path), pg_timeout=datetime.timedelta(seconds=20))
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["raised_0", "raised_1"]
 
 
 def _tied_scans_on_rank(rank: int, root: str) -> None:
@@ -386,7 +401,7 @@ def _tied_scans_on_rank(rank: int, root: str) -> None:
     scans = {
         "as_saved": routing_clear_rows(load, rows),
         "doubled": routing_clear_rows(load_doubled, rows),
-        "compared": agree_kl_rows(SimpleNamespace(rank=rank), load, rows),
+        "compared": agree_kl_rows(load, rows),
     }
     (Path(root) / "scans.json").write_text(json.dumps({name: scan._asdict() for name, scan in scans.items()}))
 

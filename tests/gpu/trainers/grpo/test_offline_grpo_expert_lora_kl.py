@@ -129,7 +129,7 @@ def _reference_oracle(ctx, reference, base, checkpoint, checks):
 
 
 def _kl_oracle(ctx, trainer, export, checks):
-    rows = agree_kl_rows(ctx, partial(eager_oracle, export, ctx.device), trainer.train_dataset)
+    rows = agree_kl_rows(partial(eager_oracle, export, ctx.device), trainer.train_dataset)
     checks["kl_rows_clear_routing_noise"] = rows.clear
     batch = pure_kl_batch(trainer, rows.rows)
     oracle = _fa2_model(export, ctx.device)

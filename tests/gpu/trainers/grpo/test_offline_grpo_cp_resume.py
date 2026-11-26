@@ -19,6 +19,7 @@ from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.checkpoint.reading import load_full_state_dict
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.attention.gpt_oss_sinks import (
@@ -32,6 +33,7 @@ from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.runtime.collectives import combine_across_ranks
 from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from tests.common.adapters import unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.dp_layout import dp_layout_checks, probe_forward
@@ -240,7 +242,7 @@ def _record_training_rows(trainer):
 
 def _kl_oracle(ctx, trainer, export):
     """``(rows clear the bf16 routing noise, oracle nonzero, trainer loss matches it)``."""
-    rows = agree_kl_rows(ctx, partial(eager_oracle, export, ctx.device, family=TINY), trainer.train_dataset)
+    rows = agree_kl_rows(partial(eager_oracle, export, ctx.device, family=TINY), trainer.train_dataset)
     batch = pure_kl_batch(trainer, rows.rows)
     cp = trainer.parallelism_config.is_cp_mode
     expected = torch.zeros((), device=ctx.device)
@@ -389,7 +391,11 @@ def run(ctx) -> dict:
     train, evaluation = kl_oracle_training_set(8, SEED), offline_grpo_dataset(4, 6)
 
     trainer = _build_trainer(ctx, base, output, tokenizer, train, evaluation, fields=FIELDS, save=True)
-    initial_masters = _expert_masters(trainer.model) if fp32_masters else {}
+    initial_masters = {}
+    if fp32_masters:
+        # The construction's reference sweep is a forward, which leaves unsharded parameters registered.
+        reshard_fsdp2_modules(unwrap(trainer.model))
+        initial_masters = _expert_masters(trainer.model)
     saved_state = _OptimizerSnapshot("save", trainer, capture_optimizer=True)
     trainer.add_callback(saved_state)
     checks = {"run_start_reference_swept": REF_PER_TOKEN_LOGPS_COLUMN in trainer.train_dataset.column_names}

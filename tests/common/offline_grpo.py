@@ -11,7 +11,6 @@ from functools import partial
 from typing import TYPE_CHECKING, NamedTuple
 
 import torch
-import torch.distributed as dist
 from datasets import Dataset, concatenate_datasets
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
@@ -30,6 +29,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.introspection.config_access import get_config_field
 from halo.models.moe.config_fields import resolve_moe_routing
 from halo.models.moe.router_logits import declared_routers
+from halo.runtime.collectives import combine_across_ranks
 from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import loading_problems
@@ -510,13 +510,17 @@ def _doubled_head_oracle(load_oracle, dtype):
     return model
 
 
-def agree_kl_rows(ctx, load_oracle, dataset) -> RoutingClearRows:
+def agree_kl_rows(load_oracle, dataset) -> RoutingClearRows:
     """COLLECTIVE. Rank 0's :func:`routing_clear_rows` of ``load_oracle``'s weights under the doubled output head every
-    KL check compares, which every rank collates alike: a tied head doubles the input embeddings too, moving routers."""
-    payload = [routing_clear_rows(partial(_doubled_head_oracle, load_oracle), dataset) if ctx.rank == 0 else None]
+    KL check compares, which every rank collates alike: a tied head doubles the input embeddings too, moving routers.
+    A scan that raises on rank 0 raises on every rank."""
+    rows = combine_across_ranks(
+        None,
+        lambda _: routing_clear_rows(partial(_doubled_head_oracle, load_oracle), dataset),
+        what="the KL rows' routing scan",
+    )
     cleanup_memory()
-    dist.broadcast_object_list(payload, src=0)
-    return payload[0]
+    return rows
 
 
 def pure_kl_batch(trainer, rows) -> dict:
