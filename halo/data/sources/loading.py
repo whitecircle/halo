@@ -38,6 +38,7 @@ from halo.log import info_logger
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import (
     agree_probe_across_ranks,
+    barrier_on_exit,
     rank_consensus,
     reject_divergent_settings,
     store_join_recorded_failure,
@@ -430,7 +431,9 @@ def load_preprocessed_dataset(
         )
 
     sharded = is_sharded_dataset_across_ranks(path)
-    recorded_shards = load_preprocessed_metadata(path).num_shards
+    # Joined: a per-node copy without its stamp would raise here alone and strand its peers in the consensus below.
+    with barrier_on_exit(f"Reading the {METADATA_FILE} of {path}"):
+        recorded_shards = load_preprocessed_metadata(path).num_shards
     # A copy that adds files without removing the old ones (hf download --local-dir, rsync without --delete, an upload
     # over an earlier bake) leaves one bake's shard index beside another's rows and stamp; the index decides the load.
     if not rank_consensus((recorded_shards > 1) == sharded).all_ok:
