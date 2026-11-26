@@ -82,6 +82,7 @@ def test_raw_html_outside_code_is_listed():
         "<details>\n<summary>Answers</summary>\n"
         "\n"
         "Text `<kept>` and a `wrapped\n<span>` code span, <https://example.com> and \\<escaped>.\n"
+        "Autolinks of another scheme <ftp://example.com/file> and of an address <team@example.com>.\n"
         "\n"
         "```html\n<p>fenced</p>\n```\n"
         "> A '<split>' placeholder <!-- and a note -->\n"
@@ -92,8 +93,8 @@ def test_raw_html_outside_code_is_listed():
         (6, "<details>"),
         (7, "<summary>"),
         (7, "</summary>"),
-        (15, "<split>"),
-        (15, "<!--"),
+        (16, "<split>"),
+        (16, "<!--"),
     )
 
 
