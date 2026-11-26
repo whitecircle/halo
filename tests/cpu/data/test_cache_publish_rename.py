@@ -99,6 +99,21 @@ def _never_fetched(_tmp: str) -> None:
     raise AssertionError("a served cache must not be fetched again")
 
 
+def test_a_listing_that_fails_before_the_fetch_takes_the_one_after(tmp_path):
+    """A marker without a fingerprint is stamped with whatever the source lists next, so the tree would pass as any
+    later state, and a stale tree the caller keeps would be served instead of refused."""
+    _publish_listing(tmp_path, [None, "v1"])
+    with pytest.raises(ValueError, match="keep the cached copy"):
+        serve_cached_tree(
+            str(tmp_path / "cache"),
+            "s3://bucket/key",
+            _never_fetched,
+            lambda: "v2",
+            stale_message="keep the cached copy",
+            replace_stale=False,
+        )
+
+
 def _read_only_lock(monkeypatch) -> None:
     """A pre-staged cache on a read-only mount cannot open its lock file for writing."""
 
