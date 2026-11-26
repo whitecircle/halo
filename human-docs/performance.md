@@ -33,9 +33,11 @@ More shapes:
 [Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md) ↗ ·
 [Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗.
 
-GLM-5.3-Flash runs two kernels of its own: DeepSeek sparse attention as a tiled
-matmul over the keys a query can reach, and hyper-connections as one launch per
-direction, which DeepSeek-V4 shares. LoRA at `ep8` reaches 2,840 at 8,192 tokens
+GLM-5.3-Flash runs two kernels of its own. DeepSeek sparse attention runs as a tiled
+matmul over the keys a query can reach. Hyper-connections run each operation (normalize
+and project, Sinkhorn, collapse, mix) as one kernel launch. A hyper-connection and its mix
+take 16 launches forward and 14 backward, against upstream's 143 and 306. DeepSeek-V4 shares the
+hyper-connection kernels. LoRA at `ep8` reaches 2,840 at 8,192 tokens
 and 2,390 at 16,384, against 1,282 and 893 without them; a full fine-tune on two
 8-GPU machines reaches 1,504 at `ep16` and 2,423 at `pp2 × ep8`
 ([GLM-5 Next](../agent-docs/models/glm5-next.md#throughput) ↗).
@@ -44,75 +46,92 @@ Pick the lowest expert-parallel size that fits, since EP costs throughput. CP
 and the other sharding modes add sequence length and capacity at a cost in tokens
 per second.
 
-Before you judge a number, check `M = per_device_train_batch_size × max_length`.
-On a B300 MoE run it should be at least ~8k; below that throughput is still
-climbing fast. Read it on a warm Triton cache too: on a fresh one, a recipe's first
-~20 steps run about 40% of the steady rate while kernels compile. Set
+Before you judge a number, check the tokens each GPU takes per step,
+`T = per_device_train_batch_size × max_length`. On a B300 MoE run it should be
+at least about 8,000; below that throughput is still climbing fast. Read it on a warm Triton cache too: on a fresh one, a recipe's first
+20 or so steps run at about 40% of the steady rate while kernels compile. Set
 `enable_efficiency_metrics: true` to log tokens/s/GPU in your own run; it counts a
-batch that TP, ETP, CP or PP ranks share once, and a PP rate also counts padding.
+batch that TP, ETP, CP or PP ranks share once.
 
 ## Levers that help
 
 Set these per run:
 
-- **A bigger `M`**: raise `per_device_train_batch_size` or `max_length`, and
+- **More tokens per step (`T`)**: raise `per_device_train_batch_size` or `max_length`, and
   fill the global batch with `gradient_accumulation_steps`, not more
   parallelism. It is the largest effect on MoE.
 - **`gradient_checkpointing: false`** when the activations fit, at much higher
-  peak memory. On packed SFT rows `gradient_checkpointing_plan: auto` finds that
-  out itself: it measures step 2 and checkpoints only the layers the memory
-  needs ([Callbacks](../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback) ↗).
+  peak memory. At equal batch that is faster, but the largest batch that fits
+  with checkpointing on can beat the largest that fits with it off. On packed SFT rows keep it on and set
+  `gradient_checkpointing_plan: auto` instead: it measures step 2 and
+  checkpoints only the layers the memory needs ([Callbacks](../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback) ↗).
 - **`packing: true`** on a corpus of short rows; `padding_free: true` gains
   less. Where SFT rows share long prefixes (GPT-OSS, Qwen3, Qwen3.5/3.6,
   GLM-5 Next), `tree_packing: true` stores each prefix once, at some extra
   step time on full-attention layers
   ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗).
-- **`liger_kernel_config: {fused_linear_cross_entropy: true}`** past ~16k
-  tokens, which trades a little speed for a lot of logits memory.
+- **`liger_kernel_config: {fused_linear_cross_entropy: true}`** on large-vocab
+  models and long rows: it never materializes the logits, which cuts peak memory at equal or better speed
+  ([measured](../agent-docs/optimization/liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy) ↗).
 - **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** in front of a dense
   launch: 13–14% less peak reserved memory at the same speed. Under EP it costs
   throughput, so set it there only to fit
   ([Allocator](../agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments) ↗).
 - **`--numa-binding node`** on `torchrun` or `halo launch` on a multi-socket
-  host: each rank runs on the CPUs next to its GPU. Host-bound runs (TP, CP,
-  small-batch EP) gain up to ~3%; GPU-bound runs are flat
+  host: each rank runs on the CPUs next to its GPU. Runs whose step the CPU paces
+  (TP, small-batch EP) gain up to 3.4%; GPU-bound runs are flat
   ([NUMA binding](../agent-docs/optimization/throughput-benchmarks.md#numa-binding) ↗).
 - **`fsdp_defer_grad_sync: true` with `fsdp_reshard_after_backward: false`**
   under gradient accumulation: one gradient reduce and one re-gather per
   optimizer step, at an unsharded gradient copy per GPU.
 - **`use_chunked_grpo_logprobs: true`** on GRPO when the full logits do not fit.
 
-On by default: grouped GEMM for MoE experts, Flash Attention 4 on Blackwell,
-Liger, `AdamWBF16` (6 bytes per parameter instead of 12), the atomic-free expert
-permute and its sync-free routing sort, the fused MoE path, TP linears on their
-local shards, two decoder layers per FSDP2 shard group under ZeRO-2, one Ulysses
-all-to-all for Q, K and V under CP, and `sdpa_flex_sliding` for Gemma 4 and
-Step-3.7. Each lever's page carries its measurements:
+Grouped GEMM for MoE experts, Flash Attention 4 on Blackwell, Liger and
+`AdamWBF16` (6 bytes per parameter instead of 12) are on by default. So are the
+atomic-free expert permute, its sync-free routing sort and the fused MoE path.
+TP linears run on their local shards, an FSDP2 shard group holds two decoder
+layers under ZeRO-2, and CP runs one Ulysses all-to-all for Q, K and V. Gemma 4
+and Step-3.7 run `sdpa_flex_sliding`, and Qwen3.8-Flash-Next runs its block-sparse
+attention and gated residual on Triton kernels. Each lever's page carries its measurements:
 [Optimization](../agent-docs/optimization/README.md) ↗.
 
 ## Levers that do not help here
 
 Halo's fp8/fp4 QAT path and the opt-in DeepGEMM adapter ran whole training steps at
-about half bf16's speed or less, and `torch.compile` on an EP MoE run gained at most
-1%
+about half bf16's speed or less on B300. Simulated mxfp4 with its fused round trip ran at
+0.93–0.99× bf16 on H200. `torch.compile` on an EP MoE run gained at most 1%
 ([Levers that do not help](../agent-docs/optimization/README.md#levers-that-do-not-help-at-these-shapes) ↗).
 
-![Roofline for a B300 expert GEMM, showing small-M experts far below the compute ceiling](../agent-docs/assets/diagrams/roofline.png)
+![Roofline of one B300: a memory line at 6.65 TB/s meets the 1,388 TFLOP/s sustained GEMM peak at about 210 FLOP/byte; a bf16 GEMM at K = N = 2880 (GPT-OSS's expert width), timed on the device, reaches 45% of the memory line at M = 128 and 88% of the roof at M = 8,192](../agent-docs/assets/diagrams/roofline.png)
 
 An expert GEMM with few tokens sits in the memory-bound region. At 128 token
-rows against GPT-OSS's 16 MB expert weight, the tensor cores idle while HBM
-streams the weight, and fine-grained MoEs put even fewer tokens on each expert.
-A bigger `M` helps here, and a faster kernel does not.
+rows against GPT-OSS's 16.6 MB expert weight, the GEMM takes about 6 µs on a
+B300, as long as it takes for 24 rows or for 232. By a fit over four weight
+sizes, two thirds of that time does not scale with the weight's bytes. Called
+from PyTorch, the same GEMM costs the CPU about 9 µs to launch, longer than the
+kernel runs
+([Why a small M is slow](../agent-docs/reference/gpu-training-theory.md#why-a-small-m-is-slow) ↗).
 
-## Compared with stock TRL
+Each expert gets about `k / E` of the step's tokens, with `k` experts per token
+out of `E`: 1/8 on GPT-OSS 20B (4 of 32) and 1/32 on Qwen3.6-35B-A3B (8 of
+256). `M` is the number of rows in one expert's GEMM, and a bigger `M` helps
+here.
 
-Halo 1.1.0 trained GPT-OSS 20B at 2.6–3.5× stock TRL (`ep1` and `ep2`) on the
-same 8 B300s, with the same kernels on both sides, and both reach the same
-loss. Expert parallelism, no per-micro-step parameter re-gather and 6-byte
-optimizer state make up most of the gap
-([full comparison](../agent-docs/optimization/halo-vs-stock-trl.md) ↗).
+## Compared with other frameworks
+
+On packed 64k and 128k rows on 8 B300s, Halo 1.2.0 trains Qwen3.6-35B-A3B at 1.10–1.12× Megatron Bridge, 1.47× TRL 1.17.1
+and 1.9–2.0× NeMo AutoModel 0.7.0. It trails a tuned Megatron by 11.5% on dense Qwen3.5-9B at 64k. Rates, layouts and the
+conditions that decide how to read them are in the
+[framework comparison](../agent-docs/optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison) ↗; the
+TRL side is in [Halo vs stock TRL](../agent-docs/optimization/halo-vs-stock-trl.md) ↗.
+
+In GRPO on Qwen3.5-35B-A3B, with one 8× B300 node training and another serving SGLang rollouts, Halo takes 22% less
+time per response token than Miles v0.1.3 on-policy (0.137 against 0.176 s per 1k tokens, step 14.0 against 18.6 s).
+Its trainer node peaks at 63 GiB against 109. With rollouts overlapped, Halo takes 8% less time per response token
+([GRPO against Miles](../agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles) ↗).
 
 For memory rather than speed, start at [Parallelism](parallelism.md). For a run
 slower than these numbers with no obvious cause, turn on the profiler
-([Monitoring](monitoring.md)). Why the defaults are what they are:
-[GPU Training Theory](../agent-docs/reference/gpu-training-theory.md) ↗.
+([Monitoring](monitoring.md)).
+[GPU Training Theory](../agent-docs/reference/gpu-training-theory.md) ↗ explains
+the limits a training step hits and how to find which one yours is hitting.

@@ -16,11 +16,11 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_exp
 from halo.env import is_accelerate_launch
 from halo.kernels.head_logprobs import chunked_head_logprobs
 from halo.models.head_transform import resolve_head_transform
-from halo.models.modality import config_declares_multimodality
-from halo.models.module_tree import hidden_state_backbone
+from halo.models.introspection.modality import config_declares_multimodality
+from halo.models.introspection.module_tree import hidden_state_backbone
+from halo.models.introspection.unwrapping import base_transformers_model, find_peft_model
 from halo.models.moe.config_fields import has_routed_experts, resolve_active_router_aux_loss_coef
 from halo.models.moe.family_specs import QWEN3, find_moe_family_spec_for_config
-from halo.models.unwrapping import base_transformers_model, find_peft_model
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.reference_logps import is_reference_entry, reference_regeneration_steps
 

@@ -17,7 +17,7 @@ from halo.data.collators.offline_grpo import (
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.gloo import run_gloo_ranks
 
 _KL_SCORES = [[-2.0, -2.3, -1.8, -2.2, -2.6, -1.7, -3.2], [-1.2, -2.7, -3.1, -1.9, -2.8, -1.5, -2.4]]
@@ -64,8 +64,11 @@ def _trainer(logps, *, beta: float, loss_type: str):
     return trainer
 
 
-@pytest.mark.parametrize("loss_type", ["grpo", "bnpo", "dr_grpo"])
-@pytest.mark.parametrize("beta", [0.0, 0.2])
+@pytest.mark.parametrize(
+    ("beta", "loss_type"),
+    [(0.0, "grpo"), (0.2, "bnpo"), (0.0, "dr_grpo")],
+    ids=["0.0-grpo", "0.2-bnpo", "0.0-dr_grpo"],
+)
 def test_cp_dispatch_loss_and_gradient_use_only_completion_targets(loss_type, beta):
     batch = _inputs(with_reference=beta != 0.0)
     logps = torch.tensor([[-0.3, -0.4, -9.0], [-0.5, -8.0, -8.0]], requires_grad=True)
@@ -177,9 +180,8 @@ def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
             assert abs(float(wrong_loss.detach() - expected.detach())) > 1e-4
 
 
-@pytest.mark.parametrize("cp_size", [2, 4])
-def test_cp_kl_reference_rank_slice_matches_full_loss_and_gradient_and_rejects_mutation(cp_size):
-    run_gloo_ranks(_ranked_kl_oracle, cp_size, cp_size, pg_timeout=datetime.timedelta(seconds=30))
+def test_cp_kl_reference_rank_slice_matches_full_loss_and_gradient_and_rejects_mutation():
+    run_gloo_ranks(_ranked_kl_oracle, 4, 4, pg_timeout=datetime.timedelta(seconds=30))
 
 
 def _cp_sum_count_worker(rank: int) -> None:

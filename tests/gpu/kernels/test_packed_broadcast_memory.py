@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """The vLLM weight-sync path must not ratchet reserved memory, across syncs or reconnects.
 
-The allocator pools freed blocks per stream, and the producer packs on streams the client owns, so a closed client's
-pool strands one sync's worth per reconnect.
+The allocator pools freed blocks per stream, so anything a client allocates on streams it owns strands one sync's
+worth per reconnect; the packing runs on the caller's stream.
 """
 
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ import torch
 
 import halo.weight_sync.clients.vllm as vllm_client_module
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
-from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, packed_broadcast_producer
+from halo.weight_sync.transport.packed_broadcast import PACKED_NUM_BUFFERS, broadcast_packed, pack_tensors
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.weight_sync import offline_client, push
 
@@ -48,9 +48,9 @@ def _run_syncs(streams):
     staged_params = [(f"p{i}", torch.randn(_PARAM_BYTES // 4, device=device)) for i in range(_PARAMS_PER_SYNC)]
     reserved = []
     for _ in range(_SYNCS):
-        packed_broadcast_producer(
-            iterator=iter(staged_params), group=_SinkGroup(), streams=streams, buffer_size_bytes=_PACK_BYTES
-        )
+        buffers = pack_tensors([tensor for _, tensor in staged_params], buffer_size_bytes=_PACK_BYTES)
+        broadcast_packed(buffers, _SinkGroup(), streams, ready=None)
+        del buffers
         torch.cuda.synchronize()
         reserved.append(torch.cuda.memory_reserved())
     return reserved
@@ -71,7 +71,7 @@ def test_persistent_streams_bound_reserved_memory():
 
 
 def test_client_reuses_one_stream_pair_across_syncs():
-    """Dropping ``streams=`` or re-creating them per sync reintroduces the ratchet while the producer-contract test
+    """Dropping ``streams=`` or re-creating them per sync reintroduces the ratchet while the broadcast-contract test
     stays green."""
     client = offline_client(VLLMWeightSyncClient)
     client._sync_device = torch.device("cuda", torch.cuda.current_device())
@@ -79,12 +79,12 @@ def test_client_reuses_one_stream_pair_across_syncs():
 
     captured = []
 
-    def fake_producer(iterator, group, streams, **kwargs):
+    def fake_broadcast(buffers, group, streams, **kwargs):
         captured.append(streams)
 
     ok = SimpleNamespace(status_code=200)
     with (
-        mock.patch.object(vllm_client_module, "packed_broadcast_producer", fake_producer),
+        mock.patch.object(vllm_client_module, "broadcast_packed", fake_broadcast),
         mock.patch.object(VLLMWeightSyncClient, "request", return_value=ok),
     ):
         params = [("w", torch.zeros(4))]
@@ -92,7 +92,7 @@ def test_client_reuses_one_stream_pair_across_syncs():
         push(client, params)
 
     assert len(captured) == 2
-    assert captured[0] is not None, "client did not create/pass persistent streams to the producer"
+    assert captured[0] is not None, "client did not create/pass persistent streams to the broadcast"
     assert captured[0] is captured[1], "client re-created its stream pair between syncs (per-sync churn)"
     assert captured[0] is client._packed_streams
     assert len(captured[0]) == PACKED_NUM_BUFFERS

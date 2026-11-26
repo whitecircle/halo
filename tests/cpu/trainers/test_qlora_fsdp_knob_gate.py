@@ -5,7 +5,7 @@ It skips FSDP2 (``fully_shard`` cannot wrap bnb's non-float Params4bit), so ``us
 import pytest
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.trainer_rules import reject_fsdp_knobs_under_qlora
+from halo.trainers.construction.trainer_rules import reject_fsdp_knobs_under_qlora
 
 
 def _config(**knobs):

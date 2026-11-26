@@ -6,7 +6,7 @@
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.6-35B-A3B
-attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+attn_implementation: flash_attention_2
 model_init_kwargs:
   output_router_logits: true
 moe_balancing: none  # explicit aux_loss is REJECTED on a GRPO trainer (it never enters the loss); router logits stay on for MoE metrics

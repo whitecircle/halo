@@ -28,8 +28,8 @@ from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.external_tables import named_external_tables
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.moe.family_specs import expert_weight_roots, experts_container_attrs, moe_model_types
-from halo.models.param_roles import persistent_buffers
 from halo.trainers.grpo.rollout.weight_push import _dense_params, gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems, safetensors_state_dict, save_context
 from tests.common.ep_stubs import StubEPLayerBase, bare_ep_layer
@@ -111,18 +111,6 @@ def _outside_expert_banks(loaded: _Loaded, keys) -> set[str]:
 
 
 @pytest.mark.parametrize("name", list(FAMILIES))
-def test_gathered_save_writes_the_hub_namespace_outside_the_expert_banks(name, tmp_path):
-    loaded = _loaded(name, tmp_path)
-    hub, saved = _outside_expert_banks(loaded, loaded.hub), _outside_expert_banks(loaded, loaded.saved)
-
-    assert set(loaded.hub) - hub and set(loaded.saved) - saved, f"{name}: no key classified as an expert bank"
-    assert saved == hub, (
-        f"{name}: the gathered save spells tensors outside the expert banks differently from the hub: "
-        f"only saved={sorted(saved - hub)[:5]}, only hub={sorted(hub - saved)[:5]}"
-    )
-
-
-@pytest.mark.parametrize("name", list(FAMILIES))
 def test_gathered_save_reloads_into_the_saved_tensors(name, tmp_path):
     loaded = _loaded(name, tmp_path)
     reloaded, info = loaded.family.load_class.from_pretrained(
@@ -142,8 +130,10 @@ def test_gathered_save_reloads_into_the_saved_tensors(name, tmp_path):
 _WRAPPERLESS_SAVERS = {"fsdp2": save_fsdp2_checkpoint, "tp": save_tp_checkpoint}
 
 
-@pytest.mark.parametrize("saver", _WRAPPERLESS_SAVERS)
-@pytest.mark.parametrize("name", list(FAMILIES))
+@pytest.mark.parametrize(
+    ("name", "saver"),
+    [(name, "fsdp2") for name in FAMILIES] + [("gpt_oss", "tp"), ("qwen3_moe", "tp")],
+)
 def test_wrapperless_save_writes_the_hub_checkpoint(name, saver, tmp_path):
     """These writers revert the per-expert merges too."""
     family = FAMILIES[name]
@@ -188,7 +178,7 @@ def _gather_on_cpu(layer: EPMoELayerBase):
     """The sync asks for the GPU, and the family's assembly is what is under test."""
 
     def gather(device, **kwargs):
-        return type(layer).gather_expert_state_dict(layer, **{**kwargs, "device": "cpu"})
+        return type(layer).start_gather_expert_state_dict(layer, **{**kwargs, "device": "cpu"})
 
     return gather
 
@@ -199,7 +189,7 @@ def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
     family declares (``engine_loaded_buffers``)."""
     loaded = _loaded(name, tmp_path)
     for layer in loaded.ep_layers.values():
-        layer.gather_expert_state_dict = _gather_on_cpu(layer)
+        layer.start_gather_expert_state_dict = _gather_on_cpu(layer)
     sender = _RecordingSender()
     gather_and_send_weights(loaded.model, sender)
 

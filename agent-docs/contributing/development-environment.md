@@ -70,11 +70,11 @@ back to the host `.venv`. For Hopper, change `"image"` to `halo:hopper`.
 
 The code does not auto-load `.env` — it is passed with `docker run --env-file .env`. Only the GPU
 `make` targets do this (`DOCKER_RUN`, and only when `ENV_FILE` is non-empty); the CPU targets
-(`check-lock`, `test-cpu`, `seed-hf-cache`, `diagrams`, `verify-move`, `verify-artifacts`, `verify-efficiency`,
+(`check-lock`, `test-cpu`, `seed-hf-cache`, `verify-move`, `verify-artifacts`, `verify-efficiency`,
 `verify-ep` and `verify-cp` at `TIER=cpu`, and `make bench`'s band step) pass no credentials
-at all; `docs` runs on the host.
+at all; `docs` and `diagrams` run on the host.
 
-The CPU targets other than `check-lock` and `diagrams` mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
+The CPU targets other than `check-lock` mount `HF_CACHE` (default `$HALO_SCRATCH/hf`)
 read-write, because many CPU tests load a real tokenizer. A test calling `from_pretrained` directly
 hard-fails when the cache is missing and the Hub is unreachable; one going through
 `tests/common/tokenizers.py` skips instead, or fails under `HALO_TEST_REQUIRE_HUB_CACHE=1`.
@@ -89,9 +89,11 @@ and the toolkit and cache variables are cataloged in
 |---|---|---|---|
 | `WANDB_API_KEY` | Weights & Biases logging | `.env` | — |
 | `HF_TOKEN` | Gated HuggingFace model/dataset access | `.env` | — |
-| `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` | [AWS Auth](../infrastructure/aws-auth.md) |
-| `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
-| `VLLM_API_KEY` | The key a local OpenAI-compatible server expects (its `--api-key`), else `OPENAI_API_KEY` | `.env` | [Environment variables](../reference/configuration-reference.md#environment-variables) |
+| `AWS_DEFAULT_REGION` | Region for your S3 bucket / ECR registry | `.env` (commented out in the template: set it only with a value) | [AWS Auth](../infrastructure/aws-auth.md) |
+| `OPENROUTER_API_KEY`, `OPENAI_API_KEY`, `TAVILY_API_KEY`, `SERPER_API_KEY`, `BRAVE_API_KEY`, `KEENABLE_API_KEY` | External LLM + web-search backends | `.env` | [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md) |
+| `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | Modal Sandboxes code-execution backend. `~/.modal.toml` holds the same credentials, and a container reads it only when the launch mounts it ([Modal credentials in Docker](../training-methods/async-grpo/environments/sandbox.md#modal)) | `.env` | [Code Execution Sandboxes](../training-methods/async-grpo/environments/sandbox.md#modal) |
+| `BASETEN_API_KEY` | Baseten Sandboxes code-execution backend | `.env` | [Code Execution Sandboxes](../training-methods/async-grpo/environments/sandbox.md#baseten-sandboxes) |
+| `VLLM_API_KEY` | The key a local OpenAI-compatible server expects (its `--api-key`) | `.env` | [Environment variables](../reference/configuration-reference.md#environment-variables) |
 | `HALO_SCRATCH` | The large host volume the `make` targets, the dev container and `docker-compose.vllm.yml` mount | shell export (compose also reads `.env`; `make` does not) | [Docker](../infrastructure/docker.md#standard-training-launch) |
 | `SGLANG_MODEL_DIR` | The host directory `docker-compose.sglang.yml` mounts (required, no fallback) | shell export or `.env` | [Rollout Servers](../infrastructure/rollout-servers.md#sglang) |
 | `VLLM_GROUP_HOST`, `SGLANG_GROUP_HOST` | The trainer address a rollout server on another host dials back to | `.env` | [Rollout Servers](../infrastructure/rollout-servers.md#group-rendezvous) |
@@ -101,7 +103,7 @@ and the toolkit and cache variables are cataloged in
 | Path | Role |
 |---|---|
 | `/workspace` | Repo bind-mount and working dir in the image (`-v $(pwd):/workspace -w /workspace`); also `PYTHONPATH` |
-| scratch volume (`HALO_SCRATCH`) | Checkpoints, logs, HF cache, temp — verify its capacity before a large write |
+| scratch volume (`HALO_SCRATCH`) | HF cache, dataset cache, temp and `HALO_DATA_ROOT` scratch; checkpoints and logs go to `output_dir`, which is relative to the repo root unless you point it at this volume. Verify its capacity before a large write |
 | `.env` (repo root) | Secrets, passed via `--env-file .env` |
 | `/root/.aws` | AWS credentials, bind-mounted for S3 / ECR |
 | `.venv/` (repo root) | Host-side uv environment for the IDE (git-ignored) |

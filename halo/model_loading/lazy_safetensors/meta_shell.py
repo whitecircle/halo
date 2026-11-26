@@ -9,11 +9,12 @@ import traceback
 import torch
 import torch.nn as nn
 from accelerate import init_empty_weights
-from transformers import GenerationConfig, PreTrainedModel
+from transformers import PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
 from halo.model_loading.dtype import resolve_load_dtype
-from halo.models.param_roles import fp32_pin_matches
+from halo.model_loading.model_preparation import find_generation_config
+from halo.models.introspection.param_roles import fp32_pin_matches
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +47,10 @@ def _resolve_remote_code_class(model_class, config, trust_remote_code: bool, rev
 
 def _restore_checkpoint_generation_config(model: nn.Module, model_name_or_path: str, revision=None) -> None:
     """Re-read ``generation_config.json`` onto a config-only shell, whose derived one a save would write without the
-    checkpoint's eos set and sampling defaults. An unreadable file raises."""
-    try:
-        model.generation_config = GenerationConfig.from_pretrained(model_name_or_path, revision=revision)
-    except OSError:
-        if os.path.isfile(os.path.join(model_name_or_path, "generation_config.json")):
-            raise
+    checkpoint's eos set and sampling defaults."""
+    generation_config = find_generation_config(model_name_or_path, revision=revision)
+    if generation_config is not None:
+        model.generation_config = generation_config
 
 
 def _apply_fp32_dtype_plan(model: nn.Module, dtype: torch.dtype) -> None:
@@ -99,6 +98,16 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
         ) from e
     _apply_fp32_dtype_plan(model, dtype)
     return model
+
+
+def config_only_parameter_bytes(
+    model_class, config, dtype: torch.dtype, *, trust_remote_code: bool, revision: str | None = None
+) -> int:
+    """Bytes of the parameters ``model_class`` builds from ``config`` alone at ``dtype``, fp32 pins included: no weight
+    is read. Raises :class:`MetaShellBuildError` for a class the meta device cannot build."""
+    model_class = _resolve_remote_code_class(model_class, config, trust_remote_code, revision)
+    shell = _instantiate_from_config_on_meta(model_class, config, resolve_load_dtype(dtype, config), trust_remote_code)
+    return sum(p.numel() * p.element_size() for p in shell.parameters())
 
 
 def _materialize_nonpersistent_buffers_from_config_twin(

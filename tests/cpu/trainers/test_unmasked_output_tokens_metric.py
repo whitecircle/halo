@@ -9,8 +9,8 @@ import pytest
 import torch
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers import token_metrics
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.metrics import token_metrics
 
 _extract = DistributedTrainerMixin._extract_output_token_count
 _accumulate = DistributedTrainerMixin._accumulate_unmasked_output_tokens

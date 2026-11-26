@@ -8,9 +8,9 @@ import pytest
 from datasets import Dataset, IterableDataset
 from torch.utils.data import SequentialSampler
 
-from halo.trainers.dataloaders import DataParallelLoaderMixin
-from halo.trainers.evaluation import EvaluationMixin
 from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
 
 _ROWS = list(range(8))
 

@@ -12,8 +12,8 @@ from torch.utils.checkpoint import checkpoint
 from transformers import NemotronHConfig
 from transformers.models.nemotron_h import modeling_nemotron_h as nemotron_modeling
 
-from halo.models import nemotron_h
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families import nemotron_h
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import NEMOTRON_H_RELEASE_TEXT_CONFIG
 from tests.common.numerics import fro_rel_err, max_abs_rel_err

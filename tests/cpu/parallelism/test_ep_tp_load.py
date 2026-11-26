@@ -44,6 +44,7 @@ def _stub_pc() -> SimpleNamespace:
         data_parallel_size=1,
         max_concurrent_loading=1,
         fp32_non_ep_params=False,
+        frozen_quantized_experts=False,
         ep_config=lambda: "ep-config-sentinel",
     )
 

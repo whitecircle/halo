@@ -7,8 +7,8 @@ from dataclasses import fields
 import pytest
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.ray_actors import _await_with_deadline
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.ray_actors import _await_with_deadline
 
 
 class _SlowRef:

@@ -17,8 +17,8 @@ from transformers import TrainerCallback
 from trl import SFTConfig
 
 from halo.distributed import fsdp, mesh
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.token_metrics import TokenMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.offline_grpo import OFFLINE_VOCAB, make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config

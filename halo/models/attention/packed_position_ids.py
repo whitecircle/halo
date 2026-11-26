@@ -7,6 +7,8 @@ import functools
 import inspect
 from abc import ABC, abstractmethod
 
+from halo.models.gradient_checkpointing import patch_layer_forward
+
 _STASH_ATTR = "_halo_packed_position_ids"
 
 
@@ -89,7 +91,7 @@ def install_position_ids_stash(owner_cls, stash_targets) -> bool:
                 setattr(target, _STASH_ATTR, None)
 
     setattr(forward, _STASH_ATTR, True)
-    owner_cls.forward = forward
+    patch_layer_forward(owner_cls, forward)
     return True
 
 

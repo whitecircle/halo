@@ -7,9 +7,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import (
+    EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
+    REWARD_COMPONENTS_KEY,
+)
+from halo.environments.episodes.messages import Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from halo.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, rollout_valid_mask

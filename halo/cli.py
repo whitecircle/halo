@@ -17,9 +17,12 @@ from torch.numa.binding import AffinityMode
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_ROOT = Path("scripts")
 TRAINING_ROOT = _SCRIPTS_ROOT / "training"
+# Benchmark harnesses, Halo's and other frameworks': their own launch scripts run them, each in its framework's
+# image, so none is a Halo tool.
+BENCHMARK_HARNESS_ROOT = _SCRIPTS_ROOT / "benchmarks"
 
-# ``training`` belongs to ``halo launch``; ``diagrams`` holds doc generators that mostly lack a ``__main__`` guard.
-_NON_TOOL_DIRS = frozenset({TRAINING_ROOT.name, "diagrams"})
+# ``training`` belongs to ``halo launch``; the benchmark harnesses belong to neither command.
+_NON_TOOL_DIRS = frozenset({TRAINING_ROOT.name, BENCHMARK_HARNESS_ROOT.name})
 
 _EXTRA_ARGS = {"allow_extra_args": True, "ignore_unknown_options": True}
 _LAUNCH_USAGE = "halo launch METHOD CONFIG [launcher flags] [--field=value ...]"
@@ -44,7 +47,18 @@ _TORCHRUN_MULTINODE_FLAGS = frozenset(
     }
 )
 
+# --halo-rollout-backend value -> environment set for the launched process (Ray rollout actors inherit it).
+# HALO_SANDBOX_REPL routes the Python REPL tools to that backend too, off the in-process REPL.
+ROLLOUT_BACKEND_ENV: dict[str, dict[str, str]] = {
+    "modal": {"HALO_SANDBOX_BACKEND": "modal", "HALO_SANDBOX_REPL": "1"},
+    "baseten": {"HALO_SANDBOX_BACKEND": "baseten"},
+}
+
 app = typer.Typer(no_args_is_help=True, add_completion=False)
+
+_ROLLOUT_BACKEND_OPTION = typer.Option(
+    "--halo-rollout-backend", help=f"Code-execution sandbox for rollouts: {', '.join(ROLLOUT_BACKEND_ENV)}"
+)
 
 
 def _tool_roots(repo_root: Path) -> tuple[Path, ...]:
@@ -190,17 +204,26 @@ def _lookup(index: dict[str, Path], name: str, kind: str, root: Path) -> Path:
     raise typer.BadParameter(f"unknown {kind} '{name}'. Known {kind}s: {known} (--list for all)")
 
 
-def _execute(argv: list[str], root: Path, *, cwd: Path | None, dry_run: bool) -> None:
-    """Exec ``argv`` with ``root`` first on ``PYTHONPATH``, since ``python script.py`` puts only the script's directory
-    on ``sys.path``. ``halo launch`` passes the repo root as ``cwd`` so a config's relative paths resolve there;
-    ``halo run`` passes ``None`` so a tool's path flags keep the caller's cwd."""
+def _rollout_env(rollout_backend: str | None) -> dict[str, str]:
+    if rollout_backend is None:
+        return {}
+    if rollout_backend not in ROLLOUT_BACKEND_ENV:
+        known = ", ".join(ROLLOUT_BACKEND_ENV)
+        raise typer.BadParameter(f"unknown --halo-rollout-backend '{rollout_backend}'. Known: {known}")
+    return ROLLOUT_BACKEND_ENV[rollout_backend]
+
+
+def _execute(argv: list[str], root: Path, *, cwd: Path | None, dry_run: bool, env: dict[str, str]) -> None:
+    """Exec ``argv`` with ``env`` set and ``root`` first on ``PYTHONPATH``, since ``python script.py`` puts only the
+    script's directory on ``sys.path``. ``halo launch`` passes the repo root as ``cwd`` so a config's relative paths
+    resolve there; ``halo run`` passes ``None`` so a tool's path flags keep the caller's cwd."""
     if dry_run:
-        typer.echo(" ".join(shlex.quote(part) for part in argv))
+        typer.echo(" ".join([*(f"{k}={shlex.quote(v)}" for k, v in env.items()), *map(shlex.quote, argv)]))
         return
     if cwd is not None:
         os.chdir(cwd)
     python_path = os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH")]))
-    os.execvpe(argv[0], argv, {**os.environ, "PYTHONPATH": python_path})
+    os.execvpe(argv[0], argv, {**os.environ, **env, "PYTHONPATH": python_path})
 
 
 @app.callback()
@@ -240,6 +263,7 @@ def launch(
         ),
     ] = None,
     list_methods: Annotated[bool, typer.Option("--list", help="List indexed training methods")] = False,
+    rollout_backend: Annotated[str | None, _ROLLOUT_BACKEND_OPTION] = None,
     dry_run: Annotated[bool, typer.Option("--dry_run", help="Print command without executing")] = False,
     root: Annotated[Path, typer.Option("--root", help="Repository root")] = REPO_ROOT,
 ) -> None:
@@ -280,7 +304,7 @@ def launch(
         port=port,
         numa_binding=numa_binding,
     )
-    _execute(argv, root, cwd=root, dry_run=dry_run)
+    _execute(argv, root, cwd=root, dry_run=dry_run, env=_rollout_env(rollout_backend))
 
 
 @app.command(context_settings=_EXTRA_ARGS)
@@ -290,6 +314,7 @@ def run(
         str | None, typer.Argument(help="Tool name, e.g. merge-ep-shards or inference/reward-model/score")
     ] = None,
     list_tools: Annotated[bool, typer.Option("--list", help="List indexed tools")] = False,
+    rollout_backend: Annotated[str | None, _ROLLOUT_BACKEND_OPTION] = None,
     dry_run: Annotated[bool, typer.Option("--dry_run", help="Print command without executing")] = False,
     root: Annotated[Path, typer.Option("--root", help="Repository root")] = REPO_ROOT,
 ) -> None:
@@ -298,7 +323,7 @@ def run(
     checkpoint tool would race on one output directory.
 
     Flags after the tool name pass through to the underlying script, except the launcher's own
-    (--list, --dry_run, --root), which the CLI consumes first. Put ``--`` before a tool flag that
+    (--list, --dry_run, --root, --halo-rollout-backend), which the CLI consumes first. Put ``--`` before a tool flag that
     collides (``halo run prepare-dataset -- --help``).
 
     The tool runs in the caller's cwd (unlike ``halo launch``), so a relative path flag means what it
@@ -314,7 +339,7 @@ def run(
         raise click.UsageError("halo run requires a TOOL name (use --list to see options)")
     script = _lookup(index, tool, "tool", root)
     argv = build_launch_command(script, None, nproc=1, args=ctx.args)
-    _execute(argv, root, cwd=None, dry_run=dry_run)
+    _execute(argv, root, cwd=None, dry_run=dry_run, env=_rollout_env(rollout_backend))
 
 
 def main() -> None:

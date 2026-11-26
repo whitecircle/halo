@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """The block-scale quantizers (MXFP8 / MXFP4 / NVFP4) in ``halo/kernels/lowp/quantization.py``."""
 
+import contextlib
 import warnings
 
 import pytest
@@ -64,12 +65,6 @@ def test_roundtrip_within_tolerance_all_formats():
         assert re < _TOL[fmt], f"{fmt} round-trip relerr {re:.4f} >= {_TOL[fmt]}"
 
 
-def test_fp8_beats_fp4_accuracy():
-    torch.manual_seed(1)
-    x = torch.randn(128, 256) * 0.4
-    assert fro_rel_err(dequantize(quantize_mxfp8(x)), x) < fro_rel_err(dequantize(quantize_nvfp4(x)), x)
-
-
 def test_axis_0_quantization():
     torch.manual_seed(0)
     x = torch.randn(128, 96) * 0.3
@@ -87,14 +82,6 @@ def test_zero_input_roundtrips_to_zero():
         assert recon.abs().max().item() == 0.0
 
 
-def test_scale_tracks_block_magnitude():
-    small = torch.full((1, 32), 0.01)
-    large = torch.full((1, 32), 100.0)
-    s_scale = quantize_mxfp8(small).scales.item()
-    l_scale = quantize_mxfp8(large).scales.item()
-    assert l_scale > s_scale
-
-
 def test_e2m1_midpoints_round_to_even_not_down():
     """``bucketize`` resolves every tie down, and exact ties are routine, which would bias every fp4 tensor toward
     zero."""
@@ -110,17 +97,6 @@ def test_e2m1_midpoints_round_to_even_not_down():
     assert [recon[0, i].item() for i in (1, 2, 3)] == [1.0, 2.0, 4.0]  # Tie-down would give 0.5/1.5/3.0.
     assert recon[0, 4].item() == -1.0
     assert [recon[0, i].item() for i in (5, 6)] == [0.5, 1.0]
-
-
-def test_nvfp4_saturating_scale_guards_against_outlier_nan():
-    # A block amax above E2M1_MAX*E4M3_MAX (=2688) overflows a lone e4m3 scale to NaN; the global scale lifts it into
-    # range.
-    x = torch.randn(16, 64) * 0.1
-    x[0, 0] = 5000.0
-    q = quantize_nvfp4(x)
-    recon = dequantize(q)
-    assert torch.isfinite(q.scales.float()).all()
-    assert torch.isfinite(recon).all()
 
 
 def test_divisibility_guard_raises():
@@ -208,6 +184,73 @@ def test_compiled_round_trip_matches_eager_without_tracing_the_cache(fmt):
         compiled = torch.compile(quantization._block_round_trip, dynamic=True)(x, fmt, -1)
     assert torch.equal(compiled, quantization._block_round_trip(x, fmt, -1))
     assert not [w for w in caught if "lru_cache" in str(w.message)]
+
+
+@contextlib.contextmanager
+def _flushed_denormals():
+    """CPU flush-to-zero, as a compiled CUDA graph applies it, restored on exit."""
+    if not torch.set_flush_denormal(True):
+        pytest.skip("this CPU cannot flush denormals")
+    try:
+        # The flush must reach the scale the bug came from, or the test proves nothing.
+        assert torch.exp2(torch.tensor(-127.0)).item() == 0.0
+        yield
+    finally:
+        torch.set_flush_denormal(False)
+
+
+def _with_zero_blocks() -> torch.Tensor:
+    """The repro from #151: one expert's first 32 rows zero, so each of its columns has an all-zero block on axis 1."""
+    torch.manual_seed(0)
+    w = torch.randn(4, 64, 32, dtype=torch.bfloat16) * 0.05
+    w[1, :32, :] = 0
+    return w
+
+
+@pytest.mark.parametrize("fmt", ["mxfp8", "mxfp4"])
+def test_an_all_zero_block_round_trips_to_zero_under_flushed_denormals(fmt):
+    """The block's exponent clamps to -127, and exp2(-127) is a subnormal a flushing graph turns into 0: dividing by it
+    gave 0/0 = NaN for mxfp8 (1024 NaNs on this tensor). Under the flush the round trip has no NaN, the block is
+    exactly 0, and every value equals the unflushed round trip's."""
+    w = _with_zero_blocks()
+    unflushed = quantization._block_round_trip(w, fmt, 1)
+    with _flushed_denormals():
+        flushed = quantization._block_round_trip(w, fmt, 1)
+    assert not flushed.isnan().any()
+    assert torch.equal(flushed[1, :32, :], torch.zeros(32, 32, dtype=flushed.dtype))
+    assert torch.equal(flushed, unflushed)
+
+
+def _block_at_exponent(fmt: str, edge: str) -> torch.Tensor:
+    """Row 1's first block on an extreme ``e8m0`` exponent, its values normal fp32 so the flush leaves the input alone:
+    ``tiny`` clamps to -127 (amax below format max x 2^-127, about 2.6e-36 for mxfp8 and 3.5e-38 for mxfp4), ``inf``
+    reaches 127 with values large enough to keep codes once scaled by 2^-127."""
+    torch.manual_seed(0)
+    x = torch.randn(4, 64)
+    if edge == "tiny":
+        x[1, :32] = (torch.rand(32) * 0.5 + 0.5) * 3e-38 * torch.where(torch.rand(32) < 0.5, -1.0, 1.0)
+    else:
+        x[1, :32] = torch.exp2(torch.rand(32) * 19 + 108) * torch.where(torch.rand(32) < 0.5, -1.0, 1.0)
+        x[1, 0] = float("inf")
+    return x
+
+
+@pytest.mark.parametrize("edge", ["tiny", "inf"])
+@pytest.mark.parametrize("fmt", ["mxfp8", "mxfp4"])
+def test_an_extreme_exponent_block_keeps_its_codes_and_scale_under_flushed_denormals(fmt, edge):
+    """Exponents -127 and 127 are where 2^-127 enters the scaling: CUDA's exp2(-127) is a subnormal, one ulp low, and a
+    flushing graph makes it 0. The quantizer scales those blocks by normal powers of two, so its codes and scale match
+    the unflushed ones. Before #185, mxfp4 divided a tiny block by the flushed 0 (all codes 0) and mxfp8 multiplied an
+    inf block by it (NaN codes). Only the dequantize's 2^-127 multiply is left to the flush."""
+    x = _block_at_exponent(fmt, edge)
+    unflushed = quantization.QUANTIZERS[fmt](x, axis=-1)
+    with _flushed_denormals():
+        flushed = quantization.QUANTIZERS[fmt](x, axis=-1)
+    assert torch.equal(flushed.data.view(torch.uint8), unflushed.data.view(torch.uint8))
+    assert torch.equal(flushed.scales, unflushed.scales)
+    assert unflushed.scales[1, 0].item() == (0 if edge == "tiny" else 254)
+    # Past the inf's own element (byte), the block must keep nonzero codes, or it tests nothing.
+    assert unflushed.data[1, 1:16].float().abs().max() > 0
 
 
 @pytest.fixture

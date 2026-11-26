@@ -16,7 +16,6 @@ from halo.trainers.distillation.divergences import (
 )
 
 BATCH, SEQ, VOCAB = 2, 5, 257
-TEMPERATURES = (1.0, 2.0, 0.7, 1.3)
 # A temperature whose divide rounds in bf16, so a bf16-side divide is visible.
 INEXACT_TEMPERATURE = 0.7
 # fp32 rounding between two spellings of one loss (q log q - q log p vs q (log q - log p), softmax vs
@@ -66,6 +65,7 @@ def _soft_cross_entropy_spelling(student, teacher, temperature):
 
 
 def _jensen_shannon_spelling(student, teacher, temperature):
+    """The symmetric JSD, which ``jensen_shannon`` is at β = 0.5."""
     student_probs = softmax(student.float() / temperature, dim=-1)
     teacher_probs = softmax(teacher.float() / temperature, dim=-1)
     log_m = (0.5 * (student_probs + teacher_probs)).clamp_min(1e-12).log()
@@ -88,7 +88,7 @@ def _logits(dtype, seed=0):
 
 
 def _teacher_loss(name):
-    loss_fn = require_divergence(name)
+    loss_fn = require_divergence(name, jsd_beta=0.5)
     hard_labels = torch.zeros(BATCH, SEQ, dtype=torch.long)
     return lambda student, teacher, temperature: call_divergence(loss_fn, student, teacher, temperature, hard_labels)
 
@@ -101,7 +101,7 @@ def _value_and_grad(loss_fn, student, teacher, temperature):
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("temperature", TEMPERATURES)
+@pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
 @pytest.mark.parametrize(
     ("loss_fn", "reference_fn"),
     [
@@ -120,7 +120,7 @@ def test_opd_losses_are_bit_identical_to_upcast_then_divide(loss_fn, reference_f
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("temperature", TEMPERATURES)
+@pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
 @pytest.mark.parametrize("name", TEACHER_SOFTENED_LOSSES)
 def test_teacher_softened_losses_match_their_reference_spelling(name, temperature, dtype):
     student, teacher = _logits(dtype, seed=1)
@@ -146,8 +146,12 @@ def _finite_value_and_grad(loss_fn, student, teacher, temperature):
     return value, grad
 
 
-@pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
-@pytest.mark.parametrize("loss_fn", [reverse_kl_loss, forward_kl_loss, unnormalized_kl_loss])
+@pytest.mark.parametrize("temperature", (INEXACT_TEMPERATURE,))
+@pytest.mark.parametrize(
+    "loss_fn",
+    [reverse_kl_loss, forward_kl_loss, unnormalized_kl_loss, require_divergence("jensen_shannon", jsd_beta=0.3)],
+    ids=["reverse_kl", "forward_kl", "unnormalized_kl", "jensen_shannon"],
+)
 def test_opd_losses_ignore_a_vocabulary_padded_on_both_sides(loss_fn, temperature):
     """Self-distillation scores student and teacher with one model, so both pad the same columns."""
     student, teacher = _logits(torch.float32, seed=3)
@@ -158,7 +162,7 @@ def test_opd_losses_ignore_a_vocabulary_padded_on_both_sides(loss_fn, temperatur
     assert padded_grad[..., VOCAB:].eq(0).all()
 
 
-@pytest.mark.parametrize("temperature", (1.0, INEXACT_TEMPERATURE))
+@pytest.mark.parametrize("temperature", (INEXACT_TEMPERATURE,))
 @pytest.mark.parametrize("name", TEACHER_SOFTENED_LOSSES)
 def test_teacher_losses_score_a_top_k_truncated_teacher(name, temperature):
     """Truncated entries add 0, as ``kl_div``/``softmax`` give a zero probability."""

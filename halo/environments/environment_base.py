@@ -7,10 +7,10 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, final
 
 from halo.config_validation import present, require_bool, require_int
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     COMPLETED_KEY,
     CONTEXT_KEY,
     OUTPUT_BUDGET_EXHAUSTED_KEY,
@@ -18,16 +18,17 @@ from halo.environments.episode_keys import (
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from halo.environments.episode_scoring import REWARD_PENDING_KEY, EpisodeGrade, EpisodeScoringMixin
-from halo.environments.messages import EnvStep, Message, StepOutcome, Trajectory, engine_view
-from halo.environments.reasoning_effort import EffortProfilesMixin
-from halo.environments.tool_accounting import TOTAL_TOOL_CALLS_KEY, ToolCallAccountingMixin
-from halo.environments.turn_recovery import (
+from halo.environments.episodes.episode_scoring import REWARD_PENDING_KEY, EpisodeGrade, EpisodeScoringMixin
+from halo.environments.episodes.messages import EnvStep, Message, StepOutcome, Trajectory, engine_view
+from halo.environments.episodes.reasoning_effort import REASONING_BUDGET_KEY, REASONING_PRICE_KEY, EffortProfilesMixin
+from halo.environments.episodes.turn_recovery import (
     EMPTY_TURNS_KEY,
     LENGTH_CUTOFF_IN_CALL_TURNS_KEY,
     LENGTH_CUTOFF_TURNS_KEY,
     TurnRecoveryMixin,
 )
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
+from halo.environments.tools.accounting import TOTAL_TOOL_CALLS_KEY, ToolCallAccountingMixin
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
 from halo.rewards.terms import RewardTerm
@@ -47,11 +48,15 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
     # Whether the reward grades only against ``context["answer"]``, so the trainer refuses an answerless dataset.
     requires_answer: bool = False
 
-    # Whether the tools arrive on the first reset (an MCP server's, when it connects).
+    # Environments whose tools arrive on reset implement _discover_tools_schema for startup probes.
     TOOLS_ARRIVE_ON_RESET: bool = False
 
     # Set by the protocol layers; the eval records it. ``None`` = no system turn.
     system_prompt: str | None = None
+
+    # Whether :meth:`observation_view` rewrites earlier messages, so a turn's prompt is no prefix of the next one's and
+    # only per-turn training rows render what the engine saw.
+    rewrites_history_in_view: bool = False
 
     def __init__(
         self,
@@ -100,6 +105,25 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         self._background_tasks: set[asyncio.Task] = set()
         self._trajectories: dict[int, Trajectory] = {}
         self._episode_ids = itertools.count()
+
+    def reject_settings_without_thinking(self) -> None:
+        """For a run that samples with no reasoning block (``rollout_thinking: false``): refuses ``carry_reasoning`` and
+        an effort level whose profile budgets or prices reasoning. An environment that needs more of such a run extends
+        it."""
+        if self.carry_reasoning:
+            raise ValueError(
+                "carry_reasoning: true with rollout_thinking: false: no turn reasons, so there is no reasoning to send "
+                "back. Remove carry_reasoning, or set rollout_thinking: true."
+            )
+        reasoning_levels = [
+            level for level in VALID_REASONING_EFFORTS if self.reasoning_terms_for_effort(level) != (None, 0.0)
+        ]
+        if reasoning_levels:
+            raise ValueError(
+                f"reasoning_effort_profiles {reasoning_levels} set {REASONING_BUDGET_KEY} or {REASONING_PRICE_KEY} with "
+                "rollout_thinking: false: they set how the reasoning terms charge an episode's reasoning tokens, and no "
+                "turn reasons, so they would have no effect. Remove them, or set rollout_thinking: true."
+            )
 
     def reset(
         self, prompts: list[str | list[dict[str, str]]], contexts: list[dict[str, Any]] | None = None
@@ -155,6 +179,18 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         """Passed to the rollout engine as ``tools=``; overridden by the tool-use envs."""
         return None
 
+    @final
+    async def discover_tools_schema(self) -> list[dict[str, Any]]:
+        """On an unused environment, return a nonempty snapshot of its dynamic tools and release discovery resources."""
+        tools = await self._discover_tools_schema()
+        if not tools:
+            raise ValueError(f"{type(self).__name__} advertised no tools. Configure it to expose at least one tool.")
+        return tools
+
+    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
+        """What the engine reads for the turn after ``messages``; the trainer's per-turn re-render reads the same."""
+        return engine_view(messages, self.carry_reasoning)
+
     def rollout_metrics(self, trajectory: Trajectory) -> dict[str, float]:
         """Per-episode metrics the trainer means, by full path: ``outcome/*`` (added by task envs), ``episode/*``,
         ``reward/*`` (sum to the reward) and the scorers' keys."""
@@ -186,6 +222,10 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         )
         metrics.update(self._reward_metrics(trajectory))
         return metrics
+
+    async def _discover_tools_schema(self) -> list[dict[str, Any]]:
+        """Snapshot the tool schema and release all resources opened for discovery before returning."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement dynamic tool schema discovery")
 
     @abstractmethod
     def _reset_single(self, prompt: str | list[dict[str, str]], context: dict[str, Any] | None = None) -> Trajectory:
@@ -267,6 +307,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
                 thinking=ctx.get("reasoning"),
                 token_ids=ctx.get("token_ids"),
                 token_logprobs=ctx.get("token_logprobs"),
+                candidates=ctx.get("candidates"),
                 routing_mask=ctx.get("routing_mask"),
                 routing_prompt_tokens=ctx.get("routing_prompt_tokens"),
                 prompt_token_ids=ctx.get("prompt_token_ids"),
@@ -313,9 +354,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         """``reward`` is this step's delta; the rest mirrors ``trajectory`` as it stands."""
         return EnvStep(
             trajectory=trajectory,
-            observation=[
-                m.to_dict(include_thinking=True) for m in engine_view(trajectory.messages, self.carry_reasoning)
-            ],
+            observation=[m.to_dict(include_thinking=True) for m in self.observation_view(trajectory.messages)],
             reward=reward,
             done=trajectory.done,
             truncated=trajectory.truncated,

@@ -2,6 +2,7 @@
 two of its calls."""
 
 import os
+from types import SimpleNamespace
 
 from transformers.trainer import TRAINER_STATE_NAME
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
@@ -11,6 +12,9 @@ class BaseTrainerSave:
     """HF's ``_save_checkpoint`` as far as files go, in order: weights, optimizer and scheduler, RNG, trainer state,
     then push and rotation. The trainer over it sets ``run_dir``, ``args`` and ``state`` (a real ``TrainerState``) and
     overrides ``save_model``."""
+
+    # HF's Trainer builds one in __init__; the checkpoint sidecars look through its callbacks.
+    callback_handler = SimpleNamespace(callbacks=())
 
     def _get_output_dir(self, trial=None):
         return self.run_dir

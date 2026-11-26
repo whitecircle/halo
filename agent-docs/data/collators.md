@@ -64,10 +64,15 @@ Whether the packed documents actually stay isolated is **per family**, not unive
 
 Where the attention path is isolated, the remaining difference between backends is cost. The non-varlen path builds a dense `[L, L]` mask over the *flattened* row, so `L` is the whole batch's token count (up to `per_device_train_batch_size × max_length`) and the mask exhausts memory at long context. `select_data_collator` **warns** there, telling you to keep `per_device_train_batch_size` at 1.
 
-It detects packed data via the `seq_lengths` field that TRL's `pack_dataset()` emits for the `bfd` and
-`bfd_split` strategies. The `wrapped` strategy emits no `seq_lengths` column at all, so each row
-collates as **one** document and anything concatenated inside it attends across itself; the collator
-warns once per instance when it sees such rows.
+It detects packed data via the `seq_lengths` field: TRL's `pack_dataset()` emits it for `bfd` and `bfd_split`, and
+`coordinated_pack` adds it to `wrapped` rows, one entry per piece of a source document, cut at document ends and at the
+row edge and summing to the row length. A document cut by the row edge is two pieces in two rows, each isolated from
+its row's other documents. The first token of a piece has no earlier token in its row to be predicted from, so its
+label is masked like any document's first token, a continuation's included; under completion-only masking a
+continuation piece holds no assistant marker and trains nothing. A continuation also restarts its `position_ids`
+at 0, so it sees none of the prefix; under completion-only masking prefer `bfd_split` over `wrapped`. Rows without `seq_lengths` (a corpus baked by an
+earlier release) collate as **one** document, so concatenated documents attend across each other; the collator warns
+once per instance when it sees such rows.
 
 Online packing (`packing: true` at training time) and the offline `prepare_dataset.py` pipeline both
 accept all three strategies (see [Pre-Processing](dataset-preparation.md#parameters)).
@@ -114,23 +119,23 @@ collator = select_data_collator(
 
 Flags, keyword-only: `train_on_completions_only` (required: the run's own setting), `padding_free=False`,
 `packing=False`, `assistant_message_template=None`, `pad_to_multiple_of=None`, `use_context_parallel=False`,
-`train_on_last_assistant_only=False`, `model_config=None`, `per_device_train_batch_size=1`,
+`train_on_last_assistant_only=False`, `model_config=None`, `generation_config=None`, `per_device_train_batch_size=1`,
 `keeps_packed_rows=False`, `allow_cross_document_linear_attention=False`, `per_device_eval_batch_size=0`,
 `emit_varlen_one_document=False` ([One-document batches](#one-document-batches)). With `packing` above batch 1 the collator merges the mini-batch's packed
 rows into one row (document isolation and throughput unchanged), and the factory warns: raise
 `max_length` instead when a longer pack is the intent. `keeps_packed_rows` suppresses that warning;
 only the PP seam sets it.
 
-**Pass `model_config`.** It is what feeds `resolve_eos_token_ids(tokenizer, model_config)`; without
-it the collator falls back to the tokenizer's EOS alone and mis-masks any family whose turn
-terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
+**Pass `model_config` and `generation_config`.** They feed `resolve_eos_token_ids(tokenizer, model_config,
+generation_config)`; without them the collator falls back to the tokenizer's EOS alone and mis-masks any
+family whose turn terminators live in `config.eos_token_id` (GLM-4) or `generation_config.json` (gpt-oss's
+`<|call|>`, Gemma 4's `<|tool_response>`). The SFT script passes its model's two.
 `train_on_last_assistant_only=True` requires `train_on_completions_only=True` and raises otherwise.
 
 | Configuration | Collator |
 |---------------|----------|
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
 | PP + padding_free | **rejected** — the flattened width varies per step while the pipeline's P2P buffers are frozen after the first |
-| padding_free on an M-RoPE decoder (Qwen3.5/3.6 text towers included, the Qwen-VL text models) | **rejected** on every backend (`reject_mrope_padding_free`), as is a padding-free collator handed straight to the SFT trainer (`reject_multi_document_collator` in `halo/trainers/trainer_rules.py`) — the flattened M-RoPE row faults the flash varlen kernels; `packing` serves the same rows |
 | PP + packing on a model whose conv / linear-attention layers read no boundary at all (KDA, Lightning Attention-2, Inkling's short convolutions) | **rejected**, whatever `allow_cross_document_linear_attention` says — no marker reaches those layers, so they cross the kept rows' documents; the segment markers GatedDeltaNet and LFM-2 ShortConv read each stage rebuilds ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
 | CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
@@ -164,15 +169,18 @@ drift is measured per family (0 = isolated) and the verdict is **not** universal
 correct `position_ids` everywhere, but a family's forward has to carry them into its mask, and a
 non-attention mixer carries state along the sequence regardless of any mask.
 
+The on-policy GRPO trainers' packed micro-batches (`packed_microbatch_tokens`) flatten several rows into one varlen call under these same rules, applied with no opt-in: a family whose rows cross documents (the rows below marked refused, and the families `allow_cross_document_linear_attention` would admit for SFT), compressed-KV layers, and attention that reads a token's row index are refused at construction, since a crossing RL step corrupts the policy gradient without a trace ([Packed micro-batches](../training-methods/async-grpo/performance.md#packed-micro-batches)).
+
 | Family | Attention layers | Other layers |
 |---|---|---|
 | Qwen3 (dense + MoE), GLM-4 MoE Lite, Laguna, Gemma 4, and dense Llama, Qwen2, Mistral, Mixtral, OLMo3, Cohere2, Gemma 1, 2 and 3, and PaliGemma | isolated on their supported backends | — |
 | Inkling | isolated | four depthwise causal convs per layer **cross by construction** — the modeling reads `seq_idx` but its call sites never forward kwargs, so no emission can reach them; `packing` and `padding_free` are **refused** unless `allow_cross_document_linear_attention` |
-| Mistral4 | isolated — flash needs `patch_mistral4_flash_packed_position_ids` (upstream drops `position_ids` before the attention interface); dense clean to grouped-GEMM reduction noise | — |
+| Inkling 2 | isolated — `inkling2_relative_flex` reads the documents off `position_ids`; `padding_free` is refused (no varlen flash kernel) | the four depthwise causal convs per layer are isolated by the family's patches, which stop each tap at its document's start |
+| Mistral4 | isolated — flash reads the `position_ids` the attention hands its interface; dense clean to grouped-GEMM reduction noise | — |
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |
 | Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators and SMPO's padding-free forward emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free`, and SMPO its `padding_free`, unless transformers' own fast-path predicates hold |
-| Qwen3.8-Flash-Next | isolated — its sparse (QSA) layers run Halo's tiled kernel per `seq_idx` document, and a packed row without `seq_idx` is refused ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#attention-and-rows)) | GatedDeltaNet as Qwen3.5; the per-layer embedding's n-gram history and dilated conv restart at every `seq_idx` document start |
+| Qwen3.8-Flash-Next | isolated — its sparse (QSA) layers run Halo's block-sparse kernel per `seq_idx` document (the tiled path under `full_determinism` or where that kernel cannot run), and a packed row without `seq_idx` is refused ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#attention-and-rows)) | GatedDeltaNet as Qwen3.5; the per-layer embedding's n-gram history and dilated conv restart at every `seq_idx` document start |
 | Bailing / Ling | Ling 2.0, Ring: isolated on flash only (`patch_remote_llama_flash_template`); eager/SDPA **leak** — the remote file builds its mask from `attention_mask` alone ([Bailing/Ling](../models/bailing.md#attention-and-packing)). Ling 3.0: flash refused, MLA on SDPA leaks the same way, so Ling 3.0 cannot pack | Ling 3.0 KDA and Ring's Lightning-Attention-2 linear layers — **cross**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
 | GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either — flat packing **crosses**, so it is refused; [tree packing](../optimization/tree-packing.md) isolates it (the DSA forward reads the plan's path links) | KDA linear attention — **crosses** under flat packing, the same unreachable-boundary class as Bailing/Ling; isolated under tree packing (conv and scan segmented by the plan) |
 | LFM-2 | isolated | ShortConv is isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for this family and both conv paths honor it |
@@ -245,8 +253,9 @@ A family outside the table above and the family specs gets a warning on every ba
 
 ## Constraints
 
-- **`packing` and `padding_free` are mutually exclusive.** Packing pads concatenated sequences to
-  `max_length`; padding-free flattens to one variable-length tensor. Pick packing for short
+- **`packing` and `padding_free` are mutually exclusive.** Packing concatenates documents into rows of
+  at most `max_length` (flattened to one row of real tokens outside PP, as in
+  [Collator classes](#collator-classes)); padding-free flattens unpacked rows to one variable-length tensor. Pick packing for short
   sequences, padding-free for long/variable ones.
 
 - **Both want a varlen Flash Attention backend.** The gate is the model's **resolved**
@@ -256,7 +265,7 @@ A family outside the table above and the family specs gets a warning on every ba
     Off it, `padding_free` **raises** (its `cu_seq_lens` kwargs have no consumer) and `packing`
     **warns** (it pays a dense `[L, L]` mask per layer). A family whose dense path leaks documents
     makes packing raise too ([Document isolation](#document-isolation-under-packing)), and
-    DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
+    DeepSeek-V4 (eager-only, and its compressed-KV windows cross documents on every backend) refuses both. Gemma 4 lands on the
     warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
 - **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose kernels are not validated with a
@@ -276,25 +285,52 @@ A family outside the table above and the family specs gets a warning on every ba
     zero tokens at loss ≈ 0. The text probe renders both a plain and a `thinking` assistant turn, so a
     marker gpt-oss harmony emits only under thinking passes it and is caught per batch instead.
 
-    The VLM collators also refuse assistant turns that end in no turn terminator
-    (`reject_untrainable_completions`): they render two exchanges through the processor's template
-    and mask them under their own span policy, so a template borrowed from another family (a Gemma
-    template on PaliGemma, whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused
-    until `eos_token` names the token it closes a turn with. The self-distillation policy runs a
-    terminator-less span to the row end, so it passes there.
+    `select_data_collator`, the VLM collators and the text self-distillation collator also refuse
+    assistant turns that end in no turn terminator (`reject_untrainable_completions`). They render two
+    exchanges through the chat template and mask them under the route's span policy: the packed one for
+    packed and padding-free rows, self-distillation's own, else the padded one. They refuse only when no
+    probed conversation the marker matches trains a span. A text tokenizer without a chat template is not
+    probed. A template borrowed from another family (a Gemma template on PaliGemma,
+    whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused until `eos_token` names
+    the token it closes a turn with. A template that ends a turn at the next role marker (GLM's) passes
+    through the model config's terminator set. The self-distillation policy runs a terminator-less span
+    to the row end unless another role's turn opens first, so it refuses only a setup where every span
+    meets such a turn. A marker written from the turn before (`<|im_end|>\n<|im_start|>assistant\n`) on a
+    base checkpoint whose only terminator is `<|endoftext|>` is one: each reply's own `<|im_end|>` opens
+    the next turn. The packed and padding-free routes still accept a terminator-less template (their
+    policy trains the final turn), and the offline bake and tree packing do not go through this probe, so
+    the refusal holds for padded rows.
 
 ## EOS, pad, and the response template
 
-**The turn terminator is the resolved terminator set, not just `tokenizer.eos_token_id`.** A turn
-ends at the first token in the union of the model config's `eos_token_id` (scalar or list;
-`text_config.eos_token_id` for VLM/composite configs) and the tokenizer's EOS
-(`resolve_eos_token_ids`, `halo/data/turn_markers.py`). This is required for templates that delimit
-turns with role markers instead of a per-turn `<|endoftext|>` — GLM-4 ends an assistant turn with
-`<|user|>` or `<|observation|>` and lists both in `config.eos_token_id`.
+**The turn terminator is the resolved terminator set, the ids a served model stops at.** A turn ends at
+the first token in the union of the tokenizer's EOS, the model config's `eos_token_id` (scalar or list;
+`text_config.eos_token_id` only where the top level declares none) and the generation config's
+`eos_token_id` (`resolve_eos_token_ids`, `halo/data/turn_markers.py`). The resolver reads the checkpoint's files,
+not a server: a generation-config id ends a served turn only where the server applies that list. vLLM 0.32 adds the
+`eos_token_id` list of the `generation_config.json` it loads (the model's own unless `--generation-config` names
+another directory; `--override-generation-config` does not reach it) to every request's stop ids unless the request
+sets `ignore_eos`. Serving gpt-oss with harmony off, as the toolkit image does, changes none of this, so a stock gpt-oss
+turn stops at `<|call|>`. A stop that file does not list reaches a rollout only through `rollout_stop_tokens`
+([Tool calls](../training-methods/async-grpo/episodes.md#tool-calls)).
+Role-marker templates need the model config's list: GLM-4 ends an assistant turn with `<|user|>` or
+`<|observation|>` and lists both in `config.eos_token_id`. Tool calls need the generation config's:
+gpt-oss ends a call with `<|call|>` and Gemma 4 with `<|tool_response>`, which no model config lists.
 
-A distinct pad token is deliberately **not** a terminator: on a right-padded row whose turn lacks a
-real terminator, the first trailing pad would close the span and train the model to predict pad.
-Such a turn falls to the warn-and-mask path instead.
+A run reads both off its model (`model.config`, `model.generation_config`). The generation config comes
+from the checkpoint's `generation_config.json` whatever class loads it, so a `text_only_model` load, whose
+model config is the text sub-config, resolves the set the composite load does wherever that file lists
+the top level's ids. An `eos_token` setting that names an id a config already lists keeps that list
+(`sync_special_token_id`, on both configs), so GLM's role markers and gpt-oss's `<|call|>` stay
+terminators and stay in the exported generation config; an id outside the list replaces it. A
+[pre-processed](dataset-preparation.md) bake with the same `eos_token` resolves the same set from the
+checkpoint's two files.
+
+A distinct pad token that **only the generation config** lists is not a terminator (Qwen3, Qwen-VL and
+gpt-oss list `<|endoftext|>` there): on a right-padded row whose turn lacks a real terminator, the first
+trailing pad would close the span and train the model to predict pad. Such a turn falls to the
+warn-and-mask path instead. A pad the tokenizer's eos or the model config's `eos_token_id` names stays a
+terminator: Qwen3.5, 3.6 and 3.8 name their pad `<|endoftext|>` in `text_config.eos_token_id`.
 
 **`assistant_message_template` should be the assistant *role* token alone** when the model prefixes a
 thinking marker (GLM's `<|assistant|></think>` vs `<|assistant|><think>…`, Qwen3's `<think>` blocks).
@@ -303,19 +339,77 @@ every thinking turn from the loss; the role token marks every assistant turn and
 span for non-thinking turns.
 
 The completion-only collators locate each turn at its role token and unmask through to that turn's
-first terminator, bounded by the next response start. A truncated turn therefore yields an empty span
-rather than borrowing a later turn's terminator.
+first terminator, bounded by the next response start and by the next turn of another role. Such a turn
+opens at the marker's first token, where that token is special (gpt-oss's `<|start|>`, ChatML's
+`<|im_start|>`) and the marker does not follow it; a plain first token (`###`) bounds nothing, as it
+also opens markdown inside an answer. A first token that is itself a terminator bounds nothing either,
+as it would end each span before the reply's own terminator: a marker written from the turn before it,
+`<|im_end|>\n<|im_start|>assistant\n`, starts with one. A truncated turn, or one the template closes with a token outside
+the set (gpt-oss's `<|end|>`), therefore yields an empty span rather than borrowing a later turn's
+terminator: a gpt-oss answer followed by a user turn and a tool call never trains on through them to the
+call's `<|call|>`. An answer whose text spells the opener (a literal `<|im_start|>user`) tokenizes to it, so
+its span ends there and, with no terminator before it, trains nothing, as a literal terminator in an answer
+ends its span early.
 
 The packed and padding-free routes add a global end-of-sequence fallback, where the last position
 substitutes only when the sequence has **no** terminator at all. The padded route has no fallback: on
 a padded row the last position is pad, so a terminator-less turn is masked out entirely.
 
+**A row's last assistant turn is closed at tokenization.** A template that ends a turn only at the next
+role marker (GLM's native ones, tool data included) writes nothing after the last turn of a row, which
+would then be masked under the padded and packed policies (an earlier turn's role marker keeps the
+end-of-sequence fallback from firing) and train with no stop under the self-distillation policy or
+without completion masking. A row that ends on an assistant turn with no terminator from the resolved set
+therefore takes the token the template writes after such a turn when the conversation goes on
+(`resolve_final_turn_closer`, `halo/data/chat_render.py`): GLM's `<|observation|>` after a tool call and
+`<|user|>` after an answer, so the last turn trains the stop it trains mid-row and a served model stops at.
+The probe renders a turn of the row's kind (a tool call or an answer) closed and then followed by a tool
+reply or a user turn, once per template, terminator set and tools declaration. Where a probe render
+raises, the closed turn is no token prefix of the followed one, or the first token after it is outside
+the resolved set, the row takes the tokenizer's eos.
+
+The training renders append it to the token ids (`close_final_assistant_turn`,
+`halo/data/chat_render.py`): the text row maps (flat SFT, teacher-distillation and tree rows, the
+offline text bake), the text self-distillation collator's student and teacher branches. The VLM renders
+(the runtime collators, their over-length filter and the offline VLM bake) append it to the text
+(`render_vlm_training_text`, `halo/data/vlm_render.py`), probed on the processor's template, since a
+processor tokenizes and pads in one call; on a prefix LM it lands ahead of the newline the processor appends.
+SMPO (text and VLM) and offline-GRPO completions append the tokenizer's eos through `_close_completions`
+(`halo/data/pipeline/prompt_completion.py`) where they end on no token from the same set. DPO's text
+completions reach TRL rendered, and TRL appends the tokenizer's `eos_token` to each one not ending in it,
+whatever the set; the async-GRPO re-render appends nothing to the template's own render.
+
+A turn the template terminates stays as rendered, and a row ending on a user or tool turn, like a
+generation prompt, takes nothing. A tool-call turn ends at its stop: gpt-oss's `…<|call|>` and Gemma 4's
+`…<tool_call|><|tool_response>` take nothing after it, and the span ends at that stop.
+
+**A span restarts after a block the template writes into the model's own turn.** Gemma 4 renders a
+tool's reply inside the model turn that called it, and the answer after it with no new marker:
+`<|turn>model\n<|tool_call>…<tool_call|><|tool_response>response:…<tool_response|>ANSWER<turn|>`. Served,
+the model stops at `<|tool_response>`, the client writes the reply, and the model resumes after
+`<tool_response|>`. Mistral 4's hub template does the same after `</s>`
+(`[TOOL_RESULTS]…[/TOOL_RESULTS]ANSWER</s>`).
+
+`resolve_span_bounds` (`halo/data/completion_spans.py`) reads both bounds, the turn opener and this
+block (`find_injected_block`), off the tokenizer and chat template once per collator, tree map or bake.
+The block probe renders one tool round with two answers; where the call's span ends at a
+stop and neither a terminator nor the marker's first token comes between that stop and the answer, the
+stop is the block's opener, its last special token its closer, and its first token, where special, its
+head. `resolve_completion_spans` then ends a span at the opener and opens a new one after the closer,
+past every further block that opens at the opener or the head (one reply per parallel call). The row trains the call and its stop, then the answer and its terminator, never the tool's output;
+under `train_on_last_assistant_only` the answer is the last span. A closer is searched only up to the next
+terminator, which no reply holds. Every completion route takes both bounds: the padded, packed and padding-free
+collators, the VLM and self-distillation collators, tree rows and both offline bakes. A template that
+opens a new turn for the answer, or renders no tool round, yields no block, and its spans end at their
+terminators alone.
+
 **One span resolver, three named policies.** Every completion mask locates its spans with
 `resolve_completion_spans` in `halo/data/completion_spans.py`, under one of three declared policies:
 `PADDED_SPAN_POLICY` (the padded route, described above), `PACKED_SPAN_POLICY` (the same plus the
 global end-of-sequence fallback the packed and padding-free routes take) and
-`SELF_DISTILL_SPAN_POLICY` (the span starts after the marker and runs to the first terminator
-anywhere after it, falling back per span to the row end).
+`SELF_DISTILL_SPAN_POLICY` (the span starts after the marker and runs to the first terminator after
+it, through later markers, as gpt-oss's analysis and final blocks are one completion, but never into
+another role's turn; where none follows, a terminator-less span falls back to the row end).
 
 All three enter it through one preamble, `resolve_spans_or_warn`: it applies the policy and — when
 the marker never matched, or every span closed at `-1` — warns that the sequence trains zero tokens

@@ -10,7 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from halo.environments.messages import Message
+from halo.environments.episodes.messages import Message
 from halo.environments.sandbox.results import SandboxFault
 
 # What reading model-authored arguments as JSON or a Python literal raises past a syntax error: an unhashable key
@@ -33,12 +33,13 @@ class ToolDisabled(ToolBudgetExhausted):
 class ToolArgumentError(TypeError):
     """Model-authored arguments the tool refuses, raised before the handler runs (or by a handler,
     :class:`ToolCallRefused`), so the model reads ``Error: <tool>: missing a required argument: 'code'`` instead of a
-    Python signature. Booked like :class:`ToolBudgetExhausted`."""
+    Python signature; a value ending in the closing tag of a parameter that refuses one (``stdin`` ending
+    ``</stdin>``) is refused too. Booked like :class:`ToolBudgetExhausted`."""
 
 
 class ToolCallRefused(ToolArgumentError):
-    """A handler refusing an admitted call, returned to the budget (code contests: a program already graded, or
-    evidently in another language than its call names)."""
+    """A handler refusing an admitted call, returned to the budget (code contests: a program evidently in another
+    language than its call names)."""
 
 
 # What refuses a call unrun: expected control flow, logged without a traceback.
@@ -61,13 +62,16 @@ def parse_python_expression(source: str) -> ast.expr:
 @dataclass
 class ToolParameter:
     """``type`` is the JSON-schema type, ``None`` where a schema declares none (an MCP property typed through ``anyOf``
-    or ``$ref``), which takes any value."""
+    or ``$ref``), which takes any value. ``refuse_closing_tag`` refuses a ``string`` value ending in ``</name>``, the
+    call syntax leaked into it: opt-in, since a parameter of an external tool may legitimately end in markup (an
+    ``svg`` in ``</svg>``)."""
 
     name: str
     type: str | None
     description: str
     enum: list[str] | None = None
     required: bool = True
+    refuse_closing_tag: bool = False
 
 
 @dataclass
@@ -79,8 +83,19 @@ class NativeTool:
     async_handler: Callable[..., Any] | None = None
     # Observation for a call over the episode budget; ``None`` takes the generic wording.
     budget_message: str | None = None
+    # A JSON-schema object shown to the engine as ``parameters`` in place of one built from ``parameters`` (an
+    # MCP server's ``inputSchema``), which keeps what a ToolParameter has no field for: array ``items``, nested
+    # objects, ``anyOf``, ``$defs``. Admission still checks ``parameters``.
+    input_schema: dict[str, Any] | None = None
 
     def to_openai_schema(self) -> dict[str, Any]:
+        """The function declaration the engine reads. ``input_schema`` wins when set, so a server-authored schema
+        reaches the model with its array items, nested objects and references intact."""
+        if self.input_schema is not None:
+            return {
+                "type": "function",
+                "function": {"name": self.name, "description": self.description, "parameters": self.input_schema},
+            }
         properties = {}
         required = []
 
@@ -141,6 +156,13 @@ class NativeTool:
                     )
                 else:
                     bound[parameter.name] = value = str(value)
+                    # Markup the call's own syntax leaked into the value: run as given, it is input the program was
+                    # never meant to read, and stripped silently, a habit nothing prices.
+                    if parameter.refuse_closing_tag and value.rstrip().endswith(f"</{parameter.name}>"):
+                        raise ToolArgumentError(
+                            f"{self.name}: not run — the {parameter.name} argument ends with a stray "
+                            f"`</{parameter.name}>` tag, which is no part of its value; send it again without the tag"
+                        )
             # The schema is the contract the model was shown: a missing required parameter or an out-of-enum value is
             # refused before the handler and the budget, even where the handler has its own default.
             if parameter.required and parameter.name not in bound:
@@ -264,6 +286,8 @@ class NativeToolResult:
     unknown_tool: bool = False
     # Refused and nothing ran (:func:`is_refused_unrun`); structural like ``unknown_tool``.
     refused: bool = False
+    # Answered for the episode's spent or zero budget for this tool: no handler ran.
+    budget_spent: bool = False
     # Booked by type (infra or agent-caused) rather than as a tool error; it ends the episode.
     sandbox_fault: SandboxFault | None = None
 

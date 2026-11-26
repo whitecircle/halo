@@ -23,6 +23,7 @@ from halo.models.attention.gpt_oss_sinks import (
     install_sdpa_for_reset_sinks,
     uses_gpt_oss_sinks,
 )
+from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX, register_inkling2_relative_flex
 from halo.models.attention.layout import (
     declares_attention_heads,
     has_latent_attention,
@@ -31,8 +32,8 @@ from halo.models.attention.layout import (
     resolve_qk_v_head_dims,
 )
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.config_access import get_config_field, set_config_field_run_scoped, text_config
-from halo.models.model_classes import is_remote_code_class, mapped_model_class
+from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped, text_config
+from halo.models.introspection.model_classes import is_remote_code_class, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
@@ -63,8 +64,18 @@ _KERNELS_DROPPING_ATTENTION_DROPOUT = ("flash_attention_3", "flash_attention_4")
 _ATTENTION_CLASS_TABLE_SUFFIX = "_ATTENTION_CLASSES"
 
 
+# The toolkit's own attention implementations a family spec names (``toolkit_attention``), each registered on first use.
+_TOOLKIT_ATTENTION_REGISTRARS = {INKLING2_RELATIVE_FLEX: register_inkling2_relative_flex}
+# Beside the varlen flash kernels, the implementations that read a packed row's documents off its position_ids.
+DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS = (*VARLEN_ATTN_IMPLEMENTATIONS, INKLING2_RELATIVE_FLEX)
+
+
 def is_flash_attn_implementation(attn_impl: str | None) -> bool:
     return attn_impl in VARLEN_ATTN_IMPLEMENTATIONS
+
+
+def is_document_isolating_attn_implementation(attn_impl: str | None) -> bool:
+    return attn_impl in DOCUMENT_ISOLATING_ATTN_IMPLEMENTATIONS
 
 
 def flash_kernel(attn_impl: str, *, varlen: bool = True):
@@ -141,7 +152,7 @@ def has_head_dim_beyond_flash(model_config) -> bool:
 
 
 def has_attention_logit_softcap(model_config) -> bool:
-    """Gemma 2's softcap, which transformers' SDPA path drops without a word."""
+    """Gemma 2's softcap, which transformers' SDPA path refuses."""
     return bool(get_config_field(model_config, "attn_logit_softcapping", per_layer_reduce=max))
 
 
@@ -171,7 +182,7 @@ def fa4_varlen_refusal(model_config) -> str | None:
 
 
 def flash_attention_2_in_place_of_fa4(reason: str) -> str:
-    """Raises without an FA2 build, as the rest either drops a softcap (SDPA) or cannot compile under EP (flex)."""
+    """Raises without an FA2 build, as the rest either refuses a softcap (SDPA) or cannot compile under EP (flex)."""
     if not is_flash_attn_2_available():
         raise ValueError(
             f"{reason}, and no FlashAttention-2 build imports to run it instead. Install flash-attn, or set "
@@ -265,7 +276,7 @@ def select_supported_attn_implementation(
     supports_sdpa = getattr(resolved_class, "_supports_sdpa", True)
     supports_flash = declares_flash_attention(model_config)
 
-    # sdpa drops sinks and the softcap, so it is valid only without either, or once the sinks were reset.
+    # sdpa drops sinks and refuses the softcap, so it is valid only without either, or once the sinks were reset.
     softcapped = has_attention_logit_softcap(model_config)
     sdpa_ok = supports_sdpa and not softcapped and (not has_sinks or recorded_reset is True)
 
@@ -395,7 +406,7 @@ def resolve_attn_implementation(
     attn_implementation = attn_implementation or _detect_attention_impl()
 
     if dtype == torch.float32 and is_flash_attn_implementation(attn_implementation):
-        # flex carries the sinks and the softcap SDPA drops.
+        # flex carries the sinks SDPA drops and the softcap it refuses.
         needs_flex = uses_gpt_oss_sinks(model_config) or has_attention_logit_softcap(model_config)
         fp32_fallback = "flex_attention" if needs_flex else "sdpa"
         if is_global_main_process():
@@ -437,8 +448,19 @@ def resolve_attn_implementation(
             )
         attn_implementation = fa4_fallback
 
-    # Force eager before from_pretrained rejects the auto-detected FA default.
+    # A family with its own kernel runs it on CUDA unless the run pins eager.
     spec = find_moe_family_spec_for_config(model_config)
+    if spec is not None and spec.toolkit_attention and pinned != "eager" and torch.cuda.is_available():
+        if pinned not in (None, spec.toolkit_attention) and is_global_main_process():
+            logger.warning(
+                f"{spec.model_types[0]} runs attn_implementation='{spec.toolkit_attention}' (its attention adds terms "
+                f"no stock kernel takes); ignoring attn_implementation='{pinned}'."
+            )
+        attn_implementation = _TOOLKIT_ATTENTION_REGISTRARS[spec.toolkit_attention]()
+    elif spec is not None and spec.toolkit_attention:
+        attn_implementation = "eager"
+
+    # Force eager before from_pretrained rejects the auto-detected FA default.
     if attn_implementation != "eager" and spec is not None and spec.eager_only_attention:
         if is_global_main_process():
             logger.warning(

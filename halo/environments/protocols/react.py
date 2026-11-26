@@ -11,10 +11,10 @@ from typing import Any
 
 from halo.config_validation import present, require_callable, require_finite
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, LAST_TURN_KEY
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Message, StepOutcome, Trajectory
-from halo.environments.tool_accounting import (
+from halo.environments.episodes.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, LAST_TURN_KEY
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Message, StepOutcome, Trajectory
+from halo.environments.tools.accounting import (
     MAGNITUDE_WHY,
     initial_tool_counters,
     tool_call_outcome,

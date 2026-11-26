@@ -2,7 +2,8 @@
 
 [GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) is OpenAI's open-weight MoE in two sizes, 20B and
 120B. Its attention adds a learned per-head "sink" logit, and its experts store gate and up projections
-interleaved. Halo trains the BF16 mirrors of the release.
+interleaved. Halo's SFT recipes load both sizes from OpenAI's release, and its other recipes load the
+20B's BF16 mirror.
 
 ## Support
 
@@ -10,7 +11,9 @@ Modes: the GPT-OSS row of the [Supported Matrix](../supported-matrix.md#model-fa
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `unsloth/gpt-oss-20b-BF16` (32 experts, top-4) and `unsloth/gpt-oss-120b-BF16` (128
-  experts, top-4).
+  experts, top-4). The SFT recipes load OpenAI's own `openai/gpt-oss-20b` (EP or PP) and
+  `openai/gpt-oss-120b` (EP): the MXFP4 experts are decoded to bf16 at load, so no mirror is needed
+  there.
 - **GPUs:** the 20B recipe runs at EP8 on eight GPUs. The 120B recipe is a two-node EP16 layout
   (`examples/sft/gptoss/gptoss-120b-multinode-ep.yaml`, [Clusters](../clusters.md)), which H100 or H200
   need. At EP8 on eight B300s it last ran on code before 1.2.0.
@@ -28,8 +31,8 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
 ```
 
 The shipped recipe is a two-node EP16 layout. These overrides run it on one eight-GPU node. They also
-turn grouped GEMM back on: the file turns it off because at EP16, with two experts per rank, the
-per-expert loop keeps up, while at EP8 grouped GEMM is faster.
+turn grouped GEMM back on. The file turns it off because at EP16, with two experts per rank, grouped
+GEMM has few launches to fuse; at EP8 it is faster than the per-expert loop.
 
 ### Other layouts
 
@@ -58,8 +61,11 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/gpt-oss-20b-lora
 ```
 
-The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which no tool merges
-afterwards, so `merge_expert_lora_on_save` folds the adapters into each save.
+The expert targets (`gate_up_proj`, `down_proj`) go to Halo's grouped expert LoRA, which
+`merge_expert_lora_on_save` folds into each save. `halo run merge-peft-adapters` merges a saved adapter
+afterwards only on a BF16 base: it folds by stored key, and the MXFP4 release stores the experts as
+`_blocks` and `_scales`. An adapter trained with neutralized sinks, the SFT default
+(`reset_sinks: true`), merges with them neutralized.
 
 ### GRPO
 
@@ -69,7 +75,7 @@ This one is a full fine-tune at EP4 with two vLLM servers on GPUs 0–3.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft
+export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft/checkpoint-<step>
 export VLLM_CHAT_TEMPLATE=/jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 export VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text
 export VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
@@ -85,7 +91,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 cp examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-full-ep4.yaml gpt-oss-grpo.yaml
 CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 \
   halo launch grpo/environmental gpt-oss-grpo.yaml -n 4 \
-  --model_name_or_path=/data/checkpoints/gpt-oss-20b-sft \
+  --model_name_or_path=/data/checkpoints/gpt-oss-20b-sft/checkpoint-<step> \
   --output_dir=/data/checkpoints/gpt-oss-20b-grpo
 ```
 
@@ -107,15 +113,17 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - **Router aux-loss coefficient.** The hub config ships `router_aux_loss_coef: 0.9`, which swamps the SFT
   loss. The shipped SFT recipes set it to `0.001` in `model_init_kwargs`. Do the same on any other run
   that balances with `aux_loss`, which is what `auto` picks for GPT-OSS.
-- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`, without which
-  the model writes past its tool call and invents the result. They also set
-  `use_chunked_grpo_logprobs: true`, because the ~201k-token vocabulary makes the full logits plane too
-  large.
+- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`. On a checkpoint
+  whose `generation_config.json` does not list `<|call|>`, a turn would run past its tool call and the
+  model would write the result itself, so Halo refuses a tool-using run without the field when it builds
+  the trainer. The recipes also set `use_chunked_grpo_logprobs: true`, because the vocabulary of
+  about 201k tokens makes the full logits plane too large.
 
 ## Limits
 
-- The MXFP4 release (`openai/gpt-oss-*`) fails at load under EP. Train the BF16 mirror. A weight sync into
-  an MXFP4 server also drops every expert weight without an error, so RL serves the BF16 mirror too.
+- The recipes that load a frozen reference or teacher keep the BF16 mirror. A weight sync into an MXFP4
+  server drops every expert weight without an error, so an RL rollout server serves a BF16 checkpoint
+  whatever the trainer loaded ([GPT-OSS model notes](../../agent-docs/models/gpt-oss.md#configs) ↗).
 - Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
   and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
@@ -124,9 +132,8 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
 - The DPO, SMPO, reward, classification and offline GRPO recipes pin FA4, so they run on Blackwell only;
   FA4 is also what those scripts pick there unpinned. Unpinned on other GPUs, they take SDPA; on Hopper,
-  pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains without
-  gradient checkpointing and reserved 138 GiB per GPU over three steps at 16k tokens, so on an 80 GB
-  GPU it also needs `--gradient_checkpointing=true`.
+  pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains 16,384-token rows
+  without gradient checkpointing, so on an 80 GB GPU it also needs `--gradient_checkpointing=true`.
 
 ## Export and serve
 
@@ -136,7 +143,7 @@ it directly. Smoke-test it with `AutoModelForCausalLM`
 [host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-sft" \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-sft/checkpoint-<step>" \
   docker compose -f docker-compose.sglang.yml up -d
 ```
 

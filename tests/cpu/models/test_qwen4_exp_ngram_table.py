@@ -20,7 +20,7 @@ from transformers.core_model_loading import Concatenate
 import halo.model_loading.parallel.ep as ep_lazy_loader
 import halo.model_loading.parallel.loader as model_loading
 import halo.model_loading.parallel.whole_model as whole_model
-import halo.models.qwen4_exp.forwards as qwen4_exp_forwards
+import halo.models.families.qwen4_exp.forwards as qwen4_exp_forwards
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
@@ -31,8 +31,8 @@ from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.lazy_plan import WeightPlanner
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
+from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
 from halo.models.gradient_checkpointing import install_recompute_scopes
-from halo.models.qwen4_exp.ngram_table import HostNGramTable
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN4_EXP_CONFIG
 from tests.common.parallelism import make_parallelism_config

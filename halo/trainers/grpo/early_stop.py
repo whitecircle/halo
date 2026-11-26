@@ -23,17 +23,18 @@ class GRPOEarlyStopCallback(StopsTrainingEarly):
     def __init__(self, config: EarlyStopConfig, gap_key: str):
         self.config = config
         self.gap_key = gap_key
-        self._streaks: dict[str, int] = {}
+        # Consecutive breaching readings per condition; a checkpoint's sidecar carries them across a resume.
+        self.streaks: dict[str, int] = {}
         self._evidence: dict[str, str] = {}
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if not logs or ENTROPY_KEY not in logs:
             return
         for name, breach in self._readings(logs).items():
-            self._streaks[name] = 0 if breach is None else self._streaks.get(name, 0) + 1
+            self.streaks[name] = 0 if breach is None else self.streaks.get(name, 0) + 1
             if breach is not None:
                 self._evidence[name] = breach
-        held = [name for name, streak in self._streaks.items() if streak >= self.config.patience]
+        held = [name for name, streak in self.streaks.items() if streak >= self.config.patience]
         if not rank_consensus(bool(held)).any_ok:
             return
         self.stopped = True

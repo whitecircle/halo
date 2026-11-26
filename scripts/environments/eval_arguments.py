@@ -20,7 +20,8 @@ def add_eval_args(parser: argparse.ArgumentParser) -> None:
         "--training_config",
         default=None,
         help="Environmental-GRPO training YAML to evaluate under: its rollout contract (chat-template "
-        "variables, stop tokens, thinking budget, episode output budget, backend, sampling) and its environment config become "
+        "variables, stop tokens, reasoning cap, episode output budget, backend, sampling) and its environment config "
+        "become "
         "the eval's, with any sampling flag passed explicitly laid over them. Without it the eval samples "
         "under the flags alone.",
     )

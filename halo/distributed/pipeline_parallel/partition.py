@@ -7,8 +7,8 @@ import torch.nn as nn
 from halo.distributed.pipeline_parallel.families import resolve_pp_spec
 from halo.distributed.pipeline_parallel.model_rules import require_backbone
 from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
-from halo.models.config_access import get_config_field, text_config
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.config_access import get_config_field, text_config
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.models.moe.config_fields import has_routed_experts, resolve_expert_ffn_width, resolve_router_topk
 
 

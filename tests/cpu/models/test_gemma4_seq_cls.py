@@ -7,7 +7,7 @@ import torch
 from transformers import AutoModelForSequenceClassification
 from transformers.models.gemma4 import Gemma4Config
 
-import halo.models.seq_cls_heads  # noqa: F401  (registers the head as an import side effect)
+import halo.models.upstream.seq_cls_heads  # noqa: F401  (registers the head as an import side effect)
 
 
 def _tiny_config(num_labels: int = 1) -> Gemma4Config:

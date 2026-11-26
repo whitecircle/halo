@@ -12,16 +12,16 @@ import pytest
 import torch
 
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
-from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.moe.family_specs import BAILING
 from tests.common import weight_push_exact
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.weight_sync import RecordingSender
+from tests.common.weight_sync import RecordingSender, gathering_on_the_host
 
-_ROWS = [[1, 2, 3, 4], [5, 6, 7], [8, 9, 10], [11, 12, 13]]
+_SHORT_ROW_COMPLETION = 1
+_ROWS = [[14, 15], [1, 2, 3, 4], [5, 6, 7], [8, 9, 10], [11, 12, 13]]
 _GATE_WEIGHT = "gate.weight"
 _GATE_BIAS = "gate.expert_bias"
 
@@ -95,14 +95,11 @@ def _engine_scores_of_the_trainer(model, rows, device) -> list[float]:
 @pytest.fixture
 def run_row(monkeypatch):
     """Drive one row against ``engine_args`` with ``as_served`` on the server. Single rank, on the host."""
-    gather = EPGatherMixin.gather_expert_state_dict
-    monkeypatch.setattr(
-        EPGatherMixin,
-        "gather_expert_state_dict",
-        lambda self, *, device="cpu", merge_lora=False, retain=True: gather(
-            self, device="cpu", merge_lora=merge_lora, retain=retain
-        ),
-    )
+    with gathering_on_the_host():
+        yield _row_runner(monkeypatch)
+
+
+def _row_runner(monkeypatch):
     model = _tiny_ep_ling()
     recorder = RecordingSender(keep_values=True)
     weight_push_exact.sync_weights_to_client(model, recorder, True, True)
@@ -205,6 +202,24 @@ def test_a_push_that_misses_the_real_step_fails(run_row, monkeypatch):
     assert checks["a_real_step_moved_the_trainer_past_the_floor"]
     assert not checks["a_push_after_a_real_step_moved_the_server"]
     assert not checks["a_push_after_a_real_step_serves_the_trainer"]
+
+
+def test_a_short_forward_that_reads_a_copy_the_push_never_reaches_fails_the_reach_round(run_row, monkeypatch):
+    """The failure the long rows cannot see: a server's small-batch path scores from the weights it booted with."""
+    score = _Engine.score_completion_logprobs
+
+    def stale_when_short(self, prompt_ids, completion_ids):
+        total = vars(self).setdefault("booted", sum(tensor.double().sum().item() for tensor in self.held.values()))
+        if len(completion_ids) <= _SHORT_ROW_COMPLETION:
+            return [total + token for token in completion_ids]
+        return score(self, prompt_ids, completion_ids)
+
+    monkeypatch.setattr(_Engine, "score_completion_logprobs", stale_when_short)
+
+    checks = run_row("sglang", reach=True)
+
+    assert checks["every_forwarded_name_reaches_the_served_model"]
+    assert not checks["every_forwarded_name_reaches_the_short_row"]
 
 
 def test_a_family_with_nothing_declared_runs_no_leave_out_round(run_row, monkeypatch):

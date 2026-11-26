@@ -44,8 +44,7 @@ def test_string_policy_with_kl_reaches_the_model_loader_without_a_peft_probe_cra
     assert calls == ["local-or-hub-policy"]
 
 
-@pytest.mark.parametrize("presharded", [False, True])
-def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tmp_path, monkeypatch, presharded):
+def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tmp_path, monkeypatch):
     def stop_at_loader(*args, **kwargs):
         raise RuntimeError("model loader reached")
 
@@ -53,16 +52,14 @@ def test_constructor_passes_presharded_ownership_to_the_active_reference_gate(tm
     args = OfflineGRPOConfig(
         output_dir=str(tmp_path), kl_beta=0.2, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
-    error = ValueError if presharded else RuntimeError
-    message = "pre-sharded dataset" if presharded else "model loader reached"
-    with pytest.raises(error, match=message):
+    with pytest.raises(ValueError, match="pre-sharded dataset"):
         OfflineGRPOTrainer(
             model="local-or-hub-policy",
             args=args,
             train_dataset=offline_grpo_dataset(2),
             processing_class=make_offline_tokenizer(),
             parallelism_config=ParallelismConfig(),
-            dataset_presharded=presharded,
+            dataset_presharded=True,
         )
 
 

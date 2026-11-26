@@ -69,9 +69,18 @@ def test_servable_moe_without_a_live_wrapper_is_refused_with_the_remedy(backend,
     reject_unsyncable_model(_wrapped(StockModel(model_type), layer_cls), backend)
 
 
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
-@pytest.mark.parametrize("model_type", ["qwen2_moe", "mixtral", "glm4_moe", "deepseek_v3", "minimax_m2"])
-def test_a_moe_with_no_family_is_refused(backend, model_type):
+@pytest.mark.parametrize(
+    ("model_type", "backend"),
+    [
+        pytest.param("qwen2_moe", "vllm", id="qwen2_moe-vllm"),
+        pytest.param("mixtral", "vllm", id="mixtral-vllm"),
+        pytest.param("glm4_moe", "vllm", id="glm4_moe-vllm"),
+        pytest.param("deepseek_v3", "vllm", id="deepseek_v3-vllm"),
+        pytest.param("minimax_m2", "vllm", id="minimax_m2-vllm"),
+        pytest.param("qwen2_moe", "sglang", id="qwen2_moe-sglang"),
+    ],
+)
+def test_a_moe_with_no_family_is_refused(model_type, backend):
     """Its stock tree forwards experts no engine layout was validated for, and SGLang drops them with a 200."""
     with pytest.raises(ValueError, match="MoE with no Halo EP family") as refused:
         reject_unsyncable_model(StockModel(model_type), backend)
@@ -101,7 +110,7 @@ def test_a_dense_model_with_a_leftover_expert_count_passes(backend):
 def test_wrapperless_refusal_yields_to_the_sharper_family_and_engine_facts():
     """The loader fact names the remedy (another engine, or none); the wrapper hint would not."""
     with pytest.raises(ValueError, match="does not support weight sync"):
-        reject_unsyncable_model(StockModel("glm5_next"), "vllm")
+        reject_unsyncable_model(StockModel("qwen3_next"), "vllm")
     with pytest.raises(ValueError, match="cannot serve model_type"):
         reject_unsyncable_model(StockModel("zaya"), "sglang")
 

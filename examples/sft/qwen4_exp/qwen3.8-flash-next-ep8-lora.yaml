@@ -7,7 +7,8 @@
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.8-Flash-Next
 text_only_model: true                 # Qwen4ExpForCausalLM: no vision tower or MTP head, and the fused loss applies
-# The class declares no flash support; the sparse (QSA) layers run the toolkit's tiled kernel on SDPA.
+# The class declares no flash support; the sparse (QSA) layers run the toolkit's block-sparse kernel on SDPA where it
+# can (HALO_QSA_KERNEL=auto), the tiled kernel elsewhere.
 attn_implementation: sdpa
 # The router stays frozen under these targets, so nothing balances; auto would warn its way to none under the
 # fused loss.
@@ -47,8 +48,8 @@ lora_target_modules:
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> a servable checkpoint
                                       #   (~360 GB, ~100 GB of it the n-gram table, hard-linked from the previous
-                                      #   save); without it the mixed adapter resumes here but
-                                      #   merge_peft_adapters.py refuses it
+                                      #   save); without it the adapter stays mixed, which no tool folds: the
+                                      #   streaming merge refuses a text_only_model adapter over the composite base
 
 # --- Attention & sequence ---
 # Packed rows keep their documents apart in every mixer: QSA and the PLE n-gram history and conv read seq_idx, the

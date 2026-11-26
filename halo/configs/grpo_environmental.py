@@ -1,6 +1,7 @@
 """Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncRolloutConfig``."""
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import timedelta
@@ -18,14 +19,17 @@ from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
     GRPOEarlyStopArguments,
+    PackedMicrobatchArguments,
+    PhaseTimerArguments,
     PromptDatasetArguments,
+    RolloutWeightPrecisionArguments,
+    ScoreCenteringArguments,
 )
 from halo.configs.rollout_arguments import RolloutBudgetArguments, RolloutSamplingArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments
 from halo.env import DEFAULT_NCCL_TIMEOUT_MINUTES, WATCHDOG_WARN_FRACTION, nccl_timeout
 from halo.environments.rollout_config import (
-    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-    REASONING_BUDGET_TEMPLATE_VAR,
+    ENABLE_THINKING,
     SGLANG_BACKEND,
     RolloutBackend,
     RolloutConfig,
@@ -33,10 +37,11 @@ from halo.environments.rollout_config import (
 from halo.inference.endpoints import DEFAULT_LOCAL_SERVER_URL
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms, read_context_files
 from halo.runtime.ranks import is_global_main_process
+from halo.weight_sync.group_layout import SyncTopologySetting, validate_sync_topology
 
 logger = logging.getLogger(__name__)
 
-_ROLLOUT_SERVER_KEYS = frozenset({"url", "group_port", "group_host"})
+_ROLLOUT_SERVER_KEYS = frozenset({"url", "group_port", "group_host", "node"})
 
 
 @dataclass(frozen=True)
@@ -158,46 +163,36 @@ class ISCorrectionArguments(ValidatedConfig):
 
 @dataclass
 class ReasoningCostArguments(ValidatedConfig):
-    """What an episode pays for its reasoning length: the per-level price and the under-use floor."""
+    """What an episode pays for its reasoning length: the cap on the per-level price (each level's profile sets the
+    price) and the under-use floor."""
 
-    reasoning_price: dict[str, float] | None = field(
-        default=None,
-        metadata={
-            "help": "Per effort level (exactly low, medium and high), the reward units an episode pays per 1,000 "
-            "reasoning tokens, capped by reasoning_price_cap; unset = off. Price the lowest level highest, so the "
-            "same trace costs most where little reasoning was asked. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#price."
-        },
-    )
-    reasoning_price_past_budget: bool = field(
-        default=False,
-        metadata={
-            "help": "Price only the reasoning tokens each turn spends past its level's soft budget instead of every "
-            "reasoning token. Needs reasoning_price and a soft budget on every drawable level. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#price-past-the-budget."
-        },
-    )
     reasoning_price_cap: float = field(
         default=0.1,
         metadata={
-            "help": "Cap of reasoning_price per episode, in reward units, so a long trace cannot outweigh the task "
-            "reward. Keep it, plus reasoning_floor, below what the environment charges for the decisions it prices. "
+            "help": "Cap of the reasoning price per episode, in reward units, so a long trace cannot outweigh the task "
+            "reward. The price itself is per effort level: a level's profile (environment_kwargs."
+            "reasoning_effort_profiles) charges reasoning_price per 1,000 reasoning tokens an episode spends past its "
+            "reasoning_budget, summed over turns. Keep it below what the environment charges for the decisions it "
+            "prices: an episode pays it or reasoning_floor, never both. Set while no drawable level prices reasoning, "
+            "it is refused at trainer construction. Logged as reward/reasoning_price. "
             "See agent-docs/training-methods/async-grpo/reasoning.md#price."
         },
     )
     reasoning_floor: float = field(
         default=0.0,
         metadata={
-            "help": "Weight of the reasoning under-use floor (0 = off): an episode reasoning less than three "
-            "quarters of its per-turn thinking budget pays -weight × shortfall / that three-quarter target. Keep it, plus "
-            "reasoning_price_cap, below what the environment charges for the decisions it prices. "
-            "See agent-docs/training-methods/async-grpo/reasoning.md#floor."
+            "help": "Weight of the reasoning under-use floor (0 = off): a baseline episode that earned no objective and "
+            "reasoned, summed over its turns, under its level's reasoning_budget pays -weight × shortfall / budget; a "
+            "solve pays nothing. The one term that pays for more reasoning. Keep it below what the environment "
+            "charges for the decisions it prices: an episode pays it or the price, never both. Every level the "
+            "environment draws needs a reasoning_budget above 0 (refused at trainer construction otherwise). Logged "
+            "as reward/reasoning_floor. See agent-docs/training-methods/async-grpo/reasoning.md#floor."
         },
     )
     reasoning_terms_in_failed_groups: bool = field(
         default=False,
         metadata={
-            "help": "Charge reasoning_price and reasoning_floor in a training group none of whose baseline episodes "
+            "help": "Charge the reasoning price and reasoning_floor in a training group none of whose baseline episodes "
             "earned the objective (its reward/objective component, zeroed by a veto). Off by default: there the "
             "length terms are most of what tells the attempts apart, so the advantage would train reasoning length "
             "rather than the task. A group with a success is charged either way, and eval episodes always are. Off, "
@@ -208,34 +203,10 @@ class ReasoningCostArguments(ValidatedConfig):
     )
 
     def _validate_fields(self) -> None:
-        """A NaN passes every ordered comparison, a negative price would pay for the length it prices, and a cap with
-        the price off, or the failed-group switch with both terms off, changes nothing. Price levels and the objective
-        a waiver reads are checked at trainer construction."""
+        """A NaN passes every ordered comparison. Whether some level prices reasoning, which the cap and the
+        failed-group switch need, is checked at trainer construction, beside the environment's profiles."""
         super()._validate_fields()
         owner = type(self).__name__
-        if self.reasoning_price is None and self.reasoning_price_cap != ReasoningCostArguments.reasoning_price_cap:
-            raise ValueError(
-                "reasoning_price_cap set with reasoning_price unset: nothing reads it until the price is on. Remove "
-                "it, or set reasoning_price."
-            )
-        if self.reasoning_price is None and self.reasoning_floor == 0 and self.reasoning_terms_in_failed_groups:
-            raise ValueError(
-                "reasoning_terms_in_failed_groups set with reasoning_price and reasoning_floor both off: it chooses "
-                "where the reasoning terms charge. Set one of them, or remove it."
-            )
-        if self.reasoning_price is None and self.reasoning_price_past_budget:
-            raise ValueError(
-                "reasoning_price_past_budget set with reasoning_price unset: it chooses what the price counts. Set "
-                "reasoning_price, or remove it."
-            )
-        if self.reasoning_price is not None:
-            if not isinstance(self.reasoning_price, Mapping) or not self.reasoning_price:
-                raise ValueError(
-                    f"reasoning_price must map each effort level to a price, got {self.reasoning_price!r}"
-                )
-            require_finite(
-                owner, ge=0, **{f"reasoning_price[{level!r}]": price for level, price in self.reasoning_price.items()}
-            )
         require_finite(owner, gt=0, reasoning_price_cap=self.reasoning_price_cap)
         # A NaN or negative weight would parse and leave the floor off without a word.
         require_finite(owner, ge=0, why=" (0 = off)", reasoning_floor=self.reasoning_floor)
@@ -250,26 +221,31 @@ class AsyncRolloutConfig(
     AdvantageShapingArguments,
     GRPOEarlyStopArguments,
     ChunkedLogprobsArguments,
+    PackedMicrobatchArguments,
+    PhaseTimerArguments,
+    RolloutWeightPrecisionArguments,
+    ScoreCenteringArguments,
 ):
     """The async GRPO trainer's rollout side: Ray workers, rollout-server connections, weight sync, prefetch and
     timeouts, over the sampling, budget, IS-correction and reasoning-cost bundles."""
 
-    num_rollout_workers: int = field(
-        default=64,
+    rollout_actor_budget: int = field(
+        default=256,
         metadata={
-            "help": "Ray environment actors per training rank; each is async and runs many episodes, so this is no "
-            "concurrency limit (max_concurrent_rollouts is). Size it to the CPU-side environment cost; with "
-            "ray_address set each rank takes this // world_size, at least 1. "
+            "help": "Ray environment actors per node, split across that node's rollout ranks; with ray_address set, "
+            "the cluster-wide total, split across every rollout rank. Each actor is async and runs many episodes, so "
+            "this is no concurrency limit (max_concurrent_rollouts is). Size it to the CPU-side environment cost; a "
+            "rank left under 4 actors warns. "
             "See agent-docs/infrastructure/ray.md#pool-sizing."
         },
     )
     max_concurrent_rollouts: int | None = field(
         default=None,
         metadata={
-            "help": "Per-rank cap on one round's rollouts in flight, the generation-throughput throttle; size it to "
-            "one generation cycle's per-rank demand. Each round in flight holds its own cap: the prefetch_depth "
-            "prefetched rounds, and a cold or eval round beside them. Unset = 4 × this rank's share of the rollout "
-            "workers, and an explicit value below that share is raised to it. "
+            "help": "Per-rank cap on one round's rollouts in flight, the generation-throughput throttle. Each round "
+            "in flight holds its own cap: the prefetch_depth prefetched rounds, and a cold or eval round beside them. "
+            "Unset = the larger of a train round's and an eval round's rows, so a round runs in one wave; a value "
+            "below this rank's actor count is raised to it. "
             "See agent-docs/reference/configuration-reference.md#asyncrolloutconfig."
         },
     )
@@ -319,6 +295,39 @@ class AsyncRolloutConfig(
             "See agent-docs/training-methods/async-grpo/setup.md#weight-synchronization."
         },
     )
+    rollout_sync_topology: SyncTopologySetting = field(
+        default="per_server",
+        metadata={
+            "help": "How the trainer's weight-sync groups span the rollout servers: per_server (default) forms one "
+            "NCCL group per server, single_group one group over all of them that broadcasts each chunk once, and auto "
+            "picks single_group for two or more servers that report the same served model and weight-loading flags "
+            "(and that one group can rank) and per_server otherwise. single_group and auto need every server to see "
+            "every server's GPU (NCCL peer-to-peer), so servers that each see only their own GPU stay on per_server. "
+            "single_group takes one rollout_group_port, one group_host, and an optional 'node' label per "
+            "rollout_server_configs entry that orders the servers by node; auto refuses 'node'. See agent-docs/infrastructure/rollout-servers.md#one-group-over-every-server."
+        },
+    )
+    rollout_adapter_sync: bool = field(
+        default=False,
+        metadata={
+            "help": "Serve a LoRA policy as an adapter beside the frozen base instead of pushing it folded into the "
+            "weights: the first sync pushes the base once, and each later sync loads the adapter alone under a new "
+            "name that new episodes select. A family whose base no push carries (Inkling 2) is never pushed: its "
+            "servers keep the base they launched with. SGLang launched with --enable-lora, and vLLM for Inkling 2 "
+            "with rollout_adapter_dir and VLLM_ALLOW_RUNTIME_LORA_UPDATING=True; attention and dense-MLP "
+            "projections, plus Inkling 2's routed experts on vLLM. A model it cannot serve is refused at "
+            "startup with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+        },
+    )
+    rollout_adapter_dir: str | None = field(
+        default=None,
+        metadata={
+            "help": "Under rollout_adapter_sync: an absolute directory the trainer and every rollout server mount at "
+            "the same path. Each adapter version is published there and loaded by path instead of sent in a request "
+            "body. It belongs to one run at a time, since a run's first sync removes every halo-adapter-* directory "
+            "there. vLLM requires it."
+        },
+    )
     sync_weights_every_n_steps: int = field(
         default=1, metadata={"help": "Sync weights to the rollout servers every N training steps, N >= 1."}
     )
@@ -328,7 +337,8 @@ class AsyncRolloutConfig(
             "help": "Train on the server's sampled token ids, each assistant turn its own row sharing the "
             "trajectory's advantage, instead of re-tokenizing a chat-template re-render. vLLM needs "
             "--return-tokens-as-token-ids (SGLang no flag), and a trajectory with an uncaptured turn falls back to "
-            "one re-tokenized row. See agent-docs/training-methods/async-grpo/objective.md#training-rows."
+            "one re-tokenized row, or is dropped under an environment whose view rewrites earlier turns, which "
+            "requires this field. See agent-docs/training-methods/async-grpo/objective.md#training-rows."
         },
     )
     routing_replay: Literal["none", "recompute", "rollout"] = field(
@@ -353,6 +363,19 @@ class AsyncRolloutConfig(
             "See agent-docs/training-methods/async-grpo/performance.md#length-ordered-micro-batches."
         },
     )
+    loss_forward_importance_weights: bool = field(
+        default=False,
+        metadata={
+            "help": "Take the importance weight (and the KL tail clamp) from the loss forward's own detached "
+            "log-probs in place of a separate no-grad pass over the round's rows. The weight is the same function of "
+            "the same weights on an aligned one-step round, built from a different forward program, so values differ "
+            "by the forward's log-prob noise. Raises at construction where a consumer needs the round's log-probs "
+            "before its first backward (token-mass balance, trajectory-level isr_* stages, the update breaker, "
+            "routing_replay: recompute, num_iterations above 1, misaligned accumulation) or no pass would run. With "
+            "early_stop_logratio_gap set, the logged log-ratio reads loss-mask tokens only. "
+            "See agent-docs/training-methods/async-grpo/performance.md#weight-from-the-loss-forward."
+        },
+    )
     early_stop_on_skipped_updates: bool = field(
         default=False,
         metadata={
@@ -373,10 +396,24 @@ class AsyncRolloutConfig(
         default=50,
         metadata={
             "help": "Raise after this many train rounds in a row in which no token anywhere carries a policy gradient, "
-            "while no earlier round of this launch has: every group tied or dropped, or every token masked, trains on "
-            "nothing while logging loss 0. Past the first round that trained, a streak this long only warns. Logged as "
-            "sampling/zero_gradient_round. Positive; null = off."
+            "while no earlier round of this run has (a resume keeps that verdict): every group tied or dropped, or "
+            "every token masked, trains on nothing while logging loss 0. Past the first round that trained, a streak "
+            "this long only warns. Warns on the first such round of a run that has not trained yet, and logs "
+            "sampling/zero_gradient_round. Positive; null never raises."
         },
+    )
+    episode_error_rate_limit: float | None = field(
+        default=0.5,
+        metadata={
+            "help": "Raise once a train round's world-wide episode/error_rate (episodes that errored or timed out, "
+            "which train as masked rows) is over this for episode_error_round_limit rounds in a row: the batch is "
+            "then mostly the episodes that finished fast, a bias toward short answers, or the rollout path is down. "
+            "In [0, 1); null = off. See agent-docs/training-methods/async-grpo/monitoring.md."
+        },
+    )
+    episode_error_round_limit: int = field(
+        default=3,
+        metadata={"help": "Consecutive train rounds over episode_error_rate_limit that raise. Positive."},
     )
     tool_parser_watch_rounds: int | None = field(
         default=2,
@@ -400,8 +437,9 @@ class AsyncRolloutConfig(
         default_factory=list,
         metadata={
             "help": "Special-token strings that end a turn, sent as the engine's stop_token_ids; list the model's "
-            "tool-call terminator when it is no eos (gpt-oss <|call|> under harmony-disabled serving, refused without "
-            "it on a tool environment). Empty = only eos stops a turn. "
+            "tool-call terminator when the served generation config lists no such eos (gpt-oss <|call|> under "
+            "harmony-disabled serving, refused without it on a tool environment whose checkpoint omits it). Empty = "
+            "only the eos ids stop a turn. "
             "See agent-docs/training-methods/async-grpo/episodes.md#tool-calls."
         },
     )
@@ -409,9 +447,19 @@ class AsyncRolloutConfig(
         default_factory=dict,
         metadata={
             "help": "Chat-template variables sent with every rollout request (chat_template_kwargs) and applied to "
-            "the trainer's own renders, so both sides see one template state. reasoning_effort, reasoning_budget "
-            "and reasoning_budget_soft are refused here, being per episode. "
-            "See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
+            "the trainer's own renders, so both sides see one template state. reasoning_effort is refused here: "
+            "it is per episode and travels as the request's top-level field. enable_thinking is refused too: "
+            "rollout_thinking writes it. See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
+        },
+    )
+    rollout_thinking: bool = field(
+        default=True,
+        metadata={
+            "help": "Sample the policy with a reasoning block per turn. false adds enable_thinking: false to "
+            "rollout_chat_template_kwargs, so the template closes the block on the engine and in the trainer's "
+            "renders and the model works in its visible messages and tool calls; it needs a chat template that "
+            "reads the switch, and refuses the reasoning-only knobs. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#thinking-off."
         },
     )
     enable_prefetch: bool | None = field(
@@ -431,8 +479,7 @@ class AsyncRolloutConfig(
             "per optimizer step at the default steps_per_generation), which the sampling-logprob IS ratio corrects. "
             "Raise it when the trainer waits on rollouts every step while the engines drain at each round's tail. "
             "Costs staleness, engine KV for every round in flight, and this many cold rounds when a run starts. "
-            "An int >= 1; above 1 it needs a run that prefetches. On SGLang, whose every sync aborts the turns in "
-            "flight, a round may span at most max_retries syncs (refused before the model load). "
+            "An int >= 1; above 1 it needs a run that prefetches. "
             "See agent-docs/training-methods/async-grpo/setup.md#multiple-servers-and-prefetch."
         },
     )
@@ -474,6 +521,8 @@ class AsyncRolloutConfig(
     )
 
     def _validate_fields(self) -> None:
+        """Normalizes ``rollout_chat_template_kwargs`` to carry ``enable_thinking: False`` under ``rollout_thinking:
+        false``, so the engine's renders and the trainer's close the reasoning block alike."""
         super()._validate_fields()
         owner = type(self).__name__
         # A 0 divides by zero (the sync period, the empty actor list), reads as unset or fails inside the DataLoader.
@@ -481,7 +530,7 @@ class AsyncRolloutConfig(
             owner,
             ge=1,
             sync_weights_every_n_steps=self.sync_weights_every_n_steps,
-            num_rollout_workers=self.num_rollout_workers,
+            rollout_actor_budget=self.rollout_actor_budget,
             prefetch_depth=self.prefetch_depth,
             **present(
                 max_concurrent_rollouts=self.max_concurrent_rollouts,
@@ -518,6 +567,8 @@ class AsyncRolloutConfig(
         # A rate is never above 1, so a threshold at 1 would never fire.
         require_finite(owner, ge=0, lt=1, **present(truncation_alarm_rate=self.truncation_alarm_rate))
         require_int(owner, ge=1, **present(zero_gradient_round_limit=self.zero_gradient_round_limit))
+        require_finite(owner, ge=0, lt=1, **present(episode_error_rate_limit=self.episode_error_rate_limit))
+        require_int(owner, ge=1, episode_error_round_limit=self.episode_error_round_limit)
         require_int(owner, ge=1, **present(tool_parser_watch_rounds=self.tool_parser_watch_rounds))
         # The breaker is the only writer of the skip flag: without it the condition could never fire.
         if self.early_stop_on_skipped_updates and self.skip_update_masked_frac is None:
@@ -530,18 +581,37 @@ class AsyncRolloutConfig(
                 "rollout_chat_template_kwargs must be a mapping of template variables, got "
                 f"{type(self.rollout_chat_template_kwargs).__name__}"
             )
-        per_episode = {
-            "reasoning_effort",
-            REASONING_BUDGET_TEMPLATE_VAR,
-            REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-        } & set(self.rollout_chat_template_kwargs)
-        if per_episode:
+        if "reasoning_effort" in self.rollout_chat_template_kwargs:
             raise ValueError(
-                f"rollout_chat_template_kwargs must not carry {sorted(per_episode)}: the level and its thinking "
-                "budget are per episode; the level travels as the request's top-level field and the budget is "
-                "added to the nested form per request."
+                "rollout_chat_template_kwargs must not carry 'reasoning_effort': the level is per episode and "
+                "travels as the request's top-level field."
             )
-        # SGLang drops the field silently. A level's thinking budget still steers through the template; this only caps.
+        if self.rollout_adapter_dir is not None and (
+            not self.rollout_adapter_sync or not os.path.isabs(self.rollout_adapter_dir)
+        ):
+            raise ValueError(
+                f"rollout_adapter_dir={self.rollout_adapter_dir!r} needs rollout_adapter_sync: true and an absolute "
+                "path the rollout servers read at the same path."
+            )
+        # The normalized form below passes, so validating a normalized config again holds.
+        if ENABLE_THINKING in self.rollout_chat_template_kwargs and (
+            self.rollout_thinking or self.rollout_chat_template_kwargs[ENABLE_THINKING] is not False
+        ):
+            raise ValueError(
+                "rollout_chat_template_kwargs must not carry 'enable_thinking': set rollout_thinking, which writes the "
+                "switch for the engine and the trainer's renders alike."
+            )
+        if not self.rollout_thinking:
+            self._reject_reasoning_knobs_without_thinking(owner)
+            self.rollout_chat_template_kwargs = {**self.rollout_chat_template_kwargs, ENABLE_THINKING: False}
+        if self.rollout_weight_precision != "bf16" and self.rollout_adapter_sync:
+            raise ValueError(
+                f"rollout_weight_precision={self.rollout_weight_precision!r} cannot be combined with "
+                "rollout_adapter_sync: the base is pushed once and the adapter is served apart from it, so no folded "
+                "weight is ever quantized and the server would hold a different policy than the trainer. Set one of "
+                "them back to its default."
+            )
+        # SGLang drops the field silently. The level still steers through the template; this only caps.
         if self.rollout_backend == SGLANG_BACKEND and self.rollout_max_thinking_tokens is not None:
             raise ValueError(
                 "rollout_max_thinking_tokens is not supported with rollout_backend='sglang': the "
@@ -569,11 +639,39 @@ class AsyncRolloutConfig(
                 require_int(where, ge=0, le=65535, group_port=server["group_port"])
             if "group_host" in server:
                 require_text(where, group_host=server["group_host"])
+            if "node" in server:
+                require_text(where, node=server["node"])
+        validate_sync_topology(self.rollout_sync_topology, servers)
         if servers and differs_from_default(self, "rollout_server_url"):
             raise ValueError(
                 f"{owner}: rollout_server_url={self.rollout_server_url!r} is set beside rollout_server_configs, whose "
                 "entries alone name the servers, so it would never be dialed. Remove it, or add it to the list."
             )
+
+    def _reject_reasoning_knobs_without_thinking(self, owner: str) -> None:
+        unread = "it sets how the reasoning terms charge, and no turn reasons"
+        cap = (
+            "a reasoning cap counts each turn's sampled tokens as reasoning up to a close the turn never writes, so "
+            "a long visible turn reads as reasoning that ran to the cap"
+        )
+        refusals = {
+            "reasoning_floor": (
+                self.reasoning_floor > 0,
+                "the floor charges a failed episode its shortfall under its level's reasoning_budget, all of it "
+                "without reasoning, so every failed episode would pay the full weight: a gradient back toward "
+                "reasoning",
+            ),
+            "reasoning_price_cap": (differs_from_default(self, "reasoning_price_cap"), unread),
+            "reasoning_terms_in_failed_groups": (self.reasoning_terms_in_failed_groups, unread),
+            "rollout_max_thinking_tokens": (self.rollout_max_thinking_tokens is not None, cap),
+            "rollout_max_answer_tokens": (self.rollout_max_answer_tokens is not None, cap),
+        }
+        for knob, (is_set, why) in refusals.items():
+            if is_set:
+                raise ValueError(
+                    f"{owner}: {knob} is set with rollout_thinking: false: {why}. Remove it, or set rollout_thinking: "
+                    "true."
+                )
 
     def _stops_on_skipped_updates(self) -> bool:
         return self.early_stop_on_skipped_updates
@@ -618,6 +716,7 @@ class AsyncRolloutConfig(
         return RolloutConfig(
             **mirrored,
             capture_token_ids=self.train_on_sampled_tokens,
+            capture_candidate_logprobs=self.score_centering_top_k or 0,
             capture_routed_experts=self.routing_replay == "rollout",
             stop_token_ids=stop_token_ids,
             reasoning_end_token_id=reasoning_end_token_id,
@@ -674,8 +773,8 @@ class EnvironmentConfig(ValidatedConfig):
         default_factory=lambda: [{"source": "environment"}],
         metadata={
             "help": "Reward terms, each {source, name?, weight?, exponent?, ...}, summed into the episode reward as "
-            "weight × score^exponent: 'environment' (the environment's own grade), 'judge' or 'reward_model'. The "
-            "environment's per-turn and shaping terms add on top; YAML-only. "
+            "weight × score^exponent: 'environment' (the environment's own grade), 'judge', 'reward_model' or "
+            "'whitecircle'. The environment's per-turn and shaping terms add on top; YAML-only. "
             "See agent-docs/training-methods/grpo/rewards/README.md#environment-arm."
         },
     )

@@ -19,7 +19,7 @@ import halo.checkpoint.parallel.adapters as peft_mod
 import halo.checkpoint.parallel.ep as saving_mod
 import halo.checkpoint.parallel.resume_weights as loader_mod
 import halo.checkpoint.parallel.save as save_mod
-import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE, resume_adapter_dir
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -75,10 +75,15 @@ class _TokenizerSpy:
 
 
 class _ExpertLoraLayer(StubEPLayerBase):
+    """Holds the adapters ``EXPERT_STATE`` saves, as a layer that built them does."""
+
     def __init__(self, spec: ExpertLoraSpec | None = None):
         super().__init__()
         self._expert_lora_attrs = frozenset({"gate_up_proj"})
-        self.ep_config = SimpleNamespace(expert_lora=spec)
+        self.ep_config = SimpleNamespace(expert_lora=spec, ep_size=1)
+        for key, tensor in EXPERT_STATE.items():
+            attr = key.rpartition(".experts.")[2].replace(".", "_")
+            setattr(self, attr, nn.Parameter(torch.zeros_like(tensor)))
 
 
 class _ExpertOnlyModel(nn.Module):

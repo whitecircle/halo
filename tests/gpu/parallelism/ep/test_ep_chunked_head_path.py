@@ -12,7 +12,7 @@ from trl.trainer.utils import selective_log_softmax
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from tests.common.distributed import world_spread
 from tests.common.ep_reference import random_token_batch

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import os
 
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 
 # Stamped by load_distributed_model: where the weights were read (None under init_from_scratch).
 LOADED_WEIGHTS_FROM_ATTR = "_loaded_weights_from"
+# Stamped beside it: the Hub commit they were read at (None for a local directory and under init_from_scratch).
+LOADED_WEIGHTS_REVISION_ATTR = "_loaded_weights_revision"
 
 
 def config_schema_source(model) -> str | None:
@@ -20,11 +22,19 @@ def config_schema_source(model) -> str | None:
 
 def weights_read_from(model) -> str | None:
     """Where the live weights were read, or None for a from-config random init; an unstamped model falls back to
-    ``config._name_or_path``, which is where any ``from_pretrained`` read them."""
-    live = unwrap_toolkit_wrappers(model)
+    ``config._name_or_path``, which is where any ``from_pretrained`` read them. Read off the model as the run holds it,
+    since the loader stamps what it returns, a CP wrapper included, and a PEFT or CP wrapper answers for what it
+    wraps."""
+    live = unwrap_framework_wrappers(model)
     if hasattr(live, LOADED_WEIGHTS_FROM_ATTR):
         return getattr(live, LOADED_WEIGHTS_FROM_ATTR)
     return str(getattr(getattr(live, "config", None), "_name_or_path", "")) or None
+
+
+def weights_read_at(model) -> str | None:
+    """The Hub commit the live weights were read at, or None: a local directory and a from-config random init have
+    none, and nor does a model ``load_distributed_model`` did not load. Read as :func:`weights_read_from` reads."""
+    return getattr(unwrap_framework_wrappers(model), LOADED_WEIGHTS_REVISION_ATTR, None)
 
 
 def built_from_checkpoint(live_source: str | None, checkpoint: str) -> bool:

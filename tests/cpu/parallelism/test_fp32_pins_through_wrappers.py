@@ -11,7 +11,7 @@ from transformers import DeepseekV4Config, DeepseekV4ForCausalLM, PreTrainedMode
 
 from halo.checkpoint.writing import save_dtype_caster
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
-from halo.models.param_roles import fp32_pinned_names
+from halo.models.introspection.param_roles import fp32_pinned_names
 from tests.common import tiny_models
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import (

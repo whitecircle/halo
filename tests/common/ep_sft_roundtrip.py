@@ -15,7 +15,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import fixed_batch_loss, safetensors_state_dict
 from tests.common.datasets import create_sft_dataset

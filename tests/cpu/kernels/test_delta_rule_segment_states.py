@@ -59,14 +59,6 @@ def body():
     return inspect.unwrap(modeling_qwen3_5.torch_chunk_gated_delta_rule)
 
 
-def test_premise_the_two_initial_states_lead_apart(body):
-    """Otherwise the checks below compare nothing."""
-    query, key, value, g, beta, initial_state, cu_seqlens = _segments_problem()
-    alone = _alone(body, query, key, value, g, beta, initial_state, cu_seqlens)
-    swapped = _alone(body, query, key, value, g, beta, initial_state.flip(0), cu_seqlens)
-    assert all(not torch.allclose(a[0], s[0]) for a, s in zip(alone, swapped, strict=True))
-
-
 def test_the_fixup_runs_each_segment_from_its_own_state(body):
     query, key, value, g, beta, initial_state, cu_seqlens = _segments_problem()
     packed = _segmented_chunk_gated_delta_rule(

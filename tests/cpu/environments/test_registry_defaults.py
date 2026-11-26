@@ -11,7 +11,7 @@ import pytest
 
 from halo.configs.grpo_environmental import EnvironmentConfig
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
 from halo.environments.protocols.react import build_react_math_environment
 from halo.environments.registry import build_environment, get_registered_environments
 from halo.rewards.terms import EnvironmentTerm

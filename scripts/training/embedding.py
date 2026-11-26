@@ -22,6 +22,8 @@ from halo.config_validation import reject_non_default_args, reject_unsupported_a
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import template_column_kwargs
+from halo.data.render_columns import render_column_checks_across_ranks
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
 from halo.entrypoints.model_setup import load_model_and_tokenizer, plan_row_attention
@@ -42,22 +44,22 @@ from halo.model_loading.parallel.model_source import fetch_checkpoint_config, re
 from halo.model_loading.parallel.peft_setup import build_peft_config
 from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, reject_trainable_sinks_without_sinks
-from halo.models.config_access import drop_toolkit_stamps
-from halo.models.context_window import resolve_length_to_context
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
+from halo.models.introspection.config_access import drop_toolkit_stamps
+from halo.models.introspection.context_window import resolve_length_to_context
 from halo.models.moe.family_specs import wraps_experts
 from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.dataloaders import uses_dp_sharded_loader
 from halo.trainers.embedding.embedding_rules import (
     reject_injected_lora_parallelism,
     reject_uneven_sentence_transformers_batches,
 )
 from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from halo.trainers.embedding.trainer import EmbeddingTrainer
+from halo.trainers.loop.dataloaders import uses_dp_sharded_loader
 
 logger = logging.getLogger(__name__)
 
@@ -414,7 +416,7 @@ def _reject_unhonored_args(args: EmbeddingScriptArguments) -> None:
         unfreeze_layers_patterns=args.unfreeze_layers_patterns,
         freeze_layers_patterns=args.freeze_layers_patterns,
         # No chat-template rendering and no log_dataset_examples stage on this path.
-        tools_field=args.tools_field,
+        **template_column_kwargs(args),
         log_decoded_samples=args.log_decoded_samples,
         # The parallel loader pins model_class=AutoModel and the SentenceTransformer branch never reads the flag.
         text_only_model=args.text_only_model,
@@ -443,7 +445,8 @@ def main():
     parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=None)
-    reject_image_columns(ds, "Embedding training")
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "Embedding training")
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
     # Here, ahead of the model load: the trainer would refuse the same run only after it.

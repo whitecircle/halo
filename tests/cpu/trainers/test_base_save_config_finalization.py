@@ -11,8 +11,9 @@ import torch
 from transformers.utils import CONFIG_NAME
 
 from halo.checkpoint.config_export import finalize_exported_config
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR
 from halo.models.moe.family_specs import find_moe_family_spec
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 
 BAILING = "bailing_moe"
 SOURCE_SCHEMA_FAMILY = "step3p7"
@@ -97,7 +98,7 @@ class _Trainer(CheckpointingMixin, _BaseTrainer):
 
 
 def test_the_base_save_path_finalizes_the_config_it_just_wrote(tmp_path, monkeypatch):
-    module = "halo.trainers.checkpointing"
+    module = "halo.trainers.loop.checkpointing"
     # False = no parallelism strategy claimed the write, so the base Trainer's save runs.
     monkeypatch.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)
     monkeypatch.setattr(f"{module}.fs_aware_makedirs", lambda path: Path(path).mkdir(parents=True, exist_ok=True))
@@ -113,6 +114,24 @@ def test_the_base_save_path_finalizes_the_config_it_just_wrote(tmp_path, monkeyp
         "the base save path shipped a family-less config: the shard merge refuses it and the hub "
         "key renames degrade to 'no renames', with nothing failing at train time"
     )
+
+
+def test_the_base_save_path_reads_its_source_at_the_commit_the_weights_were_read_at(tmp_path, monkeypatch):
+    """A source-schema family's export reads the source repo again, whose default branch may have moved."""
+    module = "halo.trainers.loop.checkpointing"
+    seen: dict = {}
+    monkeypatch.setattr(f"{module}.save_checkpoint", lambda ctx, output_dir: False)
+    monkeypatch.setattr(f"{module}.fs_aware_makedirs", lambda path: Path(path).mkdir(parents=True, exist_ok=True))
+    monkeypatch.setattr(f"{module}.restore_config_fields", lambda ids: None)
+    monkeypatch.setattr(f"{module}.save_balancing_biases", lambda *args, **kwargs: None)
+    monkeypatch.setattr(f"{module}.finalize_exported_config", lambda config, output_dir, **kwargs: seen.update(kwargs))
+    trainer = _Trainer(str(tmp_path))
+    setattr(trainer.model, LOADED_WEIGHTS_FROM_ATTR, "org/base")
+    setattr(trainer.model, LOADED_WEIGHTS_REVISION_ATTR, "c0ffee")
+
+    trainer.save_model()
+
+    assert seen == {"source": "org/base", "revision": "c0ffee"}
 
 
 if __name__ == "__main__":

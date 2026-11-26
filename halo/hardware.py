@@ -4,6 +4,7 @@ peaks differ within one architecture."""
 import logging
 import math
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 
@@ -89,7 +90,7 @@ GPU_PEAK_FLOPS = {
             "fp32": 80.0e12,
         },
     ),
-    "B300": GpuPeak(  # same 148-SM die as B200; the published 6x FP4 names GB300, so this keeps the 4x
+    "B300": GpuPeak(  # bf16 as NVIDIA's HGX B300 row; fp4 keeps the B200's 4x where that row gives 6x dense
         aliases=("B300",),
         flops={
             "bf16": 2250.0e12,
@@ -175,6 +176,19 @@ def available_host_ram_bytes() -> int | None:
     except (OSError, ValueError, IndexError):
         return None
     return None
+
+
+def nearest_existing_path(path: str) -> str:
+    """``path`` resolved, or its nearest existing ancestor, whose volume a directory yet to be created lands on."""
+    target = os.path.realpath(path)
+    while not os.path.exists(target):
+        target = os.path.dirname(target)
+    return target
+
+
+def free_disk_bytes(path: str) -> int:
+    """Free bytes on the volume ``path`` lands on, whether or not it exists yet."""
+    return shutil.disk_usage(nearest_existing_path(path)).free
 
 
 def _read_cgroup_file(path: str) -> str | None:

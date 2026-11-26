@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 
 from halo.model_loading.dtype import has_packed_quantized_params
-from halo.trainers.accelerator import AcceleratorMixin
+from halo.trainers.construction.accelerator import AcceleratorMixin
 from tests.common.distributed import max_abs_diff_across
 from tests.common.gloo import run_gloo_ranks
 from tests.common.numerics import max_or_nan

@@ -11,10 +11,11 @@ import types
 import pytest
 import torch
 
-import halo.trainers.grpo.logprob_scoring as chunked
+import halo.trainers.full_logits_memory as guard
 from halo.runtime.consensus import RankConsensus
+from halo.trainers.full_logits_memory import LogitsWidth, full_logits_verdict
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin, full_logits_verdict
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
@@ -22,21 +23,26 @@ from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 _GIB = 1024**3
 _WIDTH = LogitsWidth(1024, "max_completion_length")
 _TRAIN_ROWS = "per_device_train_batch_size"
+_GRPO = {
+    "bytes_per_logit": 4,
+    "loss": "GRPO loss",
+    "remedy": "Set use_chunked_grpo_logprobs: true to compute the log-probs in vocab chunks instead",
+}
 
 
 def test_the_verdict_prices_rows_width_vocab_at_four_bytes():
     # 2 × 1024 × 131072 × 4 B = 1 GiB exactly.
-    assert full_logits_verdict(2, _TRAIN_ROWS, _WIDTH, 131072, free_bytes=4 * _GIB) is None
-    fatal, message = full_logits_verdict(2, _TRAIN_ROWS, _WIDTH, 131072, free_bytes=int(1.5 * _GIB))
+    assert full_logits_verdict(2, _TRAIN_ROWS, _WIDTH, 131072, free_bytes=4 * _GIB, **_GRPO) is None
+    fatal, message = full_logits_verdict(2, _TRAIN_ROWS, _WIDTH, 131072, free_bytes=int(1.5 * _GIB), **_GRPO)
     assert not fatal and "1.0 GiB" in message and "67%" in message
-    fatal, message = full_logits_verdict(2, _TRAIN_ROWS, _WIDTH, 131072, free_bytes=_GIB - 1)
+    fatal, message = full_logits_verdict(2, _TRAIN_ROWS, _WIDTH, 131072, free_bytes=_GIB - 1, **_GRPO)
     assert fatal and "more than" in message
 
 
 @pytest.mark.parametrize("free", [int(1.5 * _GIB), _GIB // 2])
 def test_every_verdict_names_the_remedy_and_the_settings_behind_the_plane(free):
     width = LogitsWidth(1024, "max_train_row_tokens (unset: the 1023-token context window)")
-    _, message = full_logits_verdict(2, "per_device_eval_batch_size", width, 131072, free_bytes=free)
+    _, message = full_logits_verdict(2, "per_device_eval_batch_size", width, 131072, free_bytes=free, **_GRPO)
     assert "use_chunked_grpo_logprobs: true" in message
     assert "per_device_eval_batch_size (2)" in message
     assert "max_train_row_tokens (unset: the 1023-token context window)" in message
@@ -55,6 +61,7 @@ def _host(
     model = types.SimpleNamespace(get_output_embeddings=lambda: head)
     return types.SimpleNamespace(
         _use_chunked_grpo_logprobs=chunked_on,
+        _full_logits_bytes_per_logit=LogprobScoringMixin._full_logits_bytes_per_logit,
         args=types.SimpleNamespace(
             per_device_train_batch_size=rows,
             per_device_eval_batch_size=eval_rows,
@@ -62,7 +69,7 @@ def _host(
             eval_on_start=eval_on_start,
         ),
         model=model,
-        accelerator=types.SimpleNamespace(unwrap_model=lambda m: m, is_main_process=True, device="cuda:3"),
+        accelerator=types.SimpleNamespace(unwrap_model=lambda m: m, device="cuda:3"),
     )
 
 
@@ -72,9 +79,9 @@ def free_memory(monkeypatch):
     asked: list = []
 
     def _set(free: int):
-        monkeypatch.setattr(chunked.torch.cuda, "is_available", lambda: True)
+        monkeypatch.setattr(guard.torch.cuda, "is_available", lambda: True)
         monkeypatch.setattr(
-            chunked.torch.cuda, "mem_get_info", lambda device=None: asked.append(device) or (free, 8 * free)
+            guard.torch.cuda, "mem_get_info", lambda device=None: asked.append(device) or (free, 8 * free)
         )
         return asked
 
@@ -100,14 +107,14 @@ def test_an_oversized_plane_refuses_the_run(free_memory):
 def test_a_plane_another_rank_cannot_hold_refuses_the_run_here_too(free_memory, monkeypatch):
     """A refusal on one rank alone would leave its peers in the next collective."""
     free_memory(64 * _GIB)
-    monkeypatch.setattr(chunked, "rank_consensus", lambda ok: RankConsensus(False, True))
+    monkeypatch.setattr(guard, "rank_consensus", lambda ok: RankConsensus(False, True))
     with pytest.raises(RuntimeError, match="Another rank"):
         LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
 
 
 def test_a_plane_taking_most_of_the_free_memory_warns(free_memory, caplog):
     free_memory(int(1.5 * _GIB))
-    with caplog.at_level(logging.WARNING, logger=chunked.__name__):
+    with caplog.at_level(logging.WARNING, logger=guard.__name__):
         LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
     assert any("use_chunked_grpo_logprobs" in r.getMessage() for r in caplog.records)
 
@@ -125,7 +132,7 @@ def test_an_evaluating_run_weighs_the_wider_eval_chunk(free_memory, eval_strateg
 
 def test_a_run_that_never_evaluates_weighs_only_the_train_chunk(free_memory, caplog):
     free_memory(4 * _GIB)
-    with caplog.at_level(logging.WARNING, logger=chunked.__name__):
+    with caplog.at_level(logging.WARNING, logger=guard.__name__):
         LogprobScoringMixin._verify_full_logits_fit(_host(rows=1, eval_rows=16), _WIDTH)
     assert not caplog.records
 
@@ -139,7 +146,7 @@ def test_a_narrower_eval_chunk_leaves_the_train_chunk_the_one_weighed(free_memor
 
 def test_a_small_plane_stays_quiet(free_memory, caplog):
     free_memory(64 * _GIB)
-    with caplog.at_level(logging.WARNING, logger=chunked.__name__):
+    with caplog.at_level(logging.WARNING, logger=guard.__name__):
         LogprobScoringMixin._verify_full_logits_fit(_host(), _WIDTH)
     assert not caplog.records
 

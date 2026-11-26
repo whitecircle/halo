@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from datetime import timedelta
 from typing import Any
 
@@ -280,6 +281,8 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         return server.session
 
     def _build_mcp_tool(self, mcp_tool: Any) -> NativeTool:
+        """Build the engine's declaration from the server's tool. ``parameters`` carries the names admission
+        checks; ``input_schema`` is the server's schema minus the ``$schema`` draft URL."""
         name = mcp_tool.name
         parameters = []
         schema = mcp_tool.inputSchema
@@ -305,6 +308,11 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             description=mcp_tool.description or f"MCP tool: {name}",
             parameters=parameters,
             async_handler=mcp_handler,
+            # ``$schema`` names the JSON-schema draft, which tells the model nothing.
+            input_schema={key: value for key, value in schema.items() if key != "$schema"},
+            # The model sees the server's schema; admission still checks ``parameters``, so a schema that
+            # explicitly permits extra keys through ``additionalProperties``/``patternProperties`` will have
+            # those calls refused before the server. The local refusal keeps a typo from costing a server call.
         )
 
     async def _call_mcp_tool(self, name: str, arguments: dict[str, Any]) -> str:
@@ -360,6 +368,14 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
                 logger.warning("MCP close(): owning event loop already stopped; connection not unwound")
                 self._forget_servers()
         super().close()
+
+    async def _discover_tools_schema(self) -> list[dict[str, Any]]:
+        """Read a disposable discovery server's tools without opening an episode or retaining its session."""
+        try:
+            await self.connect()
+            return deepcopy(self.get_tools_schema())
+        finally:
+            await self.disconnect()
 
     def _forget_servers(self) -> None:
         for server in self._servers():

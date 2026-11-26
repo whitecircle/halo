@@ -29,7 +29,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/rm-qwen3.5-9b-skywork-pref80k
 ```
 
-`max_length` is a **filter**: TRL drops pairs whose chosen or rejected side exceeds it. `center_rewards_coefficient` penalizes `(chosen + rejected)²`, pulling scores toward zero mean. `tools_field` names a column of per-row tool schemas, aliased onto `tools` and rendered on conversational rows only; `images_field` is under [Vision-language](#vision-language). Types and defaults: [RewardConfig](../reference/configuration-reference.md#trl-trainer-configs) and [RewardScriptArguments](../reference/configuration-reference.md#other-script-arguments).
+`max_length` is a **filter**: TRL drops pairs whose chosen or rejected side exceeds it. `center_rewards_coefficient` penalizes `(chosen + rejected)²`, pulling scores toward zero mean. `tools_field` names a column of per-row tool schemas, aliased onto `tools` and rendered on conversational rows only; `reasoning_effort_field` is refused, as TRL reads a level only from its own `chat_template_kwargs` column; `images_field` is under [Vision-language](#vision-language). Types and defaults: [RewardConfig](../reference/configuration-reference.md#trl-trainer-configs) and [RewardScriptArguments](../reference/configuration-reference.md#other-script-arguments).
 
 `max_length: null` resolves to the model's context window. `learning_rate` defaults to TRL's `1e-4`, high for a full fine-tune. A `chat_template_kwargs` column is splatted into the template too.
 
@@ -66,7 +66,7 @@ LoRA is rejected under TP, EP+TP and PP ([PEFT](../optimization/peft.md#parallel
 
 ## Vision-language
 
-Image-carrying pairs train on the families with both a vision tower and a sequence-classification head. transformers 5.20 ships one for `gemma3`, `qwen3_5` (dense), `t5gemma2` and `modernvbert`; the toolkit registers Gemma 4 and MoE Qwen3.5/3.6 in `halo/models/seq_cls_heads.py`. A checkpoint outside that live registry is refused before the model load, naming the supported list.
+Image-carrying pairs train on the families with both a vision tower and a sequence-classification head. transformers 5.23 ships one for `gemma3`, `qwen3_5` (dense), `t5gemma2`, `modernvbert` and `ultravbert`; the toolkit registers Gemma 4 and MoE Qwen3.5/3.6 in `halo/models/upstream/seq_cls_heads.py`. A checkpoint outside that live registry is refused before the model load, naming the supported list.
 
 The data path follows the **run**, not the checkpoint: a vision run is one whose dataset carries an `images`/`image` column, or has `images_field` name one. A text recipe on a multimodal checkpoint stays on TRL's tokenize map.
 
@@ -103,4 +103,4 @@ Once trained, score fresh generations or build preference pairs with `scripts/in
 Failure signatures:
 
 - Rows vanishing at prep — `max_length` filters rather than truncates, and the text path drops them silently (only the VLM path reports a count). Compare the split sizes, then raise it or shorten the pairs.
-- Accuracy pinned near 0.5 under LoRA — the score head is freshly initialized, so it must be in `lora_modules_to_save`.
+- Accuracy pinned near 0.5 under LoRA — the score head is freshly initialized, so it must train: set `lora_task_type: SEQ_CLS`, under which PEFT trains and saves it, or add it to `lora_modules_to_save`. Either needs an attention target in `lora_target_modules`: an expert-only LoRA run is not PEFT-wrapped, so `lora_task_type` leaves the head frozen and `lora_modules_to_save` raises.

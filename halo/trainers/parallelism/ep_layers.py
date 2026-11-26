@@ -10,7 +10,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, nam
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.trainer_rules import reject_ep_gradient_checkpointing
+from halo.trainers.construction.trainer_rules import reject_ep_gradient_checkpointing
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,17 @@ def resolve_use_reentrant(parallelism_config, model_config, configured: bool | N
             "validated only under pipeline parallelism, which requires it."
         )
     return True
+
+
+def apply_checkpointing_args(training_args, checkpointing_kwargs: dict, *, enabled: bool | None = None) -> None:
+    """Write the checkpoint kwargs, and ``enabled`` when given, under both of transformers' spellings.
+    ``TrainingArguments`` mirrors ``gradient_checkpointing*`` and ``activation_checkpointing*`` only at construction:
+    its Trainer reads the second pair in ``train()``, TRL the first."""
+    training_args.gradient_checkpointing_kwargs = checkpointing_kwargs
+    training_args.activation_checkpointing_kwargs = checkpointing_kwargs
+    if enabled is not None:
+        training_args.gradient_checkpointing = enabled
+        training_args.activation_checkpointing = enabled
 
 
 def require_ep_config(ep_config):
@@ -116,6 +127,6 @@ class EPLayersMixin:
         # Explicit where nothing forces reentrancy too: the PP stage's checkpoint takes the value as given.
         gc_kwargs = {**gc_kwargs, "use_reentrant": bool(use_reentrant)}
         enable_scoped_gradient_checkpointing(self.model, gradient_checkpointing_kwargs=gc_kwargs)
-        # TRL's disable_gradient_checkpointing context manager re-enables GC from these kwargs on exit.
-        self.args.gradient_checkpointing_kwargs = gc_kwargs
-        self.args.gradient_checkpointing = False
+        # TRL's disable_gradient_checkpointing context manager re-enables GC from these kwargs on exit. Left on,
+        # transformers' Trainer re-installs a bare checkpoint in train().
+        apply_checkpointing_args(self.args, gc_kwargs, enabled=False)

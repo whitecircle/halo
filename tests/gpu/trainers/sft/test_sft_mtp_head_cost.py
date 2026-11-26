@@ -25,7 +25,7 @@ from halo.data.collators.factory import select_data_collator
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 from halo.models.mtp.head import find_mtp_head
 from halo.models.mtp.spec import MtpHeadRequest, MtpObjective
 from halo.trainers.sft import DistributedSFTTrainer

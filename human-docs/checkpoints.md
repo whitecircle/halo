@@ -1,4 +1,4 @@
-# Checkpoints: Save, Resume, Export, Upload
+# Checkpoints
 
 A run writes standard HuggingFace checkpoints to `output_dir` on the cadence set
 by `save_strategy` / `save_steps`. Every mode (FSDP2, EP, TP, CP, PP and their
@@ -22,8 +22,9 @@ Drafting with `method=mtp` needs one: vLLM refuses a checkpoint without it.
 | PP | one part set per stage plus the full index | yes; on per-node storage, merge the nodes' directories first |
 | LoRA / QLoRA | adapter only (`adapter_model.safetensors`) | serve as an adapter, or merge into the base |
 
-EP expert LoRA cannot be merged afterwards: train it with
-`merge_expert_lora_on_save: true` to save the merged model.
+EP expert LoRA merges with `halo run merge-peft-adapters` too, which streams it into the base's shards. On GPT-OSS
+that takes a BF16 base, and a run with neutralized sinks, the SFT default, gets them back in the
+merged checkpoint. `merge_expert_lora_on_save: true` saves the merged model at each save instead.
 
 ## Sharded EP saves
 
@@ -50,10 +51,15 @@ hand-built model.
 | `resume_from_checkpoint: true` and a step directory lacks `trainer_state.json` (written last) | that save never completed: it moves to `output_dir/_incomplete_checkpoints/` and the newest complete one resumes |
 | An explicit path to an incomplete directory, or an `output_dir` whose step directories are all incomplete | raises |
 
+Under PP a checkpoint with optimizer shards resumes only on the topology and layer
+split that wrote it: a changed fingerprint or a failed restore raises, even with
+`allow_optimizer_warm_restart: true`. To start fresh moments there, delete every
+`optimizer_shard_*.pt` and `optimizer_meta.pt`.
+
 A save is safe to interrupt: `save_total_limit` never deletes a checkpoint
 before its successor is complete. LoRA runs restore the adapters onto the base,
 and MoE router-balancing state is restored automatically. Checkpoints from Halo
-1.1.0 resume on this release; merge a sharded EP save first.
+1.1.0 and later resume on this release; merge a sharded EP save first.
 `load_best_model_at_end` is refused on a full fine-tune under CP, on an MoE with
 EP layers, and under TP with several replicas
 ([full mechanics](../agent-docs/reference/checkpoints.md#resuming-training) ↗).
@@ -85,9 +91,10 @@ flags.
 | `merge-ep-shards` | make a sharded EP save loadable |
 | `merge-pp-stages` | merge the per-node directories of a PP save into one checkpoint |
 | `merge-peft-adapters` | merge a LoRA adapter into its base as one checkpoint |
+| `export-engine-adapter` | write a saved LoRA adapter as the directory a vLLM or SGLang server loads by path, as adapter sync publishes it |
 | `merge-models` | combine models in weight space (linear, SLERP, task arithmetic, TIES) |
 | `convert-to-bf16` | cast an fp32 or mixed checkpoint to bf16 for serving |
-| `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights; serving engines do not load its manifest as-is |
+| `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights under Halo's manifest, which serving engines do not load, or with `--export_format compressed-tensors` in the layout vLLM loads |
 | `unfuse-moe-experts` | rewrite fused expert weights to the family's per-expert layout, for a serving loader that reads only that layout |
 | `reset-sinks` | disable the attention sinks in a GPT-OSS checkpoint |
 | `reattach-vision-tower` | restore the vision tower, the base's untrained MTP head (or keep the one the export trained) and processor files to a `text_only_model` export; SGLang needs it for a Qwen3.8-Flash-Next export |
@@ -105,17 +112,23 @@ only where the pinned engine reads that family's layout:
 - **No serving path:** Mistral4 and Ring on either engine (neither registers
   their architecture), and Zaya on SGLang, whose loader reads a layout the export
   does not carry.
+- **Adapters only:** an Inkling 2 run over the packed release saves adapters and
+  has no gathered export. `export-engine-adapter` writes a saved adapter
+  (attention, or attention and experts) as the directory vLLM's Inkling 2 image
+  loads by path over the release
+  ([Inkling 2 → Serving a saved adapter](../agent-docs/models/inkling2.md#serving-a-saved-adapter) ↗).
 - **Untested:** Zaya on vLLM's generic transformers backend, Ling 3.0, Inkling,
-  and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The exports use the
-  hub's names, but no engine has served one.
+  GLM-5 Next and, after `unfuse-moe-experts`, DeepSeek-V4. The
+  exports use the hub's names, but no engine has served one.
 - **Every other family** serves its normal save as is, except a Cohere2 MoE
   (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first. A
   `text_only_model` export of Nemotron 3.5 Super VL serves after
   `reattach-vision-tower`.
-- **What has served on 1.2.0:** one-step RL exports of Qwen3.6-35B-A3B and Gemma 4,
+- **What has served:** on 1.2.0, one-step RL exports of Qwen3.6-35B-A3B and Gemma 4,
   an MTP head fit of Qwen3.6-35B-A3B and untrained exports of Nemotron 3.5 Super VL
   (reattached) and Lightning on both engines, and an MTP head fit of GLM-4.7-Flash
-  on vLLM, each on short prompts.
+  on vLLM, each on short prompts. On 1.3.0rc2, vLLM's Inkling 2 image served the
+  converted adapter of a 30-step Inkling-2-Small SFT run.
 - **Fused experts on a per-expert-only loader** are refused or dropped without
   an error. Rewrite such a checkpoint with `unfuse-moe-experts` first; the result
   is the hub's own layout
@@ -144,6 +157,8 @@ weights:
 - `trainer_state.json` and `scheduler.pt`;
 - `optimizer*` and `rng_state*`, unless the run set `save_only_model: true`;
 - `router_balancing_biases.pt` (bias balancing);
+- `moe_expert_token_counts.json` (MoE runs that log expert load or balance
+  with a bias);
 - `reference_logps.pt` (DPO/KTO `precompute_ref_log_probs`, or offline GRPO full
   fine-tuning at `kl_beta > 0`);
 - `prefetch_pending-*.pt` (async GRPO with prefetch): drawn but untrained
@@ -152,7 +167,9 @@ weights:
   embedding LoRA).
 
 For a LoRA run, upload the adapter directory, or merge it with
-`merge-peft-adapters` for a standalone model. Load an uploaded adapter with
+`merge-peft-adapters` for a standalone model. The adapter records the Hub commit
+of its base, and the merge reads the base at that commit; `--base_revision`
+names it for an adapter that records none. Load an uploaded adapter with
 `PeftModel.from_pretrained`.
 
 The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end. It

@@ -1,11 +1,16 @@
 """The per-row token cap the EP capacity gate sizes against, read off the training config."""
 
+import types
+
 import pytest
 
 from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
-from halo.models.context_window import bounded_row_length
+from halo.models.introspection.context_window import bounded_row_length
+from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.parallelism import simulated_world
 
 
@@ -52,6 +57,33 @@ def test_the_builder_hands_the_ep_gate_the_bounded_row_length(tmp_path):
         built = parallelism_config_from_args(args, trainer_cls=OfflineGRPOTrainer, training_config=config)
     assert built.ep_declared_max_length == 512 + 1024
     assert built.ep_rows_per_device == 2
+
+
+_HINT = "\n[Hint] answer: {answer}\n"
+
+
+def test_sdpg_declares_the_hint_template_on_top_of_the_online_row():
+    """The teacher row is prompt + hint + completion; the template's literal bytes bound the hint's fixed tokens."""
+    config = types.SimpleNamespace(max_completion_length=1024)
+    args = OnlineGRPOScriptArguments(max_prompt_length=512, sdpg_hint_template=_HINT, use_sdpg=True)
+    online = DistributedOnlineGRPOTrainer.declared_row_length(config, args)
+    assert online == 512 + 1024
+    assert DistributedSDPGTrainer.declared_row_length(config, args) == online + len("\n[Hint] answer: \n")
+
+
+def test_sdpg_with_the_term_off_declares_the_online_row():
+    config = types.SimpleNamespace(max_completion_length=1024)
+    args = OnlineGRPOScriptArguments(max_prompt_length=512, sdpg_beta_base=0.0, use_sdpg=True)
+    assert DistributedSDPGTrainer.declared_row_length(config, args) == 512 + 1024
+
+
+def test_an_unbounded_sdpg_row_stays_unbounded_and_a_missing_template_source_raises():
+    config = types.SimpleNamespace(max_completion_length=None)
+    args = OnlineGRPOScriptArguments(max_prompt_length=512, use_sdpg=True)
+    assert DistributedSDPGTrainer.declared_row_length(config, args) is None
+    bounded = types.SimpleNamespace(max_completion_length=1024)
+    with pytest.raises(ValueError, match="SDPG arguments"):
+        DistributedSDPGTrainer.declared_row_length(bounded, types.SimpleNamespace(max_prompt_length=512))
 
 
 if __name__ == "__main__":

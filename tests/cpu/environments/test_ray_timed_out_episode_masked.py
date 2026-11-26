@@ -8,9 +8,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-import halo.environments.ray_actors as ray_actors
-from halo.environments.ray_actors import EnvironmentActor, RolloutManager
+import halo.environments.rollouts.ray_actors as ray_actors
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
 from halo.trainers.grpo.environmental.step_batch import rollout_valid_mask
 
 _CPU = torch.device("cpu")
@@ -39,9 +39,7 @@ class _NeverReturningActor:
 async def test_a_request_timeout_inside_the_episode_is_a_masked_error():
     actor = _actor()
 
-    async def _timed_out_generate(
-        client, url, messages, config, reasoning_effort=None, reasoning_budget=None, budget_soft=False
-    ):
+    async def _timed_out_generate(client, url, messages, config, reasoning_effort=None):
         raise TimeoutError()  # the builtin, with an empty message
 
     actor._http_client = None
@@ -64,6 +62,7 @@ async def test_an_episode_past_its_deadline_is_a_masked_error(monkeypatch):
         env_config={},
         server_urls=["http://x"],
         rollout_config=RolloutConfig(episode_timeout=0.05),
+        max_concurrent_rollouts=1,
     )
     manager._actors = [_NeverReturningActor()]
     manager._started = True

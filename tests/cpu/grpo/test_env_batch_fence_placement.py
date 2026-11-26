@@ -32,6 +32,7 @@ def _round(events: list[str], *, row_error: bool = False, wedged_prefetch: bool 
     host._group_random_effort = False
     host._tokenizer = None  # read only for thinking text, which these episodes carry none of
     host._broadcast_object_from_tp_leader = lambda results: results
+    host._is_tp_follower = lambda: False
     host._log_rollout_metrics = lambda results, mode, reasoning_tokens: None
     host._loop = SimpleNamespace(run_until_complete=lambda results: results)
 

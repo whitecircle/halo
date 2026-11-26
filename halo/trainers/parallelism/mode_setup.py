@@ -15,17 +15,17 @@ from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_for_dp, apply_fs
 from halo.distributed.mesh import tp_local_rank
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
+from halo.models.introspection.unwrapping import find_peft_model
 from halo.models.mtp.head import frozen_trunk_params
-from halo.models.unwrapping import find_peft_model
 from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.parallelism.ep_layers import require_ep_config
-from halo.trainers.trainer_rules import (
+from halo.trainers.construction.trainer_rules import (
     reject_cp_trainer_args,
     reject_ep_layers_under_accelerate,
     reject_fsdp_knobs_under_qlora,
 )
+from halo.trainers.parallelism.ep_layers import require_ep_config
 
 logger = logging.getLogger(__name__)
 
@@ -393,14 +393,13 @@ class ModeSetupMixin:
 
     def _register_output_capturing_for_fsdp(self) -> None:
         """transformers keys output capture on ``str(self.__class__)``, and FSDP2's dynamic subclasses are absent from
-        its registry."""
+        its registry, which takes the module and derives that key itself."""
         model = self._backbone_model()
         for sub in model.modules():
-            cls_str = str(sub.__class__)
-            if cls_str not in _CAN_RECORD_REGISTRY:
+            if str(sub.__class__) not in _CAN_RECORD_REGISTRY:
                 record_outputs = getattr(sub, "_can_record_outputs", None)
                 if record_outputs:
-                    _CAN_RECORD_REGISTRY[cls_str] = record_outputs
+                    _CAN_RECORD_REGISTRY[sub] = record_outputs
                     if is_global_main_process():
                         logger.info(
                             f"  Registered output capturing for {sub.__class__.__name__} "

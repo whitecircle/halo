@@ -4,10 +4,21 @@ from typing import get_args
 
 import pytest
 
+from halo.checkpoint.tools.compressed_tensors_layout import (
+    COMPRESSED_TENSORS_ARGS,
+    COMPRESSED_TENSORS_FORMAT,
+    DYNAMIC_ACTIVATION_FORMATS,
+)
 from halo.checkpoint.tools.lowp_export import _VERIFY_RELERR_TOL
 from halo.hardware import GPU_PEAK_FLOPS
 from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS
-from halo.kernels.lowp.quantization import _POW2_SCALE, FORMAT_BLOCK_SIZE, QUANTIZERS
+from halo.kernels.lowp.quantization import (
+    _ELEMENT_MAX,
+    _FUSED_FAKE_QUANT,
+    _POW2_SCALE,
+    FORMAT_BLOCK_SIZE,
+    QUANTIZERS,
+)
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpPrecision, LowpSpec, QuantFormat
 
 
@@ -26,7 +37,20 @@ def test_the_kernel_tables_are_keyed_on_the_quant_formats():
     assert set(QUANTIZERS) == set(get_args(QuantFormat))
     assert set(_POW2_SCALE) == set(get_args(QuantFormat))
     assert set(_VERIFY_RELERR_TOL) == set(get_args(QuantFormat))
+    assert set(_ELEMENT_MAX) == set(get_args(QuantFormat))
+    assert set(COMPRESSED_TENSORS_FORMAT) == set(get_args(QuantFormat))
+    assert set(COMPRESSED_TENSORS_ARGS) == set(get_args(QuantFormat))
     assert set(DEEPGEMM_FORMATS) <= set(get_args(QuantFormat))
+    assert set(DYNAMIC_ACTIVATION_FORMATS) <= set(get_args(QuantFormat))
+
+
+def test_every_quant_format_has_a_fused_round_trip():
+    """A format with no entry would run its eager round trip on every activation. The two-level format (an e4m3
+    block scale under a tensor-wide one) is the one that declares its largest block scale, for the abs-max pass."""
+    assert set(_FUSED_FAKE_QUANT) == set(get_args(QuantFormat))
+    assert {fmt for fmt, fused in _FUSED_FAKE_QUANT.items() if fused.scale_max is not None} == {
+        fmt for fmt, pow2 in _POW2_SCALE.items() if not pow2
+    }
 
 
 def test_every_peak_flops_key_is_a_peak_table_precision():

@@ -18,12 +18,13 @@ from transformers import (
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping, register_checkpoint_conversion_mapping
 from transformers.core_model_loading import PrefixChange
 
+import halo.model_loading.checkpoint_keys as checkpoint_keys
 from halo.checkpoint.hub_layout import export_conversions, revert_conversions
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.parallel.expert_fuser import ExpertFuser
-from halo.models.conversion_overrides import CONVERSION_OVERRIDES
-from halo.models.param_roles import fp32_pinned_names
+from halo.models.introspection.param_roles import fp32_pinned_names
+from halo.models.upstream.conversion_overrides import CONVERSION_OVERRIDES
 from tests.common.conversion_mapping import restored_conversion_mapping
 from tests.common.models import (
     NEMOTRON_3_5_LIGHTNING,
@@ -291,8 +292,10 @@ def test_a_composite_with_no_load_record_writes_the_level_once():
     assert not [name for name in names if name.startswith("language_model.language_model.")]
 
 
-def test_a_prefix_change_there_would_write_it_twice():
-    """Holds the test above to the mechanism: the plain transformers spelling of the same drop doubles the level."""
+def test_a_prefix_change_there_would_write_it_twice(monkeypatch):
+    """Holds the test above to the mechanism: the plain transformers spelling of the same drop doubles the level. The
+    swap is the very replacement the overrides guard refuses, so the guard is lifted to reach the revert."""
+    monkeypatch.setattr(checkpoint_keys, "verify_conversion_overrides_intact", lambda model: None)
     with restored_conversion_mapping():
         entries = get_checkpoint_conversion_mapping("nemotron_h")
         register_checkpoint_conversion_mapping(

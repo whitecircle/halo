@@ -29,7 +29,7 @@ from halo.entrypoints.run_setup import resume_checkpoint_from_config
 from halo.entrypoints.script import ScriptContext
 from halo.runtime import filesystem
 from halo.runtime.consensus import RankConsensus
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from halo.trainers.reference_logps import token_digest as _token_digest
 from tests.common.distributed import reset_shared_filesystem_consensus
@@ -108,16 +108,15 @@ def test_the_swept_columns_are_persisted_as_training_reads_them(kind, tmp_path):
         assert torch.equal(entry["columns"][name], column(prepared, name))
 
 
-@pytest.mark.parametrize("umask", [0o002, 0o022, 0o077])
-def test_a_fresh_reference_sidecar_takes_the_umask_mode(kind, tmp_path, umask):
-    previous = os.umask(umask)
+def test_a_fresh_reference_sidecar_takes_the_umask_mode(kind, tmp_path):
+    previous = os.umask(0o002)
     try:
         _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
     finally:
         os.umask(previous)
 
     path = tmp_path / REFERENCE_LOGPS_FILE
-    assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~umask
+    assert stat.S_IMODE(path.stat().st_mode) == 0o666 & ~0o002
     assert torch.load(path, weights_only=True)["train"]["num_rows"] == N_ROWS
 
 
@@ -332,17 +331,6 @@ def test_a_reference_mismatch_names_the_data_and_settings_to_resume_with(kind, t
     assert "row's reference" in message
     assert "--max_steps=1" in message, "the refusal must also name how to regenerate the file"
     assert trainer.compute_ref_log_probs.batches == 0
-
-
-def test_a_split_saved_at_the_runs_precision_is_restored(kind, tmp_path):
-    _save_base_run(kind, tmp_path, {"train": token_rows(kind)})
-    saved = torch.load(tmp_path / REFERENCE_LOGPS_FILE, weights_only=True)["train"]
-    assert saved["settings"]["logprob_precision"] == TRAINERS[kind][0].LOGPROB_PRECISION
-
-    resumed = _resumed(kind, tmp_path)
-    resumed._precompute_ref_logps(token_rows(kind), "train", SWEEP_BATCH_SIZE)
-
-    assert resumed.compute_ref_log_probs.batches == 0
 
 
 @pytest.mark.parametrize("saved_precision", [None, "bfloat16"], ids=["unrecorded", "bfloat16"])

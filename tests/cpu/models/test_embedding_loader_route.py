@@ -4,6 +4,7 @@ A sentence-transformers load builds stock experts, so ``use_grouped_gemm`` would
 
 import ast
 import inspect
+import os
 import sys
 import textwrap
 from types import SimpleNamespace
@@ -112,6 +113,31 @@ def test_train_sinks_on_a_sinkless_backbone_is_refused_before_sentence_transform
             ModelArguments(model_name_or_path=checkpoints["qwen3"]),
             EmbeddingScriptArguments(reset_sinks=False, train_sinks=True),
         )
+
+
+class _BuildReached(Exception):
+    pass
+
+
+def test_sentence_transformers_builds_with_ram_efficient_loading_off(monkeypatch, tmp_path, checkpoints):
+    """Under accelerate's RAM-efficient FSDP loading a key the checkpoint lacks (a BERT without its pooler) stays on
+    the meta device off local rank 0, and nothing broadcasts it."""
+    seen = []
+
+    def build(*args, **kwargs):
+        seen.append(os.environ["FSDP_CPU_RAM_EFFICIENT_LOADING"])
+        raise _BuildReached
+
+    monkeypatch.setenv("FSDP_CPU_RAM_EFFICIENT_LOADING", "true")
+    monkeypatch.setattr(embedding_script, "SentenceTransformer", build)
+    with pytest.raises(_BuildReached):
+        embedding_script._load_sentence_transformer(
+            _context(checkpoints["qwen3"]),
+            EmbeddingConfig(output_dir=str(tmp_path), bf16=False, use_cpu=True),
+            ModelArguments(model_name_or_path=checkpoints["qwen3"]),
+            EmbeddingScriptArguments(),
+        )
+    assert seen == ["false"] and os.environ["FSDP_CPU_RAM_EFFICIENT_LOADING"] == "true"
 
 
 def _run_main_to_the_build(monkeypatch, tmp_path, checkpoint: str, config_body: str) -> None:

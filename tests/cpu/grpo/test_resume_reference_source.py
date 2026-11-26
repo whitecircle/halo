@@ -99,6 +99,7 @@ def test_a_resumed_runs_toolkit_reference_is_the_base(tmp_path, monkeypatch):
         force_chat_template=False,
         added_special_tokens=None,
         tokenizer_backend="hf",
+        reasoning_effort_field=None,
     )
     reference = load_reference_model_for_on_policy_grpo(
         token_args,

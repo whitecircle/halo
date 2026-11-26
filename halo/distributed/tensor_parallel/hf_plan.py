@@ -8,26 +8,34 @@ from contextlib import contextmanager
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer, _get_parameter_plan
+from transformers.distributed.expert_parallel import ExpertParallelLayer
+from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES, _get_parameter_plan
+from transformers.distributed.tensor_parallel import TensorParallelLayer
 
 from halo.distributed.tensor_parallel.local_linears import install_planned_local_forwards
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, register_per_head_norm_params
-from halo.models.config_access import text_config, ties_word_embeddings
-from halo.models.model_classes import mapped_model_class
-from halo.models.module_tree import find_module_path
+from halo.models.introspection.config_access import text_config, ties_word_embeddings
+from halo.models.introspection.model_classes import mapped_model_class
+from halo.models.introspection.module_tree import find_module_path
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
-# transformers' replicated-norm gradient handling: the plan style a config asks for, and the class whose
-# backward hook installs the per-backward all-reduce for it.
+# transformers' replicated-norm gradient handling: the plan style a config asks for, and the class whose forward
+# wrapper installs the per-accumulation all-reduce for it.
 _HF_REPLICATED_GRAD_STYLE = "replicated_with_grad_allreduce"
 _HF_REPLICATED_GRAD_CLASS = "ReplicatedWithGradAllReduce"
+# The backbone attribute transformers plans as a vocab-parallel embedding by default, and the style that keeps a
+# parameter whole on every rank.
+_HF_IMPLICIT_EMBEDDING = "embed_tokens"
+_HF_KEEP_WHOLE_STYLE = "replicate"
+# The no-op ``shard_param`` of each base class the registered TP and EP styles derive from.
+_NO_OP_SHARD_PARAMS = (TensorParallelLayer.shard_param, ExpertParallelLayer.shard_param)
 
 
 def plan_shards_param(key: str, tp_plan: dict[str, str]) -> bool:
-    """Whether ``tp_plan`` puts ``key`` under a style whose class overrides the no-op ``shard_param``. Both lookup and
-    decision are transformers' own, which a restated table would drift from."""
+    """Whether ``tp_plan`` puts ``key`` under a style whose class overrides its base's no-op ``shard_param``. Both
+    lookup and decision are transformers' own, which a restated table would drift from."""
     style_name = _get_parameter_plan(key, tp_plan)
     if style_name is None:
         return False
@@ -39,7 +47,7 @@ def plan_shards_param(key: str, tp_plan: dict[str, str]) -> bool:
             f"TP plan style {style_name!r} (for parameter {key!r}) is not registered in transformers' "
             f"ALL_PARALLEL_STYLES ({sorted(ALL_PARALLEL_STYLES.keys())}); nothing can be derived for it."
         )
-    return type(style).shard_param is not TensorParallelLayer.shard_param
+    return type(style).shard_param not in _NO_OP_SHARD_PARAMS
 
 
 def _tied_module_names(concrete) -> tuple[set[str], set[str]]:
@@ -62,38 +70,50 @@ def _plan_keys_naming(plan: dict, modules: set[str]) -> set[str]:
 
 
 @contextmanager
-def consistent_tied_tp_plan(model_class, model_config):
-    """While inside, drop the plan entry of a tied embedding/head pair that only one end carries. transformers ties
-    after sharding, so a lone entry hands the unplanned end a weight of the other kind, failing on mixed operands."""
+def toolkit_tp_plan(model_class, model_config):
+    """While inside, the plan keeps an untied input embedding whole and carries a tied embedding/head pair on both
+    ends or neither. transformers vocab-shards a planned backbone's ``embed_tokens`` unless the plan names it, and
+    DTensor's embedding backward returns a replicated gradient beside that shard, which the optimizer and the norm clip
+    read as the shard's own; a tied pair's head use brings it back sharded. transformers ties after sharding, so a
+    lone tied entry hands the unplanned end a weight of the other kind, failing on mixed operands."""
     concrete = mapped_model_class(model_config, model_class) or model_class
-    heads, embeddings = _tied_module_names(concrete)
-    if not ties_word_embeddings(model_config) or not heads or not embeddings:
-        yield
-        return
     class_plan = getattr(concrete, "_tp_plan", None)
     # The embedding entry lives on the backbone's plan, whose config is the text one: a composite
     # wrapper's own base_model_tp_plan is None (Qwen3.5), so the outer config reports no entry.
     plan_config = text_config(model_config)
     base_plan = getattr(plan_config, "base_model_tp_plan", None)
+    heads, embeddings = _tied_module_names(concrete)
+    tied = ties_word_embeddings(model_config) and bool(heads) and bool(embeddings)
     head_keys = _plan_keys_naming(class_plan or {}, heads)
     embedding_keys = _plan_keys_naming(class_plan or {}, embeddings) | _plan_keys_naming(base_plan or {}, embeddings)
-    if bool(head_keys) == bool(embedding_keys):
+    # An entry, or transformers' own ``embedding_rowwise`` for a planned backbone's unnamed ``embed_tokens``.
+    embedding_planned = bool(embedding_keys) or (
+        bool(base_plan) and _HF_IMPLICIT_EMBEDDING in {module.rsplit(".", 1)[-1] for module in embeddings}
+    )
+    one_ended = tied and bool(head_keys) != embedding_planned
+    drop = (head_keys or embedding_keys) if one_ended else set()
+    new_base_plan = base_plan
+    if base_plan:
+        new_base_plan = {key: value for key, value in base_plan.items() if key not in drop}
+        # A tied pair planned on both ends or neither keeps the plan it has. Naming ``embed_tokens`` under the no-op
+        # style is the only way to keep it whole.
+        if (not tied or one_ended) and not _plan_keys_naming(new_base_plan, {_HF_IMPLICIT_EMBEDDING}):
+            new_base_plan[_HF_IMPLICIT_EMBEDDING] = _HF_KEEP_WHOLE_STYLE
+    if not drop and new_base_plan == base_plan:
         yield
         return
 
-    drop = head_keys or embedding_keys
-    original_class_plan, original_base_plan = class_plan, base_plan
-    if class_plan is not None:
+    if class_plan is not None and drop:
         concrete._tp_plan = {key: value for key, value in class_plan.items() if key not in drop}
-    if base_plan is not None:
-        plan_config.base_model_tp_plan = {key: value for key, value in base_plan.items() if key not in drop}
+    if new_base_plan is not None:
+        plan_config.base_model_tp_plan = new_base_plan
     try:
         yield
     finally:
-        if original_class_plan is not None:
-            concrete._tp_plan = original_class_plan
-        if original_base_plan is not None:
-            plan_config.base_model_tp_plan = original_base_plan
+        if class_plan is not None:
+            concrete._tp_plan = class_plan
+        if base_plan is not None:
+            plan_config.base_model_tp_plan = base_plan
 
 
 def validate_tied_pair_consistent(model, applied_plan: dict) -> None:
@@ -144,35 +164,40 @@ def reject_plan_sharded_plain_params(model: nn.Module, tp_plan: dict[str, str]) 
         )
 
 
+def _installs_hf_replicated_grad_hooks(module: nn.Module) -> bool:
+    forward = vars(module).get("forward")
+    return getattr(forward, "__qualname__", "").startswith(f"{_HF_REPLICATED_GRAD_CLASS}.")
+
+
+def _has_post_accumulate_hooks(module: nn.Module) -> bool:
+    return any(getattr(param, "_post_accumulate_grad_hooks", None) for param in module.parameters(recurse=False))
+
+
 def retarget_hf_replicated_grad_hooks(model: nn.Module) -> None:
     """Move transformers' per-backward norm all-reduce onto the trainer's step-time SUM, since it reduces
-    ``param.grad`` in place on every backward and earlier micro-batches compound by ``tp_size``. Raises when the plan
-    asks for that style and no hook was found."""
+    ``param.grad`` in place on every accumulation and earlier micro-batches compound by ``tp_size``. transformers
+    wraps the module's forward to register a post-accumulate-grad hook on each parameter at its first grad-enabled
+    forward; dropping the wrapper restores the class forward before any hook exists. Raises when the plan asks for
+    that style and no wrapper was found, or when a forward already registered the hooks."""
     plan = getattr(model, "_tp_plan", None) or {}
     plan_wants_it = any(style == _HF_REPLICATED_GRAD_STYLE for style in plan.values())
 
-    modules: list[nn.Module] = []
-    for module in model.modules():
-        hooks = getattr(module, "_backward_hooks", None)
-        if not hooks:
-            continue
-        stale = [
-            handle
-            for handle, fn in hooks.items()
-            if getattr(fn, "__qualname__", "").startswith(f"{_HF_REPLICATED_GRAD_CLASS}.")
-        ]
-        if not stale:
-            continue
-        for handle in stale:
-            del hooks[handle]
-        modules.append(module)
+    modules = [module for module in model.modules() if _installs_hf_replicated_grad_hooks(module)]
+    for module in modules:
+        if _has_post_accumulate_hooks(module):
+            raise RuntimeError(
+                f"A {type(module).__name__} under {_HF_REPLICATED_GRAD_STYLE!r} already ran a grad-enabled "
+                "forward, which registered transformers' per-accumulation all-reduce on its parameters: retarget "
+                "the norm gradients before the first forward."
+            )
+        del module.forward
 
     if plan_wants_it and not modules:
         raise RuntimeError(
-            f"The TP plan requests {_HF_REPLICATED_GRAD_STYLE!r} but no "
-            f"{_HF_REPLICATED_GRAD_CLASS} backward hook was found to retarget — transformers has "
-            "changed how it installs that reduction. Without the retarget the per-head attention "
-            "norms are re-reduced on every backward, which compounds under gradient accumulation."
+            f"The TP plan requests {_HF_REPLICATED_GRAD_STYLE!r} but no {_HF_REPLICATED_GRAD_CLASS} forward "
+            "wrapper was found to retarget — transformers has changed how it installs that reduction. Without the "
+            "retarget the per-head attention norms are re-reduced on every backward, which compounds under "
+            "gradient accumulation."
         )
 
     register_per_head_norm_params(model, modules)

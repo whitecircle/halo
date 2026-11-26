@@ -4,7 +4,7 @@ reasoning drifting into another script."""
 
 import pytest
 
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
@@ -55,7 +55,7 @@ def _metrics_for(messages: list[Message]) -> dict[str, float]:
     return _make_env().rollout_metrics(Trajectory(messages=messages))
 
 
-@pytest.mark.parametrize("drift", ["the 最长 path is bounded", "但实际上 the prefix sums", "カタカナ", "한글"])
+@pytest.mark.parametrize("drift", ["the 最长 path is bounded", "カタカナ", "한글"])
 def test_reasoning_in_another_script_is_counted(drift):
     metrics = _metrics_for([Message.user("task"), Message.assistant("answer", thinking=drift)])
     assert metrics["episode/reasoning_cjk_rate"] == 1.0

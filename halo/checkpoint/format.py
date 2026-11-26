@@ -30,6 +30,8 @@ _NUMBERED_SHARD_FILE_RE = re.compile(
 )
 # A renaming writer's in-flight parts: outside HF's final pattern, inside the sweep's glob.
 STREAM_PART_PREFIX = "model-streaming"
+# A striped gathered save gives each writer its own prefix, so the writers share one directory without coordinating.
+_STRIPE_WRITER_PART = "model-writer{}"
 # Each stage picks its own part prefix without coordinating, since a global k-of-n is not derivable locally once a
 # stage emits a variable number of parts.
 PP_WRAPPER_PART_PREFIX = "model-wrapper"
@@ -52,6 +54,8 @@ OPTIMIZER_META_FILE = "optimizer_meta.pt"
 # The warm-restart remedies name the shards by this glob, so every filename derives from it.
 OPTIMIZER_SHARD_GLOB = "optimizer_shard_*.pt"
 ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
+# Per-layer, per-expert routed token slots over the run, beside each checkpoint (MoELoadMetricsBase).
+MOE_EXPERT_TOKEN_COUNTS_FILE = "moe_expert_token_counts.json"
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
 # An output_dir entry the run keeps beside its checkpoints and never exports, like the Trainer's Hub push.
 RUN_INTERNAL_PREFIX = "_"
@@ -86,7 +90,12 @@ CHECKPOINT_COMPLETION_MARKERS = (
     RESUME_ADAPTER_MARKER_FILE,
 )
 # Resume state the aux copy drops by name when it drops the resume sidecars.
-UNSUFFIXED_RESUME_ENTRIES = (TRAINER_STATE_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE)
+UNSUFFIXED_RESUME_ENTRIES = (
+    TRAINER_STATE_FILE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    MOE_EXPERT_TOKEN_COUNTS_FILE,
+)
 
 # Never carried over by the aux copy: a stray weight file would shadow the fresh safetensors.
 WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
@@ -141,6 +150,10 @@ def hf_shard_filename(part: int, total_parts: int, *, indexed: bool = False) -> 
 
 def stream_part_filename(prefix: str, part_index: int) -> str:
     return f"{prefix}-{part_index:05d}.safetensors"
+
+
+def stripe_writer_part_prefix(writer_index: int) -> str:
+    return _STRIPE_WRITER_PART.format(f"{writer_index:05d}")
 
 
 def pp_stage_part_prefix(pp_rank: int, pp_size: int) -> str:

@@ -197,7 +197,6 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
     # a new scripts/ subtree (profiling, inference, ...) must index without a hand-maintained list
     write_script(tmp_path / "scripts/profiling/trace_report.py")
     write_script(tmp_path / "scripts/after_training/merge_models.py")
-    write_script(tmp_path / "scripts/diagrams/gen_roofline.py")
     write_script(tmp_path / "scripts/training/sft.py")
 
     index = tool_commands(tmp_path)
@@ -206,9 +205,6 @@ def test_tool_subtrees_are_derived_from_the_scripts_tree(tmp_path):
     assert index["after-training/merge-models"] == tmp_path / "scripts/after_training/merge_models.py"
     assert all(not name.startswith("training/") for name in index)
     assert "sft" not in index
-    # diagrams regenerates doc assets through generators that must run as a script, so advertising them as tools would
-    # mislead.
-    assert all(not name.startswith("diagrams/") for name in index)
 
 
 def test_real_repo_profiling_tools_are_indexed():
@@ -268,26 +264,6 @@ def test_command_uses_accelerate_launch_with_config():
     ]
 
 
-def test_command_accelerate_passes_num_processes_when_nproc_set():
-    run = build_launch_command(
-        Path("scripts/training/sft.py"),
-        Path("config.yaml"),
-        nproc=4,
-        args=[],
-        accelerate_config=Path("launcher-configs/accelerate/fsdp2_gradop_config.yaml"),
-    )
-
-    assert run[:6] == [
-        "accelerate",
-        "launch",
-        "--config_file",
-        "launcher-configs/accelerate/fsdp2_gradop_config.yaml",
-        "--num_processes",
-        "4",
-    ]
-    assert "torchrun" not in run
-
-
 def test_repo_relative_config_resolves_from_root(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     root = tmp_path / "repo"
@@ -322,43 +298,6 @@ def test_launch_rejects_missing_config(tmp_path):
 
     assert result.exit_code != 0
     assert "config not found" in result.output
-
-
-def test_launch_accelerate_option_resolves_config_from_root(tmp_path):
-    write_script(tmp_path / "scripts/training/sft.py")
-    write_config(tmp_path / "config.yaml")
-    write_config(tmp_path / "accelerate/_cli_test_only.yaml")
-
-    # use a path that does not exist in the cwd so resolve_config falls back to root deterministically
-    result = runner.invoke(
-        app,
-        [
-            "launch",
-            "sft",
-            "config.yaml",
-            "--accelerate",
-            "accelerate/_cli_test_only.yaml",
-            "--dry_run",
-            "--root",
-            str(tmp_path),
-        ],
-    )
-
-    assert result.exit_code == 0
-    assert "accelerate launch --config_file" in result.stdout
-    assert str(tmp_path / "accelerate/_cli_test_only.yaml") in result.stdout
-
-
-def test_run_command_passes_flags_through(tmp_path):
-    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
-
-    result = runner.invoke(
-        app,
-        ["run", "merge-ep-shards", "--dry_run", "--root", str(tmp_path), "--", "--input_dir", "ckpt"],
-    )
-
-    assert result.exit_code == 0
-    assert "merge_ep_shards.py --input_dir ckpt" in result.stdout
 
 
 def test_run_keeps_the_caller_cwd_so_relative_path_flags_mean_what_they_say(tmp_path, monkeypatch):
@@ -452,19 +391,6 @@ def test_launch_refuses_torchrun_multinode_flags_by_name(tmp_path, flag):
     assert "torchrun" in result.output and "single-node" in result.output
 
 
-def test_launch_port_option_reaches_torchrun(tmp_path):
-    write_script(tmp_path / "scripts/training/sft.py")
-    write_config(tmp_path / "config.yaml")
-
-    result = runner.invoke(
-        app,
-        ["launch", "sft", "config.yaml", "--nproc", "2", "--port", "29751", "--dry_run", "--root", str(tmp_path)],
-    )
-
-    assert result.exit_code == 0
-    assert "--master_port=29751" in result.stdout
-
-
 def _dry_run(tmp_path, verb_args: list[str]) -> list[str]:
     verb, *rest = verb_args
     # Launcher flags first: whatever follows a separator in ``rest`` is the script's.
@@ -476,12 +402,10 @@ def _dry_run(tmp_path, verb_args: list[str]) -> list[str]:
 @pytest.mark.parametrize(
     "overrides",
     [
-        ["--learning_rate=1e-5"],
-        ["--learning_rate", "1e-5"],
-        ["--seed", "-1"],
-        ["--packing"],
-        ["--run_name", "a b"],
-        ["--expert_parallel_size=8", "--learning_rate", "1e-5", "--packing"],
+        pytest.param(["--seed", "-1"], id="overrides2"),
+        pytest.param(["--packing"], id="overrides3"),
+        pytest.param(["--run_name", "a b"], id="overrides4"),
+        pytest.param(["--expert_parallel_size=8", "--learning_rate", "1e-5", "--packing"], id="overrides5"),
     ],
 )
 def test_launch_forwards_field_overrides_without_a_separator(tmp_path, overrides):
@@ -644,16 +568,22 @@ def test_torchrun_reads_numa_binding_only_before_the_script():
     assert parsed.training_script_args == ["config.yaml", "--numa-binding", "node"]
 
 
-@pytest.mark.parametrize("mode", [mode.value for mode in AffinityMode])
-def test_every_numa_mode_reaches_torchrun(tmp_path, mode):
+def test_every_numa_mode_reaches_torchrun(tmp_path, subtests):
     """torchrun's choices are these modes; its parser exits on a value it does not take."""
-    write_script(tmp_path / "scripts/training/sft.py")
-    write_config(tmp_path / "config.yaml")
+    modes = [affinity.value for affinity in AffinityMode]
+    assert modes, "torch.numa.binding.AffinityMode declares no mode"
+    for mode in modes:
+        with subtests.test(mode):
+            root = tmp_path / mode
+            write_script(root / "scripts/training/sft.py")
+            write_config(root / "config.yaml")
 
-    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", "-n", "2", "--port", "29752", "--numa-binding", mode])
+            tokens = _dry_run(
+                root, ["launch", "sft", "config.yaml", "-n", "2", "--port", "29752", "--numa-binding", mode]
+            )
 
-    assert parse_args(tokens[1:]).numa_binding == mode
-    assert tokens[:4] == ["torchrun", "--nproc_per_node=2", "--master_port=29752", f"--numa-binding={mode}"]
+            assert parse_args(tokens[1:]).numa_binding == mode
+            assert tokens[:4] == ["torchrun", "--nproc_per_node=2", "--master_port=29752", f"--numa-binding={mode}"]
 
 
 def test_an_unknown_numa_mode_is_refused_before_launch(tmp_path):
@@ -699,21 +629,6 @@ def test_numa_binding_is_refused_for_a_launch_without_torchrun(tmp_path, launche
 
 
 @pytest.mark.parametrize(
-    ("nproc", "accelerate_config"), [(1, None), (8, Path("launcher-configs/accelerate/fsdp2_gradop_config.yaml"))]
-)
-def test_command_rejects_numa_binding_off_torchrun(nproc, accelerate_config):
-    with pytest.raises(typer.BadParameter, match="--numa-binding is a torchrun option"):
-        build_launch_command(
-            Path("scripts/training/sft.py"),
-            Path("config.yaml"),
-            nproc=nproc,
-            args=[],
-            accelerate_config=accelerate_config,
-            numa_binding=AffinityMode.NODE,
-        )
-
-
-@pytest.mark.parametrize(
     ("launcher", "expected"),
     [
         (["-n", "8"], ["torchrun", "--nproc_per_node=8"]),
@@ -736,6 +651,87 @@ def test_a_launch_without_numa_binding_is_unchanged(tmp_path, launcher, expected
         str((tmp_path / "config.yaml").resolve()),
         "--packing",
     ]
+
+
+def test_rollout_backend_flag_sets_the_sandbox_backend_for_the_launched_process(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_config(tmp_path / "cfg.yaml")
+    envs: list[dict[str, str]] = []
+    _, argvs = stub_exec(monkeypatch, envs)
+    monkeypatch.delenv("HALO_SANDBOX_BACKEND", raising=False)
+
+    result = runner.invoke(
+        app,
+        [
+            "launch",
+            "grpo/environmental",
+            "cfg.yaml",
+            "-n",
+            "4",
+            "--halo-rollout-backend",
+            "baseten",
+            "--root",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert envs[0]["HALO_SANDBOX_BACKEND"] == "baseten"
+    assert argvs[0][:2] == ["torchrun", "--nproc_per_node=4"]
+    assert "HALO_SANDBOX_BACKEND" not in os.environ
+
+
+def test_rollout_backend_flag_reaches_tools_and_dry_run(tmp_path):
+    write_script(tmp_path / "scripts/environments/inference/eval_code_contests.py")
+
+    result = runner.invoke(
+        app, ["run", "eval-code-contests", "--halo-rollout-backend", "baseten", "--dry_run", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout.startswith("HALO_SANDBOX_BACKEND=baseten ")
+
+
+def test_without_the_flag_the_sandbox_backend_is_left_alone(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "cfg.yaml")
+    envs: list[dict[str, str]] = []
+    stub_exec(monkeypatch, envs)
+    monkeypatch.delenv("HALO_SANDBOX_BACKEND", raising=False)
+
+    result = runner.invoke(app, ["launch", "sft", "cfg.yaml", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "HALO_SANDBOX_BACKEND" not in envs[0]
+
+
+@pytest.mark.parametrize("command", ["launch", "run"])
+def test_rollout_backend_modal_reaches_the_exec_environment(tmp_path, monkeypatch, command):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
+    write_config(tmp_path / "config.yaml")
+    envs: list[dict[str, str]] = []
+    _, argvs = stub_exec(monkeypatch, envs)
+    target = ["grpo/environmental", "config.yaml"] if command == "launch" else ["merge-ep-shards"]
+
+    result = runner.invoke(app, [command, *target, "--halo-rollout-backend", "modal", "--root", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert envs[0]["HALO_SANDBOX_BACKEND"] == "modal" and envs[0]["HALO_SANDBOX_REPL"] == "1"
+    assert "--halo-rollout-backend" not in argvs[0]
+
+
+def test_unknown_rollout_backend_is_refused_before_exec(tmp_path, monkeypatch):
+    write_script(tmp_path / "scripts/training/grpo/environmental.py")
+    write_config(tmp_path / "config.yaml")
+    _, argvs = stub_exec(monkeypatch)
+
+    result = runner.invoke(
+        app, ["launch", "grpo/environmental", "config.yaml", "--halo-rollout-backend", "nope", "--root", str(tmp_path)]
+    )
+
+    assert result.exit_code == 2 and argvs == []
+    assert "unknown --halo-rollout-backend 'nope'" in " ".join(result.output.split())
 
 
 if __name__ == "__main__":

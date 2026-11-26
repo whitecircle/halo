@@ -4,7 +4,12 @@ Slots are literals off TRL 1.14.2; recomputing ``params.index(...)`` would test 
 
 import pytest
 
-from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, get_ctor_model_and_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import (
+    get_ctor_arg,
+    get_ctor_config,
+    get_ctor_model_and_config,
+    resolve_ctor_positions,
+)
 from halo.trainers.grpo.on_policy import GRPO_CTOR_POSITIONS
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer
@@ -17,8 +22,8 @@ REWARD_CTOR_POSITIONS = DistributedRewardTrainer.CTOR_POSITIONS
 
 
 def test_sft_slots_match_installed_trl():
-    """TRL 1.14.2: ``SFTTrainer.__init__(self, model, args, data_collator, ...)``."""
-    assert SFT_CTOR_POSITIONS == {"model": 0, "args": 1, "data_collator": 2}
+    """TRL 1.14.2: ``SFTTrainer.__init__(self, model, args, data_collator, train_dataset, ...)``."""
+    assert SFT_CTOR_POSITIONS == {"model": 0, "args": 1, "data_collator": 2, "train_dataset": 3}
 
 
 def test_dpo_slots_match_installed_trl():

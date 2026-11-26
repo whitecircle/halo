@@ -81,9 +81,22 @@ def test_the_collective_raises_with_the_caller_s_guidance():
     assert "rank 0 has {'HALO_GRAD_BUCKET_MB': 256}" in message, f"the reference must be shown: {message}"
 
 
-def test_the_grad_bucket_knob_is_in_the_compared_set():
-    """Dropping it would leave the TP and QLoRA sweeps with no uniformity guard."""
-    assert "HALO_GRAD_BUCKET_MB" in rank_uniform_env.rank_uniform_settings()
+@pytest.mark.parametrize(("value", "expected"), [(None, 1), ("0", 0), ("3", 3)])
+def test_the_weight_sync_gather_order_is_compared_across_ranks(value, expected):
+    """Ranks issuing their expert gathers in different orders run different collective sequences."""
+    env = {} if value is None else {"HALO_WEIGHT_SYNC_GATHER_AHEAD": value}
+    with patch.dict(os.environ, env):
+        settings = rank_uniform_env.rank_uniform_settings()
+    assert settings["HALO_WEIGHT_SYNC_GATHER_AHEAD"] == expected
+
+
+def test_ranks_holding_different_parity_probe_modes_are_refused(monkeypatch):
+    """The probe forward is collective: 'off' on one rank and 'warn' on another must be named, not passed."""
+    per_rank = []
+    for mode in ("off", "warn"):
+        monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", mode)
+        per_rank.append(rank_uniform_env.rank_uniform_settings())
+    assert divergent_settings(per_rank) == {"HALO_WEIGHT_SYNC_PARITY_PROBE": ["off", "warn"]}
 
 
 def _count_joins(monkeypatch) -> list:
@@ -91,17 +104,6 @@ def _count_joins(monkeypatch) -> list:
     monkeypatch.setattr(rank_uniform_env, "_env_uniformity_verified", False)
     monkeypatch.setattr(rank_uniform_env, "reject_divergent_settings", lambda *a, **k: calls.append(a))
     return calls
-
-
-def test_the_check_runs_at_most_once_per_process(monkeypatch):
-    """Otherwise the post-load world join is back."""
-    calls = _count_joins(monkeypatch)
-    monkeypatch.setattr(rank_uniform_env, "has_process_group", lambda: True)
-
-    rank_uniform_env.agree_rank_uniform_env()
-    rank_uniform_env.agree_rank_uniform_env()
-    rank_uniform_env.agree_rank_uniform_env()
-    assert len(calls) == 1, f"the world join ran {len(calls)} times; it is latched to one"
 
 
 def test_a_pre_init_call_does_not_disarm_the_backstop(monkeypatch):

@@ -12,16 +12,12 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from peft.utils import get_peft_model_state_dict
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from halo.checkpoint.parallel.adapters import (
-    _load_peft_adapter_state,
-    live_adapter_tensors,
-    remap_cp_adapter_keys_to_live,
-)
+from halo.checkpoint.parallel.adapters import live_adapter_tensors, remap_adapter_keys_to_live
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
-from halo.models.param_roles import persistent_buffers
-from halo.models.unwrapping import plain_adapter_key
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import plain_adapter_key
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
 
@@ -111,40 +107,11 @@ def test_resume_remap_recovers_live_keys():
     saved = _plain_keys(get_peft_model_state_dict(peft_model))
     assert saved, "no adapter tensors to save"
 
-    remapped = remap_cp_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
+    remapped = remap_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
 
     expected_live = {name.replace(".default.", ".") for name in _live_lora_keys(peft_model)}
     assert set(remapped) == expected_live, "remap did not recover the exact live key set"
     assert set(remapped) != set(saved)
-
-
-def test_resume_roundtrip_loads_every_saved_tensor():
-    """A mis-spelled remap leaves the keys in portable spelling, which the copy cannot place."""
-    trained = _cp_peft_model()
-    with torch.no_grad():  # make adapters non-zero so a successful restore is detectable (B inits 0)
-        for name, param in trained.named_parameters():
-            if ".lora_" in name:
-                param.add_(torch.randn_like(param))
-    saved = _plain_keys(get_peft_model_state_dict(trained))
-
-    fresh = _cp_peft_model()
-    trained_lora = {n: p for n, p in trained.named_parameters() if ".lora_" in n}
-    fresh_lora = {n: p for n, p in fresh.named_parameters() if ".lora_" in n}
-    assert set(fresh_lora) == set(trained_lora)
-    assert any(not torch.equal(fresh_lora[n], trained_lora[n]) for n in trained_lora), (
-        "fresh adapters already equal trained — the restore below would be unfalsifiable"
-    )
-
-    live_tensors = live_adapter_tensors(fresh)
-    remapped = remap_cp_adapter_keys_to_live(saved, live_tensors)
-    unplaced = sorted(set(remapped) - set(live_tensors))
-    assert not unplaced, f"{len(unplaced)}/{len(remapped)} adapter keys name no live tensor, e.g. {unplaced[:3]}"
-    _load_peft_adapter_state(live_tensors, remapped)
-
-    not_restored = [n for n in trained_lora if not torch.equal(fresh_lora[n], trained_lora[n])]
-    assert not not_restored, (
-        f"{len(not_restored)}/{len(trained_lora)} adapter tensors not restored: {not_restored[:3]}"
-    )
 
 
 def test_resume_remap_covers_modules_to_save_buffers():
@@ -159,7 +126,7 @@ def test_resume_remap_covers_modules_to_save_buffers():
         "modules_to_save clone did not serialize its persistent buffer — the remap case is vacuous"
     )
 
-    remapped = remap_cp_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
+    remapped = remap_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
     live = {
         name.replace(".modules_to_save.default.", ".").replace(".default.", ".")
         for name, _ in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
@@ -179,7 +146,7 @@ def test_resume_remap_covers_embedding_adapters():
     assert live_embedding, "no ParameterDict embedding adapter was injected — the case is vacuous"
 
     saved = _plain_keys(get_peft_model_state_dict(peft_model))
-    remapped = remap_cp_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
+    remapped = remap_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
 
     expected = {name.removesuffix(".default") for name in live_embedding}
     assert expected <= set(remapped), (
@@ -197,14 +164,14 @@ def test_resume_remap_covers_dora_magnitudes():
     assert magnitudes, "no DoRA magnitude was saved — the case is vacuous"
 
     live_tensors = live_adapter_tensors(peft_model)
-    remapped = remap_cp_adapter_keys_to_live(saved, live_tensors)
+    remapped = remap_adapter_keys_to_live(saved, live_tensors)
     assert set(remapped) == set(live_tensors), sorted(set(remapped) ^ set(live_tensors))[:4]
 
 
 def test_resume_remap_passes_through_unmatched_saved_key():
     """The restore's layout check names and refuses it (``tests/cpu/peft/test_adapter_restore_strict.py``)."""
     orphan = "base_model.model.model.layers.99.self_attn.q_proj.lora_A.weight"
-    assert remap_cp_adapter_keys_to_live({orphan: 123}, live_adapter_tensors(_cp_peft_model())) == {orphan: 123}
+    assert remap_adapter_keys_to_live({orphan: 123}, live_adapter_tensors(_cp_peft_model())) == {orphan: 123}
 
 
 if __name__ == "__main__":

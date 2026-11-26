@@ -7,7 +7,7 @@ import inspect
 
 import pytest
 
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.rosters import distributed_trainer_classes
 
 _WRITER = "create_model_card"
@@ -28,16 +28,19 @@ def test_the_derived_roster_covers_every_trainer():
     assert {"DistributedSFTTrainer", "SMPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
 
 
-@pytest.mark.parametrize("trainer", TRAINERS, ids=lambda cls: cls.__name__)
-def test_the_card_writer_is_the_mixins_and_hands_tags_on(trainer):
-    mro = trainer.__mro__
-    owner = _writer_owner(mro)
-    assert owner is CheckpointingMixin, f"{trainer.__name__}.{_WRITER} resolves to {owner.__name__}, which adds no tag"
-    library = _writer_owner(mro[mro.index(CheckpointingMixin) + 1 :])
-    tags = inspect.signature(getattr(library, _WRITER)).parameters.get("tags")
-    assert tags is not None and tags.kind in _KEYWORD_KINDS, (
-        f"{library.__module__}.{library.__name__}.{_WRITER} takes no ``tags`` keyword"
-    )
+def test_the_card_writer_is_the_mixins_and_hands_tags_on(subtests):
+    for trainer in TRAINERS:
+        with subtests.test(trainer.__name__):
+            mro = trainer.__mro__
+            owner = _writer_owner(mro)
+            assert owner is CheckpointingMixin, (
+                f"{trainer.__name__}.{_WRITER} resolves to {owner.__name__}, which adds no tag"
+            )
+            library = _writer_owner(mro[mro.index(CheckpointingMixin) + 1 :])
+            tags = inspect.signature(getattr(library, _WRITER)).parameters.get("tags")
+            assert tags is not None and tags.kind in _KEYWORD_KINDS, (
+                f"{library.__module__}.{library.__name__}.{_WRITER} takes no ``tags`` keyword"
+            )
 
 
 if __name__ == "__main__":

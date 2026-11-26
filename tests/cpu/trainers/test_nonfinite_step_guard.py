@@ -19,9 +19,10 @@ from trl import SFTConfig
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
+from halo.trainers.metrics.token_metrics import TokenMetricsMixin
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin, is_clipping_enabled
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
 from tests.common.offline_grpo import OFFLINE_VOCAB, make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.step_guard import Guarded, guarded, guarded_step
@@ -63,8 +64,13 @@ def _same_moments(a: list[dict], b: list[dict]) -> bool:
     )
 
 
-@PATHS
-@pytest.mark.parametrize("bad", [float("nan"), float("inf")], ids=["nan", "inf"])
+@pytest.mark.parametrize(
+    ("bad", "optimizer_cls"),
+    [
+        pytest.param(float("nan"), torch.optim.AdamW, id="nan-host"),
+        pytest.param(float("inf"), AdamWBF16, id="inf-device"),
+    ],
+)
 def test_a_nonfinite_step_leaves_weights_and_moments_untouched(bad, optimizer_cls):
     me = guarded(optimizer_cls=optimizer_cls)
     guarded_step(me, 0.5)
@@ -344,8 +350,9 @@ class _Rows(torch.utils.data.Dataset):
         return {"x": self.x[i], "y": self.y[i]}
 
 
-class _GuardedTrainer(GradientClippingMixin, NonFiniteStepGuardMixin, Trainer):
-    """``DistributedTrainerMixin.create_optimizer``'s install, behind the clipping mixin as the spine composes them."""
+class _GuardedTrainer(GradientClippingMixin, NonFiniteStepGuardMixin, TokenMetricsMixin, Trainer):
+    """``DistributedTrainerMixin.create_optimizer``'s install, behind the clipping mixin as the spine composes them; the guard's
+    batch fetch is timed through the token-metrics mixin."""
 
     def create_optimizer(self, model=None):
         super().create_optimizer(model)
@@ -604,13 +611,20 @@ def test_a_resume_after_an_interrupted_run_settles_its_unread_verdict_first(tmp_
     )
 
 
-@PATHS
-@pytest.mark.parametrize("accumulation", [1, 2], ids=["ga1", "ga2"])
-@pytest.mark.parametrize("poison", sorted(_POISONS))
 @pytest.mark.parametrize(
-    ("logging_strategy", "logging_steps", "nan_inf_filter"),
-    [("steps", 1, False), ("steps", 1, True), ("steps", 3, False), ("epoch", 1, False), ("no", 1, False)],
-    ids=["steps1", "steps1-filter", "steps3", "epoch", "no"],
+    ("logging_strategy", "logging_steps", "nan_inf_filter", "poison", "accumulation", "optimizer_cls"),
+    [
+        pytest.param("steps", 1, False, "nan_loss", 1, torch.optim.AdamW, id="steps1-nan_loss-ga1-host"),
+        pytest.param("steps", 1, False, "inf_grad", 2, AdamWBF16, id="steps1-inf_grad-ga2-device"),
+        pytest.param("steps", 1, True, "nan_loss", 2, torch.optim.AdamW, id="steps1-filter-nan_loss-ga2-host"),
+        pytest.param("steps", 1, True, "inf_grad", 1, AdamWBF16, id="steps1-filter-inf_grad-ga1-device"),
+        pytest.param("steps", 3, False, "nan_loss", 1, AdamWBF16, id="steps3-nan_loss-ga1-device"),
+        pytest.param("steps", 3, False, "inf_grad", 2, torch.optim.AdamW, id="steps3-inf_grad-ga2-host"),
+        pytest.param("epoch", 1, False, "nan_loss", 2, AdamWBF16, id="epoch-nan_loss-ga2-device"),
+        pytest.param("epoch", 1, False, "inf_grad", 1, torch.optim.AdamW, id="epoch-inf_grad-ga1-host"),
+        pytest.param("no", 1, False, "nan_loss", 1, torch.optim.AdamW, id="no-nan_loss-ga1-host"),
+        pytest.param("no", 1, False, "inf_grad", 2, AdamWBF16, id="no-inf_grad-ga2-device"),
+    ],
 )
 def test_train_loss_and_every_window_average_the_applied_steps(
     tmp_path, poison, logging_strategy, logging_steps, nan_inf_filter, accumulation, optimizer_cls

@@ -26,6 +26,23 @@ Then, for one family (``-k`` narrows ``pytest -m 'gpu and vllm_server' tests/gpu
 ``--reach`` adds one push per forwarded name, on Laguna and Gemma 4 especially, whose real-step bar is gross;
 ``--reach-leave-out model.layers.N.mlp.gate.weight`` is its negative control and must fail.
 
+GLM-5 Next serves a tiny random checkpoint written first (the Hub supplies the tokenizer and processor files only):
+    python tests/gpu/trainers/grpo/test_weight_push_exact.py --family glm5_next --write-checkpoint $DIR
+then vLLM with ``--max-model-len 1024 --enforce-eager --gpu-memory-utilization 0.2
+--limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0``, or SGLang with ``SGLANG_MODEL=$DIR
+SGLANG_EXTRA_ARGS='--mamba-track-interval 1024'``,
+and ``HALO_TEST_GLM5_NEXT_MODEL=$DIR`` on the trainer. The name-for-name ``--reach`` rows leave GLM-5 Next out: scaling a
+DSA indexer weight cannot move the log-probs (the top-k ranking is scale-invariant).
+
+Flash-Next serves a tiny composite checkpoint written first by the trainer's own gathered save (the Hub supplies the
+tokenizer and processor files only; two ranks):
+    torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_weight_push_exact.py --family qwen4_exp_text \\
+        --write-checkpoint $DIR
+then vLLM with ``--max-model-len 1024 --enforce-eager --gpu-memory-utilization 0.2 --limit-mm-per-prompt
+'{"image":0,"video":0}' --max-logprobs 64``, and ``HALO_TEST_QWEN4_EXP_MODEL=$DIR`` on the trainer. SGLang takes the
+same checkpoint on an image carrying the hyper-connection mix-up patch (``halo_patches`` on ``/server_info``); it
+registers only the multimodal class, so a text-only export goes through ``reattach_vision_tower.py`` first.
+
 A server launched from a local path takes ``--served-model-name`` (or SGLang's ``SGLANG_MODEL``) equal to
 ``HALO_TEST_PUSH_EXACT_MODEL``, the same path for the trainer.
 """
@@ -36,15 +53,23 @@ from tests.common.weight_push_exact import (
     parse_row,
     run_push_exactness,
     skip_unless_a_fresh_server_holds_the_row,
+    write_gathered_tiny_checkpoint,
+    write_tiny_checkpoint_if_asked,
 )
 
 
 def run(ctx) -> dict:
-    return run_push_exactness(ctx, parse_row())
+    row = parse_row()
+    if row.write_checkpoint is not None:
+        return write_gathered_tiny_checkpoint(ctx, row)
+    return run_push_exactness(ctx, row)
 
 
 main = gpu_test_main(exact_world_size=WORLD_SIZE, prefix="weight_push_exact")(run)
 
 if __name__ == "__main__":
-    skip_unless_a_fresh_server_holds_the_row(parse_row())
+    row = parse_row()
+    write_tiny_checkpoint_if_asked(row)
+    if row.write_checkpoint is None:
+        skip_unless_a_fresh_server_holds_the_row(row)
     main()

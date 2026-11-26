@@ -8,9 +8,9 @@
 # Placeholder: the stage-2 checkpoint whose eval you kept (stage 2 rotates its saves at save_total_limit: 3).
 model_name_or_path: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage2-hard/checkpoint-200  # weights only: the optimizer starts fresh
 model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, the path above would be sent as the model id
-chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort and thinking budget; the stock template has no effort variable
+chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's reasoning effort level; the stock template has no effort variable
 force_chat_template: true      # the stage-2 weights ship this same template (a save keeps the forced one); serve with it
-attn_implementation: sdpa  # FA2 crashes Qwen3.5 M-RoPE varlen path
+attn_implementation: flash_attention_2
 # No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag would still
 # record a [tokens, num_experts] router-logit plane per MoE layer on every forward.
 # train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
@@ -27,21 +27,21 @@ environment_type: codeforces
 max_turns: 18               # the high profile's 3 submissions + 8 test calls, two recoveries and the
                             # closing turn, with slack for failed calls; an unproductive turn costs a turn, not the episode
 environment_kwargs:
-  language: [python, cpp]   # the model names each program's language; python is graded at timeout_per_test,
-                            # cpp at compiled_time_limit_scale x the stated limit
+  language: [python, cpp]   # the model names each program's language; python runs at the stated limit, at least
+                            # timeout_per_test, cpp at compiled_time_limit_scale x the stated limit (timeout_per_test
+                            # where none is stated), both at most max_time_limit (default 15 s)
   carry_reasoning: true      # each turn sees the reasoning of the turn before it
   compiled_time_limit_scale: 2.0   # a compiled solution's time limit as a multiple of the stated one
   timeout_per_test: 5
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a stop before any failure leaves the group baseline, one after is a failure
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
-  # thinking_tokens is the level's per-turn reasoning budget, soft (enforce_thinking_cap: false): stated to the
-  # model and priced past it (reasoning_price_past_budget), never cut there; the engine closes the reasoning only
-  # where rollout_max_answer_tokens is left of the turn. The episode's output is bounded by rollout_max_episode_tokens.
+  # reasoning_budget is the reasoning an episode spends free, summed over its turns, and reasoning_price what the
+  # trainer charges per 1,000 reasoning tokens past it, the lowest level highest; the model is told neither.
   reasoning_effort_profiles:
-    low: {thinking_tokens: 8192, enforce_thinking_cap: false, max_submissions: 1, max_test_calls: 6}
-    medium: {thinking_tokens: 12288, enforce_thinking_cap: false, max_submissions: 2, max_test_calls: 8}
-    high: {thinking_tokens: 16384, enforce_thinking_cap: false, max_submissions: 3, max_test_calls: 8}
+    low: {reasoning_budget: 100000, reasoning_price: 0.008, max_submissions: 1, max_test_calls: 6}
+    medium: {reasoning_budget: 135000, reasoning_price: 0.006, max_submissions: 2, max_test_calls: 8}
+    high: {reasoning_budget: 170000, reasoning_price: 0.004, max_submissions: 3, max_test_calls: 8}
   # Reward ladder: see code_contests.py _grade_episode.
   submission_reward: 0.1     # bonus for reaching the graded channel
   verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
@@ -49,10 +49,12 @@ environment_kwargs:
   no_tool_use_penalty: 0.2   # ending with 0 tool calls: below a failed attempt at the price cap
   turn_overflow_penalty: 0.35 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns or the output budget spent, or a cut/empty turn it could not retry): above one more failed submission
   length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut, or ended without a call or an answer
-  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that fails to parse/execute
+  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that errors or is refused (bad arguments, an unknown tool, a
+                             # spent budget, a mislabelled language); a program that crashes or fails to compile
+                             # still ran, uncharged
 
 # --- Rewards ---
-# The length economy: the level's per-turn thinking budget, soft (priced past it), the engine's ceiling where the
+# The length economy: the level's episode reasoning budget (priced past it), the engine's ceiling where the
 # answer room is left of the turn, the interaction budgets and the output budget. The judge reads the whole episode, every
 # turn's reasoning included, and vetoes the credit of one that carried its working-out into a program, spent a call on
 # an unfinished draft, or faked, probed or mined the grade; working-out in a scratchpad run is logged, never priced, so
@@ -66,16 +68,17 @@ rewards:
     name: audit
     model: openai/gpt-6-luna   # through OpenRouter; the key is read from OPENROUTER_API_KEY in the launch environment (api_key_env names another)
     view: full
-    max_view_chars: 900000     # a whole episode with its reasoning: 160000 sampled tokens and the tool replies
+    max_view_chars: 900000     # a whole episode with its reasoning: 200000 sampled tokens and the tool replies
     max_tokens: 16384          # room for the verdict's own reasoning on the longest episodes
-    request_timeout: 120       # a verdict on a full episode takes ~10 s; with the client's retries it stays inside episode_timeout
+    request_timeout: 120       # a verdict on a full episode takes ~10 s; it is scored inside the episode's episode_timeout,
+                               # where the client's retries can spend up to 5 x 120 s on a judge that hangs
     on_error: invalid          # a verdict the judge never reached leaves the episode out of training: an outage never trains unjudged episodes
     weight: -0.7               # prices each fired weighted check by its share: wasted_run and untested_submission 0.1, hardcoded_output 0.3 and verdict_probe 0.2 beyond their veto; reasoning_in_runs is logged
     context_file: examples/grpo/environmental/code-contests-judge/qwen3.6-vllm-run-code.txt
     checks: environment        # the environment's audit rubric (CodeContestsEnvironment.JUDGE_CHECKS)
 
 # --- Ray Workers ---
-num_rollout_workers: 48         # >= the 24 episodes a rank has in flight, with headroom
+rollout_actor_budget: 288  # per node, split over its trainer ranks
 max_concurrent_rollouts: 48  # >= the per-rank batch (24) and >= eval_rollout_batch_size (34): both must fit one wave
 
 # --- vLLM Servers ---
@@ -96,13 +99,11 @@ episode_timeout: 3600         # whole-episode deadline in engine-serving time (a
 # --- Rollout Generation ---
 rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
 rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
-rollout_max_tokens: 38192              # per-turn total; under a soft budget the reasoning may run until only the answer room is left of it
+rollout_max_tokens: 38192              # per-turn total; the reasoning may run until only the answer room is left of it
 rollout_max_answer_tokens: 8192      # the most a turn generates past its reasoning cap (never stated to the model): an honest call fits well inside it, a program carrying the reasoning on in its comments is cut at it
 rollout_stop_tokens: ["<|im_start|>"]  # a turn ends where the model starts a chat turn of its own (it can, past a forced close of its reasoning)
-rollout_max_episode_tokens: 160000  # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
-reasoning_floor: 0.10  # the one term that pays for MORE reasoning: an episode reasoning under 0.75x its level's per-turn budget, summed over its turns, pays up to this
-reasoning_price: {low: 0.008, medium: 0.006, high: 0.004}  # per 1,000 reasoning tokens a turn spends past its level's soft budget, the lowest level highest
-reasoning_price_past_budget: true  # free within the budget: the soft budget's only ceiling below the engine's
+rollout_max_episode_tokens: 200000  # the most an episode may sample over all its turns, reasoning and visible output together (never stated to the model; a turn's caps narrow to what is left)
+reasoning_floor: 0.25  # the one term that pays for MORE reasoning: a failed episode reasoning under its level's reasoning_budget pays up to this, in proportion to the shortfall
 reasoning_price_cap: 0.28          # the most the price charges an episode: under one more failed submission (resubmission + untested_submission)
 
 # --- Prefetch ---
@@ -118,7 +119,7 @@ max_prompt_length: null
 
 # --- GRPO objective: KL-free, bands as the trust region ---
 num_generations: 12          # 12 prompts x 12: on a frontier pool a problem solved once in twelve still yields a contrast
-use_chunked_grpo_logprobs: true # required for Qwen3.6 (~248k vocab)
+use_chunked_grpo_logprobs: true # required by packed_microbatch_tokens; full logits over Qwen3.6's ~248k vocab OOM anyway
 max_train_row_tokens: 64000   # a training rank's memory bound (a B300 rank peaks near 250 GB here); a longer row leaves the batch
 loss_type: dapo
 beta: 0.0                   # KL-free: the IS bands below are the trust region
@@ -146,6 +147,7 @@ mask_truncated_completions: false  # `truncated` = the max_turns or output-budge
 
 # --- Training ---
 per_device_train_batch_size: 1
+packed_microbatch_tokens: 12288  # rows packed into one varlen call per 12,288-token bin
 per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
 eval_rollout_batch_size: 34       # rows per rank per eval rollout round: 34 x 6 ranks = 204 requests in
                                   # flight at once, so the 400-row split takes two rounds

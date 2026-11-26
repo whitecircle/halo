@@ -37,7 +37,7 @@ from halo.models.attention.selection import (
     select_supported_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.config_access import (
+from halo.models.introspection.config_access import (
     TOOLKIT_STAMP_PREFIX,
     config_export_ready,
     set_config_field_run_scoped,
@@ -397,6 +397,7 @@ def _ref_load_stubs(checkpoint: str, attn_implementation: str | None = None):
         force_chat_template=False,
         added_special_tokens=None,
         tokenizer_backend="hf",
+        reasoning_effort_field=None,
     )
     model_config = ModelArguments(model_name_or_path=checkpoint, attn_implementation=attn_implementation)
     training_config = types.SimpleNamespace()  # no bf16/fp16 flags → fp32 reference

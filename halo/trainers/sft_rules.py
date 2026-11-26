@@ -4,7 +4,7 @@ from halo.config_validation import reject_non_default_args
 from halo.data.collators.collator_rules import reject_padding_free_conflicts
 from halo.env import is_accelerate_launch
 from halo.model_loading.dtype import resolve_quantization_config
-from halo.models.context_window import is_bounded_length
+from halo.models.introspection.context_window import is_bounded_length
 from halo.models.mtp.spec import require_mtp_head_spec
 
 

@@ -39,7 +39,7 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.prefix_lm import prefix_lm_token_type_ids
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.gradient_checkpointing import in_backward_pass
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
@@ -169,7 +169,7 @@ def record_forwards(model) -> tuple[list, list]:
 
 
 def count_recomputes(model) -> list[int]:
-    """A running count of decoder-layer forwards inside a backward: the recomputes gradient checkpointing runs."""
+    """Count decoder recomputes at the first norm, inside the checkpointed forward."""
     calls = [0]
 
     def count(_module, _args) -> None:
@@ -177,7 +177,7 @@ def count_recomputes(model) -> list[int]:
             calls[0] += 1
 
     for layer in decoder_layers(backbone_with_layers(model)):
-        layer.register_forward_pre_hook(count)
+        layer.input_layernorm.register_forward_pre_hook(count)
     return calls
 
 

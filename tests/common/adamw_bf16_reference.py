@@ -1,6 +1,6 @@
-"""The per-parameter AdamWBF16 step the fused launch replaced: the bit-for-bit oracle both test tiers hold it to. Runs
-on CUDA and, with ``TRITON_INTERPRET=1`` set before Triton is imported, on CPU. Float arguments round to fp32 first, as
-the CUDA launcher does."""
+"""The per-parameter AdamWBF16 step the fused launch replaced, taking 1 - beta as arguments as the fused kernel does:
+the bit-for-bit oracle both test tiers hold it to. Runs on CUDA and, with ``TRITON_INTERPRET=1`` set before Triton is
+imported, on CPU. Float arguments round to fp32 first, as the CUDA launcher does."""
 
 import math
 import struct
@@ -20,11 +20,13 @@ from halo.optimizers.adamw_bf16 import (
     AdamWBF16,
     _divisibility,
     _eager_adam_bf16_step,
+    _fused_update,
     _FusedUpdate,
     _launch_fused,
     _launch_tables,
     _program_blocks,
     _scaled_grad,
+    _step_hparams,
 )
 from halo.optimizers.stochastic_rounding import SR_BLOCK_SIZE, sr_param_index, sr_round_to_bf16, sr_seed_pair
 from halo.runtime.dtensor import to_local
@@ -67,6 +69,8 @@ def _per_parameter_kernel(
     bc2_sqrt,
     eps,
     wd_factor,
+    one_minus_beta1,
+    one_minus_beta2,
     n_elements,
     seed,
     grad_scale_ptr,
@@ -88,8 +92,8 @@ def _per_parameter_kernel(
     ea = tl.load(ea_ptr + offsets, mask=mask).to(tl.float32)
     easq = tl.load(easq_ptr + offsets, mask=mask).to(tl.float32)
 
-    ea = beta1 * ea + (1.0 - beta1) * grad
-    easq = beta2 * easq + (1.0 - beta2) * grad * grad
+    ea = tl.fma(one_minus_beta1, grad, beta1 * ea)
+    easq = tl.fma(one_minus_beta2 * grad, grad, beta2 * easq)
 
     tl.store(ea_ptr + offsets, ea.to(tl.bfloat16), mask=mask)
 
@@ -139,6 +143,8 @@ def per_parameter_step(
         _fp32(bc2_sqrt),
         _fp32(eps),
         _fp32(wd_factor),
+        _fp32(1.0 - beta1),
+        _fp32(1.0 - beta2),
         n,
         seed,
         grad_scale if grad_scale is not None else grad_flat,
@@ -237,7 +243,7 @@ def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
             step_size = LR / (1.0 - BETAS[0] ** step)
             seed = sr_seed_pair(_SR_KEY, step, sr_param_index(f"p{i}"))[0]
             tensors = tuple(role[i] for role in fused)
-            hparams = (BETAS[0], BETAS[1], step_size, bc2_sqrt, EPS, 1.0 - LR * wd)
+            hparams = (BETAS[0], BETAS[1], step_size, bc2_sqrt, EPS, 1.0 - LR * wd, 1.0 - BETAS[0], 1.0 - BETAS[1])
             update = _FusedUpdate(tensors[0], tensors, hparams, seed + seed_shift, _divisibility(tensors))
             if n and all(update.divisible) != aligned:
                 mismatches.append(f"divisible[{i}] is {update.divisible}, placed {'' if aligned else 'un'}aligned")
@@ -256,6 +262,55 @@ def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
                 if not torch.equal(expected, got):
                     mismatches.append(f"scale={grad_scale is not None} {name}[{i}] ({CASE[i][0]} elements)")
     return mismatches
+
+
+# Step 1 from zero moments with eps 0 and no decay moves a weight by lr * m_hat / sqrt(v_hat) = lr * sign(grad) in
+# float64, so p = -lr under a negative gradient lands on 0, and a relative error r in the step leaves r * lr.
+FIRST_STEP_LR = 2.0**-10
+FIRST_STEP_GRAD = -(2.0**-12)
+# The step's scalars round to fp32 once each and its few fp32 ops round again: a few units of fp32 roundoff of lr.
+FIRST_STEP_TOLERANCE = 8 * 2.0**-24
+
+
+def adamw_bf16_step(p: Tensor, name: str, state: dict, group: dict, *, fused: bool) -> None:
+    """Step ``p`` (its ``.grad`` set) and ``state``'s moments in place at ``state["step"]``, through the fused kernel or
+    the eager step, as ``AdamWBF16.step`` takes either without a grad scale or a skip flag."""
+    if fused:
+        update = _fused_update(p, name, state, group)
+        _launch_fused([update], *_launch_tables([update]), None, None, 1)
+    else:
+        beta1, beta2, step_size, bc2_sqrt, eps, wd_factor = _step_hparams(group, state["step"])
+        seeds = sr_seed_pair(_SR_KEY, state["step"], sr_param_index(name))
+        args = (p, p.grad, state["exp_avg"], state["exp_avg_sq"], step_size, bc2_sqrt, eps, wd_factor)
+        _eager_adam_bf16_step(*args, beta1, beta2, seeds)
+
+
+def _first_step(beta2: float, *, fused: bool) -> Tensor:
+    """``p / lr`` after step 1 from ``p = -lr``, through the fused kernel or the eager step."""
+    group = {"betas": (BETAS[0], beta2), "lr": FIRST_STEP_LR, "eps": 0.0, "weight_decay": 0.0}
+    p = torch.nn.Parameter(torch.full((SR_BLOCK_SIZE,), -FIRST_STEP_LR, dtype=torch.bfloat16))
+    p.grad = torch.full_like(p, FIRST_STEP_GRAD)
+    state = {"step": 1, "exp_avg": torch.zeros_like(p), "exp_avg_sq": torch.zeros_like(p)}
+    adamw_bf16_step(p, "w", state, group, fused=fused)
+    return p.detach().double() / FIRST_STEP_LR
+
+
+def first_step_cancellation_mismatches() -> list[str]:
+    """Each beta2 whose fused first step leaves ``p = -lr`` further from 0 than fp32 rounding explains."""
+    findings = []
+    for beta2 in (0.999, 0.9999):
+        worst = _first_step(beta2, fused=True).abs().max().item()
+        if not math.isfinite(worst) or worst > FIRST_STEP_TOLERANCE:
+            findings.append(f"beta2={beta2}: the fused first step lands {worst:.3e} lr from 0")
+    return findings
+
+
+def first_step_eager_mismatches() -> list[str]:
+    """The fused first step at beta2 0.99999 against the eager one, which takes 1 - beta from the float64 betas."""
+    gap = (_first_step(0.99999, fused=True) - _first_step(0.99999, fused=False)).abs().max().item()
+    if not math.isfinite(gap) or gap > FIRST_STEP_TOLERANCE:
+        return [f"beta2=0.99999: the fused and eager first steps differ by {gap:.3e} lr"]
+    return []
 
 
 @triton.jit
@@ -315,7 +370,7 @@ def lookup_mismatches() -> list[str]:
         # Alternate full and short last blocks; the table holds the element count, not the block count.
         numels = [b * SR_BLOCK_SIZE - (i % 2) * 7 if b else 0 for i, b in enumerate(blocks)]
         storage = torch.empty(max(numels), dtype=torch.bfloat16)
-        updates = [_FusedUpdate(storage, (storage[:n],) * 4, (0.0,) * 6, 0, (False,) * 5) for n in numels]
+        updates = [_FusedUpdate(storage, (storage[:n],) * 4, (0.0,) * 8, 0, (False,) * 5) for n in numels]
         index, _, num_programs = _launch_tables(updates)
         block_starts = torch.tensor([sum(blocks[:i]) for i in range(len(blocks))], dtype=torch.int64)
         expected = torch.empty((sum(blocks), 2), dtype=torch.int64)

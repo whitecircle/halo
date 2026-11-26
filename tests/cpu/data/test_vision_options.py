@@ -14,7 +14,7 @@ from transformers import Gemma4ImageProcessor, Qwen2VLImageProcessor
 from halo.configs.sft import SFTScriptArguments
 from halo.data.vlm_render import apply_image_pixel_bounds
 from halo.entrypoints.data_setup import apply_vision_options
-from halo.models.module_tree import backbone_with_layers, media_module_names
+from halo.models.introspection.module_tree import backbone_with_layers, media_module_names
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_VLM_FAMILIES, TINY_QWEN3_VL_FAMILY, tiny_family_model
 
 _COMPOSITES = {**TINY_MOE_VLM_FAMILIES, "qwen3_vl": TINY_QWEN3_VL_FAMILY}

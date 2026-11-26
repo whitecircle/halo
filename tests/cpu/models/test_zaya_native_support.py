@@ -12,8 +12,7 @@ from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
 
 from halo.model_loading import model_preparation
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
-from halo.models.moe.balancing import resolve_balancing_mode
-from halo.models.zaya import (
+from halo.models.families.zaya import (
     _same_document_masks,
     apply_zaya_patches,
     is_zaya_cca_document_isolated,
@@ -21,6 +20,7 @@ from halo.models.zaya import (
     patch_zaya_packed_document_isolation,
     patch_zaya_router_load_recording,
 )
+from halo.models.moe.balancing import resolve_balancing_mode
 from tests.common.models import TINY_ZAYA_CONFIG
 
 SEED = 1234
@@ -148,11 +148,13 @@ def test_discarded_tokens_count_toward_the_discard_slot():
     assert counter[:-1].sum().item() == 0.0, "discarded tokens leaked into real experts' loads"
 
 
-def test_gradient_checkpointing_is_refused():
+@pytest.mark.parametrize("enable", ["activation_checkpointing_enable", "gradient_checkpointing_enable"])
+def test_gradient_checkpointing_is_refused(enable):
+    """Both spellings: transformers' Trainer calls the first, TRL the deprecated second."""
     patch_zaya_gradient_checkpointing_refusal()
     model = _tiny_model()
-    with pytest.raises(ValueError, match="gradient checkpointing"):
-        model.gradient_checkpointing_enable()
+    with pytest.raises(ValueError, match="does not support activation checkpointing"):
+        getattr(model, enable)()
 
 
 def test_flash_interface_receives_position_ids_only_with_the_patch(upstream_zaya):

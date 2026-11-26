@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import pytest
 from torch.utils.data import SequentialSampler
 
-import halo.trainers.dataloaders as dataloader_mod
+import halo.trainers.loop.dataloaders as dataloader_mod
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.consensus import RankConsensus
-from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 
 _ROWS = [{"x": 1}, {"x": 2}]
 

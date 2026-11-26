@@ -34,12 +34,12 @@ from tests.common.trees import checkpointing_gaps, example_rows, randomize_index
 
 VOCAB = 1024
 # Eight indexer heads: with fewer, a random model scores many pools exactly zero (every head's ReLU off), and the
-# stock top-k breaks those ties in an unspecified order. Two pools per selection, so every path past twelve tokens
-# selects.
+# stock top-k breaks those ties in an unspecified order. A 4-token pool (the release's 16 would leave rows this short
+# nothing to select) and two pools per selection, so every path past twelve tokens selects.
 SPARSE_FAMILIES = {
     "glm5_next_text": (
         TINY_MOE_FAMILIES["glm5_next"],
-        {"index_n_heads": 8, "index_topk": 8, "index_kpool_always_select_tail": True},
+        {"index_n_heads": 8, "index_topk": 8, "index_kpool": 4, "index_kpool_always_select_tail": True},
     ),
 }
 # lora_target_modules spelling -> (refused before the load, PEFT wraps every sparse layer's kv_b_proj). A regex

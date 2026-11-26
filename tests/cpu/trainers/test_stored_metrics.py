@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from halo.trainers.stored_metrics import StoredMetricsMixin
+from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 from tests.common.gloo import run_gloo_ranks
 
 

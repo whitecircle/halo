@@ -28,11 +28,13 @@ def test_the_literal_rows_are_the_literal_shapes(golden):
     assert set(golden.literal_shapes) <= set(layout_shapes())
 
 
-@pytest.mark.parametrize(
-    ("golden", "shape"), [_case(golden, shape) for golden in GOLDENS for shape in layout_shapes()]
-)
-def test_the_record_matches_the_golden_digest(golden, shape):
-    assert record_digest(golden.record(shape)) == COMMITTED[golden.name]["digest"][shape.key]
+@pytest.mark.parametrize("golden", GOLDENS, ids=lambda golden: golden.name)
+def test_the_record_matches_the_golden_digest(golden, subtests):
+    shapes = layout_shapes()
+    assert shapes, "the shape grid is empty"
+    for shape in shapes:
+        with subtests.test(f"{golden.name}-{shape.key}"):
+            assert record_digest(golden.record(shape)) == COMMITTED[golden.name]["digest"][shape.key]
 
 
 @pytest.mark.parametrize(

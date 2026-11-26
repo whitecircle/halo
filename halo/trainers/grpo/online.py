@@ -13,9 +13,11 @@ import trl.generation.vllm_generation as _trl_vllm_generation
 from trl import GRPOTrainer
 
 from halo.configs.grpo import EarlyStopConfig, RLRRConfig
+from halo.diagnostics.phase_timers import Phase
 from halo.environments.rollout_config import VLLM_BACKEND
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.full_logits_memory import LogitsWidth
 from halo.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from halo.trainers.grpo.grpo_rules import (
     reject_conflicting_advantage_hooks,
@@ -23,31 +25,50 @@ from halo.trainers.grpo.grpo_rules import (
     reject_unshared_rollout_func,
     require_vllm_server_mode,
 )
-from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
-from halo.trainers.grpo.objective.advantages import degenerate_group_mask, group_relative_advantages
+from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
+from halo.trainers.grpo.loss_forward_seam import LOSS_FORWARD_KNOB
+from halo.trainers.grpo.objective.advantages import (
+    degenerate_group_mask,
+    group_relative_advantages,
+    maxrl_zero_mean_groups,
+)
 from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, clamp_ref_logps, kl_clamp_counts
 from halo.trainers.grpo.objective.loss_inputs import (
     DEGENERATE_GROUP_FRAC_KEY,
+    MAXRL_ZERO_MEAN_GROUP_FRAC_KEY,
     gathered_num_items,
     narrow_loss_masks,
     record_token_mass,
 )
 from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
+from halo.trainers.grpo.online_loss_forward import OnlineLossForwardMixin
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
+from halo.trainers.grpo.rollout.push_parity import verify_first_push_parity
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights
-from halo.trainers.token_metrics import effective_loss_mask
-from halo.trainers.world_metrics import world_sums
+from halo.trainers.grpo.rounds.packed_rounds import PackedRoundMixin
+from halo.trainers.grpo.rounds.packed_rules import PACKED_KNOB
+from halo.trainers.grpo.rounds.rank_balance import RankBalancedRoundMixin
+from halo.trainers.grpo.rounds.row_order import reject_trainer_refusal
+from halo.trainers.grpo.row_span_stash import RowSpanStashMixin
+from halo.trainers.metrics.token_metrics import effective_loss_mask
+from halo.trainers.metrics.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
 
 
 class DistributedOnlineGRPOTrainer(
     OnPolicyGRPOInitMixin,
+    PackedRoundMixin,
+    RankBalancedRoundMixin,
     GenerationRoundMixin,
+    OnlineLossForwardMixin,
+    PhaseTimedMixin,
     ProtectedTokenEntropyMixin,
     ChunkedGRPOLogprobsMixin,
+    RowSpanStashMixin,
     DecoupledCompletionsLogMixin,
     DistributedTrainerMixin,
     GRPOTrainer,
@@ -63,22 +84,26 @@ class DistributedOnlineGRPOTrainer(
     )
     # TRL's server-mode generation is vLLM-only, so the engine the weight-sync gate reads is fixed here.
     _rollout_backend = VLLM_BACKEND
+    # Whether the first weight push has been checked against the trainer's own log-probs (``verify_first_push_parity``).
+    first_push_verified: bool = False
+    # MaxRL advantages; off unless ``_adopt_advantage_hooks`` reads ``use_maxrl``.
+    _use_maxrl: bool = False
 
     def __init__(self, *args, **kwargs):
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
+        self._log_phase_times = kwargs.pop("log_phase_times", False)
+        self._packed_microbatch_tokens = kwargs.pop("packed_microbatch_tokens", None)
+        self._rollout_weight_precision = kwargs.pop("rollout_weight_precision", "bf16")
+        self._balances_rank_tokens = kwargs.pop("balance_rank_tokens", False)
+        self._requests_loss_forward_weights = kwargs.pop(LOSS_FORWARD_KNOB, False)
         training_args, kwargs = self._begin_on_policy_init(args, kwargs)
+        if self._packed_microbatch_tokens is not None:
+            reject_trainer_refusal(type(self), self.PACKED_ROWS_REFUSAL, PACKED_KNOB)
         grpo_args = require_vllm_server_mode(training_args)
         reject_tool_calling_loop(args, kwargs)
         reject_unshared_rollout_func(self.parallelism_config, args, kwargs)
         self._adopt_advantage_hooks(kwargs)
-        reject_conflicting_advantage_hooks(
-            grpo_args,
-            self._rlrr_config,
-            std_floor=self._scale_rewards_std_floor,
-            drop_degenerate_groups=self._drop_degenerate_groups,
-            balance_token_mass=self._balance_token_mass,
-            recomputes_from_gathered_rewards=self._recomputes_from_gathered_rewards,
-        )
+        self._reject_conflicting_advantage_hooks(grpo_args)
         # Built before TRL's ctor opens the NCCL group to the rollout server, so a refused condition costs nothing.
         early_stop = build_early_stop_callback(
             kwargs.pop("early_stop", EarlyStopConfig()),
@@ -106,7 +131,13 @@ class DistributedOnlineGRPOTrainer(
                 self.beta,
             )
 
+        self.pad_token_id = self._tokenizer.pad_token_id
         self._finish_on_policy_init()
+        self._configure_phase_timers()
+        self._configure_row_span_stash()
+        self._configure_packed_microbatches()
+        self._configure_rank_balance()
+        self._configure_loss_forward_weights()
 
     @staticmethod
     def sums_sequence_logratio(grpo_args) -> bool:
@@ -121,7 +152,21 @@ class DistributedOnlineGRPOTrainer(
         self._rlrr_config: RLRRConfig | None = kwargs.pop("rlrr_config", None)
         self._drop_degenerate_groups: bool = kwargs.pop("drop_degenerate_groups", False)
         self._scale_rewards_std_floor: float = kwargs.pop("scale_rewards_std_floor", 0.0)
+        self._use_maxrl: bool = kwargs.pop("use_maxrl", False)
         self._balance_token_mass: bool = kwargs.pop("balance_token_mass", False)
+
+    def _reject_conflicting_advantage_hooks(self, grpo_args) -> None:
+        """The adopted hooks' refusals, each from this trainer's own field, so a hook left out of the call is
+        accepted beside the one it conflicts with."""
+        reject_conflicting_advantage_hooks(
+            grpo_args,
+            self._rlrr_config,
+            std_floor=self._scale_rewards_std_floor,
+            drop_degenerate_groups=self._drop_degenerate_groups,
+            balance_token_mass=self._balance_token_mass,
+            recomputes_from_gathered_rewards=self._recomputes_from_gathered_rewards,
+            use_maxrl=self._use_maxrl,
+        )
 
     @staticmethod
     @contextlib.contextmanager
@@ -173,12 +218,16 @@ class DistributedOnlineGRPOTrainer(
     def _distributed_sync_weights(self) -> None:
         """COLLECTIVE. The client TRL holds on ``vllm_generation`` forwards from the main process."""
         client = self.vllm_generation.vllm_client if self.accelerator.is_main_process else None
-        sync_trainer_weights(self, client)
+        with self.unbinned_scoring():
+            with self._phase_timers.span(Phase.SYNC, "host"):
+                sync_trainer_weights(self, client, precision=self._rollout_weight_precision)
+            verify_first_push_parity(self, client)
 
     def _generate_single_turn(self, *args, **kwargs):
         """TRL slices the result by ``process_index``, so TP ranks land on different completions and deadlock at the
         first all-reduce in ``model.forward``; broadcast from the TP leader."""
-        result = super()._generate_single_turn(*args, **kwargs)
+        with self._phase_timers.span(Phase.ROLLOUT, "host"):
+            result = super()._generate_single_turn(*args, **kwargs)
         return self._broadcast_object_from_tp_leader(result)
 
     def _calculate_rewards(self, *args, **kwargs):
@@ -190,25 +239,47 @@ class DistributedOnlineGRPOTrainer(
 
     @property
     def _recomputes_from_gathered_rewards(self) -> bool:
-        return self._rlrr_config is not None or self._drop_degenerate_groups or self._scale_rewards_std_floor > 0
+        return (
+            self._rlrr_config is not None
+            or self._drop_degenerate_groups
+            or self._scale_rewards_std_floor > 0
+            or self._use_maxrl
+        )
 
     def _generate_and_score_completions(
         self, inputs: list[dict[str, torch.Tensor | Any]]
     ) -> dict[str, torch.Tensor | Any]:
         """Broadcast the scored tensors across the TP/ETP group, since CPU-side post-processing may diverge."""
-        result = super()._generate_and_score_completions(inputs)
+        with self._phase_timers.span(Phase.BUILD, "host"), self._scoring_round_in_bins(), self._without_trl_old_pass():
+            result = super()._generate_and_score_completions(inputs)
 
         # Before the TP/ETP broadcast, so the reshaped tensors are what gets broadcast.
         self._apply_rlrr_advantages(result)
         self._apply_std_floor_advantages(result)
+        self._apply_maxrl_advantages(result)
         self._apply_degenerate_group_drop(result)
         self._apply_token_mass_balance(result)
         # Consumed: the next generation batch must stash its own rewards, never reuse these.
         self._last_rewards_per_func = None
         # After the drop, so the clamp share reads the loss mask the KL term is averaged on.
         self._clamp_kl_reference(result)
+        result |= self._build_privileged_rows(result, inputs)
+        if self._balances_rank_tokens and self.model.training:
+            result = self._deal_round_across_ranks(result)
+            # The scoring passes binned the rows as TRL dealt them.
+            self._round_plan = None
+        if self._packs_microbatches and self.model.training:
+            result = self._lay_out_packed_round(result, self._take_round_plan(result))
 
-        return self._broadcast_tensors_from_tp_leader(result)
+        return self._with_row_spans(self._broadcast_tensors_from_tp_leader(result))
+
+    def _build_privileged_rows(
+        self, result: dict[str, torch.Tensor | Any], inputs: list[dict[str, torch.Tensor | Any]]
+    ) -> dict[str, torch.Tensor]:
+        """Row tensors a subclass adds to the round from ``inputs``, whose rows are still in the order of ``result``'s:
+        the deal across ranks and the packed layout that follow reorder both together. A pair of left-padded prompt
+        tensors it adds is declared on ``ROUND_PROMPT_ROWS``."""
+        return {}
 
     def _apply_rlrr_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Replace advantages with RLRR ones, recomputed on the full gathered reward set in TRL's group order. Train
@@ -258,6 +329,29 @@ class DistributedOnlineGRPOTrainer(
         advantages_full = advantages_full.masked_fill(unscorable, 0.0)  # match TRL's unscorable handling
         self._install_advantages(result, advantages_full, "scale_rewards_std_floor")
 
+    def _apply_maxrl_advantages(self, result: dict[str, torch.Tensor | Any]) -> None:
+        """Replace advantages with MaxRL's, divided by the group mean, on the full gathered set; TRL has no mean
+        divisor. Every rank holds the same gathered set, so the non-negative check agrees. Train mode only."""
+        if not self._use_maxrl:
+            return
+        gathered = self._gathered_rewards()
+        if gathered is None:
+            return
+        rewards, unscorable = gathered
+        valid = ~unscorable
+        advantages_full = group_relative_advantages(
+            rewards.float(),
+            self.num_generations,
+            self.args.scale_rewards,
+            valid_mask=valid,
+            already_gathered=True,
+            normalizer="mean",
+        )
+        advantages_full = advantages_full.masked_fill(unscorable, 0.0)  # match TRL's unscorable handling
+        zero_mean = maxrl_zero_mean_groups(rewards.float(), self.num_generations, valid_mask=valid)
+        self._metrics["train"][MAXRL_ZERO_MEAN_GROUP_FRAC_KEY].append(zero_mean.float().mean().item())
+        self._install_advantages(result, advantages_full, "use_maxrl")
+
     def _apply_degenerate_group_drop(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Mask all-equal-reward groups out of the loss: their advantage is 0, but their tokens would inflate the DAPO
         normalizer and dilute the groups that carry signal. Train mode only."""
@@ -289,7 +383,7 @@ class DistributedOnlineGRPOTrainer(
     def _apply_token_mass_balance(self, result: dict[str, torch.Tensor | Any]) -> None:
         """Log the net token mass and, under ``balance_token_mass``, cancel it; a token weighs its place in the loss
         times TRL's vLLM IS ratio. Train mode only."""
-        if not self.model.training:
+        if not self.model.training or self._fuses_round:
             return
         loss_mask = effective_loss_mask(result)
         if loss_mask is None:
@@ -328,7 +422,7 @@ class DistributedOnlineGRPOTrainer(
             return None
         if self._last_rewards_per_func is None:
             raise RuntimeError(
-                "An advantage hook (RLRR / drop_degenerate_groups / scale_rewards_std_floor) is armed "
+                "An advantage hook (RLRR / drop_degenerate_groups / scale_rewards_std_floor / use_maxrl) is armed "
                 "but no gathered rewards were stashed for this generation batch: TRL's scoring no "
                 "longer goes through _calculate_rewards, so the hook would silently leave TRL's "
                 "advantages in place."

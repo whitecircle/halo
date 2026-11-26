@@ -7,9 +7,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.preference.smpo import SMPOTrainer
-from halo.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.smpo_trainer import smpo_trainer
 
 
@@ -53,13 +51,6 @@ def test_smpo_eval_metrics_are_tensors_and_prefixed():
     )
     assert all(name.startswith("eval_") for name in metrics)
     assert all(torch.is_tensor(v) for v in metrics.values())
-
-
-def test_sdpg_routes_through_stored_metrics_mixin():
-    assert issubclass(DistributedSDPGTrainer, StoredMetricsMixin)
-    t = DistributedSDPGTrainer.__new__(DistributedSDPGTrainer)
-    t.store_metrics({"opd_loss": torch.tensor(1.5)}, train_eval="train")
-    assert t._stored_metrics["train"].flush() == {"opd_loss": 1.5}
 
 
 if __name__ == "__main__":

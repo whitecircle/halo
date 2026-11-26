@@ -9,7 +9,7 @@ from halo.data.conversation import (
     conversation_carries_images,
     reject_unsupported_media_parts,
 )
-from halo.models.modality import is_vlm_model
+from halo.models.introspection.modality import is_vlm_model
 from halo.runtime.consensus import agree_probe_across_ranks, reject_across_ranks
 
 # The raw spellings a dataset ships images in, ``images`` first: TRL's vision probe reads the same pair.

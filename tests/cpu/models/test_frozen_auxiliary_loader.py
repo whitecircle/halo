@@ -3,7 +3,6 @@
 A per-site copy drifts silently: a pin read off an object that cannot carry it, or sdpa over sinks never reset."""
 
 import ast
-import inspect
 import pathlib
 import types
 from unittest.mock import patch
@@ -62,6 +61,7 @@ def _token_setup_args():
         force_chat_template=False,
         added_special_tokens=None,
         tokenizer_backend="hf",
+        reasoning_effort_field=None,
     )
 
 
@@ -253,22 +253,24 @@ def _module_binds(path: pathlib.Path, name: str) -> bool:
     return False
 
 
-@pytest.mark.parametrize("step", FROZEN_LOAD_STEPS)
-def test_the_resolve_and_sinks_steps_live_only_in_their_owners(step):
+def test_the_resolve_and_sinks_steps_live_only_in_their_owners(subtests):
     """Any module outside the owners that binds one of these steps is a new copy until proven otherwise."""
+    assert FROZEN_LOAD_STEPS, "no frozen load step is pinned"
     roots = [REPO_ROOT / directory for directory in ("halo", "scripts")]
     assert all(root.is_dir() for root in roots), f"the sweep lost a root: {roots}"
-    offenders = sorted(
-        str(path.relative_to(REPO_ROOT))
-        for root in roots
-        for path in root.rglob("*.py")
-        if str(path.relative_to(REPO_ROOT)) not in FROZEN_LOAD_STEP_OWNERS and _module_binds(path, step)
-    )
-    assert not offenders, (
-        f"{offenders} bind '{step}' themselves. Resolving a backend and applying the sinks policy "
-        f"are one decision — load_frozen_auxiliary_model owns it for every frozen reference/teacher, "
-        f"and load_distributed_model owns it for the policy. A third copy is free to drift from both."
-    )
+    for step in FROZEN_LOAD_STEPS:
+        with subtests.test(step):
+            offenders = sorted(
+                str(path.relative_to(REPO_ROOT))
+                for root in roots
+                for path in root.rglob("*.py")
+                if str(path.relative_to(REPO_ROOT)) not in FROZEN_LOAD_STEP_OWNERS and _module_binds(path, step)
+            )
+            assert not offenders, (
+                f"{offenders} bind '{step}' themselves. Resolving a backend and applying the sinks policy "
+                f"are one decision — load_frozen_auxiliary_model owns it for every frozen reference/teacher, "
+                f"and load_distributed_model owns it for the policy. A third copy is free to drift from both."
+            )
 
 
 def test_the_frozen_model_is_finalized_like_the_policy():
@@ -279,10 +281,6 @@ def test_the_frozen_model_is_finalized_like_the_policy():
         load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
 
     assert model.generation_config.do_sample is True
-
-
-def test_reset_sinks_default_matches_the_policy_loaders():
-    assert inspect.signature(load_frozen_auxiliary_model).parameters["reset_sinks"].default is True
 
 
 def test_the_reference_requests_the_policy_s_attention_default():
@@ -389,6 +387,17 @@ def test_an_untagged_fetch_opens_no_coordination_scope():
     with stub_frozen_loader() as caps:
         load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
     caps.fetch_scope.assert_not_called()
+
+
+def test_the_on_policy_reference_load_checks_its_fit_then_warns_before_loading(monkeypatch):
+    order = []
+    monkeypatch.setattr(frozen_models, "reject_unfit_reference", lambda *args, **kwargs: order.append("fit"))
+    monkeypatch.setattr(frozen_models, "warn_unparallelized_reference", lambda *args: order.append("warn"))
+    monkeypatch.setattr(frozen_models, "load_frozen_reference_model", lambda *args, **kwargs: order.append("load"))
+
+    _on_policy_grpo_reference(reset_sinks=True)
+
+    assert order == ["fit", "warn", "load"]
 
 
 if __name__ == "__main__":

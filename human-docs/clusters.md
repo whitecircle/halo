@@ -34,8 +34,9 @@ parallelism flag.
 
 `DIST_SHARED_FILESYSTEM` declares whether nodes share a filesystem.
 
-- **`1` (default): shared** NFS or Lustre. Global rank 0 writes the model and
-  does the downloads; each rank writes its own optimizer shard.
+- **`1` (default): shared** NFS or Lustre. Global rank 0 does the downloads and
+  writes the model, except that a gathered EP save stripes its layers over the
+  first rank of each node. Each rank writes its own optimizer shard.
 - **`0`: per-node local disk** (RunPod pods, ephemeral NVMe). Each node saves its
   own copy. Resume needs no copying as long as every node keeps its
   `--node_rank`, since optimizer shards stay on the node that wrote them
@@ -104,7 +105,9 @@ On 2×8 GPUs, `ep8 + tp2` forms two EP groups and is rejected at config time;
 
 ## Pipeline parallelism across nodes
 
-PP puts one stage per node, so only the boundary activations cross nodes. Two
+PP gives each stage a whole number of NVLink domains. In the two recipes
+below that is one node per stage, so only the boundary activations cross
+nodes; a stage of several domains runs its own collectives across them too. Two
 recipes ship, each for 2 × 8 GPUs and launched as above, both without gradient
 checkpointing:
 

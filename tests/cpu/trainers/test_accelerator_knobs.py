@@ -6,7 +6,7 @@ import types
 
 import pytest
 
-import halo.trainers.accelerator as mixin_module
+import halo.trainers.construction.accelerator as mixin_module
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.parser import HaloArgumentParser
 from halo.distributed.parallelism_config import ParallelismConfig

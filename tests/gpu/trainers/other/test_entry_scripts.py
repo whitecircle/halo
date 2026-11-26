@@ -18,6 +18,12 @@ may have been skipped. The row declines on any other GPU, and needs two ranks, b
     HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method preference/dpo
     HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method preference/dpo --attn unset
     HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method embedding --family gpt_oss
+
+``--cp-size 2`` runs both launches under context parallelism, where the resume reads the policy from the checkpoint and
+the loader hands back a CP wrapper. Ulysses runs Flash Attention alone, so the row drops the recipe's attention pin
+too and the script picks the kernel.
+
+    HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method sft --cp-size 2
 """
 
 from pathlib import Path
@@ -92,13 +98,13 @@ def run(ctx):
         model=model,
         dataset_dir=str(dataset_dir),
         server_url=VLLM_DENSE_SERVER_URL,
-        attention_unset=ATTENTION_UNSET,
+        attention_unset=ATTENTION_UNSET or ARGS.cp_size > 1,
     )
     output = scratch / "output"
 
     log(f"{ARGS.method}: {FIRST_STEPS} steps on {NPROC} ranks")
     saved = range(1, FIRST_STEPS + 1)
-    first = _launch(config, first_launch_overrides(), 0)
+    first = _launch(config, first_launch_overrides(cp_size=ARGS.cp_size), 0)
     checks = {"first_launch_exits_cleanly": first.returncode == 0}
     checks["first_launch_saves_every_step"] = all(
         (checkpoint_dir(output, step) / "trainer_state.json").is_file() for step in saved
@@ -110,7 +116,7 @@ def run(ctx):
 
     log(f"{ARGS.method}: resume to step {RESUMED_STEPS}")
     stamps = state_stamps(output, saved)
-    resumed = _launch(config, resume_overrides(), 1)
+    resumed = _launch(config, resume_overrides(cp_size=ARGS.cp_size), 1)
     checks["resume_exits_cleanly"] = resumed.returncode == 0
     if ATTENTION_UNSET:
         checks |= _fa4_checks(resumed, "resume")

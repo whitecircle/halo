@@ -23,6 +23,7 @@ import requests
 import torch
 from urllib3.util.retry import Retry
 
+from halo.weight_sync import staging
 from halo.weight_sync.clients import base as client_base
 from halo.weight_sync.clients import sglang as sglang_client
 from halo.weight_sync.clients import vllm as vllm_client
@@ -132,8 +133,8 @@ class _Transport:
         self._form("communicator")
         return _Communicator(self, device)
 
-    def packed_producer(self, *, iterator, **kwargs) -> None:
-        for _, tensor in iterator:
+    def packed_broadcast(self, buffers, **kwargs) -> None:
+        for tensor in buffers:
             self.send(tensor)
 
     def form_group(self, *args, **kwargs) -> tuple[object, object]:
@@ -154,7 +155,9 @@ class _Transport:
 def _vllm_transport(transport: _Transport) -> list:
     return [
         patch.object(vllm_client, "PyNcclCommunicator", transport.form_communicator),
-        patch.object(vllm_client, "packed_broadcast_producer", transport.packed_producer),
+        # One buffer per tensor, so the transcript names each tensor the packing would have joined.
+        patch.object(staging, "pack_tensors", list),
+        patch.object(vllm_client, "broadcast_packed", transport.packed_broadcast),
     ]
 
 
@@ -438,8 +441,8 @@ class Driver:
             patch.dict(os.environ),
             patch.object(atexit, "register", register),
             patch.object(atexit, "unregister", unregister),
-            # SGLang binds the budget by name: it sizes the staging arena.
-            *(patch.object(module, "WEIGHT_SYNC_CHUNK_BYTES", CHUNK_BYTES) for module in (client_base, sglang_client)),
+            # The staging arena is sized by the budget it binds by name.
+            *(patch.object(module, "WEIGHT_SYNC_CHUNK_BYTES", CHUNK_BYTES) for module in (client_base, staging)),
             *self.engine.transport_patches(transport),
         ]
         with ExitStack() as stack:

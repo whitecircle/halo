@@ -24,33 +24,33 @@ A tagged row needs the turn's sampled ids; without them, or on the single-row pa
 
 ### Single-row fallback
 
-- **Lost completion ids** on any untagged turn drop the whole trajectory to one re-tokenized row, warned once with the remedy.
+- **Lost completion ids** on any untagged turn drop the whole trajectory to one re-tokenized row, warned once with the remedy. Under an environment whose view rewrites earlier turns (the code-contests [notes harness](environments/tasks/code-contests/tools.md#notes)) no one render matches what the engine saw, so the episode is invalidated instead.
 - **Lost prompt ids** alone re-render that prompt through the serving template, silently. A prefix the template rejects invalidates the episode (on an untrainable turn, only that row).
 - **A span boundary** the single-row path cannot pin **invalidates the episode** rather than training a guessed span.
 
 The single-row path locates every assistant span inside one full-conversation render, because chat templates are not prefix-monotone (harmony rewrites an archived turn's terminator and drops its reasoning; Qwen3 drops reasoning once a later user message arrives). A boundary is a prefix render verified to be an exact prefix, or the block's own length, measured by re-rendering with the message duplicated. The trained span starts where the engine's generation prompt stops agreeing with the render. No boundary carries across turns, since BPE merges a role header with each turn's first token differently.
 
-`train_on_sampled_tokens: false` forces the single-row path and disables the importance-sampling correction (batches train uncorrected, with a warning), so it is refused wherever [forced reasoning closes](#forced-reasoning-closes) need the correction.
+`train_on_sampled_tokens: false` forces the single-row path and disables the importance-sampling correction (batches train uncorrected, with a warning), so it is refused wherever [forced reasoning closes](#forced-reasoning-closes) need the correction, and under an environment whose view rewrites earlier turns (at construction, and by the script before the model load).
 
 ## Importance sampling correction
 
-The trainer recomputes the sampled tokens' log-probs and multiplies the per-token loss by `clamp(exp(logπ_recompute − logπ_sampling), max=vllm_importance_sampling_clip_max)` (TRL default `3.0`). On by default; without the log-probs [training rows](#training-rows) capture, it is disabled with a warning.
+The trainer recomputes the sampled tokens' log-probs and multiplies the per-token loss by `clamp(exp(logπ_recompute − logπ_sampling), max=vllm_importance_sampling_clip_max)` (TRL default `3.0`). On by default; without the log-probs [training rows](#training-rows) capture, it is disabled with a warning. `logπ_recompute` comes from a no-grad pass over the round's rows or, under `loss_forward_importance_weights: true`, from the loss forward's own detached log-probs ([Weight from the loss forward](performance.md#weight-from-the-loss-forward)).
 
 - Truncation is token-level, from above only: TRL's `token_truncate` at an unset lower clip. `vllm_importance_sampling_mode` passes at TRL's default or `token_truncate`; any other value, or a set `vllm_importance_sampling_clip_min`, is refused at trainer construction.
 - `loss_type: vespo` is refused at trainer construction, in every config. VESPO weighs each turn row by the sum of its per-token log-ratios, so one token at ratio 0 (a [mask stage](#trust-region-masks), a [forced reasoning close](#forced-reasoning-closes)) takes the whole row's weight to ~1e-15 with no error. Use a per-token loss: `dapo`, `dr_grpo`, `cispo` or `grpo`.
-- Under the geometric band or the negative-advantage drift mask (`isr_opsm_delta`; both in [Trust region masks](#trust-region-masks)), set `rollout_top_p: 1.0` (default `0.95`) and leave `rollout_top_k` and `rollout_min_p` off: a cut shifts every uncertain position, which the band reads as drift. A server that renormalizes log-probs over the cut raises at startup.
+- Under the geometric band or the negative-advantage drift mask (`isr_opsm_delta`; both in [Trust region masks](#trust-region-masks)), set `rollout_top_p: 1.0` (default `0.95`) and leave `rollout_top_k` and `rollout_min_p` off: a cut shifts every uncertain position, which the band reads as drift. A server that renormalizes log-probs over the cut raises at startup. Keep `rollout_repetition_penalty` at `1.0` there too: the engines' sampling log-probs carry the penalty and the trainer's do not, so every penalized position reads as drift, and the startup preflight refuses it.
 
 Watch `sampling/logratio_mean` first: the unclamped mean log-ratio in nats, near 0 when healthy. A growing negative drift means either:
 
 - **Broken weight sync** ([Weight synchronization](setup.md#weight-synchronization)).
-- **A KL-free run drifting**, widening ahead of a climbing `entropy` while `advantage/net_token_mass` stays negative ([`balance_token_mass`](#token-mass-balance), [early stop](monitoring.md#early-stop)).
+- **A KL-free run drifting**, widening ahead of a climbing `entropy` while `advantage/net_token_mass` stays negative ([early stop](monitoring.md#early-stop); [`balance_token_mass`](#token-mass-balance) cancels the net push, whose measured entropy effect is small).
 
 ### Forced reasoning closes
 
-A reasoning close the engine forced at a turn's reasoning cap ([Reasoning budget](reasoning.md#reasoning-budget)) gets ratio 0, keeping the DAPO normalizer. The policy did not choose it, so training it would shift the model's own probability of ending its reasoning.
+A reasoning close the engine forced at a turn's reasoning cap ([Reasoning cap](reasoning.md#reasoning-cap)) gets ratio 0, keeping the DAPO normalizer. The policy did not choose it, so training it would shift the model's own probability of ending its reasoning.
 
 - **Detection.** A forced close is a run of `rollout_reasoning_end_token` ids, each at sampling log-prob exactly 0: one token for Qwen3.x `</think>` and Gemma 4 `<channel|>`, six for gpt-oss's `<|end|><|start|>assistant<|channel|>final<|message|>`. `sampling/forced_close_frac` is their share of the tokens carrying sampling log-probs.
-- **Required correction.** A run whose vLLM reasoning cap can bind (a drawable level's `thinking_tokens`, a soft one only through its ceiling, or `rollout_max_thinking_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
+- **Required correction.** A run whose vLLM reasoning cap can bind (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`) and whose tokenizer resolves the marker is refused at construction without the correction.
 - **Unresolved marker.** A marker the tokenizer does not write (`</think>` on Gemma 4 or gpt-oss) is refused at construction where a cap can bind, since the forced closes could not leave the loss; a soft-only run only warns.
 
 ## Trust region masks
@@ -81,6 +81,17 @@ Past a high masked fraction the survivors are a selection-biased sample, the row
 
 It needs `rollout_temperature` and `rollout_top_p` of `1.0`, with `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` off, and costs one prefill per row, for which a vLLM server needs memory headroom ([Throughput](../../infrastructure/rollout-servers.md#throughput)). `isr_engine_rescore_per_server` (default 128) bounds the prefills in flight on each server across all ranks; a row whose re-score misses its deadline reads the trainer's log-ratio, counted in `sampling/engine_rescore_miss_frac`. A startup probe refuses a server whose prompt log-probs differ between an eager prefill and CUDA-graph prefills of its prefixes at the positions the model scores above −1.0 log-prob (bf16 noise alone reaches several nats at low-probability ones), as vLLM's V1 runner's do under MTP speculative decoding; the image's Model Runner V2 passes ([vLLM server patches](../../infrastructure/rollout-servers.md#vllm-server-patches)).
 
+## Score centering
+
+A sampler that differs from the trainer (low-precision rollouts, a stale policy) makes the plain gradient drift: on a constant reward the sampled tokens' scores still sum to `q − p` in logit space, so the policy moves with nothing to learn. Score centering ([arXiv:2609.20807](https://arxiv.org/abs/2609.20807), App. A) subtracts, per token, the importance-weighted score-function mean of the sampler's top-`K` candidates, and models the mass outside them by the trainer's own tail rescaled to the sampler's. At `K` equal to the vocabulary the expected update on a constant reward is exactly zero; a truncated head cancels the drift where the candidates hold nearly all of the sampler's mass on the tokens where sampler and trainer disagree. Under `tis` with clip `c`, `α = min(1, ρ·c)`: once the sampler's mass outside the candidates reaches `1/c` of the trainer's, `α` stays at 1, the tail no longer cancels, and that token's expected update is plain TIS's apart from what the candidates cover, so a truncated head may remove little of the drift. Set `score_centering_top_k` to turn it on ([fields](../../reference/configuration-reference.md#asyncrolloutconfig)) and raise it until `score_centering/sampler_head_mass_mean` is near 1 and `tail_ratio_mean` stays below `1/c`. The candidates come from an SGLang rollout server ([Candidate log-probs](../../infrastructure/rollout-servers.md#candidate-log-probs)).
+
+- **Estimator.** With `p` the trainer's and `q` the sampler's probabilities, `H` the candidates and `f` the weight, a token's term is `w_y·logπ(y) − Σ_{v∈H} c_v·logπ(v)`, where `w_y = f(p_y/q_y)`, `c_v = q_v·f(p_v/q_v) − α·p_v`, `α = ρ·f(1/ρ)` and `ρ` the ratio of the sampler's to the trainer's mass outside `H`. Every weight is detached. The sampled token need not be a candidate.
+- **Weight `f`.** `score_centering_weights`: `none` (1), `tis` (truncated at `vllm_importance_sampling_clip_max`) or `mis` (the ratio inside `[score_centering_mis_low, score_centering_mis_high]`, else 0). It replaces the token ratio of the [correction](#importance-sampling-correction): leave `vllm_importance_sampling_correction` on only to feed the [mask stages](#trust-region-masks), whose 0/1 verdict then drops a masked token's whole term, centering included, and counts in the [breaker](#breaker). `sampling/is_ratio_mean` and `is_ratio_max` read that verdict (1 on kept tokens).
+- **Where it runs.** The loss forward scores the candidates beside the sampled token in one chunked head sweep and returns a surrogate log-prob whose value is the policy's and whose gradient is the term above, so TRL's coefficient, masks, normalizers and the packed loss scale apply unchanged. A token the sampler emitted with probability 1 trains on its plain score. The head costs `1 + K` log-probs per position and the batch carries 8 B per candidate per token.
+- **Metrics.** `score_centering/active_frac`, `score_centering/head_mass_mean` (trainer) and `sampler_head_mass_mean`, `tail_ratio_mean` (`ρ`), `weight_mean`, `weight_zero_frac` (tokens `mis` zeroed) and `correction_mean`, over the centered loss tokens of all ranks, once per generation round.
+- **Refused** at construction, and by the script before its server preflights: `rollout_backend: vllm`, `train_on_sampled_tokens: false`, a filtered sampler (`rollout_top_p < 1`, `rollout_top_k`, `rollout_min_p`, a `rollout_repetition_penalty` other than 1), `use_chunked_grpo_logprobs: false`, `loss_forward_importance_weights`, `balance_token_mass` and `isr_engine_reference`. At construction also `num_iterations > 1` or accumulation that straddles a generation round (TRL's PPO clip would replace the gradient), `beta != 0` and `importance_sampling_level` other than `token`. Online GRPO rolls out through vLLM only and offline GRPO has no sampler: neither has the knob.
+- **Advantage scale.** Group-std scaling composes, since the cancellation holds for any per-group detached scale; `scale_rewards: none` is the paper's setting. [MaxRL](#advantages) composes the same way: it changes only the detached per-trajectory advantage each token's centered term is multiplied by.
+
 ## Advantages
 
 A trajectory's advantage is its total reward minus the mean over its group's valid members. `scale_rewards` picks the divisor:
@@ -93,6 +104,8 @@ A trajectory's advantage is its total reward minus the mean over its group's val
 
 `scale_rewards_std_floor` (default `0`, `0.2` in the code-contests recipes) divides by `max(std, floor)`, so a degenerate batch cannot inflate its noise into full-scale advantages. Set it below the healthy batch std. A floor above `0` under `scale_rewards: none` is refused.
 
+`use_maxrl` (default off) divides by the group's valid mean instead, MaxRL's estimator ([arXiv:2602.02710](https://arxiv.org/abs/2602.02710)): `A = (r − r̂) / r̂`, and `A = 0` for a group whose mean `r̂` is 0. On a pass/fail reward its gradient is an unbiased estimate of the truncated maximum-likelihood objective `−Σ_{k<N} (1−p)^k / k` for group size `N` and per-prompt success rate `p`, which weighs hard prompts up: one success in 16 gets advantage 15, where mean-centering gives 0.94. The rewards must be non-negative, checked every step on every rank together. It is refused beside `scale_rewards` other than `none`, a std floor, RLRR, and here the [reasoning price or floor](reasoning.md#reasoning-length-reward), which subtract from the reward. `drop_degenerate_groups` and the token-mass balance compose with it. `sampling/maxrl_zero_mean_group_frac` is the share of groups with no success, which get no gradient. Online GRPO takes the same knob.
+
 A non-finite reward or advantage fails the step on every rank.
 
 `drop_degenerate_groups` defaults **on** here (off for online GRPO): it drops a group whose members all settled the same environment reward, which would only inflate the DAPO normalizer (`sampling/degenerate_group_frac`), the cheap half of DAPO's dynamic sampling (drop, without resampling replacements). The trainer's [reasoning floor and price](reasoning.md#reasoning-length-reward) are left out of that comparison, so reasoning length alone never breaks a tie.
@@ -103,15 +116,15 @@ A non-finite reward or advantage fails the step on every rank.
 
 `balance_token_mass` (default off, on in the code-contests recipes) cancels each generation round's net push on the sampled tokens.
 
-A group's advantages sum to zero, but their token-weighted sum does not: where failures run longer than solves, each round pushes down the sampled tokens and, without a KL anchor, entropy climbs; where solves run longer, it sharpens the policy and entropy falls.
+A group's advantages sum to zero, but their token-weighted sum does not: where failures run longer than solves, each round pushes down the sampled tokens; where solves run longer, it pushes them up. The net push is real and its sign follows the length asymmetry. In measured runs (Qwen3.5-2B GRPO on GPU and a CPU model) its entropy effect is small and the balance did not beat a matched smaller learning rate.
 
-- The balance sums the trainable rows' positive and negative mass, `P` and `N` (advantage × IS-weighted trained tokens), over every rank. It shrinks the heavier sign by their ratio, never up, keeping every row's sign and within-sign order.
-- [Untrainable-turn](#untrainable-turns) rows stay out of both sums with their raw advantage, so their mass is the round's whole net push.
-- The scale falls continuously to 0 as the lighter side empties, so a one-sign round trains nothing on those advantages. Balanced rows pull at `1 - |net|` of their unbalanced strength.
+- The balance sums the trainable rows' positive and negative mass, `P` and `N` (advantage × IS-weighted trained tokens), and the [untrainable-turn](#untrainable-turns) rows' negative mass `U`, over every rank. It shrinks the heavier side, `P` or `N + U`, by their ratio, never up, keeping every row's sign and within-sign order, so the whole round nets to zero.
+- Where cut turns carry much of the negative mass, the balance shrinks their negative advantage with the rest, and the trainable rows alone keep a push up.
+- The scale falls continuously to 0 as the lighter side empties, so a one-sign round trains nothing on those advantages. With no untrainable rows the heavier sign then pulls at `(1 - |net|) / (1 + |net|)` of its unbalanced strength.
 
 | Metric | Meaning |
 |---|---|
-| `advantage/net_token_mass` | `(P - N) / (P + N)` before balancing; logged with the knob off too. Under a token-sum loss, staying negative pushes entropy up, staying positive pulls it down |
+| `advantage/net_token_mass` | `(P - N) / (P + N)` before balancing, the trainable rows only; logged with the knob off too. With the knob off and `s` the `negative_only_mass`, the whole round's push is `(1 - s) × net - s`. Under a token-sum loss, a negative push raises entropy, a positive one lowers it |
 | `advantage/token_mass_scale` | The applied factor |
 | `advantage/negative_only_mass` | The untrainable rows' share of the trained mass |
 
@@ -127,7 +140,7 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 
 ## KL and template protection
 
-`beta > 0` adds TRL's k3 KL term, weighted by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain term. An unconditional clamp (`clamp_ref_logps`) caps its log-ratio at 5 nats, bounding per-token KL at `exp(5) ≈ 148`. A persistently non-zero `kl_clamp_frac` (the clamped share of real loss tokens) means the policy sits far from the reference.
+`beta > 0` adds TRL's k3 KL term; `use_bias_correction_kl` (on by default) multiplies it by TRL's policy ratio `exp(logπ − logπ_old)`, about 1 in value at `num_iterations: 1` but not in gradient; `use_bias_correction_kl: false` keeps the plain term. The engine importance weight never touches it. An unconditional clamp (`clamp_ref_logps`) caps its log-ratio at 5 nats where the reference favors a token the policy suppresses, so that side of the term stays under `e^5 − 6 ≈ 142`; the other side, unclamped, grows linearly in the gap. A persistently non-zero `kl_clamp_frac` (the clamped share of real loss tokens) means the policy sits far from the reference.
 
 `top_entropy_quantile < 1.0` trains only the highest-entropy tokens, which alone starves the low-entropy structural tokens (role markers, tool delimiters, BOS/EOS) until tool calls stop parsing. `ProtectedTokenEntropyMixin` unions the tokenizer's special and added tokens back in, and a mask whose shape does not match the last log-prob forward's completion ids **raises**. The code-contests recipes leave `top_entropy_quantile: 1.0` and set `tool_error_penalty: 0.05` on the reward side.
 
@@ -135,10 +148,10 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 
 `routing_replay` pins the top-k expert selection to a recorded mask, so the gradient forward trains through the routing the IS ratios were computed on. Gate weights are re-derived from the live router scores, so replay removes only the discontinuous routing-flip part of the divergence (Qwen's Routing Replay, DeepSeek's Keep Routing).
 
-- `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass and replays it in the update. Both passes are the trainer's, so it leaves the trainer-versus-engine gap where it was. It needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
-- `rollout` (R3, experimental) replays the engine's own selection through the no-grad pass and the update, so it can narrow that gap. It needs `train_on_sampled_tokens` and a capture-capable server. Positions the engine did not cover (prefix-cache hits) keep natural routing, so check the capture coverage on your serving shape before a long run.
+- `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass and replays it in the update. Both passes are the trainer's, so it leaves the trainer-versus-engine gap where it was. It needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation. It keeps the pass: `loss_forward_importance_weights` is a blocker for it, as with one forward there is no pass to pin the update to.
+- `rollout` (R3, experimental) replays the engine's own selection through the update and, where it runs, the no-grad pass, so it can narrow that gap. It needs `train_on_sampled_tokens` and a capture-capable server. Positions the engine did not cover (prefix-cache hits) keep natural routing, so check the capture coverage on your serving shape before a long run.
 
-Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of (token, layer) pairs on which the live top-k would have flipped a selection.
+Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. Under both modes the host holds each row's covered positions only, ragged, for the whole train round (`recompute` copies each row's captured tokens off the device when the no-grad pass ends); every gradient micro-batch pads just the rows it forwards, on the device, and frees them with its forward. The batch carries row ids in place of a dense mask, which follow the rows through TRL's shuffle and the length-ordered deal, so no tensor of the whole round's width ever exists, on the host or the device. Under `rollout` the no-grad pass scores `per_device_train_batch_size` rows per call (one call per bin under packed micro-batches) and pads just those, so a call's padded routing never exceeds that. `routing/replay_flip_rate` is the share of (token, layer) pairs on which the live top-k would have flipped a selection.
 
 To run R3, set `routing_replay: rollout` and serve with `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1` ([R3 flags](../../infrastructure/rollout-servers.md)). Capture and replay pass in two-step rows on GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, LFM-2 and Ling 2.0 on both engines and on Laguna on vLLM ([Coverage](../../infrastructure/rollout-servers.md#coverage)). Only the gpt-oss `-ep1` recipes ship it: no long run compares it with `none`.
 
@@ -185,16 +198,16 @@ TRL's `RepeatSampler` delivers each prompt `num_generations` consecutive times, 
 
 A rollout with no learning signal (a raised episode, an `episode_timeout` cancellation, an invalid one) enters as a zero-masked row outside its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second consecutive one**.
 
-Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed. A round's rows reach its micro-batches dealt by length rather than shuffled where only the order changes ([Length-ordered micro-batches](performance.md#length-ordered-micro-batches)).
+Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed into shared rows unless `packed_microbatch_tokens` is set ([Packed micro-batches](performance.md#packed-micro-batches)). A round's rows reach its micro-batches dealt by length rather than shuffled where only the order changes ([Length-ordered micro-batches](performance.md#length-ordered-micro-batches)).
 
 `per_device_train_batch_size` counts rows (completions); unique prompts per step are the rollout total ÷ `num_generations` ([online-GRPO count](../grpo/online.md#data-flow-and-batch-construction)).
 
 | Knob | Sets | Sizing rule |
 |---|---|---|
-| `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and exam-QA. Trades unique prompts for samples each. |
-| `max_concurrent_rollouts` | Per-rank cap on one round's rollouts in flight | Defaults to 4× this rank's actor share; above the round's count it never binds. |
-| `num_rollout_workers` | Ray actor pool per rank | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
+| `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and the Qwen3.6 and Inkling 2 exam-QA recipes. Trades unique prompts for samples each. |
+| `max_concurrent_rollouts` | Per-rank cap on one round's rollouts in flight | Defaults to the larger of a train and an eval round's rows, one wave; above the round's count it never binds. |
+| `rollout_actor_budget` | Ray actor budget per node (cluster-wide with `ray_address`), split over the rollout ranks | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
 
 ## Learning rate
 
-Learning rates sit near the SFT floor: `2e-7` on the code-contests full fine-tunes, `3e-6` on their LoRA siblings, `1e-6` on the lighter single-answer tasks, `5e-6` on the template. The code-contests recipes cap their cosine at `max_steps: 300`, the run's useful length; curriculum stage 1, the single-answer tasks and the template run it over `num_train_epochs`; stages 2 and 3 use `constant_with_warmup` ([SFT](../sft.md#learning-rate-and-global-batch-size)).
+Learning rates sit near the SFT floor: `2e-7` on the code-contests full fine-tunes, `3e-6` on their LoRA siblings, `1e-6` on the lighter single-answer full fine-tunes, `2e-5` on the Inkling 2 exam-QA LoRA runs, `5e-6` on the template. The code-contests recipes cap their cosine at `max_steps: 300`, the run's useful length; curriculum stage 1, the notes recipe, the single-answer tasks and the template run it over `num_train_epochs`; stages 2 and 3 use `constant_with_warmup` ([SFT](../sft.md#learning-rate-and-global-batch-size)).

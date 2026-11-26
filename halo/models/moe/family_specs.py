@@ -5,7 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-from halo.models.config_access import config_sources, text_config
+from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX
+from halo.models.introspection.config_access import config_sources, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_layout import (
     GLU_PROJECTIONS,
@@ -15,6 +16,8 @@ from halo.models.moe.expert_layout import (
     ExpertLayout,
     ExpertLayoutKind,
 )
+
+UNVALIDATED_FP8_ROLLOUT = "no GPU row has validated block-FP8 rollouts for the family"
 
 
 @dataclass(frozen=True)
@@ -60,6 +63,28 @@ class EngineLoadedBuffers:
     config_flag: str
 
 
+@dataclass(frozen=True)
+class FrozenExpertSlot:
+    """One projection of a release's packed (NVFP4/MXFP8) expert layout: the live weight name, which the packed data
+    takes, and the release's stem for NVFP4's sidecars. The block scales sit under transformers'
+    ``<weight>_scale_inv`` conversion target."""
+
+    weight: str
+    hub_stem: str
+
+    @property
+    def scale(self) -> str:
+        return f"{self.weight}_scale_inv"
+
+    @property
+    def amax(self) -> str:
+        return f"{self.hub_stem}_amax"
+
+    @property
+    def denominator(self) -> str:
+        return f"{self.hub_stem}_outer_scale_denominator"
+
+
 @dataclass(frozen=True, eq=False)
 class MoEFamilySpec:
     """Identity-compared, as each family has exactly one spec constant."""
@@ -82,9 +107,15 @@ class MoEFamilySpec:
     fused_contraction_axis: int = -1
     # transformers' conversion-mapping keys for a vendor-namespace hub checkpoint.
     hub_conversion_keys: tuple[str, ...] = ()
+    # The release's packed expert layout, one slot per projection, which ``frozen_quantized_experts`` keeps: the lazy
+    # loader fills the slots and the EP layer builds its frozen banks from them.
+    frozen_expert_slots: tuple[FrozenExpertSlot, ...] = ()
     # A composite transformers' CausalLM mapping does not name: ``text_only_model`` builds its text sub-config's class.
     text_only_layout: CompositeTextLayout | None = None
     supports_lazy_loading: bool = True
+    # The release stores its experts in MXFP4 (``<proj>_blocks`` / ``<proj>_scales``), which the lazy loaders decode
+    # to bf16 while reading (``Mxfp4Decode``). Any other checkpoint-native quantization takes ``from_pretrained``.
+    lazy_decodes_mxfp4: bool = False
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
     supports_gradient_checkpointing: bool = True
@@ -93,6 +124,11 @@ class MoEFamilySpec:
     tool_call_terminator: str | None = None
     # Why no online weight sync into the family's served model is validated.
     weight_sync_refusal: str | None = None
+    # The rollout backends an engine run validated ``rollout_adapter_sync`` on for the family: its adapters load beside
+    # the launch base, which lifts ``weight_sync_refusal`` and the engine client's ``ADAPTER_SYNC_REFUSAL`` there.
+    adapter_sync_backends: tuple[str, ...] = ()
+    # Why no block-FP8 rollout server is validated for the family; None where a GPU row passed.
+    fp8_rollout_refusal: str | None = UNVALIDATED_FP8_ROLLOUT
     # vLLM's reload rebuilds a module that received part of its tensors from uninitialized storage
     # (agent-docs/infrastructure/rollout-servers.md#partly-loaded-layers).
     engine_loaded_buffers: EngineLoadedBuffers | None = None
@@ -104,6 +140,8 @@ class MoEFamilySpec:
     ep_layer_needs_remote_code: str | None = None
     # Why the family runs eager attention only.
     eager_only_attention: str | None = None
+    # The toolkit's attention implementation the family runs on CUDA in place of the requested one (eager elsewhere).
+    toolkit_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
@@ -180,14 +218,10 @@ GLM4 = MoEFamilySpec(
 GLM5_NEXT = MoEFamilySpec(
     model_types=("glm5_next", "glm5_next_text"),
     dense_packing_leaks=True,
-    expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
+    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("glm5_next",),
-    weight_sync_refusal=(
-        "both pinned rollout engines register glm5_next, but their expert loaders take only per-expert keys "
-        "where the gather emits the fused pair, and no online update into either has been validated"
-    ),
 )
 GPT_OSS = MoEFamilySpec(
     model_types=("gpt_oss",),
@@ -199,6 +233,7 @@ GPT_OSS = MoEFamilySpec(
     expert_weight_roots=INTERLEAVED_GLU_ROOTS,
     # Matmul convention [E, H, 2M] / [E, M, H]: nothing is transposed on the way out.
     fused_contraction_axis=1,
+    lazy_decodes_mxfp4=True,
 )
 INKLING = MoEFamilySpec(
     # The composite config spells it ``inkling_mm_model``; no bare ``inkling`` spelling exists.
@@ -211,6 +246,26 @@ INKLING = MoEFamilySpec(
     weight_sync_refusal=(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),
+)
+# Inkling 2: 384 sigmoid-routed experts, no shared expert, softcapped SwiGLU. The composite spells ``inkling2``, the
+# text tower ``inkling2_text``.
+INKLING2 = MoEFamilySpec(
+    model_types=("inkling2", "inkling2_text"),
+    balancing_slot=_E_SCORE_CORRECTION_BIAS,
+    # Declared so the absent slot registers as None (the block ships none), as LFM-2.
+    shared_expert_attrs=("shared_experts",),
+    hub_conversion_keys=("inkling2",),
+    # ``w13_weight`` is the interleaved gate/up, ``w2_weight`` the down projection.
+    frozen_expert_slots=(FrozenExpertSlot("gate_up_proj", "w13_weight"), FrozenExpertSlot("down_proj", "w2_weight")),
+    # Every attention layer adds a learned relative-logits bias and a query-conditioned sink, which only the eager
+    # path and this kernel carry. The short convolutions read the document starts of a packed row through the
+    # family's patches (halo/models/families/inkling2.py).
+    toolkit_attention=INKLING2_RELATIVE_FLEX,
+    weight_sync_refusal=(
+        "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
+    ),
+    # Attention LoRA over the release's frozen experts, the adapters loaded by vLLM beside its launch base.
+    adapter_sync_backends=("vllm",),
 )
 # GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(
@@ -264,13 +319,15 @@ NEMOTRON_H = MoEFamilySpec(
     ),
 )
 QWEN3 = MoEFamilySpec(
-    model_types=("qwen3_moe",), expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS)
+    model_types=("qwen3_moe",),
+    expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
 )
 # Qwen3.6 ships under these same types.
 QWEN3_5 = MoEFamilySpec(
     model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
+    fp8_rollout_refusal=None,
 )
 # Qwen3.5-MoE's block with a router that renormalizes only under ``norm_topk_prob``; the hub stores the experts
 # one tensor per expert, which transformers fuses on load.
@@ -288,11 +345,6 @@ QWEN4_EXP = MoEFamilySpec(
     model_types=("qwen4_exp", "qwen4_exp_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
-    weight_sync_refusal=(
-        "no online update into either pinned rollout engine has been validated end to end; on SGLang, each "
-        "hyper-connection GatedResidual also caches a padded copy of its mix-up weight on SM100-family GPUs that an "
-        "update leaves stale (agent-docs/models/qwen4_exp.md#rl-weight-sync)"
-    ),
 )
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),
@@ -318,6 +370,7 @@ MOE_FAMILY_SPECS: tuple[MoEFamilySpec, ...] = (
     GLM5_NEXT,
     GPT_OSS,
     INKLING,
+    INKLING2,
     LAGUNA,
     LFM2,
     MISTRAL4,
@@ -387,6 +440,14 @@ def experts_container_attrs() -> tuple[str, ...]:
     """Longest first, so a matcher trying them in order never shadows a longer spelling with one it contains."""
     attrs = {attr for spec in MOE_FAMILY_SPECS for attr in spec.experts_container_attrs}
     return tuple(sorted(attrs, key=lambda attr: (-len(attr), attr)))
+
+
+@lru_cache(maxsize=1)
+def frozen_expert_sidecar_attrs() -> tuple[str, ...]:
+    """The per-expert sidecars of every declared frozen slot (block scales, NVFP4 ``amax``), which shard on the expert
+    axis with their weight; the scalar denominator replicates."""
+    slots = (slot for spec in MOE_FAMILY_SPECS for slot in spec.frozen_expert_slots)
+    return tuple(dict.fromkeys(name for slot in slots for name in (slot.scale, slot.amax)))
 
 
 @lru_cache(maxsize=1)

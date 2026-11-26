@@ -1,5 +1,6 @@
-"""A contest program's source as the code-contests environment reads it: comments stripped, normalized for the
-resubmission identity check, its evident language, and whether it compiles."""
+"""A contest program's source as the code-contests environment reads it: comments stripped, normalized (comments,
+blank lines and trailing whitespace outside string literals gone) for the resubmission identity check, its evident
+language, and whether it compiles."""
 
 import re
 import warnings
@@ -88,11 +89,48 @@ def strip_comments(code: str, language: str) -> str:
     return "".join(out)
 
 
+def trim_outside_strings(code: str) -> str:
+    """``code`` without blank lines and trailing whitespace, string literals untouched (their whitespace is program
+    data), leading indentation kept."""
+    out: list[str] = []
+    pending: list[str] = []  # whitespace since the last content, written only when content follows
+    newline_pending = False
+    line_has_content = False
+    i = 0
+    while i < len(code):
+        char = code[i]
+        if char in "\"'":
+            end = _skip_string(code, i)
+            piece = code[i:end]
+        elif char == "\n":
+            pending.clear()
+            newline_pending = newline_pending or line_has_content
+            line_has_content = False
+            i += 1
+            continue
+        elif char.isspace():
+            pending.append(char)
+            i += 1
+            continue
+        else:
+            end = i + 1
+            piece = char
+        if newline_pending:
+            out.append("\n")
+            newline_pending = False
+        out.extend(pending)
+        pending.clear()
+        out.append(piece)
+        line_has_content = True
+        i = end
+    return "".join(out)
+
+
 def normalized_program(code: str, language: str) -> str:
-    """Language first (the same text is another program in another language), then the code without comments, trailing
-    whitespace or blank lines; indentation stays (it is the program under Python)."""
-    lines = [line.rstrip() for line in strip_comments(code, language).splitlines()]
-    return f"{language}\n" + "\n".join(line for line in lines if line)
+    """Language first (the same text is another program in another language), then the code without comments, blank
+    lines or trailing whitespace outside string literals (:func:`trim_outside_strings`); indentation stays (it is the
+    program under Python)."""
+    return f"{language}\n{trim_outside_strings(strip_comments(code, language))}"
 
 
 def is_output_only_change(ran: str, submitted: str) -> bool:

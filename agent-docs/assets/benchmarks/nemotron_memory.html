@@ -1,0 +1,327 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Nemotron-H memory</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --group-col: 150px;
+    --recipe-col: 330px;
+    --tokens-col: 170px;
+    --value-col: 112px;
+    --col-gap: 28px;
+    --track-left: calc(var(--group-col) + var(--recipe-col) + var(--tokens-col) + 3 * var(--col-gap));
+    --track-right: calc(var(--value-col) + var(--col-gap));
+    --row-h: 52px;
+    --range-h: 20px;
+    --split-gap: 36px;
+  }
+
+  body { width: 1600px; }
+
+  .plot { position: relative; }
+
+  .row {
+    display: grid;
+    grid-template-columns: var(--group-col) var(--recipe-col) var(--tokens-col) 1fr var(--value-col);
+    column-gap: var(--col-gap);
+    align-items: center;
+    height: var(--row-h);
+  }
+
+  /* The column heads and the colour key share the first row. */
+  .row.head {
+    height: auto;
+    margin-bottom: 24px;
+    font-size: 21px;
+    color: var(--secondary);
+  }
+
+  .row.head .key { display: flex; gap: 28px; color: var(--body); }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 14px;
+    height: 14px;
+    border-radius: 4px;
+    background: var(--hue);
+  }
+
+  .row.split { margin-top: var(--split-gap); padding-top: var(--split-gap); height: calc(var(--row-h) + var(--split-gap)); border-top: 1px solid var(--line); }
+
+  .group {
+    align-self: start;
+    font-family: var(--serif);
+    font-size: 33px;
+    line-height: var(--row-h);
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    white-space: nowrap;
+  }
+
+  .recipe {
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .tokens,
+  .value {
+    text-align: right;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .tokens { color: var(--secondary); }
+
+  .value { color: var(--body); }
+
+  .track {
+    position: relative;
+    height: var(--range-h);
+  }
+
+  .range {
+    position: absolute;
+    top: 0;
+    height: 100%;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+
+  .note {
+    position: absolute;
+    top: 50%;
+    transform: translate(-100%, -50%);
+    margin-left: -14px;
+    font-size: 21px;
+    font-variant-numeric: tabular-nums;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .note.after { transform: translateY(-50%); margin-left: 14px; }
+
+  /* The device line and its label share the track column, the line over the bars. */
+  .reference {
+    position: absolute;
+    top: var(--reference-top, 0);
+    bottom: 0;
+    left: var(--track-left);
+    right: var(--track-right);
+  }
+
+  /* The line ends at the device's capacity, so it stays inside the plot when the axis ends there too. */
+  .reference .device {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    z-index: 1;
+    transform: translateX(-100%);
+    border-left: 2px solid var(--body);
+  }
+
+  .device-label {
+    position: absolute;
+    transform: translateX(-100%);
+    padding-right: 12px;
+    font-size: 21px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .device-label.after { transform: none; padding: 0 0 0 14px; }
+
+  /* The axis, under the track column: a line along the plot's bottom edge, a short mark under it at each tick, and
+     the tick's value below. */
+  .ticks {
+    position: relative;
+    height: 38px;
+    margin: 20px var(--track-right) 0 var(--track-left);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ticks i {
+    position: absolute;
+    top: 0;
+    height: 8px;
+    border-left: 1px solid var(--line);
+  }
+
+  .ticks span { position: absolute; top: 12px; transform: translateX(-50%); white-space: nowrap; }
+
+  .ticks span:first-of-type { transform: none; }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>The longest <span class="nw">Nemotron-H</span> rows fill a B300</h1>
+  </header>
+
+  <div class="figure">
+    <div class="plot" id="plot"><div class="reference" id="reference"></div></div>
+    <div class="ticks" id="ticks"></div>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  const DEVICE_GB = 288;
+  // [release, recipe, tokens per rank, allocated low, allocated high, reserved low, reserved high, top rank's % of device]
+  const ROWS = [
+    ["Super VL", "LoRA", "16,384", 92, 94, 118, 165],
+    ["Super VL", "Full fine-tune", "8,192", 168, 169, 185, 202],
+    ["Super VL", "Full fine-tune", "about 31,700", 227, 235, 268, 283, 98],
+    ["Super VL", "Frozen experts", "about 48,800", 188, 194, 241, 283, 98],
+    ["Super VL", "Full fine-tune on images", "about 6,790", 168, 168, 184, 188],
+    ["Super VL", "The same, half text-only", "", 168, 168, 183, 186],
+    ["Super VL", "SMPO, full pairs", "2 × 4,096", 170, 170, 178, 184],
+    ["Super VL", "SMPO, its Tulu rows", "up to 2 × 4,096", 157, 161, 165, 170],
+    ["Super VL", "Offline GRPO", "the recipe’s rows", 164, 165, 169, 179],
+    ["Lightning", "Full fine-tune", "8,192", 50.9, 51.4, 55, 60],
+  ];
+  const MIN_RANGE_PX = 8;
+  const LINE_CLEAR_PX = 8;
+
+  const plot = document.getElementById("plot");
+  const reference = document.getElementById("reference");
+  const ticks = document.getElementById("ticks");
+  const pct = (gb, max) => `${(gb / max) * 100}%`;
+  const fmt = (gb) => String(gb);
+  const span = (low, high) => (low === high ? fmt(low) : `${fmt(low)}–${fmt(high)}`);
+  const rect = (node) => node.getBoundingClientRect();
+
+  /** A range bar from `low` to `high` GB, widened about its middle to stay visible when the two meet. */
+  function placeRange(node, low, high, max) {
+    const mid = pct((low + high) / 2, max);
+    node.style.left = `min(${pct(low, max)}, calc(${mid} - ${MIN_RANGE_PX / 2}px))`;
+    node.style.width = `max(${pct(high - low, max)}, ${MIN_RANGE_PX}px)`;
+  }
+
+  const head = el("div", "row head");
+  const key = el("div", "key");
+
+  for (const [name, hue] of [["Peak allocated", "var(--halo-violet)"], ["Reserved", "var(--halo-blue)"]]) {
+    const item = el("span");
+    const swatch = el("i");
+    swatch.style.setProperty("--hue", hue);
+    item.append(swatch, name);
+    key.append(item);
+  }
+
+  head.append(el("div"), el("div", undefined, "Recipe"), el("div", "tokens", "Tokens per rank"), key, el("div", "value", "Reserved"));
+  head.lastChild.style.color = "var(--secondary)";
+  plot.append(head);
+  const device = el("div", "device");
+  reference.append(device);
+
+  // Per row, its track and how its bars and note place on an axis's end, returning whether the note found room.
+  const rows = [];
+  let lastGroup;
+
+  for (const [group, recipe, tokens, aLow, aHigh, rLow, rHigh, topRank] of ROWS) {
+    const row = el("div", "row");
+
+    if (lastGroup !== undefined && group !== lastGroup) {
+      row.classList.add("split");
+    }
+
+    const track = el("div", "track");
+    const allocated = el("div", "range");
+    allocated.style.setProperty("--hue", "var(--halo-violet)");
+    const reserved = el("div", "range");
+    reserved.style.setProperty("--hue", "var(--halo-blue)");
+    track.append(allocated, reserved);
+    const label = topRank === undefined ? undefined : el("div", "note", `top rank at ${topRank}% of device`);
+
+    if (label !== undefined) {
+      track.append(label);
+    }
+
+    rows.push({
+      track,
+      ranges: [allocated, reserved],
+      // A note sits left of its row's bars, else right of them, else left or right of both its bars and the device
+      // line: the first spot inside the track that keeps LINE_CLEAR_PX clear of the device line.
+      place: (max) => {
+        placeRange(allocated, aLow, aHigh, max);
+        placeRange(reserved, rLow, rHigh, max);
+
+        if (label === undefined) {
+          return true;
+        }
+
+        const spots = [
+          ["before", aLow],
+          ["after", Math.max(aHigh, rHigh)],
+          ["before", Math.min(aLow, DEVICE_GB)],
+          ["after", Math.max(aHigh, rHigh, DEVICE_GB)],
+        ];
+
+        return spots.some(([side, gb]) => {
+          label.classList.toggle("after", side === "after");
+          label.style.left = pct(gb, max);
+          const box = rect(label);
+          const line = rect(device);
+
+          return box.left >= rect(track).left && box.right <= rect(track).right
+            && (box.right + LINE_CLEAR_PX <= line.left || box.left >= line.right + LINE_CLEAR_PX);
+        });
+      },
+    });
+
+    row.append(
+      el("div", "group", group === lastGroup ? "" : group),
+      el("div", "recipe", recipe),
+      el("div", "tokens", tokens),
+      track,
+      el("div", "value", span(rLow, rHigh)),
+    );
+    plot.append(row);
+    lastGroup = group;
+  }
+
+  // The layer starts at the first row, under the column heads, and runs to the last row. The device line and its label
+  // rise from it to the top of the column heads.
+  const headSpan = head.offsetHeight + parseFloat(getComputedStyle(head).marginBottom);
+  reference.style.setProperty("--reference-top", `${headSpan}px`);
+  device.style.top = `-${headSpan}px`;
+
+  const reach = Math.max(DEVICE_GB, ...ROWS.map((row) => Math.max(row[4], row[6])));
+  const axis = niceAxis(reach, (max) => {
+    device.style.left = pct(DEVICE_GB, max);
+    const fits = rows.map((row) => row.place(max)).every(Boolean)
+      && rows.every((row) => row.ranges.every((range) => rect(range).right <= rect(row.track).right));
+
+    return fits;
+  });
+
+  drawAxis(ticks, axis, (tick) => (tick === 0 ? "0 GB" : tick.toFixed(axis.digits)));
+
+  const deviceLabel = el("span", "device-label", `Device, ${DEVICE_GB} GB`);
+  deviceLabel.style.left = pct(DEVICE_GB, axis.max);
+  deviceLabel.style.top = `-${headSpan}px`;
+  reference.append(deviceLabel);
+
+  // The device label sits left of its line, or right of it where it would come closer than a column gap to the key.
+  if (rect(deviceLabel).left - rect(key.lastChild).right < parseFloat(getComputedStyle(head).columnGap)) {
+    deviceLabel.classList.add("after");
+  }
+</script>
+</body>
+</html>

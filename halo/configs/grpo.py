@@ -3,9 +3,11 @@
 from dataclasses import dataclass, field, fields, make_dataclass
 from typing import ClassVar, Literal, get_args
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, differs_from_default, present, require_finite, require_int
+from halo.models.fp8_rollout import RolloutWeightPrecision
 
 _RLRRMode = Literal["hrr", "prr"]
+ScoreCenteringWeights = Literal["none", "tis", "mis"]
 
 
 def rlrr_arg_name(config_field: str) -> str:
@@ -126,9 +128,20 @@ class RLRRArguments(_RLRRTunables, ValidatedConfig):
 
 @dataclass
 class AdvantageShapingArguments(ValidatedConfig):
-    """Reward scaling, the degenerate-group drop and token-mass balance of the online and environmental GRPO
+    """Reward scaling, MaxRL, the degenerate-group drop and token-mass balance of the online and environmental GRPO
     advantages; the environmental config re-declares ``drop_degenerate_groups`` on by default."""
 
+    use_maxrl: bool = field(
+        default=False,
+        metadata={
+            "help": "MaxRL advantages (arXiv:2602.02710): divide each reward minus its group mean by that mean, in "
+            "place of a std, and give a group whose mean is 0 advantage 0. On a pass/fail reward this is an unbiased "
+            "gradient of a truncated maximum-likelihood objective, which weighs hard prompts up: one success in 16 "
+            "gets advantage 15. Needs non-negative rewards (checked every step on every rank) and scale_rewards: "
+            "none. Logged as sampling/maxrl_zero_mean_group_frac. "
+            "See agent-docs/training-methods/async-grpo/objective.md#advantages."
+        },
+    )
     scale_rewards_std_floor: float = field(
         default=0.0,
         metadata={
@@ -240,6 +253,99 @@ class GRPOEarlyStopArguments(ValidatedConfig):
         return False
 
 
+@dataclass(frozen=True)
+class ScoreCenteringConfig:
+    """What a run with score centering on reads, and its knobs' defaults: ``top_k`` candidates per generated token, the
+    importance weight ``weights`` and its MIS bounds. The TIS clip is the trainer's
+    ``vllm_importance_sampling_clip_max``."""
+
+    top_k: int
+    weights: ScoreCenteringWeights = "tis"
+    mis_low: float = 0.5
+    mis_high: float = 5.0
+
+
+@dataclass
+class ScoreCenteringArguments(ValidatedConfig):
+    """Score centering (arXiv:2609.20807, App. A) of the environmental GRPO objective; the knobs below
+    ``score_centering_top_k`` are refused while it is unset."""
+
+    score_centering_top_k: int | None = field(
+        default=None,
+        metadata={
+            "help": "Candidates the SGLang rollout server returns per generated token for score centering, which "
+            "subtracts their score-function mean from each token's gradient, so on a constant reward the drift a "
+            "sampler-vs-trainer mismatch causes cancels where the candidates hold nearly all of the sampler's mass "
+            "on the mismatched tokens (all of it at the full vocabulary). Unset = off; raise it until "
+            "score_centering/sampler_head_mass_mean is near 1. Refused at construction beside the settings it "
+            "cannot run with, each named; see agent-docs/training-methods/async-grpo/objective.md#score-centering."
+        },
+    )
+    score_centering_weights: ScoreCenteringWeights = field(
+        default=ScoreCenteringConfig.weights,
+        metadata={
+            "help": "Importance weight f of the score-centered gradient: 'none' (f = 1), 'tis' (truncated at "
+            "vllm_importance_sampling_clip_max) or 'mis' (kept inside [score_centering_mis_low, "
+            "score_centering_mis_high], else zero). Replaces the token ratio of the IS correction, which feeds the "
+            "isr_* masks only. See agent-docs/training-methods/async-grpo/objective.md#score-centering."
+        },
+    )
+    score_centering_mis_low: float = field(
+        default=ScoreCenteringConfig.mis_low,
+        metadata={"help": "Lower bound of the 'mis' weight on the trainer-to-sampler ratio (0 < low <= high)."},
+    )
+    score_centering_mis_high: float = field(
+        default=ScoreCenteringConfig.mis_high,
+        metadata={"help": "Upper bound of the 'mis' weight on the trainer-to-sampler ratio."},
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        require_int(owner, ge=1, **present(score_centering_top_k=self.score_centering_top_k))
+        if self.score_centering_weights not in get_args(ScoreCenteringWeights):
+            raise ValueError(
+                f"score_centering_weights must be one of {get_args(ScoreCenteringWeights)}, "
+                f"got {self.score_centering_weights!r}"
+            )
+        require_finite(
+            owner,
+            gt=0,
+            score_centering_mis_low=self.score_centering_mis_low,
+            score_centering_mis_high=self.score_centering_mis_high,
+        )
+        if self.score_centering_mis_low > self.score_centering_mis_high:
+            raise ValueError(
+                f"score_centering_mis_low ({self.score_centering_mis_low}) must not exceed "
+                f"score_centering_mis_high ({self.score_centering_mis_high})"
+            )
+        bounds_set = differs_from_default(self, "score_centering_mis_low") or differs_from_default(
+            self, "score_centering_mis_high"
+        )
+        if self.score_centering_top_k is None and (
+            bounds_set or differs_from_default(self, "score_centering_weights")
+        ):
+            raise ValueError(
+                f"{owner}: score_centering_weights/mis_low/mis_high are set, but score_centering_top_k is unset, "
+                "so score centering is off and they would do nothing."
+            )
+        if bounds_set and self.score_centering_weights != "mis":
+            raise ValueError(
+                f"{owner}: score_centering_mis_low/high bound the 'mis' weight, but score_centering_weights is "
+                f"{self.score_centering_weights!r}."
+            )
+
+    def build_score_centering_config(self) -> ScoreCenteringConfig | None:
+        if self.score_centering_top_k is None:
+            return None
+        return ScoreCenteringConfig(
+            top_k=self.score_centering_top_k,
+            weights=self.score_centering_weights,
+            mis_low=self.score_centering_mis_low,
+            mis_high=self.score_centering_mis_high,
+        )
+
+
 @dataclass
 class ChunkedLogprobsArguments:
     """Vocab-chunked log-prob computation switch shared by the GRPO trainers (online, environmental, offline)."""
@@ -251,5 +357,80 @@ class ChunkedLogprobsArguments:
             "least fp32) instead of full [B, T, vocab] logits, bounding the loss-forward peak by the chunk size. "
             "For large-vocab models on long completions, where the full logits OOM. "
             "See agent-docs/training-methods/async-grpo/performance.md#chunked-log-probs."
+        },
+    )
+
+
+@dataclass
+class PackedMicrobatchArguments(ValidatedConfig):
+    """The packed micro-batch budget of the on-policy GRPO trainers (online, environmental)."""
+
+    packed_microbatch_tokens: int | None = field(
+        default=None,
+        metadata={
+            "help": "Pack each training round's rows into micro-batches of up to this many attended tokens per rank, "
+            "one flattened varlen backbone call each, in place of one call per row. The round's rows are planned "
+            "into bins (a row over the budget keeps a bin of its own), every rank runs the world's bin count in the "
+            "last slots of the window and no-ops before them, and row-mean losses are rescaled so the objective is "
+            "the per-row one. Null keeps one backbone call per row. Needs use_chunked_grpo_logprobs, "
+            "per_device_train_batch_size 1, a backend that reads documents off position_ids and a family whose rows "
+            "isolate; refused at "
+            "construction otherwise. See "
+            "agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        # A one-token bin leaves no next-token target.
+        require_int(type(self).__name__, ge=2, **present(packed_microbatch_tokens=self.packed_microbatch_tokens))
+
+
+@dataclass
+class RolloutWeightPrecisionArguments:
+    """The precision the on-policy GRPO trainers (online, environmental) store the rollout servers' weights in."""
+
+    rollout_weight_precision: RolloutWeightPrecision = field(
+        default="bf16",
+        metadata={
+            "help": "Precision of the weights the rollout servers hold: bf16 pushes the trainer's weights as they are, "
+            "fp8_block quantizes the attention and MLP projections on the sync GPU to 128x128 block FP8 "
+            "(power-of-two scales) and pushes those. The trainer stays bf16, and the server must serve a checkpoint "
+            "written by the block-FP8 export tool with the triton MoE backend (vLLM --moe-backend triton, SGLang "
+            "--moe-runner-backend triton). Admitted only for a family whose spec validates it, refused at startup "
+            "with the reason otherwise; SGLang needs SGLANG_ENABLE_JIT_DEEPGEMM=0; refused beside adapter sync and "
+            "QLoRA. See agent-docs/infrastructure/rollout-servers.md#fp8-rollouts."
+        },
+    )
+
+
+@dataclass
+class RankBalanceArguments:
+    """The rank-balance switch of the online GRPO trainer."""
+
+    balance_rank_tokens: bool = field(
+        default=False,
+        metadata={
+            "help": "Deal each training round's rows across ranks so every rank trains the same row count with a "
+            "similar attended-token total, in place of the contiguous slice the rollout hands each one; a round the "
+            "deal would not lighten at its heaviest rank is left as it is. Refused under TP/ETP, with a loss_type "
+            "outside grpo, sapo, dr_grpo, luspo, dapo, cispo, top_entropy_quantile < 1, misaligned accumulation, or "
+            "one rank; a round carrying image tensors raises. See "
+            "agent-docs/training-methods/async-grpo/performance.md#rank-balance."
+        },
+    )
+
+
+@dataclass
+class PhaseTimerArguments:
+    """The phase-timer flag of the on-policy GRPO trainers (online, environmental)."""
+
+    log_phase_times: bool = field(
+        default=False,
+        metadata={
+            "help": "Log where each optimizer step's wall time goes as phase_time/<phase>_s (rank mean) and "
+            "phase_time/<phase>_max_s (slowest rank), with the step's time no phase holds as unaccounted. "
+            "Costs a few CUDA events per micro-step and one all-reduce per log. "
+            "Phases: agent-docs/training-methods/async-grpo/monitoring.md#phase-times."
         },
     )

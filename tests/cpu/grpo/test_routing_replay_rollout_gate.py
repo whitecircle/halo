@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
@@ -25,7 +25,7 @@ SAMPLED = [44, 55]
 
 def _routing_payload(tokens: int) -> str:
     """SGLang's wire form, one row per decoder layer."""
-    return raw_routing_payload(np.zeros((tokens, ENGINE_LAYERS, TOP_K), dtype=np.int32))
+    return raw_routing_payload(np.tile(np.arange(TOP_K, dtype=np.int32), (tokens, ENGINE_LAYERS, 1)))
 
 
 def _rollout(
@@ -61,7 +61,9 @@ def _host():
             layer_indices=EP_LAYER_INDICES,
         ),
         _batch_errors=BatchBuildFence(),
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
         _carry_reasoning=False,
         _rows_over_cap=0,
         _warned_once=set(),
@@ -81,7 +83,7 @@ def _host():
         "_sampled_turn_row",
         "_stack_rows",
         "_assemble_rollout_routing",
-        "_rollout_masks_with_coverage",
+        "_rollout_routing_with_coverage",
     ):
         setattr(host, name, types.MethodType(getattr(Trainer, name), host))
     return host
@@ -91,7 +93,7 @@ def _gate(host, rows):
     """Run the gate over ``rows`` exactly as ``_build_training_tensors`` assembles its inputs."""
     rows = [r._replace(loss_mask=r.loss_mask.to(torch.bool)) for r in rows]
     step = host._stack_rows(rows, torch.device("cpu"))
-    return host._assemble_rollout_routing(rows, step, torch.device("cpu"), "train")
+    return host._assemble_rollout_routing(rows, step, "train")
 
 
 def test_an_engine_cut_turn_keeps_its_routing_on_a_negative_only_row():
@@ -106,8 +108,8 @@ def test_an_engine_cut_turn_keeps_its_routing_on_a_negative_only_row():
 def test_gate_assembles_the_engine_mask_for_a_negative_only_row():
     """A tagged row trains under a negative advantage, so it replays the engine's selection like any row."""
     host = _host()
-    masks = _gate(host, host._tokenize_trajectory_turns(_rollout(truncated=True, routing=True)))
-    assert masks is not None and int(masks.min()) == 0
+    routing = _gate(host, host._tokenize_trajectory_turns(_rollout(truncated=True, routing=True)))
+    assert routing is not None and int(routing.pad_rows([0], torch.device("cpu")).min()) == 0
     assert flushed_metrics(host)["routing/rollout_full_frac"] == [1.0]
 
 
@@ -150,8 +152,9 @@ def test_gate_raises_on_a_mixed_batch_that_still_trains_something():
 def test_gate_assembles_the_engine_mask_for_a_trainable_row():
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=True))
-    masks = _gate(host, rows)
-    assert masks is not None
+    routing = _gate(host, rows)
+    assert routing is not None
+    masks = routing.pad_rows([0], torch.device("cpu"))
     assert tuple(masks.shape) == (1, len(ENGINE_PROMPT) + len(SAMPLED), len(EP_LAYER_INDICES), TOP_K)
     # Every position of the covered row carries an engine id, not the -1 natural-routing sentinel.
     assert int(masks.min()) == 0

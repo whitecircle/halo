@@ -159,13 +159,6 @@ def test_replicate_loads_full(tmp_path):
     assert torch.equal(model.attn.weight, weight)
 
 
-def test_assign_replaces_parameter():
-    model = nn.Sequential(nn.Linear(4, 8))
-    real_weight = torch.randn(8, 4)
-    assign_tensor_to_model(model, "0.weight", real_weight)
-    assert torch.equal(model[0].weight.data, real_weight)
-
-
 def test_assign_nested_module():
     class Inner(nn.Module):
         def __init__(self):
@@ -288,10 +281,10 @@ def test_lazy_supported_ignores_shared_experts_index(tmp_path):
 
 def test_lazy_unsupported_for_a_natively_quantized_checkpoint(tmp_path):
     """The lazy loaders read tensors raw and map nothing for the scale tensors, so the coverage gate cannot fire and
-    experts load as garbage."""
+    experts load as garbage. Native MXFP4 gpt-oss is the one they decode (test_lazy_load_native_mxfp4.py)."""
     path = _write_index(tmp_path, _fused_expert_weight_map())
     (tmp_path / "config.json").write_text(
-        json.dumps({"model_type": "gpt_oss", "quantization_config": {"quant_method": "mxfp4"}})
+        json.dumps({"model_type": "gpt_oss", "quantization_config": {"quant_method": "fp8"}})
     )
     assert is_lazy_loadable(path) is False
 

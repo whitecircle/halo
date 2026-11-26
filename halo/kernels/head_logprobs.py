@@ -1,5 +1,6 @@
 """Log-probs (and entropy) of target tokens straight from hidden states, never materializing the logits: a dual-chunked
-(sequence × vocab) matmul with online softmax and a recompute backward."""
+(sequence × vocab) matmul with online softmax and a recompute backward. A row may carry several targets that share its
+one ``log Z`` (a sampled token and its candidates)."""
 
 import torch
 
@@ -38,6 +39,13 @@ def _is_target(targets, vocab_start, width) -> torch.Tensor:
     return torch.arange(width, device=targets.device) == (targets - vocab_start).unsqueeze(-1)
 
 
+def _target_slots(targets, vocab_start, width) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(column, in_tile)`` of each ``[rows, m]`` target in this vocab tile; an id below 0 is in no tile."""
+    column = targets - vocab_start
+    in_tile = (targets >= 0) & (column >= 0) & (column < width)
+    return column.clamp(0, width - 1), in_tile
+
+
 def _forward_tile(
     raw, bias, targets, vocab_start, max_old, sum_exp, sum_exp_z, target_logit, inv_t, logit_scale, softcap
 ):
@@ -51,6 +59,9 @@ def _forward_tile(
     sum_exp = sum_exp * rescale + exps.sum(dim=-1)
     if sum_exp_z is not None:
         sum_exp_z = sum_exp_z * rescale + (exps * logits).sum(dim=-1)
+    if targets.dim() == 2:
+        column, in_tile = _target_slots(targets, vocab_start, raw.shape[1])
+        return max_new, sum_exp, sum_exp_z, target_logit + torch.where(in_tile, logits.gather(1, column), 0.0)
     is_target = _is_target(targets, vocab_start, raw.shape[1])
     target_logit = target_logit + torch.where(is_target, logits, 0.0).sum(dim=-1)
     return max_new, sum_exp, sum_exp_z, target_logit
@@ -58,12 +69,20 @@ def _forward_tile(
 
 def _backward_tile(raw, bias, targets, vocab_start, log_z, grad, inv_t, logit_scale, softcap, grad_dtype):
     """``grad · (onehot − softmax)`` carried through the temperature, the cap's ``1 − tanh²`` and the logit scale, in
-    the dtype the gradient GEMMs take. The column sum, the bias's gradient, is taken before that cast."""
+    the dtype the gradient GEMMs take. The column sum, the bias's gradient, is taken before that cast. With ``m``
+    targets per row it is ``Σ_j grad_j · onehot_j − (Σ_j grad_j) · softmax`` over the unmasked ones, the one-hots
+    scatter-added so no ``[rows, m, width]`` plane exists."""
     logits, tanh = _head_logits(raw, bias, vocab_start, logit_scale, softcap)
     probs = torch.exp(logits * inv_t - log_z.unsqueeze(-1))
-    grad = grad.unsqueeze(-1)
-    is_target = _is_target(targets, vocab_start, raw.shape[1])
-    grad_logits = (torch.where(is_target, grad, 0.0) - grad * probs) * inv_t
+    if targets.dim() == 2:
+        column, in_tile = _target_slots(targets, vocab_start, raw.shape[1])
+        grad = torch.where(targets >= 0, grad, 0.0)
+        picked = torch.zeros_like(probs).scatter_add(1, column, torch.where(in_tile, grad, 0.0))
+        grad_logits = (picked - grad.sum(dim=-1, keepdim=True) * probs) * inv_t
+    else:
+        grad = grad.unsqueeze(-1)
+        is_target = _is_target(targets, vocab_start, raw.shape[1])
+        grad_logits = (torch.where(is_target, grad, 0.0) - grad * probs) * inv_t
     if tanh is not None:
         grad_logits = grad_logits * (1.0 - tanh.square())
     if logit_scale is not None:
@@ -112,7 +131,7 @@ def _online_softmax_tile(
     max_old = torch.full((n_chunk,), float("-inf"), device=device, dtype=torch.float32)
     sum_exp = torch.zeros((n_chunk,), device=device, dtype=torch.float32)
     sum_exp_z = torch.zeros((n_chunk,), device=device, dtype=torch.float32) if compute_entropy else None
-    target_logit = torch.zeros((n_chunk,), device=device, dtype=torch.float32)
+    target_logit = torch.zeros(targets_chunk.shape, device=device, dtype=torch.float32)
 
     for vocab_start in range(0, weight.shape[0], VOCAB_TILE):
         weight_chunk = weight[vocab_start : vocab_start + VOCAB_TILE].to(hidden_chunk.dtype)
@@ -143,7 +162,7 @@ def _logprobs_forward(
     n_rows = hidden.shape[0]
     inv_t = 1.0 / temperature
     bias = _tile_bias(bias)
-    logprobs = torch.empty((n_rows,), device=hidden.device, dtype=torch.float32)
+    logprobs = torch.empty(targets.shape, device=hidden.device, dtype=torch.float32)
     log_z = torch.empty((n_rows,), device=hidden.device, dtype=torch.float32)
     entropy = torch.zeros((n_rows,), device=hidden.device, dtype=torch.float32)
 
@@ -160,9 +179,11 @@ def _logprobs_forward(
             compute_entropy,
         )
         log_z[seq_start:seq_end] = log_z_chunk
-        logprobs[seq_start:seq_end] = target_logit - log_z_chunk
+        logprobs[seq_start:seq_end] = target_logit - (log_z_chunk if targets.dim() == 1 else log_z_chunk.unsqueeze(-1))
         if compute_entropy:
             entropy[seq_start:seq_end] = entropy_chunk
+    if targets.dim() == 2:
+        logprobs = logprobs.masked_fill(targets < 0, float("-inf"))
     return logprobs, log_z, entropy
 
 
@@ -281,15 +302,22 @@ def chunked_head_logprobs(
     compute_entropy: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
     """``(logps, entropy)`` of ``targets`` under ``softcap(logit_scale · (hidden @ weight.T + bias)) / temperature``.
-    ``hidden`` ``(..., H)``, ``weight`` ``(V, H)``, ``targets`` ``(...)``; both outputs are shaped like ``targets``."""
+    ``hidden`` ``(..., H)`` and ``weight`` ``(V, H)``. ``targets`` is ``(...)``, one per position, or ``(..., m)``
+    (``hidden``'s leading shape plus ``m``), ``m`` per position sharing its one ``log Z``: column 0 the sampled token, the
+    rest candidate ids; an id below 0 is masked, its log-prob ``-inf`` and its gradient zero. ``logps`` is shaped like
+    ``targets``, ``entropy`` like one target per position. The ``(..., m)`` form compiles a pair of tile graphs of its
+    own, so a run's first call in each form is its warm-up."""
+    multi = targets.dim() > 1 and targets.shape[:-1] == hidden.shape[:-1]
+    flat_targets = targets.reshape(-1, targets.shape[-1]) if multi else targets.reshape(-1)
     logps, entropy = _HeadLogprobFunction.apply(
         hidden.reshape(-1, hidden.shape[-1]),
         weight,
-        targets.reshape(-1),
+        flat_targets,
         bias,
         temperature,
         logit_scale,
         softcap,
         compute_entropy,
     )
-    return logps.reshape(targets.shape), entropy.reshape(targets.shape) if compute_entropy else None
+    entropy_shape = targets.shape[:-1] if multi else targets.shape
+    return logps.reshape(targets.shape), entropy.reshape(entropy_shape) if compute_entropy else None

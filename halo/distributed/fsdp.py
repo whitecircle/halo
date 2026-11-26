@@ -25,16 +25,16 @@ from torch.distributed.utils import _apply_to_tensors
 from transformers.modeling_utils import PreTrainedModel
 
 from halo.distributed.mesh import MeshDim, build_dp_mesh, mesh_dim_names
-from halo.models.modality import config_declares_multimodality
-from halo.models.module_tree import (
+from halo.models.introspection.modality import config_declares_multimodality
+from halo.models.introspection.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
     decoder_layers,
     input_embedding_backbone,
 )
+from halo.models.introspection.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.mtp.head import find_mtp_head
-from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
-from halo.models.unwrapping import base_transformers_model
 from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.dtensor import to_local
 from halo.runtime.ranks import is_global_main_process
@@ -219,11 +219,13 @@ def layers_per_shard_group(reshard_after_forward: bool) -> int:
 
 def _install_unit_hooks(unit: list[nn.Module]) -> None:
     """Replace torch's forward hooks on a multi-layer ``fully_shard`` group so its layers train as in groups of their
-    own, per-layer GC included. torch starts a group at whichever module runs first, in a reentrant recompute its last
-    layer, whose post-backward would reduce and reshard the group before the layers below ran backward. Here the first
-    layer's pre-forward and the last's post-forward bracket the forward, and the first layer's recompute registers the
-    backward hooks a reentrant forward under ``no_grad`` could not. Each later layer casts its inputs as its own group
-    would and, in a recompute, re-gathers what a reshard after forward freed."""
+    own, per-layer GC included. The first layer's pre-forward and the last's post-forward bracket the forward, and each
+    later layer casts its inputs as its own group would. transformers checkpoints a layer's ``forward``, inside these
+    hooks; a decoder loop checkpointing the layer's ``__call__`` (Bailing/Ling remote code) runs them in the recompute.
+    There torch would start the group at whichever module runs first, in a reentrant recompute its last layer, whose
+    post-backward would reduce and reshard the group before the layers below ran backward. So the first layer's
+    recompute registers the backward hooks a reentrant forward under ``no_grad`` could not, and each later layer
+    re-gathers what a reshard after forward freed."""
     state = unit[0]._get_fsdp_state()
     group = state._fsdp_param_group
     if group is None:
@@ -602,12 +604,14 @@ def complete_fsdp2_post_backward(groups: list[FSDPParamGroup]) -> int:
     """COLLECTIVE where a group reduces: run FSDP2's post-backward on every group a finished backward left gathered or
     holding an unsharded gradient, then make the current stream wait on the reductions; returns how many
     reduce-scattered. Which groups reduce follows rank-local gradient state, so every rank must run each layer equally
-    often per backward. A one-module group that reentrant checkpointing recomputes K>1 times in one backward gets
+    often per backward. A one-module group whose hooks run inside a reentrant checkpoint (a nested group inside a
+    checkpointed layer, or a module whose call the checkpoint wraps) and which runs K>1 times in one backward gets
     FSDP2's post-backward hook in only one recompute. The others find it PRE_BACKWARD, re-gather it and accumulate into
     the unsharded gradient, and the root's final callback skips it as POST_BACKWARD: K-1 contributions never reach the
-    sharded gradient, and the gathered params outlive the optimizer step. A multi-layer unit's group is finished by the
-    callback's later visit. Since ``post_backward`` is idempotent and honours the window flags, this is a no-op
-    wherever every recompute was hooked."""
+    sharded gradient, and the gathered params outlive the optimizer step. transformers' ``GradientCheckpointingLayer``
+    checkpoints ``forward``, inside its own group's hooks, so each of its forwards is hooked. A multi-layer unit's group
+    is finished by the callback's later visit. Since ``post_backward`` is idempotent and honours the window flags, this
+    is a no-op wherever every forward was hooked."""
     pending = [group for group in groups if group.is_unsharded or _holds_unsharded_grad(group)]
     busy = [
         f"{group!r}: {group._training_state.name}" for group in pending if group._training_state != TrainingState.IDLE

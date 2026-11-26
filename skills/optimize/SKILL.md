@@ -22,7 +22,7 @@ there, never from memory.
 
 ## How to use this skill
 
-1. Pin the **bottleneck**: throughput-bound (want more tok/s/GPU) or memory-bound (OOM /
+1. Pin the **bottleneck**: throughput-bound (want more tok/s/GPU) or short of memory (OOM /
    want longer seq / bigger batch)? For MoE/EP also ask where the layer's time goes: expert
    work and the wait for the busiest rank, or permute/elementwise work (high top-k, e.g.
    qwen3.6)? When unsure, measure: `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile`
@@ -49,8 +49,10 @@ Mention these only to confirm, not as new advice:
 ## Throughput flow (raise tok/s/GPU)
 
 - **MoE/EP, any shape →** push **seq × batch as high as memory allows** first: it fills the expert
-  GEMMs, so batch is a leading EP lever. Read achieved TFLOPS / tok-s, not plain MFU%
-  ([Throughput benchmarks](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch)).
+  GEMMs, so batch is a leading EP lever. Judge it by tok/s/GPU. Achieved TFLOPS is plain MFU times the MFU
+  reference peak, and it compares only configurations with the same parameters per rank
+  ([Metrics](../../agent-docs/optimization/throughput-benchmarks.md#metrics),
+  [Throughput benchmarks](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch)).
 - **MoE/EP, fits without GC →** turn **gradient checkpointing off**, the largest single lever in the EP
   feature A/B, at a much larger activation footprint
   ([the A/B](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)).
@@ -64,10 +66,10 @@ Mention these only to confirm, not as new advice:
 - **Dense, long context →** FA4's win over FA2 is largest here; confirm it is selected, unless the resolver
   chose FA2 on purpose ([Model-specific handling](../../agent-docs/optimization/flash-attention.md#model-specific-handling)).
 - **Variable-length data (avg << max_len) →** **packing** is the big win, padding-free the smaller one
-  (when cross-sequence boundaries are undesirable); uniform long rows tie
+  (when cross-sequence boundaries are undesirable); with rows near max_len, keep standard padding
   ([Padding-free collator](../../agent-docs/optimization/padding-free-collator.md#when-to-use-each)). Rows sharing a long prefix:
   [tree packing](../../agent-docs/optimization/tree-packing.md).
-- **Multi-socket host, host-bound rows (TP, CP, small-batch EP) →** `halo launch … --numa-binding node`, torchrun
+- **Multi-socket host, overhead-bound rows (TP, small-batch EP) →** `halo launch … --numa-binding node`, torchrun
   launches only ([NUMA binding](../../agent-docs/optimization/throughput-benchmarks.md#numa-binding)).
 - **Pipeline parallelism, memory allows →** gradient checkpointing off, on dense stages and under EP alike
   ([Measured throughput](../../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput)).
@@ -83,7 +85,7 @@ Mention these only to confirm, not as new advice:
   off under TP and PP, and run per chunk by the CP wrapper under CP
   ([Liger](../../agent-docs/optimization/liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy),
   [CP fused head loss](../../agent-docs/parallelism/context-parallelism.md#fused-head-loss)). GRPO: `use_chunked_grpo_logprobs`
-  ([the logits wall](../../agent-docs/training-methods/async-grpo/performance.md#the-logits-wall)).
+  ([the logits plane](../../agent-docs/training-methods/async-grpo/performance.md#the-logits-plane)).
 - **MoE activation OOM →** keep **GC on** and/or **raise the EP degree** (less expert memory per GPU).
 - **Fragmentation on a dense run (reserved well above allocated) →**
   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` in front of the launch, as the dense SFT, DPO and SMPO

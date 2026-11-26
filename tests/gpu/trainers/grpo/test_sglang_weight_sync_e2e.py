@@ -12,9 +12,9 @@ import urllib.request
 import torch
 from transformers import AutoModelForCausalLM
 
-from halo.environments.engine_wire import capture_generation_tokens
-from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import capture_generation_tokens
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B

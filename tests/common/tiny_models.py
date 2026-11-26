@@ -40,6 +40,10 @@ from transformers import (
     Glm5NextForConditionalGeneration,
     GptOssConfig,
     GptOssForCausalLM,
+    Inkling2Config,
+    Inkling2ForCausalLM,
+    Inkling2ForConditionalGeneration,
+    Inkling2TextConfig,
     InklingConfig,
     InklingForCausalLM,
     InklingForConditionalGeneration,
@@ -105,9 +109,10 @@ from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 from halo.checkpoint.config_export import restore_model_type
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
-from halo.models.param_roles import fp32_pinned_names
-from halo.models.seq_cls_heads import Gemma4TextForSequenceClassification
+from halo.models.introspection.param_roles import fp32_pinned_names
+from halo.models.upstream.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
+from tests.common.inkling2 import TINY_INKLING2_TEXT, TINY_INKLING2_VISION
 from tests.common.models import (
     BAILING_LING_3_TINY,
     BAILING_MOE_LING_MINI,
@@ -167,7 +172,7 @@ VOCAB_PAD_MULTIPLE = 128
 TINY_SHARD_SIZE = "4MB"
 DSV4_TID2EID_SEED = 1234
 # Families whose transformers class pins parameters (not only buffers) in fp32 via ``_keep_in_fp32_modules_strict``.
-PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
+PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text", "inkling2_text")
 # A release's router bias: far from zero with a small spread, where bf16's spacing erases its differences. A bias near
 # zero survives the cast, so a lost fp32 pin would pass.
 RELEASE_BIAS_CENTER = 42.0
@@ -341,6 +346,9 @@ class TinyFamily:
     attention_targets: tuple[str, ...] = ()
 
 
+RANDOMIZED_INIT_STD = 0.1
+
+
 def _causal(config_cls: type, model_cls: type, tiny: dict) -> Callable[[dict], PreTrainedModel]:
     return lambda overrides: model_cls(config_cls(**{**tiny, **overrides}))
 
@@ -350,6 +358,22 @@ def _composite(
 ) -> Callable[[dict], PreTrainedModel]:
     return lambda overrides: model_cls(
         config_cls(text_config={**text, **overrides}, vision_config=dict(vision), **wrapper)
+    )
+
+
+def _inkling2_text(overrides: dict) -> dict:
+    """The roster draws labels from the whole vocabulary, so no padded rows are cut from the head."""
+    config = {**TINY_INKLING2_TEXT, **overrides}
+    return {**config, "unpadded_vocab_size": config["vocab_size"]}
+
+
+def _tiny_inkling2(overrides: dict) -> PreTrainedModel:
+    return Inkling2ForCausalLM(Inkling2TextConfig(**_inkling2_text(overrides)))
+
+
+def _tiny_inkling2_composite(overrides: dict) -> PreTrainedModel:
+    return Inkling2ForConditionalGeneration(
+        Inkling2Config(text_config=_inkling2_text(overrides), vision_config=dict(TINY_INKLING2_VISION))
     )
 
 
@@ -437,10 +461,17 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         _causal(InklingTextConfig, InklingForCausalLM, TINY_INKLING_CONFIG),
         text_overrides={"max_position_embeddings": 512},
     ),
+    # Short convolutions on K/V and around each sublayer.
+    "inkling2_text": TinyFamily(
+        _tiny_inkling2,
+        text_overrides={"max_position_embeddings": 512},
+        # Its index spells the hub's ``attn_sink_proj``, not the module tree's ``sink_proj``.
+        attention_targets=("q_proj", "k_proj", "v_proj", "o_proj"),
+    ),
     # Neither attention is one the Ulysses wrapper implements.
     "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG)),
     "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG)),
-    # No AutoModelForCausalLM entry for mistral4 in transformers 5.20.
+    # No AutoModelForCausalLM entry for mistral4 in transformers 5.23.
     "mistral4": TinyFamily(
         _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG),
         load_class=Mistral4ForCausalLM,
@@ -510,6 +541,7 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         _composite(InklingConfig, InklingForConditionalGeneration, TINY_INKLING_CONFIG, TINY_INKLING_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
     ),
+    "inkling2": TinyFamily(_tiny_inkling2_composite, load_class=AutoModelForImageTextToText),
     "lfm2_vl": TinyFamily(
         _composite(
             Lfm2VlConfig,
@@ -555,7 +587,13 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
     "qwen4_exp": TinyFamily(
         lambda overrides: _with_live_ple_convs(
             _composite(
-                Qwen4ExpConfig, Qwen4ExpForConditionalGeneration, TINY_QWEN4_EXP_CONFIG, TINY_QWEN4_EXP_VISION_CONFIG
+                Qwen4ExpConfig,
+                Qwen4ExpForConditionalGeneration,
+                TINY_QWEN4_EXP_CONFIG,
+                {
+                    **TINY_QWEN4_EXP_VISION_CONFIG,
+                    "out_hidden_size": overrides.get("hidden_size", TINY_QWEN4_EXP_CONFIG["hidden_size"]),
+                },
             )(overrides)
         ),
         load_class=AutoModelForImageTextToText,
@@ -589,7 +627,9 @@ TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {
 }
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG), ulysses_cp=True)
 # Gated DeltaNet and attention layers, which the MoE roster does not carry.
-TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
+TINY_QWEN35_DENSE_FAMILY = TinyFamily(
+    _causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG), ulysses_cp=True
+)
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
 # Ring-mini-linear-2.0: the Bailing family's other attention layout (Lightning Attention-2 beside softmax).
 TINY_BAILING_RING_FAMILY = TinyFamily(
@@ -692,6 +732,20 @@ TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
 }
 # Past that roster: no window, no softcap, and a head width of its own that the FA4 parity row sets.
 TINY_GEMMA_FAMILY = TinyFamily(_causal(GemmaConfig, GemmaForCausalLM, TINY_QWEN3_CONFIG))
+
+
+def randomized_weights(after: Callable[[PreTrainedModel], None] | None = None) -> Callable[[PreTrainedModel], None]:
+    """A checkpoint ``edit`` that widens every matrix's init, so a document leaking into the next reads well above bf16
+    noise; ``after`` runs on the widened model."""
+
+    def edit(model: PreTrainedModel) -> None:
+        for param in model.parameters():
+            if param.dim() >= 2:
+                torch.nn.init.normal_(param, std=RANDOMIZED_INIT_STD)
+        if after is not None:
+            after(model)
+
+    return edit
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:

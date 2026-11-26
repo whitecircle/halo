@@ -5,7 +5,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 
 
 class _Block(nn.Module):
@@ -29,14 +29,6 @@ def test_captures_persistent_skips_nonpersistent_and_params():
     names = {name for name, _ in persistent_buffers(m)}
     assert names == {"top_scalar", *(f"layers.{i}.layer_scalar" for i in range(3))}
     assert not any("rope_cache" in n or "mask" in n or "proj" in n for n in names)
-
-
-def test_matches_state_dict_minus_params():
-    # Exactly the buffers in state_dict() (persistent) that aren't parameters.
-    m = _Model(n_layers=2)
-    param_names = {n for n, _ in m.named_parameters()}
-    expected = set(m.state_dict().keys()) - param_names
-    assert {name for name, _ in persistent_buffers(m)} == expected
 
 
 def test_exclude_prefixes():

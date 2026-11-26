@@ -1,0 +1,137 @@
+"""Document boundaries of a ``qwen4_exp`` training row (``seq_idx``) and the per-layer embedding computed within them,
+so each packed document computes what it would alone. Uncached rows only."""
+
+import math
+
+import torch
+import torch.nn.functional as F
+import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
+from torch import nn
+
+from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
+from halo.models.segment_markers import document_boundaries, document_starts
+
+
+def reject_unmarked_documents(position_ids: torch.Tensor | None, seq_idx: torch.Tensor | None) -> None:
+    """The QSA indexer, the PLE n-gram history and its conv read documents from ``seq_idx`` alone."""
+    if position_ids is None and seq_idx is None:
+        return
+    reference = seq_idx if seq_idx is not None else position_ids
+    batch, length = reference.shape
+    restarts = torch.zeros(batch, length, dtype=torch.bool, device=reference.device)
+    if position_ids is not None:
+        restarts[:, 1:] = position_ids[:, 1:] == 0
+    if seq_idx is None:
+        if bool(restarts.any()):
+            raise ValueError(
+                "A qwen4_exp row whose position_ids restart at 0 (a packed row) arrived without seq_idx: its QSA "
+                "indexer, PLE n-gram history and PLE conv would read across the documents. The packing collators "
+                "emit seq_idx for this family (segment_markers_for); pass it with every packed row."
+            )
+        return
+    starts = document_boundaries(seq_idx, batch, length, reference.device)
+    starts[:, :1] = False
+    if not torch.equal(starts, restarts):
+        raise ValueError(
+            "seq_idx marks different documents than the position_ids restarts of the same row: build it with "
+            "segment_marker_kwargs from the row's own position_ids."
+        )
+
+
+def shift_within_documents(
+    token_ids: torch.Tensor, shift: int, eos_token_id: int, starts: torch.Tensor
+) -> torch.Tensor:
+    """transformers' ``_shift_right_ignore_eos`` with a document start as a second reset."""
+    if shift == 0:
+        return token_ids
+    positions = torch.arange(token_ids.shape[1], device=token_ids.device)
+    eos_positions = torch.where(token_ids == eos_token_id, positions, -1)
+    previous_eos = F.pad(eos_positions.cummax(dim=1).values[:, :-1], (1, 0), value=-1)
+    segment_start = torch.maximum(previous_eos + 1, starts)
+    sources = (positions - shift).clamp_min(0).expand_as(token_ids)
+    shifted = token_ids.gather(dim=1, index=sources)
+    return torch.where(positions - segment_start >= shift, shifted, token_ids.new_full((), eos_token_id))
+
+
+def document_ngram_ids(embedding: nn.Module, input_ids: torch.Tensor, starts: torch.Tensor) -> torch.Tensor:
+    """The ``[batch, length, ngram_heads]`` hashed table rows, the history reset at document ``starts``."""
+    input_ids = input_ids.long()
+    shifted = [
+        shift_within_documents(input_ids, shift, embedding.eos_token_id, starts)
+        for shift in range(embedding.ngram_size)
+    ]
+    multipliers = embedding.layer_multipliers
+    blocks = []
+    for ngram in range(2, embedding.ngram_size + 1):
+        heads = slice((ngram - 2) * embedding.heads_per_ngram, (ngram - 1) * embedding.heads_per_ngram)
+        mixed = shifted[0] * multipliers[0]
+        for position in range(1, ngram):
+            mixed = torch.bitwise_xor(mixed, shifted[position] * multipliers[position])
+        ngram_ids = torch.remainder(mixed.unsqueeze(-1), embedding.ngram_heads_vocab_sizes[heads].view(1, 1, -1))
+        blocks.append(ngram_ids + embedding.ngram_heads_offsets[heads].view(1, 1, -1))
+    return torch.cat(blocks, dim=-1)
+
+
+def ngram_rows(embedding: nn.Module, ngram_ids: torch.Tensor) -> torch.Tensor:
+    table = embedding.ngram_embedding
+    if isinstance(table, HostNGramTable):
+        return table(ngram_ids).flatten(-2)
+    device = table.weight.device if table.weight.device.type != "meta" else None
+    return table(ngram_ids.to(device)).to(ngram_ids.device).flatten(-2)
+
+
+def document_short_conv(conv: nn.Module, hidden_states: torch.Tensor, starts: torch.Tensor) -> torch.Tensor:
+    """``silu`` of the PLE conv, every tap reaching before its document start reading zero. One multiply-add per tap,
+    accumulated in fp32, over a view of the left-padded states keeps the backward to one padded copy and off cuDNN."""
+    if (
+        not isinstance(conv, nn.Conv1d)
+        or conv.bias is not None
+        or conv.stride != (1,)
+        or conv.padding != (0,)
+        or not conv.in_channels == conv.out_channels == conv.groups
+    ):
+        raise TypeError(
+            f"The document-aware PLE conv reads the weights of an unbiased, stride-1, unpadded depthwise nn.Conv1d "
+            f"directly, got {conv!r}; an adapter on the PLE conv1d would be bypassed. Leave it out of "
+            f"lora_target_modules."
+        )
+    length = hidden_states.shape[1]
+    kernel, dilation = conv.kernel_size[0], conv.dilation[0]
+    reach = (kernel - 1) * dilation
+    padded = F.pad(hidden_states, (0, 0, reach, 0))
+    offsets = torch.arange(length, device=hidden_states.device) - starts
+    weight = conv.weight[:, 0, :]
+    out = None
+    for tap in range(kernel):
+        lag = reach - tap * dilation
+        term = padded[:, reach - lag : reach - lag + length] * weight[:, tap]
+        if lag:
+            term = term * (offsets >= lag).unsqueeze(-1).to(term.dtype)
+        out = term.float() if out is None else out + term.float()
+    return F.silu(out.to(hidden_states.dtype))
+
+
+def document_ple_forward(
+    ple: nn.Module,
+    hidden_states: torch.Tensor,
+    input_ids: torch.Tensor,
+    seq_idx: torch.Tensor | None,
+    conv_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``Qwen4ExpTextPLELayer.forward`` for an uncached row, the n-gram history and conv kept inside each document."""
+    batch, length = input_ids.shape
+    starts = document_starts(seq_idx, batch, length, input_ids.device)
+    embeddings = ngram_rows(ple.ple_embedding, document_ngram_ids(ple.ple_embedding, input_ids, starts))
+    streams = (ple.hc_count, ple.hidden_size)
+    key_normed = ple.norm_key(ple.key_proj(embeddings)).unflatten(-1, streams)
+    value = ple.value_proj(embeddings)
+    query_normed = ple.norm_query(hidden_states).unflatten(-1, streams)
+    gate = (key_normed * query_normed).sum(dim=-1, keepdim=True) / math.sqrt(ple.hidden_size)
+    gate = gate.abs().clamp_min(1e-6).sqrt() * gate.sign()
+    gated_value = torch.sigmoid(gate) * value.unsqueeze(-2)
+    gated_value_normed = ple.norm_conv(gated_value.flatten(-2))
+    gated_value = gated_value.flatten(-2)
+    if conv_mask is not None:
+        gated_value = qwen4_exp_modeling.apply_mask_to_padding_states(gated_value, conv_mask)
+        gated_value_normed = qwen4_exp_modeling.apply_mask_to_padding_states(gated_value_normed, conv_mask)
+    return gated_value + document_short_conv(ple.conv1d, gated_value_normed, starts)

@@ -16,6 +16,7 @@ _FORWARDED = AsyncRolloutConfig.rollout_field_sources()
 # The fields get_rollout_config computes instead of copying, each named with what it computes from.
 _DERIVED = {
     "capture_token_ids": "train_on_sampled_tokens",
+    "capture_candidate_logprobs": "score_centering_top_k",
     "capture_routed_experts": "routing_replay",
     "stop_token_ids": "rollout_stop_tokens, resolved to ids by the trainer",
     "reasoning_end_token_id": "rollout_reasoning_end_token, resolved to an id by the caller that owns the tokenizer",
@@ -53,17 +54,19 @@ def test_every_rollout_field_is_either_mirrored_or_derived():
     )
 
 
-@pytest.mark.parametrize(("rollout_field", "async_field"), sorted(_FORWARDED.items()))
-def test_every_mirrored_knob_reaches_the_built_rollout_config(rollout_field, async_field):
+def test_every_mirrored_knob_reaches_the_built_rollout_config(subtests):
     """Matching defaults only prove the two declarations agree. The actors read nothing but the built RolloutConfig."""
-    requested = _NON_DEFAULT_VALUES[async_field]
+    assert _FORWARDED, "AsyncRolloutConfig mirrors no RolloutConfig field"
+    for rollout_field, async_field in sorted(_FORWARDED.items()):
+        with subtests.test(f"{rollout_field}-{async_field}"):
+            requested = _NON_DEFAULT_VALUES[async_field]
 
-    built = AsyncRolloutConfig(**{async_field: requested}).get_rollout_config()
+            built = AsyncRolloutConfig(**{async_field: requested}).get_rollout_config()
 
-    assert getattr(built, rollout_field) == requested, (
-        f"AsyncRolloutConfig.{async_field}={requested!r} never reached RolloutConfig.{rollout_field} "
-        f"(got {getattr(built, rollout_field)!r}): the knob parses and no rollout sees it."
-    )
+            assert getattr(built, rollout_field) == requested, (
+                f"AsyncRolloutConfig.{async_field}={requested!r} never reached RolloutConfig.{rollout_field} "
+                f"(got {getattr(built, rollout_field)!r}): the knob parses and no rollout sees it."
+            )
 
 
 def test_the_non_default_table_covers_every_mirrored_knob():
@@ -76,6 +79,13 @@ def test_capture_token_ids_follows_train_on_sampled_tokens(sampled_tokens):
     """A broken derivation trains env-GRPO on a re-tokenized re-render of every turn, with nothing in the logs."""
     built = AsyncRolloutConfig(train_on_sampled_tokens=sampled_tokens).get_rollout_config()
     assert built.capture_token_ids is sampled_tokens
+
+
+@pytest.mark.parametrize(("top_k", "requested"), [(None, 0), (16, 16)])
+def test_candidate_logprobs_are_requested_as_many_as_score_centering_reads(top_k, requested):
+    """A dropped copy leaves the objective with no candidates to read, or every rollout paying for ones it ignores."""
+    built = AsyncRolloutConfig(score_centering_top_k=top_k).get_rollout_config()
+    assert built.capture_candidate_logprobs == requested
 
 
 def test_reasoning_end_token_id_is_the_id_the_caller_resolved():

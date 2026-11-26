@@ -8,13 +8,14 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Literal
 
-from halo.models.config_access import config_sources, text_config
+from halo.models.introspection.config_access import config_sources, text_config
 from halo.models.moe.family_specs import (
     BAILING,
     DEEPSEEK_V4,
     GLM4,
     GLM5_NEXT,
     INKLING,
+    INKLING2,
     NEMOTRON_H,
     QWEN3_5,
     QWEN3_NEXT,
@@ -151,6 +152,11 @@ MTP_REFUSALS: dict[str, str] = {
         "its release stores eight draft layers under names that need renames",
     ),
     **dict.fromkeys(
+        INKLING2.model_types,
+        "its release ships a five-layer draft head of its own configuration (mtp_config) that transformers' class does "
+        "not build",
+    ),
+    **dict.fromkeys(
         QWEN4_EXP.model_types,
         "its draft layer reads hyper-connection streams the trunk's layers carry between them, which an embedding and "
         "a hidden state do not supply",
@@ -164,6 +170,8 @@ MTP_REFUSALS: dict[str, str] = {
         (
             "deepseek_v3",
             "deepseek_v32",
+            "dots3_note",
+            "dots3_note_text",
             "ernie4_5_moe",
             "exaone4_5",
             "exaone_moe",
@@ -171,11 +179,13 @@ MTP_REFUSALS: dict[str, str] = {
             "glm4v_moe",
             "glm_moe_dsa",
             "glm_ocr",
+            "granite_docling",
             "hy_v3",
             "hy_v4",
             "longcat_flash",
             "mellum",
             "mimo_v2_flash",
+            "mistral_large4",
             "minimax_m3_vl",
             "minimax_m3_vl_text",
             "olmo_hybrid",

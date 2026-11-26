@@ -5,7 +5,7 @@
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B
-attn_implementation: sdpa             # FA2 crashes the Qwen3.5 M-RoPE varlen path
+attn_implementation: flash_attention_2
 
 # --- Dataset (Docmatix schema: images (1-4 pages) + {user, assistant} QA turns) ---
 dataset:

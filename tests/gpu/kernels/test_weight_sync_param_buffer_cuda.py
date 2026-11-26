@@ -22,14 +22,14 @@ def run(ctx) -> dict:
     side.wait_stream(torch.cuda.current_stream(ctx.device))
     with torch.cuda.stream(side):
         client.update_named_param("w", weights)
-    client._complete_snapshots()
+    client.complete_snapshots()
     _, stored = client._param_buffer[0]
 
     # With a small HALO_WEIGHT_SYNC_CHUNK_MB the second param would flush the first.
     client = _bare_client()
     client._sync_device = ctx.device
     client.update_named_param("v", weights.cpu())
-    client._complete_snapshots()
+    client.complete_snapshots()
     _, from_host = client._param_buffer[0]
 
     checks = {

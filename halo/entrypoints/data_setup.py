@@ -1,23 +1,36 @@
-"""Script-side dataset loading, the run's VLM verdict and vision options (the tower freeze, the FSDP2 refusal of a
-batch holding no image), shared prepare steps and switches for TRL's dataset prep."""
+"""Script-side dataset loading (datatrove token sources included), the run's VLM verdict and vision options (the tower
+freeze, the FSDP2 refusal of a batch holding no image), shared prepare steps and switches for TRL's dataset prep."""
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any
 
-from datasets import Dataset, DatasetDict
+from datasets import Dataset
 from transformers import PreTrainedTokenizer
 
 from halo.callbacks.generate_examples import GenerateExamplesCallback
-from halo.config_validation import reject_non_default_args, reject_unsupported_args
+from halo.callbacks.token_mix_checkpoint import TokenMixCheckpointCallback, find_saved_token_mix
+from halo.checkpoint.format import TRAINER_STATE_FILE
+from halo.config_validation import differs_from_default, reject_non_default_args, reject_unsupported_args
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc
+from halo.data.conversation import template_column_kwargs
+from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc, run_load_rank_first
 from halo.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.sources.loading import is_presharded_dataset_load_across_ranks, load_datasets, share_s3_control_files
-from halo.data.vlm_detection import dataset_declares_images_across_ranks, is_vlm_run_across_ranks, reject_image_columns
+from halo.data.sources.token_mix import (
+    TokenMix,
+    TokenSource,
+    build_held_out_shards_across_ranks,
+    build_token_mix_across_ranks,
+    verify_resumed_token_mix,
+)
+from halo.data.sources.token_shards import TokenShards, fetch_s3_token_folder
+from halo.data.turn_markers import resolve_eos_token_ids
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_declares_images_across_ranks, is_vlm_run_across_ranks
 from halo.data.vlm_render import apply_image_pixel_bounds
 from halo.distributed.fsdp import fsdp2_param_groups
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -27,12 +40,19 @@ from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_pat
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import wraps_in_peft_model
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
-from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module, media_module_names
+from halo.models.introspection.module_tree import (
+    backbone_with_layers,
+    decoder_layers,
+    embedding_module,
+    media_module_names,
+)
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
-from halo.runtime.consensus import reject_across_ranks
+from halo.runtime.consensus import refusal_text, reject_across_ranks, run_on_rank0_raising_everywhere
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.construction.training_args_overrides import uses_evaluation
+from halo.trainers.loop.dataloaders import resolve_data_seed
 
 logger = logging.getLogger(__name__)
 
@@ -74,23 +94,24 @@ def load_script_datasets(
     data_parallel_size = parallelism_config.data_parallel_size
     share_s3_control_files(args.dataset)
     dataset_presharded = is_presharded_dataset_load_across_ranks(args.dataset, data_parallel_size)
-    # For every script, so a typo'd tools column fails the load; the scripts that cannot render it (KTO, environmental
-    # GRPO) refuse the knob first.
-    loader_kwargs.setdefault("tools_field", args.tools_field)
     ds = loader(
         args.dataset,
         args.test_size,
         args.dataset_ratio,
         data_parallel_rank=data_parallel_rank,
         data_parallel_size=data_parallel_size,
+        # For every script, so a typo'd template column fails the load; a script that cannot render one refuses the
+        # knob.
+        template_columns=template_column_kwargs(args),
         **loader_kwargs,
     )
     return ds, dataset_presharded
 
 
 def _reject_images_under_text_only_model(args, datasets, *, text_only_model: bool) -> None:
-    """Refuse image data on a multimodal checkpoint loaded through its text-only class: ``is_vlm_run_across_ranks``
-    reads the still-multimodal config and would route the run to a VLM data path with no vision model."""
+    """COLLECTIVE under ``text_only_model``. Refuse image data on a multimodal checkpoint loaded through its text-only
+    class, since ``is_vlm_run_across_ranks`` reads the still-multimodal config and would route the run to a VLM data
+    path with no vision model. A presharded load answers per rank, so the verdict is agreed."""
     if not text_only_model:
         return
     images_field = getattr(args, "images_field", None)
@@ -100,13 +121,15 @@ def _reject_images_under_text_only_model(args, datasets, *, text_only_model: boo
             f"CausalLM class, which has no vision path. Drop text_only_model to train the "
             f"multimodal wrapper, or drop images_field for a text-only run."
         )
-    reject_image_columns(datasets, "text_only_model=True (text-only CausalLM load)")
     conversation_field = getattr(args, "conversation_field", None)
-    if conversation_field and dataset_declares_images_across_ranks(datasets, conversation_field):
+    if dataset_declares_images_across_ranks(datasets, conversation_field):
+        declared = f"an image column ({', '.join(VLM_IMAGE_COLUMNS)})"
+        if conversation_field:
+            declared += f" or image content parts in its {conversation_field!r} column"
         raise ValueError(
-            f"The {conversation_field!r} column embeds image content parts, but text_only_model=True "
-            f"loads the text-only CausalLM class, which has no vision path. Drop text_only_model to "
-            f"train the multimodal wrapper, or drop the image parts for a text-only run."
+            f"The dataset carries {declared}, but text_only_model=True loads the text-only CausalLM class, which has "
+            f"no vision path. Drop text_only_model to train the multimodal wrapper, or drop the image data for a "
+            f"text-only run."
         )
 
 
@@ -297,7 +320,7 @@ def _write_decoded_samples(
 
 
 def log_dataset_examples(
-    datasets: dict[str, Dataset],
+    datasets: dict[str, Any],
     num_examples: int = 1,
     *,
     tokenizer: PreTrainedTokenizer | None = None,
@@ -315,7 +338,7 @@ def log_dataset_examples(
         if dataset is None:
             continue
 
-        if isinstance(dataset, DatasetDict):
+        if isinstance(dataset, Mapping):
             if len(dataset) == 0:
                 continue
             split_name = next(iter(dataset))
@@ -350,26 +373,221 @@ def log_script_dataset_examples(datasets: dict, tokenizer: PreTrainedTokenizer, 
     )
 
 
-def prepare_chat_text_split(ds, tokenizer, args, training_config, *, desc: str):
+def reject_unsupported_token_source_options(args, sft_config, dist_args) -> None:
+    """Refuse the training options a token_sources run cannot honor, naming each one it misses, before the model
+    load."""
+    evaluates = uses_evaluation(sft_config) or args.gates_mtp_acceptance
+    held_out = args.eval_token_source_specs or []
+    loader = sft_config.accelerator_config
+    best = sft_config.metric_for_best_model
+    requirements = {
+        "max_steps set (the mix is laid out for the run's length)": sft_config.max_steps > 0,
+        "train_sampling_strategy: sequential (the mix is shuffled already, and a random sampler would hold a list of "
+        "every sample on each rank)": sft_config.train_sampling_strategy == "sequential",
+        "packing: true (each window is a packed row of documents)": sft_config.packing,
+        "packing_strategy left at its default (windows are cut before training, as the wrapped strategy cuts)": (
+            not differs_from_default(sft_config, "packing_strategy")
+        ),
+        "eval_packing left unset (held-out windows are packed rows too)": sft_config.eval_packing is None,
+        "padding_free off (the rows are packed already)": not sft_config.padding_free,
+        "ignore_data_skip off (a resume skips the trained steps' rows by index without reading them, and without the "
+        "skip it trains them again)": not sft_config.ignore_data_skip,
+        "auto_find_batch_size off (a halved batch reads fewer than rows_per_step rows a step, and the resume skip "
+        "miscounts)": not sft_config.auto_find_batch_size,
+        "accelerator_config's dispatch_batches and split_batches off and even_batches on (each rank draws its own "
+        "batches of the mix, which rows_per_step and the resume skip count, and with even_batches off a held-out "
+        "folder that does not split evenly over the ranks hangs the evaluation)": (
+            not loader.dispatch_batches and not loader.split_batches and loader.even_batches
+        ),
+        "dataloader_in_order on with loader workers (a batch a worker returns out of turn trains at another step than "
+        "the one the resume skip counts it at)": (
+            sft_config.dataloader_in_order or sft_config.dataloader_num_workers == 0
+        ),
+        "context_parallel_size: 1 (a window is a packed row, which context parallelism refuses)": (
+            dist_args.context_parallel_size == 1
+        ),
+        "eval_token_sources when the run evaluates, by eval_strategy, eval_on_start or the MTP acceptance gate (a "
+        "token run evaluates on held-out folders only)": not evaluates or bool(held_out),
+        "one eval_token_sources folder under the MTP acceptance gate (every folder logs its acceptance under the same "
+        "key, so the gate would set one folder's reading against another's)": (
+            not args.gates_mtp_acceptance or len(held_out) <= 1
+        ),
+        "metric_for_best_model unset or naming a held-out folder's eval_<name>_loss (a token run logs no eval_loss)": (
+            best is None
+            or (best if best.startswith("eval_") else f"eval_{best}")
+            in {f"eval_{source.name}_loss" for source in held_out}
+        ),
+    }
+    unmet = [requirement for requirement, met in requirements.items() if not met]
+    if unmet:
+        raise ValueError("token_sources needs: " + "; ".join(unmet) + ".")
+
+
+def _fetched_token_sources(sources: list[TokenSource]) -> list[TokenSource]:
+    """COLLECTIVE when a path is ``s3://``: each such source pointed at its download-cache copy, which each input
+    filesystem's load rank fetches before its peers read the cache."""
+    if not any(source.path.startswith("s3://") for source in sources):
+        return sources
+
+    def fetch() -> list[TokenSource]:
+        fetched = []
+        for source in sources:
+            if source.path.startswith("s3://"):
+                try:
+                    source = replace(source, path=str(fetch_s3_token_folder(source.path)))
+                except Exception as error:  # S3's own errors name neither the source nor its prefix
+                    raise RuntimeError(
+                        f"token source {source.name!r} ({source.path}): {refusal_text(error)}"
+                    ) from error
+            fetched.append(source)
+        return fetched
+
+    return run_load_rank_first(fetch, "fetching the s3:// token sources")
+
+
+def _saved_token_mix(checkpoint: str) -> dict:
+    saved = find_saved_token_mix(checkpoint)
+    if saved is None:
+        raise ValueError(
+            f"Checkpoint {checkpoint} carries no token mix: its {TRAINER_STATE_FILE} holds no "
+            f"{TokenMixCheckpointCallback.__name__} entry under stateful_callbacks, so the mix it trained on is "
+            f"unknown, as for a checkpoint of a run without token_sources. Resume from a checkpoint a token_sources "
+            f"run saved with this entry, or start a new run."
+        )
+    return saved
+
+
+def _rows_per_step(training_config, parallelism_config: ParallelismConfig) -> int:
+    """The rows one optimizer step reads across the data-parallel ranks. Under pipeline parallelism the accumulation
+    becomes the microbatch count, which splits the per-device batch."""
+    accumulation = 1 if parallelism_config.pp_size > 1 else training_config.gradient_accumulation_steps
+    return training_config.per_device_train_batch_size * accumulation * parallelism_config.data_parallel_size
+
+
+def reject_resume_from_a_token_run(resume_checkpoint: str | None) -> None:
+    """COLLECTIVE: refuse a run without token_sources resuming a checkpoint a token_sources run saved: the resumed
+    trainer state would carry the mix's fingerprint into every checkpoint this run saves, so a later token run could
+    resume from one onto rows these steps never read."""
+    if resume_checkpoint is None:
+        return
+    failure = None
+    try:
+        if find_saved_token_mix(resume_checkpoint) is not None:
+            raise ValueError(
+                f"Checkpoint {resume_checkpoint} was saved by a token_sources run: its {TRAINER_STATE_FILE} records "
+                f"the token mix its steps trained on, so a run without token_sources cannot resume it. Resume with "
+                f"the checkpoint's token_sources, or start a new run from its weights (model_name_or_path: "
+                f"{resume_checkpoint}, merged with scripts/after_training/merge_ep_shards.py first if it is "
+                f"EP-sharded)."
+            )
+    except Exception as error:  # a rank raising alone would strand its peers in the join below
+        failure = refusal_text(error)
+    reject_across_ranks(failure, "Checking the resumed checkpoint for a token mix", ValueError)
+
+
+def _labelled_folders(mix: TokenMix, held_out: dict[str, TokenShards] | None) -> dict[str, TokenShards]:
+    return {
+        **{f"token_sources {source.name!r}": shards for source, shards in zip(mix.sources, mix.shards, strict=True)},
+        **{f"eval_token_sources {name!r}": shards for name, shards in (held_out or {}).items()},
+    }
+
+
+def load_token_sources(
+    args, training_config, parallelism_config: ParallelismConfig, *, resume_checkpoint: str | None
+) -> tuple[TokenMix, dict[str, TokenShards] | None]:
+    """COLLECTIVE: the run's token mix, ``max_steps`` global batches long and checked against the mix
+    ``resume_checkpoint`` trained on, and the held-out folders by name, all of one token width. A failure on one rank
+    raises on every rank."""
+    mix = build_token_mix_across_ranks(
+        _fetched_token_sources(args.token_source_specs),
+        max_length=training_config.max_length,
+        num_steps=training_config.max_steps,
+        rows_per_step=_rows_per_step(training_config, parallelism_config),
+        seed=resolve_data_seed(training_config),
+    )
+    if resume_checkpoint is not None:
+        failure = None
+        try:
+            verify_resumed_token_mix(_saved_token_mix(resume_checkpoint), mix.fingerprint())
+        except Exception as error:  # a rank raising alone would strand its peers in the join below
+            failure = refusal_text(error)
+        reject_across_ranks(failure, "Checking the token mix against the resumed checkpoint", ValueError)
+    held_out = (
+        None
+        if args.eval_token_source_specs is None
+        else build_held_out_shards_across_ranks(_fetched_token_sources(args.eval_token_source_specs), mix=mix)
+    )
+    # Every rank agreed on each folder's width, so each raises alike.
+    widths = {label: shards.token_bytes for label, shards in _labelled_folders(mix, held_out).items()}
+    if len(set(widths.values())) > 1:
+        listed = ", ".join(f"{label} {width} bytes" for label, width in widths.items())
+        raise ValueError(
+            f"The token folders hold ids of different widths: {listed}. datatrove writes 2-byte ids up to a vocabulary "
+            f"of 65,536 and 4-byte ids past it, so these come from two tokenizers, and one's ids would train or score "
+            f"as the other's. Re-tokenize every folder with the model's tokenizer."
+        )
+    return mix, held_out
+
+
+def verify_token_sources_fit_model(
+    mix: TokenMix, evaluated: dict[str, TokenShards] | None, vocab_size: int, tokenizer_name: str
+) -> None:
+    """COLLECTIVE: raise on every rank when a folder holds an id past the model's vocabulary; warn when the folders'
+    metadata names more than one tokenizer or one other than the run's, which a local path or another spelling of the
+    same one also trips. Rank 0 reads the windows alone: the ranks agreed on their digest."""
+    folders = _labelled_folders(mix, evaluated)
+
+    def verify_ids() -> None:
+        for shards in folders.values():
+            shards.verify_token_ids_below(vocab_size)
+
+    run_on_rank0_raising_everywhere(verify_ids, refusal_text, ValueError)
+    tokenizers = {label: sorted({file.tokenizer for file in shards.files}) for label, shards in folders.items()}
+    named = sorted({name for names in tokenizers.values() for name in names})
+    if named != [tokenizer_name] and is_global_main_process():
+        listed = "; ".join(f"{label} names {names}" for label, names in tokenizers.items())
+        logger.warning(
+            f"The token folders' metadata names {named}, not only this run's tokenizer {tokenizer_name!r}: {listed}. "
+            f"A folder of another tokenizer trains the model on ids that mean other text; re-tokenize it with this "
+            f"run's. A local path or another spelling of the same tokenizer also reads as another name here."
+        )
+
+
+def prepare_chat_text_split(ds, tokenizer, args, training_config, model_config, generation_config, *, desc: str):
     """COLLECTIVE: ``(train, eval)`` chat-templated and tokenized once; a row over ``max_length`` is dropped, never
-    truncated mid-turn. ``desc`` keys the map's cache."""
+    truncated mid-turn, and a last assistant turn the template leaves open is closed against the terminators the model
+    and generation configs name. ``desc`` keys the map's cache."""
     render_kwargs = text_render_kwargs(args)
+    eos_token_ids = resolve_eos_token_ids(tokenizer, model_config, generation_config)
     ds = coordinated_map_and_filter(
         ds,
-        build_chat_row_processor(tokenizer=tokenizer, max_length=training_config.max_length, **render_kwargs),
+        build_chat_row_processor(
+            tokenizer=tokenizer, max_length=training_config.max_length, eos_token_ids=eos_token_ids, **render_kwargs
+        ),
         # sorted: this list feeds the coordinated-map cache key, and set order is hash-randomized per process.
         remove_columns=sorted(set(ds["train"].column_names)),
         desc=desc,
-        cache_key_extras={**render_kwargs, "add_generation_prompt": False},
+        cache_key_extras={**render_kwargs, "add_generation_prompt": False, "eos_token_ids": sorted(eos_token_ids)},
         num_proc=resolve_map_num_proc(training_config.dataset_num_proc),
     )
     return ds["train"], ds["test"]
 
 
-def prepare_raw_vlm_split(ds, args, training_config, processor, tokenizer, model_config, *, desc: str):
+def prepare_raw_vlm_split(
+    ds, args, training_config, processor, tokenizer, model_config, generation_config, *, desc: str
+):
     """COLLECTIVE: ``(train, eval, collator)``, raw conversations mapped for :class:`VLMDataCollator`."""
     num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
-    ds = prepare_vlm_dataset(ds, args, processor, tokenizer, training_config.max_length, num_proc, desc=desc)
+    ds = prepare_vlm_dataset(
+        ds,
+        args,
+        processor,
+        tokenizer,
+        training_config.max_length,
+        num_proc,
+        eos_token_ids=resolve_eos_token_ids(tokenizer, model_config, generation_config),
+        desc=desc,
+    )
     # The mapped columns are not model-forward kwargs, so HF's default remove_unused_columns=True would strip them.
     training_config.remove_unused_columns = False
     collator = VLMDataCollator(
@@ -379,6 +597,7 @@ def prepare_raw_vlm_split(ds, args, training_config, processor, tokenizer, model
         response_prompt_template=args.assistant_message_template,
         train_on_completions_only=args.train_on_completions_only,
         model_config=model_config,
+        generation_config=generation_config,
     )
     return ds["train"], ds["test"], collator
 
@@ -399,13 +618,14 @@ def prepare_script_preference_data(
         train_dataset, eval_dataset = ds["train"], ds.get("test")
     else:
         num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
+        template_columns = template_column_kwargs(args)
         train_dataset, eval_dataset = prepare_preference_datasets(
-            ds["train"], ds["test"], tokenizer, num_proc=num_proc, tools_field=args.tools_field
+            ds["train"], ds["test"], tokenizer, num_proc=num_proc, **template_columns
         )
         # Only when the callback will consume it: the prep tokenizes the whole test split.
         if args.generate_eval_examples:
             generate_dataset = prepare_generative_dataset(
-                ds["test"], tokenizer, generation_max_prompt_length, num_proc=num_proc, tools_field=args.tools_field
+                ds["test"], tokenizer, generation_max_prompt_length, num_proc=num_proc, **template_columns
             )
 
     log_script_dataset_examples(

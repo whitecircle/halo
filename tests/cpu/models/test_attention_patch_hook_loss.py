@@ -6,7 +6,6 @@ import types
 
 import pytest
 
-from halo.models import mistral4
 from halo.models.attention import backend_setup, packed_position_ids
 
 
@@ -59,12 +58,6 @@ def test_injection_with_registry_wraps_it():
 
     assert packed_position_ids.install_packed_position_ids_injection(modeling, owner, lambda module: (module,)) is True
     assert isinstance(modeling.ALL_ATTENTION_FUNCTIONS, packed_position_ids.PositionIdsInjectingRegistry)
-
-
-def test_missing_mistral4_attention_class_raises(monkeypatch):
-    monkeypatch.setattr(mistral4, "m4", types.ModuleType("modeling_mistral4"))
-    with pytest.raises(AttributeError, match="Mistral4Attention"):
-        mistral4.patch_mistral4_flash_packed_position_ids()
 
 
 if __name__ == "__main__":

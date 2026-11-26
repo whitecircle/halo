@@ -2,7 +2,7 @@
 
 Concatenates variable-length sequences into one flattened tensor and emits `cu_seq_lens` so a varlen Flash Attention kernel skips padding compute. These collators are SFT-only: `select_data_collator` (`halo/data/collators/factory.py`) picks them when `padding_free: true`. Mutually exclusive with `packing`. Incompatible with Context and Pipeline Parallelism.
 
-SMPO also supports `padding_free` (not under PP), but flattens the batch itself in `_forward_padding_free` (`halo/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline--arithmetic-intensity-and-the-ridge-point).
+SMPO also supports `padding_free` (not under CP or PP, nor in VLM runs), but flattens the batch itself in `_forward_padding_free` (`halo/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory → Padding and packing](../reference/gpu-training-theory.md#padding-and-packing).
 
 SMPO's flattened row isolates its documents too: attention through `position_ids`, and LFM-2, GatedDeltaNet and Nemotron-H's Mamba through `seq_idx` / `cu_seq_lens` segment markers built by the same gate these collators use (`halo/models/segment_markers.py`).
 
@@ -48,12 +48,6 @@ Lightning Attention-2) refuses packing and `padding_free` on every backend, flas
 and GLM-5 Next's flat rows stay refused either way
 ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
-`padding_free` is also rejected on an M-RoPE decoder (Qwen3.5/3.6, text towers included, and the Qwen-VL text
-models) on every backend, by the SFT script before the model load, the SFT collator factory, the SFT trainer (for
-a collator handed to it) and the SMPO trainer alike (`reject_mrope_padding_free`): the flattened M-RoPE row faults
-the flash varlen kernels. Turn `padding_free` off there; under SFT, `packing` serves the same rows (SMPO has no
-`packing` field and pads instead).
-
 Both collators emit `position_ids` that reset per document; whether a family's forward turns those into an
 isolating mask is per-family, and the exceptions are tabulated in
 [Document isolation under packing](../data/collators.md#document-isolation-under-packing). Where it does, the
@@ -74,7 +68,7 @@ The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence
 
 Throughput is **real (non-padding) tokens/s/GPU** — `attention_mask.sum()`, not padded element count — set via `include_num_input_tokens_seen="non_padding"` so all three modes share one real-token basis.
 
-**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2, Blackwell image, Halo 1.1.0 or earlier. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
+**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (compute capability 10.3), `ep2`, Blackwell image, Halo 1.1.0 or earlier. **Data:** max_length=4096, documents uniform over about 512–1,536 tokens (avg ≈ 1024). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup. The benchmark script passes the trainer no collator, so all three modes ran TRL's `DataCollatorForLanguageModeling`, and Standard padded each batch to its longer row, not to max_length.
 
 | Mode | tokens/s/GPU (real) | Step time | vs Standard |
 |------|:-------------------:|:---------:|:-----------:|
@@ -82,7 +76,7 @@ Throughput is **real (non-padding) tokens/s/GPU** — `attention_mask.sum()`, no
 | Packing | 13,341 | 0.59s | **14.5×** |
 | Padding-Free | 4,178 | 0.46s | 4.5× |
 
-Peak memory is 117–120 GiB across all three (weights + optimizer states dominate; packing's is ~3 GiB above the other two). At ~75% padding waste, packing wins by filling each max_length block with ~4 real sequences and cutting the step count. Padding-free strips the padding via varlen FA, so it processes only real tokens per step at lower memory than packing, while keeping per-sample boundaries (no cross-sequence attention).
+Peak memory is 117–120 GiB across all three (weights + optimizer states dominate; packing's is ~3 GiB above the other two). Packing fills each max_length block with ~4 real sequences, so a packed step holds 4.1× the real tokens of a Standard step (computed from the table). The packed step is also 3.5× shorter, and nothing recorded explains that. Padding-free strips the padding via varlen FA, so it processes only real tokens per step at lower memory than packing, while keeping per-sample boundaries (no cross-sequence attention).
 
 The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4 + packing + EP is safe (`warm_attention_kernels` compiles the FA4 kernels behind a barrier at load — see [Flash Attention](flash-attention.md#known-issues)). With `--attn_implementation` unset (the default), the benchmark auto-detects FA4 on Blackwell (`tests/common/benchmark_args.py`).
 
@@ -92,7 +86,7 @@ The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4
 |----------|-----|-----|-----|-----|
 | `DataCollatorWithFlattening` (+ `…AndCompletionMask`) | Yes | Yes | **No** | **No** |
 | `DataCollatorWithPacking` (+ `DataCollatorForCompletionOnlyLMWithPacking`) | Yes | Yes | **No** | Yes |
-| `DataCollatorForCausalLMWithPadding` | Yes | Yes | Yes | Yes |
+| Padded ([class per config](../data/collators.md#factory-select_data_collator)) | Yes | Yes | Yes | Yes |
 
 CP requires fixed-length sequences for collective synchronization: padding-free (variable-length output) and packing (the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other) are both rejected by `select_data_collator` when `use_context_parallel=True` — use the standard padded collator with `pad_to_multiple_of=cp_size` ([Context Parallelism](../parallelism/context-parallelism.md)).
 
@@ -100,20 +94,20 @@ PP rejects padding-free: its flattened width varies every step, while the pipeli
 
 ## When to use each
 
-- **avg > 80% of max_length** — any collator (all within ~1%); use standard.
-- **avg << max_length** — packing (14.5× at ~75% waste; packing's own cross-sequence padding overhead is 1–5%).
+- **avg > 80% of max_length** — use standard.
+- **avg << max_length** — packing (14.5× in the run above).
 - **Need CP** — standard padding only; both packing and padding-free are rejected.
-- **Want to skip padding FLOPS without cross-sequence boundaries** — padding-free.
+- **Want to skip padding FLOPs without cross-sequence boundaries** — padding-free.
 
 ## Running benchmarks
 
 ```bash
-# All 3 collator modes (variable-length, ~75% padding waste) — table above
+# All 3 collator modes (variable-length, avg 25% of max_length) — table above
 torchrun --nproc_per_node=2 \
     tests/gpu/profiling/benchmark_collators.py --model qwen3-30b-a3b --ep 2 --seq 4096 \
     --batch_size 2 --attn_implementation flash_attention_2
 
-# Higher padding waste (avg 10% of max_length)
+# Shorter documents (avg 10% of max_length)
 torchrun --nproc_per_node=2 \
     tests/gpu/profiling/benchmark_collators.py --model qwen3-30b-a3b --ep 2 --seq 4096 --avg_ratio 0.1
 
@@ -121,7 +115,7 @@ torchrun --nproc_per_node=2 \
 torchrun --nproc_per_node=2 \
     tests/gpu/profiling/benchmark_collators.py --model qwen3-30b-a3b --ep 2 --mode packing
 
-# Fixed-length comparison (collators equivalent)
+# Fixed-length rows; add --packing or --padding_free for the other collators
 torchrun --nproc_per_node=2 \
     tests/gpu/profiling/benchmark_sft_ep.py --model qwen3-30b-a3b --ep 2 --seq 16384
 ```

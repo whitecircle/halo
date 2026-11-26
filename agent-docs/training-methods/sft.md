@@ -1,8 +1,10 @@
 # Supervised Fine-Tuning (SFT)
 
-Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and is the only method that accepts `lowp_precision` QAT. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
+Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and accepts `lowp_precision` QAT, as does [teacher distillation](distillation/teacher-distillation.md#quantization-aware-distillation) on its student. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
 
 ## Dataset
+
+Dense hybrid Qwen3.5/3.6 text towers have a restricted [CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft).
 
 Conversations under `conversation_field` (default `prompt`):
 
@@ -35,12 +37,12 @@ gradient_checkpointing: true
 output_dir: checkpoints/sft-qwen3-4b
 ```
 
-`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) takes a higher learning rate than a full fine-tune: the shipped SFT LoRA recipes run `1e-4` ([PEFT](../optimization/peft.md#hyperparameters)). `lowp_precision` runs fp8/fp4 matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)).
+`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) takes a higher learning rate than a full fine-tune: the shipped SFT LoRA recipes run `1e-4` ([PEFT](../optimization/peft.md#hyperparameters)). `lowp_precision` simulates fp8/fp4 matmuls over bf16 masters (quantize, dequantize, bf16 matmul; [QAT](../optimization/low-precision-moe-kernels.md)).
 
 Refused at startup:
 
 - `packing` together with `padding_free`, `packing` without an explicit `max_length` (the pack size bounds memory), and `eval_packing: true` without `packing`.
-- Multi-document rows a family's forward cannot keep apart ([Document isolation](../data/collators.md#document-isolation-under-packing)): `packing` on a dense backend for GPT-OSS, Bailing/Ling and GLM-5 Next, `padding_free` on an M-RoPE decoder (Qwen3.5/3.6, Qwen-VL), either on DeepSeek-V4's compressed KV or on GatedDeltaNet layers without their segment-aware kernels, and either on linear-attention layers or short convolutions (Inkling) no segment marker reaches unless `allow_cross_document_linear_attention: true`.
+- Multi-document rows a family's forward cannot keep apart ([Document isolation](../data/collators.md#document-isolation-under-packing)): `packing` on a dense backend for GPT-OSS, Bailing/Ling and GLM-5 Next, either on DeepSeek-V4's compressed KV or on GatedDeltaNet layers without their segment-aware kernels, and either on linear-attention layers or short convolutions (Inkling) no segment marker reaches unless `allow_cross_document_linear_attention: true`.
 - `padding_free` on a non-varlen attention implementation, under CP (which refuses `packing` too) or under PP (use `packing`; [PP packing](../parallelism/pipeline-parallelism.md#packing)).
 - A pinned `flash_attention_4` the load keeps for a softcapped model (Gemma 2 27B; at head_dim 256 the resolver moves the pin to FA2) on packed, padding-free or padded rows (more than one per batch, training or evaluation), before the load: FA4's varlen kernels are not validated with a softcap.
 - TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
@@ -58,7 +60,8 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --expert_parallel_size=8
 
 # the same through the CLI
-halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
+halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --nproc 8 \
+    --expert_parallel_size=8
 
 # single GPU / LoRA
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
@@ -103,7 +106,7 @@ images_field: images
 
 Shipped configs: `examples/sft/qwen3_5/qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 
-Three options apply to every script with a vision path. `freeze_vision_tower: true` freezes the vision and audio towers and their projectors (`media_module_names`, `halo/models/module_tree.py`), training the text tower on image data; adapters freeze the base already and refuse it, as does a checkpoint with no tower. A trained tower takes batches mixing image and text rows under `torchrun`; [Shard groups](../parallelism/data-parallelism.md#shard-groups) names the two setups that refuse a batch with no image. Its blocks train under reentrant checkpointing too, adapters and a fine-tune of some blocks included ([Tower blocks](../parallelism/data-parallelism.md#tower-blocks-under-reentrant-checkpointing)). `min_pixels` and `max_pixels` bound the pixels per image, and so the tokens each one costs, on a processor that resizes by pixel count (the Qwen family; others refuse them, and a pre-processed dataset keeps what it baked). They land on the processor, so the export carries them.
+Three options apply to every script with a vision path. `freeze_vision_tower: true` freezes the vision and audio towers and their projectors (`media_module_names`, `halo/models/introspection/module_tree.py`), training the text tower on image data; adapters freeze the base already and refuse it, as does a checkpoint with no tower. A trained tower takes batches mixing image and text rows under `torchrun`; [Shard groups](../parallelism/data-parallelism.md#shard-groups) names the two setups that refuse a batch with no image. Its blocks train under reentrant checkpointing too, adapters and a fine-tune of some blocks included ([Tower blocks](../parallelism/data-parallelism.md#tower-blocks-under-reentrant-checkpointing)). `min_pixels` and `max_pixels` bound the pixels per image, and so the tokens each one costs, on a processor that resizes by pixel count (the Qwen family; others refuse them, and a pre-processed dataset keeps what it baked). They land on the processor, so the export carries them.
 
 VLM limits are fail-loud and bind the image-declaring **run**, not the multimodal checkpoint: `packing` / `padding_free` (images cannot be packed), `train_on_last_assistant_only` (all assistant turns train), `interleaved_thinking` (no VLM template renders `clear_thinking`), CP (patch features do not slice by token chunk), and `generate_eval_examples` (skipped). `init_from_scratch` is the exception, refused on the **checkpoint** at the model load.
 
@@ -115,7 +118,7 @@ The VLM render applies a chat template, so a PaliGemma checkpoint whose processo
 
 ## Parallelism
 
-Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP. Plain FSDP2 and DDP load the whole model onto every GPU before sharding, so a dense model must fit on one GPU; TP is the route past that ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
+Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP. Plain FSDP2 and DDP load the whole model onto every GPU before sharding, so a dense model must fit on one GPU; TP, or PP across NVLink domains, is the route past that ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk. With `fused_linear_cross_entropy` on, the CP wrapper scores each chunk without a logits plane ([CP fused head loss](../parallelism/context-parallelism.md#fused-head-loss)). In every mode the metrics are reduced once per log, not per micro-batch ([details](../reference/trainer-architecture.md#sft-loss-and-metrics)).
 

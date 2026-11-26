@@ -50,13 +50,14 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import warn_once
 from halo.models.forward_capture import capturing_forward_outputs
-from halo.models.peft_adapters import lora_fold_targets
-from halo.models.unwrapping import unwrap_framework_wrappers
+from halo.models.introspection.unwrapping import unwrap_framework_wrappers
+from halo.models.peft_adapters import has_adapter_layers, lora_fold_targets
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.embedding.embedding_rules import (
     reject_batch_sampler_on_toolkit_loader,
@@ -67,7 +68,6 @@ from halo.trainers.embedding.embedding_rules import (
 )
 from halo.trainers.embedding.injected_lora import (
     folded_backbone_chunks,
-    has_injected_lora,
     require_injected_lora_config,
     restore_injected_lora,
     trainable_tensors,
@@ -76,7 +76,6 @@ from halo.trainers.embedding.preloaded_transformer import (
     PreloadedTransformer,
     patch_sentence_transformer_gradient_checkpointing,
 )
-from halo.trainers.training_args_overrides import keep_all_dataset_columns
 
 logger = logging.getLogger(__name__)
 
@@ -242,7 +241,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         )
         reject_injected_lora_parallelism(
             self.parallelism_config,
-            has_injected_lora=has_injected_lora(backbone),
+            has_injected_lora=has_adapter_layers(backbone),
             has_ep_layers=bool(self._ep_layers()),
         )
         # Structural, so an adapter the save cannot fold raises here on every rank rather than on the save
@@ -382,7 +381,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         marked = broadcast_from_rank0(
             is_global_main_process() and resume_adapter_dir(resume_from_checkpoint) is not None
         )
-        if not has_injected_lora(self._backbone_model()):
+        if not has_adapter_layers(self._backbone_model()):
             if marked:
                 raise ValueError(
                     f"{resume_from_checkpoint} is an injected-LoRA checkpoint ({RESUME_ADAPTER_MARKER_FILE}): "
@@ -416,7 +415,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         """COLLECTIVE. A fold cannot resume: it rounds the delta to the save dtype and leaves no adapter tensors for
         the restored moments. So each checkpoint also carries the trainable tensors unfolded in
         :data:`~halo.checkpoint.format.RESUME_ADAPTER_DIR`, each save rank marking its copy complete last."""
-        if not has_injected_lora(self._backbone_model()):
+        if not has_adapter_layers(self._backbone_model()):
             super()._save_merged_checkpoint_resume_adapter(checkpoint_dir)
             return
         model = self._top_level_model()
@@ -453,7 +452,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
         """ST's writer cannot take EP/TP and FSDP2 DTensors (written un-gathered), EP experts (only the ladder's EP
         saver writes the hub layout), or injected-LoRA adapter keys, which reload as random base weights."""
-        if self._saves_through_distributed_ladder() or has_injected_lora(self._backbone_model()):
+        if self._saves_through_distributed_ladder() or has_adapter_layers(self._backbone_model()):
             self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
         else:
             super()._write_model_payload(ctx, output_dir, _internal_call)
@@ -477,7 +476,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         backbone = ctx.model
         # Fenced: a failed write (ENOSPC, say) raises on every rank instead of leaving the peers blocked.
         with barrier_on_exit(f"Writing the embedding model to {output_dir}"):
-            if has_injected_lora(backbone):
+            if has_adapter_layers(backbone):
                 save_tokenizer(ctx, output_dir)
                 stream_gathered_checkpoint(
                     backbone,

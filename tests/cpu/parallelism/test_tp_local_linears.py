@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 from transformers import DistributedConfig
-from transformers.distributed.tensor_parallel import _get_parameter_plan
+from transformers.distributed.parallel_utils import _get_parameter_plan
 
 from halo.distributed.fsdp import apply_fsdp2_for_tp
 from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh
@@ -27,7 +27,7 @@ from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel import lowp_compute
 from halo.model_loading.parallel import tp as tp_loading
-from halo.models.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
 from tests.common.distributed import fake_process_group, fake_process_group_mesh
 from tests.common.gloo import run_gloo_ranks
 from tests.common.tiny_models import (

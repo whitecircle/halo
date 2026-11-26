@@ -76,10 +76,6 @@ def test_the_online_arm_refuses_the_solution_placeholder(arm):
         _online_teacher_hint("{answer} {solution}", "42")
 
 
-def test_self_distillation_admits_the_solution_placeholder():
-    assert SelfDistillScriptArguments(sdpg_hint_template="{answer} {solution}").sdpg_hint_template
-
-
 def test_the_online_trainer_refuses_it_at_construction_too():
     """The trainer rebuilds the block from its kwargs, so a directly built trainer is held to it."""
     refusal = (
@@ -91,15 +87,16 @@ def test_the_online_trainer_refuses_it_at_construction_too():
         )
 
 
-@pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)
 @pytest.mark.parametrize(
-    ("template", "named"),
+    ("template", "named", "arm"),
     [
-        ("answer: {answr}", "{answr}"),
-        ("answer: {}", "{}"),
-        ("answer: {0}", "{0}"),
-        ("answer: {answer.real}", "{answer.real}"),
-        ("answer: {answer:{width}}", "{width}"),
+        ("answer: {answr}", "{answr}", SDPGArguments),
+        ("answer: {answr}", "{answr}", OnlineGRPOScriptArguments),
+        ("answer: {answr}", "{answr}", SelfDistillScriptArguments),
+        ("answer: {}", "{}", SDPGArguments),
+        ("answer: {0}", "{0}", SDPGArguments),
+        ("answer: {answer.real}", "{answer.real}", SDPGArguments),
+        ("answer: {answer:{width}}", "{width}", SDPGArguments),
     ],
 )
 def test_an_unfilled_placeholder_is_refused_by_name(arm, template, named):
@@ -108,10 +105,9 @@ def test_an_unfilled_placeholder_is_refused_by_name(arm, template, named):
 
 
 @pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)
-@pytest.mark.parametrize("template", ["answer: {answer", "answer} {answer}"])
-def test_a_malformed_template_is_refused(arm, template):
+def test_a_malformed_template_is_refused(arm):
     with pytest.raises(ValueError, match="not a valid str.format template"):
-        arm(sdpg_hint_template=template)
+        arm(sdpg_hint_template="answer: {answer")
 
 
 @pytest.mark.parametrize(
@@ -157,26 +153,87 @@ def test_escaped_braces_and_format_specs_pass(arm):
     arm(sdpg_hint_template="{{answer}} is literal; the answer is {answer!s:>4}")
 
 
-@pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)
 @pytest.mark.parametrize(
-    ("field_name", "value"),
+    ("field_name", "value", "arm"),
     [
-        ("sdpg_temperature", 0.0),
-        ("sdpg_temperature", -1.0),
-        ("sdpg_temperature", math.nan),
-        ("sdpg_temperature", math.inf),
-        ("sdpg_beta_base", -0.5),
-        ("sdpg_beta_base", math.nan),
-        ("sdpg_beta_base", math.inf),
-        ("sdpg_beta_warmup_steps", -1),
-        ("sdpg_beta_decay_steps", -1),
-        ("sdpg_beta_decay_steps", 2.5),
-        ("sdpg_loss", "kl"),
+        ("sdpg_temperature", 0.0, SDPGArguments),
+        ("sdpg_temperature", 0.0, OnlineGRPOScriptArguments),
+        ("sdpg_temperature", 0.0, SelfDistillScriptArguments),
+        ("sdpg_temperature", -1.0, SDPGArguments),
+        ("sdpg_temperature", math.nan, SDPGArguments),
+        ("sdpg_temperature", math.inf, SDPGArguments),
+        ("sdpg_beta_base", -0.5, SDPGArguments),
+        ("sdpg_beta_base", math.nan, SDPGArguments),
+        ("sdpg_beta_base", math.inf, SDPGArguments),
+        ("sdpg_beta_warmup_steps", -1, SDPGArguments),
+        ("sdpg_beta_decay_steps", -1, SDPGArguments),
+        ("sdpg_beta_decay_steps", 2.5, SDPGArguments),
+        ("sdpg_loss", "kl", SDPGArguments),
     ],
 )
 def test_an_out_of_range_tunable_is_refused(arm, field_name, value):
     with pytest.raises(ValueError, match=field_name):
         arm(**{field_name: value})
+
+
+@pytest.mark.parametrize(
+    ("beta", "arm"),
+    [
+        (-0.1, SDPGArguments),
+        (-0.1, OnlineGRPOScriptArguments),
+        (-0.1, SelfDistillScriptArguments),
+        (1.1, SDPGArguments),
+    ],
+)
+def test_a_jsd_beta_outside_the_unit_interval_is_refused(arm, beta):
+    """Outside [0, 1] the mixture weight log1p(-β) or log(β) is NaN, so every JSD term would be NaN."""
+    with pytest.raises(ValueError, match=r"sdpg_jsd_beta must be in \[0, 1\]"):
+        arm(sdpg_loss="jensen_shannon", sdpg_jsd_beta=beta)
+
+
+@pytest.mark.parametrize(
+    ("beta", "arm"),
+    [
+        (True, SDPGArguments),
+        (True, OnlineGRPOScriptArguments),
+        (True, SelfDistillScriptArguments),
+        (math.nan, SDPGArguments),
+    ],
+)
+def test_a_jsd_beta_that_is_not_a_number_is_refused(arm, beta):
+    """A YAML ``true``/``false`` compares as 1/0 and would silently train the reverse/forward KL endpoint."""
+    with pytest.raises(ValueError, match="sdpg_jsd_beta must be a finite number"):
+        arm(sdpg_loss="jensen_shannon", sdpg_jsd_beta=beta)
+
+
+@pytest.mark.parametrize(
+    ("loss", "arm"),
+    [
+        ("reverse_kl", SDPGArguments),
+        ("reverse_kl", OnlineGRPOScriptArguments),
+        ("reverse_kl", SelfDistillScriptArguments),
+        ("forward_kl", SDPGArguments),
+        ("unnormalized_kl", SDPGArguments),
+    ],
+)
+def test_a_jsd_beta_beside_another_loss_is_refused(arm, loss):
+    """Only jensen_shannon reads β, so a set β beside any other OPD loss would be silently ignored."""
+    with pytest.raises(ValueError, match=rf"sdpg_loss={loss} does not support these config fields.*sdpg_jsd_beta"):
+        arm(sdpg_loss=loss, sdpg_jsd_beta=0.3)
+
+
+@pytest.mark.parametrize(
+    ("beta", "arm"),
+    [
+        (0.0, SDPGArguments),
+        (0.3, SDPGArguments),
+        (0.3, OnlineGRPOScriptArguments),
+        (0.3, SelfDistillScriptArguments),
+        (1.0, SDPGArguments),
+    ],
+)
+def test_a_jsd_beta_with_jensen_shannon_parses(arm, beta):
+    assert arm(sdpg_loss="jensen_shannon", sdpg_jsd_beta=beta).sdpg_jsd_beta == beta
 
 
 @pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)

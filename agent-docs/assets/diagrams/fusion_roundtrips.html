@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fusion round trips</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .figure { position: relative; }
+
+  /* Two columns: the two eager kernels on the left, the fused one on the right. */
+  .columns {
+    display: grid;
+    grid-template-columns: 5.4fr 4.1fr;
+    column-gap: 92px;
+  }
+
+  .column { display: flex; flex-direction: column; }
+
+  .column-head {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .column-head span {
+    margin-left: 14px;
+    font-family: var(--sans);
+    font-size: 23px;
+    letter-spacing: 0;
+    color: var(--secondary);
+  }
+
+  .card {
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .hbm {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 76px;
+    margin-top: var(--heading-gap);
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .kernels {
+    display: flex;
+    gap: 20px;
+    margin-top: 224px;
+  }
+
+  .column.fused .kernels { justify-content: center; }
+
+  .kernel {
+    flex: 1;
+    padding: 24px 0 26px;
+    text-align: center;
+  }
+
+  /* The fused kernel is as wide as one eager kernel. */
+  .column.fused .kernel { flex: 0 0 var(--kernel-w); }
+
+  .kernel .name {
+    font-size: 27px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .kernel p {
+    margin-top: 10px;
+    font-size: 23px;
+    color: var(--body);
+  }
+
+  .total {
+    margin-top: 56px;
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .why {
+    margin-top: 10px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+  }
+
+  .time {
+    margin-top: 10px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .why em {
+    font-style: normal;
+    color: var(--hue);
+  }
+
+  /* The tensor a pass carries, beside its arrow. */
+  .tensor {
+    position: absolute;
+    font-size: 25px;
+    line-height: 1;
+    transform: translateY(-50%);
+  }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Fusion turns {eager} HBM passes into {fused}</h1>
+    <p class="subtitle">y = silu(a) × b on {side} × {side} bf16 tensors of {tensor} each, timed on one B300</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="columns" id="columns"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  const PASS = "var(--halo-blue)";
+  const INTERMEDIATE = "var(--halo-violet)";
+  /** Tensors that exist only to be re-read by the next kernel. */
+  const THROWAWAY = ["s"];
+  /** Side of the square bf16 tensors a, b and y in the measured run. */
+  const SIDE = 8192;
+  const BF16_BYTES = 2;
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py with its default sections: in its output,
+  // sections.fusion.variants[], the entries with variant "eager" (F.silu(a) * b) and "liger" (one fused kernel). Fields
+  // kernels_per_call, tensor_passes, bytes_moved and seconds_summary.median (7 repeats).
+  const COLUMNS = [
+    {
+      head: "Eager",
+      measured: { kernels: 2, passes: 5, bytes: 671088640, seconds: 0.00011586560249328613 },
+      kernels: [
+        { name: "s = silu(a)", reads: ["a"], writes: ["s"] },
+        { name: "y = s × b", reads: ["s", "b"], writes: ["y"] },
+      ],
+    },
+    {
+      head: "Fused",
+      measured: { kernels: 1, passes: 3, bytes: 402653184, seconds: 0.00006001023769378662 },
+      kernels: [{ name: "y = silu(a) × b", reads: ["a", "b"], writes: ["y"] }],
+    },
+  ];
+
+  const passes = (column) => column.kernels.reduce(
+    (sum, k) => ({ reads: sum.reads + k.reads.length, writes: sum.writes + k.writes.length }),
+    { reads: 0, writes: 0 },
+  );
+  const [eager, fused] = COLUMNS.map(passes);
+  const total = (p) => p.reads + p.writes;
+  const tensorBytes = SIDE * SIDE * BF16_BYTES;
+
+  // What is drawn must be what was timed: the kernels, the passes and the bytes of each column.
+  for (const column of COLUMNS) {
+    const drawn = total(passes(column));
+
+    if (column.kernels.length !== column.measured.kernels || drawn !== column.measured.passes || drawn * tensorBytes !== column.measured.bytes) {
+      throw new Error(`${column.head}: the drawn kernels and passes differ from the measured run`);
+    }
+  }
+
+  const megabytes = (bytes) => `${Math.round(bytes / 1e6).toLocaleString("en-US")} MB`;
+  const milliseconds = (seconds) => `${(seconds * 1e3).toFixed(3)} ms`;
+  const kernelCount = (n) => `${n} ${n === 1 ? "kernel" : "kernels"}`;
+  const [eagerRun, fusedRun] = COLUMNS.map((column) => column.measured);
+
+  fillValues({ eager: total(eager), fused: total(fused), side: SIDE.toLocaleString("en-US"), tensor: megabytes(tensorBytes) });
+
+  /** The line under each column's total, naming the throwaway tensors in their arrows' colour. */
+  const one = THROWAWAY.length === 1;
+  const why = [
+    [`${eager.reads} reads + ${eager.writes} writes: `, ` ${one ? "exists" : "exist"} only to be re-read by the next kernel`],
+    ["Same math, same FLOPs: ", ` never ${one ? "leaves" : "leave"} registers`],
+  ].map(([before, after]) => () => {
+    const line = el("p", "why", before);
+    const names = el("em", undefined, THROWAWAY.join(" and "));
+    names.style.setProperty("--hue", INTERMEDIATE);
+    line.append(names, after);
+
+    return line;
+  });
+  const totals = [
+    `${total(eager)} tensor passes over HBM, ${megabytes(eagerRun.bytes)}`,
+    `${total(fused)} tensor passes, ${megabytes(fusedRun.bytes)}: ${(eagerRun.bytes / fusedRun.bytes).toFixed(1)} times less traffic`,
+  ];
+  const times = [
+    `${milliseconds(eagerRun.seconds)} measured`,
+    `${milliseconds(fusedRun.seconds)} measured, ${(eagerRun.seconds / fusedRun.seconds).toFixed(1)} times faster`,
+  ];
+
+  const columns = document.getElementById("columns");
+  const built = COLUMNS.map((column, i) => {
+    const node = el("div", i === 0 ? "column" : "column fused");
+    const head = el("div", "column-head", column.head);
+    head.append(el("span", undefined, kernelCount(column.kernels.length)));
+    const hbm = el("div", "card hbm", "HBM");
+    const row = el("div", "kernels");
+    const cards = column.kernels.map((k) => {
+      const card = el("div", "card kernel");
+      card.append(el("div", "name", k.name), el("p", undefined, "In registers"));
+      row.append(card);
+
+      return card;
+    });
+    node.append(head, hbm, row, el("div", "total", totals[i]), why[i](), el("p", "time", times[i]));
+    columns.append(node);
+
+    return { column, hbm, cards };
+  });
+
+  // The fused kernel's card takes the width of an eager one.
+  columns.style.setProperty("--kernel-w", `${built[0].cards[0].getBoundingClientRect().width}px`);
+
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const color = (token) => getComputedStyle(document.documentElement).getPropertyValue(token.slice(4, -1)).trim();
+
+  // Reads run down from HBM into a kernel, writes run back up, spread evenly across the kernel's top.
+  for (const { column, hbm, cards } of built) {
+    const top = box(hbm).b;
+
+    column.kernels.forEach((k, i) => {
+      const card = box(cards[i]);
+      const flows = [...k.reads.map((t) => [t, "read"]), ...k.writes.map((t) => [t, "write"])];
+
+      flows.forEach(([tensor, way], j) => {
+        const x = card.l + ((card.r - card.l) * (j + 1)) / (flows.length + 1);
+        const hue = THROWAWAY.includes(tensor) ? INTERMEDIATE : PASS;
+        const [from, to] = way === "read" ? [top + 1, card.t - 3] : [card.t - 1, top + 3];
+        arrow(wires, x, from, x, to, color(hue));
+        const label = el("div", "tensor", tensor);
+        label.style.cssText = `left:${x + 12}px; top:${(top + card.t) / 2}px; color:${hue}`;
+        figure.append(label);
+      });
+    });
+  }
+</script>
+</body>
+</html>

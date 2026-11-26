@@ -5,13 +5,40 @@ import time
 import types
 from collections import defaultdict
 
+import pytest
 import torch
 import torch.distributed as dist
+from transformers import LlamaConfig, LlamaForCausalLM
 from trl import GRPOTrainer
 
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.grpo.rounds.microbatch_plan import MicrobatchPlan, agree_microbatch_geometry
 
 MAX_COMPLETION_LENGTH = 64
+
+# The packed-microbatch suites' rounds: 16 rows over 4 slots, budgets at which first-fit-decreasing needs 3 bins, so
+# the window keeps one no-op slot and the rows-per-bin rescale is not 1.
+PACKED_ROWS, PACKED_SLOTS = 16, 4
+PACKED_DENSE_ROW_TOKENS = [128 + 128 * i for i in range(PACKED_ROWS)]
+PACKED_DENSE_BUDGET = 6144
+PACKED_MOE_ROW_TOKENS = [64 + 24 * i for i in range(PACKED_ROWS)]
+PACKED_MOE_BUDGET = 1536
+
+
+def tiny_llama(vocab: int, seed: int) -> LlamaForCausalLM:
+    """A seeded two-layer SDPA Llama, small enough to forward on the host."""
+    config = LlamaConfig(
+        vocab_size=vocab,
+        hidden_size=32,
+        intermediate_size=64,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        max_position_embeddings=64,
+    )
+    config._attn_implementation = "sdpa"
+    torch.manual_seed(seed)
+    return LlamaForCausalLM(config)
 
 
 def single_process_accelerator() -> types.SimpleNamespace:
@@ -23,6 +50,7 @@ def single_process_accelerator() -> types.SimpleNamespace:
         num_processes=1,
         sync_gradients=True,
         is_main_process=False,
+        device=torch.device("cpu"),
     )
 
 
@@ -48,6 +76,7 @@ def world_accelerator() -> types.SimpleNamespace:
         num_processes=dist.get_world_size(),
         sync_gradients=True,
         is_main_process=dist.get_rank() == 0,
+        device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
 
@@ -75,11 +104,49 @@ def ragged_round(
     return {k: v.to(device) if isinstance(v, torch.Tensor) else v for k, v in batch.items()}
 
 
+def random_ragged_round(rows: int, vocab: int, seed: int) -> tuple[dict[str, torch.Tensor], torch.Generator]:
+    """A :func:`ragged_round` of random prompt and completion lengths, with the generator that drew them."""
+    gen = torch.Generator().manual_seed(seed)
+    batch = ragged_round(
+        torch.randint(1, 6, (rows,), generator=gen).tolist(),
+        torch.randint(1, 9, (rows,), generator=gen).tolist(),
+        vocab=vocab,
+        seed=seed,
+    )
+    return batch, gen
+
+
+def sampling_side_round(*, vocab: int, close: int, rows: int, seed: int = 5) -> dict:
+    """A ragged round with a forced close, an untrainable row and a tool-output token, for suites that weigh tokens by
+    the engine's log-probs."""
+    gen = torch.Generator().manual_seed(seed)
+    batch = ragged_round(
+        torch.randint(2, 6, (rows,), generator=gen).tolist(),
+        torch.randint(3, 9, (rows,), generator=gen).tolist(),
+        vocab=vocab,
+        seed=seed,
+    )
+    batch["completion_ids"][1, 1] = close
+    batch["completion_ids"][3, 0] = close
+    batch["tool_mask"][2, 1] = 0
+    batch["advantages"][4] = 0.0
+    return batch
+
+
 def stacked(batch: dict) -> tuple[torch.Tensor, torch.Tensor, int]:
     """``(input_ids, attention_mask, logits_to_keep)`` of a round, as the no-grad pass forwards it."""
     ids = torch.cat([batch["prompt_ids"], batch["completion_ids"]], 1)
     mask = torch.cat([batch["prompt_mask"], batch["completion_mask"]], 1)
     return ids, mask, batch["completion_ids"].size(1)
+
+
+def recompute_logps(model, batch: dict) -> torch.Tensor:
+    """The old-policy pass's recompute of a round: every row, no grad, no entropy."""
+    host = packed_host(model, slots=batch["advantages"].size(0), accelerator=single_process_accelerator())
+    host._packs_microbatches = False
+    ids, mask, keep = stacked(batch)
+    with torch.no_grad():
+        return host._get_per_token_logps_and_entropies(model, ids, mask, keep, compute_entropy=False)[0]
 
 
 def scoring_host(model, ref_model, *, chunks: int, accelerator):
@@ -159,11 +226,65 @@ def train_round(host, batch: dict, *, deal: bool, seed: int = 7) -> tuple[float,
     return total, row_logps
 
 
+def packed_host(model, *, slots: int, iterations: int = 1, loss_type: str = "dapo", accelerator):
+    """:func:`loss_host` as the packed trainer sees a window: ``slots`` micro-steps of one generation cycle,
+    ``iterations`` cycles to the optimizer step, the round held in the store."""
+    host = loss_host(model, chunks=slots, accelerator=accelerator, loss_type=loss_type)
+    host.num_iterations = iterations
+    host.current_gradient_accumulation_steps = host.args.gradient_accumulation_steps = slots * iterations
+    host._packs_microbatches = True
+    host._round_store = None
+    host._orders_rows_by_length = False
+    host.pad_token_id = 0
+    host.use_liger_kernel = False
+    host._get_tp_or_etp_process_group = lambda: None
+    return host
+
+
+def train_window(
+    host, batch: dict, plan: MicrobatchPlan | None = None, seed: int = 7
+) -> tuple[float, list[torch.Tensor]]:
+    """One optimizer step's micro-steps through the trainer's own ``compute_loss`` and TRL's buffer: a round one row per
+    chunk, or under ``plan`` its packed slots. ``(summed loss, parameter gradients)``."""
+    host._step, host._buffered_inputs = 0, None
+    if plan is None:
+        host._generate_and_score_completions = lambda _inputs: dict(batch)
+    else:
+        host._generate_and_score_completions = lambda _inputs: host._lay_out_packed_round(dict(batch), plan)
+    for param in host.model.parameters():
+        param.grad = None
+    torch.manual_seed(seed)
+    total = 0.0
+    for _ in range(host.args.gradient_accumulation_steps):
+        inputs = host._prepare_inputs({})
+        host._step += 1
+        loss = type(host).compute_loss(host, host.model, inputs)
+        loss.backward()
+        total += loss.item()
+    grads = [p.grad.to_local() if hasattr(p.grad, "to_local") else p.grad for p in host.model.parameters()]
+    return total, [grad.float().clone() for grad in grads]
+
+
+def windows_close(
+    got: tuple[float, list[torch.Tensor]], want: tuple[float, list[torch.Tensor]], *, rel: float, grad_rtol: float
+) -> bool:
+    """Whether two :func:`train_window` results agree: totals to ``rel``, every gradient to ``grad_rtol``."""
+    return got[0] == pytest.approx(want[0], rel=rel, abs=1e-6) and all(
+        torch.allclose(g, w, rtol=grad_rtol, atol=1e-6) for g, w in zip(got[1], want[1], strict=True)
+    )
+
+
 def with_world_normalizer(batch: dict) -> dict:
     """``batch`` with the world's loss-token count as its DAPO normalizer, as the batch build gathers it."""
     world_items = batch["num_items_in_batch"].clone()
     dist.all_reduce(world_items)
     return batch | {"num_items_in_batch": world_items}
+
+
+def plan_for(batch: dict, budget: int, slots: int, rows: int) -> MicrobatchPlan:
+    """The packed plan of a round's row lengths, as the trainer agrees it."""
+    lengths = (batch["prompt_mask"].sum(1) + batch["completion_mask"].sum(1)).clamp(min=2).tolist()
+    return agree_microbatch_geometry(lengths, budget, slots=slots, ceiling=None, round_rows=rows)
 
 
 def timed_no_grad_pass(host, batch: dict, order: torch.Tensor | None, repeats: int) -> float:
@@ -176,7 +297,7 @@ def timed_no_grad_pass(host, batch: dict, order: torch.Tensor | None, repeats: i
         torch.cuda.synchronize()
         start = time.perf_counter()
         with torch.no_grad():
-            host._recompute_logps_and_routing_masks(ids, mask, keep, None, "train", order)
+            host._recompute_logps_and_routing(ids, mask, keep, None, "train", order)
         torch.cuda.synchronize()
         dist.barrier()
         best = min(best, time.perf_counter() - start)

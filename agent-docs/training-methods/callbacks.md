@@ -14,6 +14,7 @@ Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`halo/e
 | `MoEMetricsCallback` | `moe/*` per-expert load | `enable_moe_metrics: true` (default) |
 | `BalancingBiasCallback` | DeepSeek-V3 bias update, plus `moe/*` | a `bias_update` mode |
 | `TorchProfilerCallback` | Per-rank traces, memory timeline | `enable_torch_profiler: true` ([Debugging](../reference/debugging.md)) |
+| `PhaseTimerCallback` | The `reduce` and `optimizer` phases and the step boundary of the on-policy GRPO [phase times](async-grpo/monitoring.md#phase-times) | `log_phase_times: true`, registered by the trainer |
 | `GradientCheckpointingPlanCallback` | Relaxes gradient checkpointing to what the memory budget needs | `gradient_checkpointing_plan: auto` |
 | `VariableSchedulerCallback` | Schedules a model attribute | Added by SMPO (`use_margin_schedule`) and offline GRPO (`initial_min_log_prob`) |
 | `MtpAcceptanceGate` | Fails a head fit whose held-out acceptance fell | `mtp_train_scope: head_only` ([MTP heads](../optimization/mtp-heads.md#acceptance)) |
@@ -36,21 +37,22 @@ Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline.
 
 | Key (each as `step_*` and `avg_*`) | Meaning |
 |---|---|
-| `tokens_per_second` | `cluster_tokens_per_second` / world size — the headline, comparable across every parallel layout |
+| `tokens_per_second` | `cluster_tokens_per_second` / world size — the headline, comparable across parallel layouts of one model on the same rows |
 | `cluster_tokens_per_second` | Unique cluster tokens over step time: each data-parallel replica's batch once, however many TP, expert-TP, CP or pipeline ranks share it |
 | `step_time_seconds` | Optimizer-step time from the previous step's end to this one's, between CUDA events on the current stream: the host time between two steps (the log, the next batch's fetch) counts, so the steps sum to the wall clock they span, and nothing drains the device for it. The run's first step, and the first of each epoch or after an evaluation or a save, start at their own begin |
-| `mfu_percent`, `tflops_per_sec` | Against the device peak in `halo/hardware.py`; `0.0`, with a startup warning, for an undetected GPU or a GPU/precision pair it lacks |
+| `data_wait_seconds` | Seconds the step spent blocked fetching its micro-batches from the train loader (host `perf_counter` around each `next`, no device sync), the mean over ranks from the step's one existing all-reduce, logged as `step_data_wait_seconds` and `avg_data_wait_seconds`. Near zero when the loader keeps ahead of the GPU; with `dataloader_num_workers: 0` the collation itself shows here |
+| `mfu_percent`, `tflops_per_sec` | Against the MFU reference peak in `halo/hardware.py`, a registry value per GPU and precision: bf16 2,250 TFLOP/s on a B300, above the sustained GEMM peak measured on one ([GPU Training Theory → MFU](../reference/gpu-training-theory.md#mfu)); `0.0`, with a startup warning, for an undetected GPU or a GPU/precision pair it lacks |
 | `smfu_percent`, `smfu_tflops_per_sec` | MoE-aware twin, crediting only the experts that fire; sparse models only |
 
 Memory keys take no prefix: `allocated_gb`, `reserved_gb`, `peak_allocated_gb`, `training_peak_allocated_gb`; `num_full_model_params` adds `distributed_efficiency`.
 
-Off by default: utilization misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`: each micro-batch adds its input shape on the host, and the callback's step end sums the step over the world in the same host read as the step's attention work (HF's own count gathers and syncs on every micro-batch). Without the callback the count is summed at each log and before each save, so it is exact in the logs and in `trainer_state.json` but lags between them in the state a callback sees.
+Off by default: MFU misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`: each micro-batch adds its attended tokens on the device, and the callback's step end sums the step over the world in the same host read as the step's attention work and data wait (HF's own count gathers and syncs on every micro-batch). Without the callback the count is summed at each log and before each save, so it is exact in the logs and in `trainer_state.json` but lags between them in the state a callback sees.
 
-The peak is keyed on `lowp_precision` only on the native path; the simulated path runs bf16 matmuls and scores against the bf16 peak. S-MFU scales the expert term by `(top_k / num_experts) × ep_size`; `expert_tp_size` already divides the local expert params.
+The reference peak is keyed on `lowp_precision` only on the native path; the simulated path runs bf16 matmuls and scores against the bf16 reference peak. S-MFU scales the expert term by `(top_k / num_experts) × ep_size`; `expert_tp_size` already divides the local expert params.
 
-Throughput is measured only where the collator emits `input_ids`. SMPO and embedding emit none, so every step falls back to a padded-length estimate (`per_device_train_batch_size × gradient_accumulation_steps × max_seq × 0.8`) behind one warning — a figure that reads as measured but is not.
+Throughput counts attended tokens, never padding: per token group (`input_ids` and every `<group>_input_ids`, as SMPO's prompt / chosen / rejected and the embedding columns) the `attention_mask` sum, else the `row_lengths` a packing collator emits for rows it keeps apart under pipeline parallelism, else the last `cu_seq_lens_q` offset, else the element count of a batch with nothing to tell (`count_attended_tokens`, `halo/trainers/metrics/token_metrics.py`). SMPO counts a prompt once although its forward runs it with both completions. Online GRPO's loader yields prompts, not token tensors: TRL adds a round's attended prompt and completion tokens to `num_input_tokens_seen` in the step that builds the round, and SDPG's teacher forward is not counted. A step with no usable count (no counter, a step that builds no round when `steps_per_generation` exceeds `gradient_accumulation_steps`, or an implausible delta) falls back to a padded-length estimate (`per_device_train_batch_size × gradient_accumulation_steps × max_seq × 0.8`) behind one warning — a figure that reads as measured but is not.
 
-Three cumulative token counters nest: `num_input_tokens_seen` (HF's, padding included), `num_attended_tokens_seen` (SFT, DPO, KTO and reward, each batch counted once across its TP/ETP/CP group) and `num_unmasked_output_tokens_seen` (`labels != -100`, or the completion mask). Only the first survives a resume, via `trainer_state.json`; it also drives throughput, so tokens/s counts padding.
+Three cumulative token counters nest: `num_input_tokens_seen` (attended tokens under `include_num_input_tokens_seen: all`, the EfficiencyCallback's mode), `num_attended_tokens_seen` (SFT, DPO, KTO and reward, each batch counted once across its TP/ETP/CP group) and `num_unmasked_output_tokens_seen` (`labels != -100`, or the completion mask). Only the first survives a resume, via `trainer_state.json`; it also drives throughput. A run resumed from a `trainer_state.json` written when the counter included padding continues from that saved value.
 
 ### MoEMetricsCallback
 
@@ -64,7 +66,7 @@ Tracks per-expert load for any MoE model with a declared router. A forward hook 
 | `dead_frac` | Fraction of experts that got zero tokens this step |
 | `load_max_first` / `load_max_last` | Max-load ratio for the first / last MoE layer |
 
-Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek-style router selects over biased scores inside an `n_group` mask while publishing raw logits. Routers come from transformers' `_can_record_outputs["router_logits"]` declaration; one returning logits alone re-ranks them and warns once. Counters zero every step, and `log_every_n_steps` follows `logging_steps`.
+Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek-style router selects over biased scores inside an `n_group` mask while publishing raw logits. Routers come from transformers' `_can_record_outputs["router_logits"]` declaration; one returning logits alone re-ranks them and warns once. Counters zero every step, after adding into the run's totals ([below](#expert-token-counts-over-the-run)), and `log_every_n_steps` follows `logging_steps`.
 
 It emits nothing in three cases:
 
@@ -73,6 +75,20 @@ It emits nothing in three cases:
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
 Two live paths bypass the hooks even when wired: an EP layer routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4, Nemotron-H), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
+
+### Expert token counts over the run
+
+Both load callbacks also add each step's counts into a running per-layer, per-expert total, logged step or not, on each rank and with no collective. At every checkpoint the trainer reduces the totals and writes `moe_expert_token_counts.json` into the checkpoint before `trainer_state.json` is published, so a complete checkpoint carries it. A resume reads it back and continues the count. A checkpoint without the file starts the count at the resume.
+
+| Field | Meaning |
+|---|---|
+| `format_version` | The record's schema, now 1. A resume refuses any other on every rank |
+| `counts` | `[num_layers][num_experts]` routed token slots, layers in model order across every pipeline stage. Each layer sums to tokens × `top_k`, padding positions included |
+| `first_step`, `last_step` | The optimizer steps counted, both included |
+| `top_k` | Experts per token |
+| `discard_slot_last` | The last column is a discard slot (Zaya), not an expert |
+
+Unlike the `moe/*` shares, raw counts show every duplicate. TP and expert-TP partners route the same tokens, so their sum is divided by `ParallelismConfig.router_token_replicas`, while CP partners route different chunks and add. If partners route the same tokens differently (a tie broken another way), the save warns and rounds each expert's count on its own, so that layer's total can miss tokens × `top_k` by up to half the expert count. A checkpoint recompute and a no-grad forward add nothing (`counts_toward_expert_load`). Every position the router sees counts, padding included, since the experts compute it too: on a padded batch a layer sums to (tokens + padding positions) × `top_k`. A tree-packed SFT row counts a shared token once per example holding it, in both callbacks, the weights the bias update counts by. A run where neither callback counts writes no file. The file is run state, like `trainer_state.json`: an export that drops the resume state drops it too.
 
 ### BalancingBiasCallback
 
@@ -86,7 +102,7 @@ The mode holds an **export contract**: `bias_update` is accepted only where the 
 |---|---|
 | Zaya | Native persistent `balancing_biases` buffer, in every parallelism mode |
 | GPT-OSS | `router.bias`, the hub router's own logit-space bias |
-| GLM-4, Laguna, GLM-5 Next, Inkling, DeepSeek-V4, Step-3.7, Nemotron-H | `gate.e_score_correction_bias` (Laguna's hub spelling: `experts.e_score_correction_bias`) |
+| GLM-4, Laguna, GLM-5 Next, Inkling, Inkling 2, DeepSeek-V4, Step-3.7, Nemotron-H | `gate.e_score_correction_bias` (Laguna's hub spelling: `experts.e_score_correction_bias`) |
 | Bailing / Ling | The hub gate's persistent `expert_bias`, adopted whole — no side-buffer fallback |
 | LFM-2 | The block's `expert_bias`, materialized with `use_expert_bias` flipped on for the export |
 | Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE | None — `bias_update_transient` only |

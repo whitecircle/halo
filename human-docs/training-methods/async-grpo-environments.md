@@ -20,7 +20,8 @@ advantage, and the loss drives the optimizer step](../../agent-docs/assets/diagr
 `environment_type` picks one: `react_math` and `react_search` (plain-text actions), `native_math`,
 `native_coding` and `native_combined` (native tool calls), `qa_search`, `exam_qa`, `swe` (an
 edit-run-test loop over a workspace), `code_contests`, `codeforces`, or `mcp` (whatever tools an MCP
-server advertises). The
+server advertises). Your own environment class registers alongside these
+([Custom Environments](../../agent-docs/training-methods/async-grpo/environments/custom.md) ↗). The
 [registry](../../agent-docs/training-methods/async-grpo/environments/README.md#registry) ↗ lists each
 one's tools and turn budget. An environment that grades against `answer` refuses a dataset without that
 column at startup
@@ -28,8 +29,10 @@ column at startup
 
 The Ray actor hosts need what their environment needs: a sandbox and a large `TMPDIR` for the code
 environments, outbound network and usually a search API key for the search ones, and the MCP server's
-launcher on `PATH` for `mcp`. Your own environment class registers alongside these
-([Custom Environments](../../agent-docs/training-methods/async-grpo/environments/custom.md) ↗).
+launcher on `PATH` for `mcp`. The actors also score the `judge`, `reward_model` and `whitecircle` terms, so
+their hosts need those terms' keys, a route to their services and a reward model's tokenizer. On a cluster
+joined with `ray_address`, export the keys before `ray start` on each node: actors take that daemon's
+environment, not the trainer's.
 
 > [!WARNING]
 > The default `local` sandbox does not confine the program it runs. Policy-written code can read the
@@ -63,14 +66,17 @@ rewards:
   - source: environment    # the env's grade in [0, 1]: a solved problem, an answer match, a passing test
 ```
 
-`judge` and `reward_model` terms take the same options as on the [online arm](online-grpo.md#rewards).
+`judge`, `reward_model` and `whitecircle` terms work here as in online GRPO ([GRPO Rewards](rewards.md)).
 Only this arm also accepts a **veto judge**, a `judge` that lists `checks`: a fired veto check strips the
 episode of its credit
 ([Veto judge](../../agent-docs/training-methods/grpo/rewards/judge.md#veto-judge) ↗).
 
-Every code-contests recipe audits the whole episode this way, vetoing hacks and tool misuse. These recipes
-set `on_error: invalid`, so a judge outage trains nothing, and a second step in a row with no valid
-episode stops the run
+Every code-contests recipe audits the whole episode this way, vetoing hacks and tool misuse. The auditor is
+`openai/gpt-6-luna` through OpenRouter: every training and eval episode sends it the whole transcript,
+reasoning included, so the run needs `OPENROUTER_API_KEY` and makes one judge request per episode
+(`judge/audit/completion_tokens` and `judge/audit/cost_usd` show what they cost). These recipes set
+`on_error: invalid`, so a judge outage trains nothing, and a second step in a row with no valid episode stops
+the run
 ([Audit judge](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/reward.md#audit-judge) ↗).
 
 Each component logs as `reward/<name>` (`reward/objective` for the environment term)
@@ -86,7 +92,7 @@ model_name_or_path: Qwen/Qwen3.6-35B-A3B
 expert_parallel_size: 4
 environment_type: react_math
 max_turns: 10
-num_rollout_workers: 16            # Ray environment actors per training rank
+rollout_actor_budget: 64            # Ray environment actors per node (16 per rank at 4 GPUs)
 rollout_max_tokens: 8192           # budget for ONE turn, not the trajectory
 enable_prefetch: false             # one server; true overlaps rollout with training
 num_generations: 8                 # episodes per prompt
@@ -98,13 +104,16 @@ learning_rate: 1.0e-06
 ```
 
 `examples/grpo/environmental/environmental-grpo-template.yaml` is the annotated starting point. GPT-OSS,
-Qwen3.5/3.6 and Gemma 4 ship recipes under `examples/grpo/environmental/<family>/{vllm,sglang}/`; the
-SGLang ones are `ep1` only.
+Qwen3.5/3.6, Gemma 4, Qwen3.8-Flash-Next and Inkling 2 ship recipes under
+`examples/grpo/environmental/<family>/{vllm,sglang}/`; the SGLang ones are `ep1` only, and Qwen3.8-Flash-Next
+and Inkling 2 have vLLM recipes only. Inkling 2 trains LoRA that its own vLLM tag loads as an adapter, with
+no weight push, so it starts with `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2`
+instead of the commands under Run ([Inkling 2 → Rollouts](../../agent-docs/models/inkling2.md#rollouts) ↗).
 
 - **Sampling** goes through the `rollout_*` fields. TRL's `top_p`, `top_k`, `min_p`,
   `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one raises at startup.
-- **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference: under EP,
-  ETP or TP a whole unsharded copy on every rank. A PEFT policy is its own reference with the adapter
+- **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference: a whole
+  unsharded copy on every rank, under plain FSDP2 as under EP, ETP or TP. A PEFT policy is its own reference with the adapter
   off.
 
 Three decisions matter more than the rest:
@@ -118,24 +127,29 @@ Three decisions matter more than the rest:
   how much the model should think. The model sees the level only through a chat template that renders it:
   pin one with `chat_template:` plus `force_chat_template: true`, and serve the same file
   ([Reasoning Budgets](../../agent-docs/training-methods/async-grpo/reasoning.md) ↗).
-- **Tool budgets.** `tool_success_reward`, `tool_error_penalty` and `tool_reward_cap` price tool calls. Keep
+- **Tool rewards.** `tool_success_reward`, `tool_error_penalty` and `tool_reward_cap` price tool calls. Keep
   them small beside the objective, or calling tools pays better than finishing the task.
 
 A turn the engine cut at its cap, an empty turn, or one whose every tool call was invalid earns no reward.
 It trains only as a penalty, when its episode scored below the group's mean
 ([Untrainable turns](../../agent-docs/training-methods/async-grpo/objective.md#untrainable-turns) ↗).
 
-### Thinking budgets
+### Reasoning caps and budgets
 
-`reasoning_effort_profiles` gives each level a per-turn `thinking_tokens` budget, which the engine enforces
-by default. `enforce_thinking_cap: false` makes it a soft target stated in the template, closed only at the
-run's ceiling. Engine caps bind on vLLM only; `rollout_backend: sglang` refuses
-`rollout_max_thinking_tokens` and `carry_reasoning`
-([Enforced and soft budgets](../../agent-docs/training-methods/async-grpo/reasoning.md#enforced-and-soft-budgets) ↗).
+The model is told its effort level and nothing else. The engine's per-turn reasoning cap is run-wide, the same at
+every level: `rollout_max_thinking_tokens`, else the turn less `rollout_max_answer_tokens`. It binds on vLLM only;
+`rollout_backend: sglang` refuses `rollout_max_thinking_tokens` and `carry_reasoning`
+([Reasoning cap](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-cap) ↗).
 
-`reasoning_price` and `reasoning_floor` charge long and short reasoning in the trainer. Neither is charged in
-a group where no episode earned the objective, unless `reasoning_terms_in_failed_groups: true`
+Each level's profile in `reasoning_effort_profiles` sets a `reasoning_budget` (reasoning tokens an episode spends
+free, summed over its turns) and a `reasoning_price` charged per 1,000 tokens past it. `reasoning_floor` charges a
+failed episode that reasons under its budget. Neither is charged in a group where no episode earned the objective,
+unless `reasoning_terms_in_failed_groups: true`
 ([Reasoning length reward](../../agent-docs/training-methods/async-grpo/reasoning.md#reasoning-length-reward) ↗).
+
+`rollout_thinking: false` trains with no reasoning step and refuses these caps and budgets. The code-contests notes
+curriculum runs this way, starting from a [notes SFT checkpoint](../../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/README.md#notes-sft-checkpoint) ↗
+([Thinking off](../../agent-docs/training-methods/async-grpo/reasoning.md#thinking-off) ↗).
 
 ### One server or several
 
@@ -148,8 +162,7 @@ next round with the update, training each round one step stale (the importance r
 
 With two or more, list them in `rollout_server_configs`, each with its own `group_port`. Prefetch is
 then on by default. `prefetch_depth` (default 1) collects that many rounds ahead, at that many steps of
-staleness. On SGLang every sync aborts the turns in flight, so `max_retries` must cover the syncs a
-prefetched round spans; the trainer refuses a smaller value.
+staleness.
 
 ## Run
 
@@ -168,7 +181,7 @@ A native-tool environment needs the server started with the family's
 (`VLLM_TOOL_CALLING_FLAGS=`, as above).
 
 Before a long run, put the config through a few rows, which exercises the parser, the template and the
-sandbox or judge backend in a minute:
+sandbox or judge backend:
 
 ```bash
 halo run eval-env --training_config <config>.yaml --dataset <hub-id-or-path> --split train \
@@ -190,9 +203,11 @@ the same loop: set `eval_strategy`, and `num_generations_eval: 1` for a fast pas
   `sampling/degenerate_group_frac` counts them.
 - `sampling/logratio_mean` drifting steadily negative means the weight sync is broken and the policy
   trains on stale rollouts. If `advantage/net_token_mass` also stays negative and `entropy` climbs, a
-  KL-free run is drifting instead: turn on `balance_token_mass` and the early stop.
-- `episode/reward_scored` below 1 means a judge or reward model is failing; `<source>/<name>/scored`
-  names which one. Under `on_error: invalid` those episodes also leave training, and
+  KL-free run is drifting instead: arm the early stop with `early_stop_entropy_band` or
+  `early_stop_logratio_gap` (`balance_token_mass` cancels the net push, whose measured
+  entropy effect is small).
+- `episode/reward_scored` below 1 means a judge, reward model or White Circle check is failing;
+  `<source>/<name>/scored` names which one. Under `on_error: invalid` those episodes also leave training, and
   `sampling/invalid_episode_frac` rises.
 
 Rollouts land in `<output_dir>/completions/` as parquet, one directory per logged step holding a part

@@ -30,13 +30,12 @@ from halo.checkpoint.tools.offline_export import (
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter, cast_to_save_dtype
+from halo.kernels.lowp.block_fp8 import SCALE_SUFFIX
 
 logger = logging.getLogger(__name__)
 
-# Matched exactly: GLM-5 also stores real weights named ``hc_attn_scale`` / ``hc_ffn_scale`` a looser match would drop.
-_FP8_SCALE_SUFFIX = "_scale_inv"
 # Mistral's quant sidecars, matched exactly: the per-weight dequant scale and the static activation scales.
-_STATIC_SIDECAR_SUFFIXES = (_FP8_SCALE_SUFFIX, "_activation_scale", ".activation_scale")
+_STATIC_SIDECAR_SUFFIXES = (SCALE_SUFFIX, "_activation_scale", ".activation_scale")
 
 
 @dataclass(frozen=True)
@@ -189,8 +188,9 @@ def block_fp8_rules(source: str) -> DequantRules:
         return tensor if scale is None else dequantize_block_fp8(tensor, scale, block_shape, name)
 
     return DequantRules(
-        scale_suffix=_FP8_SCALE_SUFFIX,
-        is_sidecar=lambda name: name.endswith(_FP8_SCALE_SUFFIX),
+        scale_suffix=SCALE_SUFFIX,
+        # Matched exactly: GLM-5 also stores real weights named ``hc_attn_scale`` / ``hc_ffn_scale``.
+        is_sidecar=lambda name: name.endswith(SCALE_SUFFIX),
         validate_scale=validate_scale,
         convert=convert,
     )
@@ -236,7 +236,7 @@ def static_fp8_rules(_source: str) -> DequantRules:
         return header_nbytes(header)
 
     return DequantRules(
-        scale_suffix=_FP8_SCALE_SUFFIX,
+        scale_suffix=SCALE_SUFFIX,
         is_sidecar=_is_static_fp8_sidecar,
         validate_scale=validate_scale,
         convert=_convert_static_fp8,

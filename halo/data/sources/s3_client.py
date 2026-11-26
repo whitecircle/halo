@@ -18,6 +18,7 @@ from tqdm import tqdm
 from halo.data.sources.dataset_cache import compute_etag_fingerprint
 from halo.data.sources.paths import METADATA_FILE, parse_dataset_source
 from halo.env import env_int, env_str
+from halo.hardware import free_disk_bytes
 from halo.log import info_logger
 
 logger = info_logger(__name__)
@@ -257,9 +258,17 @@ class S3Client:
             return None
 
     def delete_keys(self, keys: list[str]) -> None:
+        """Raises naming the first key S3 refused: ``DeleteObjects`` answers a refusal with success and an error list."""
         for start in range(0, len(keys), _S3_DELETE_BATCH):
             batch = [{"Key": key} for key in keys[start : start + _S3_DELETE_BATCH]]
-            self.boto_client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
+            errors = self.boto_client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch}).get("Errors")
+            if errors:
+                first = errors[0]
+                raise PermissionError(
+                    f"S3 refused to delete {len(errors)} of {len(batch)} object(s) in s3://{self.bucket}, first "
+                    f"{first.get('Key')} ({first.get('Code')}: {first.get('Message')}). Check that the credentials "
+                    f"may delete there (s3:DeleteObject, no object lock or legal hold), then retry."
+                )
 
     def list_prefix_objects(self, prefix: str) -> list[dict[str, Any]]:
         """Under an exact string prefix (no trailing-slash forcing)."""
@@ -277,8 +286,9 @@ class S3Client:
         overwrite: bool = True,
         show_progress: bool = False,
     ) -> str:
-        """Returns the S3 URI; an existing prefix raises unless ``overwrite``. Never clears the prefix up front, and
-        the ``metadata.json`` marker goes first and uploads last, so a torn upload reads as no preprocessed dataset."""
+        """Returns the S3 URI; an existing prefix raises unless ``overwrite``. Never clears the prefix up front: the
+        ``metadata.json`` marker goes first, objects the new tree lacks after the upload, and the marker last, so a torn
+        upload reads as no preprocessed dataset."""
         local_path = os.path.abspath(local_path)
         if not os.path.isdir(local_path):
             raise ValueError(f"Local path is not a directory: {local_path}")
@@ -310,15 +320,16 @@ class S3Client:
             return file_size
 
         parallel_s3_transfer(bulk_items, _upload_one, desc=f"Uploading to {key}", show_progress=show_progress)
-        for item in marker_items:  # sequential and last: the parallel bulk gives no ordering
-            _upload_one(item)
 
-        # Only after the complete upload: a stale shard numbering would otherwise ride into the new dataset.
+        # After the bulk, so a failed upload removes nothing more of the old tree; before the marker, so a marker never
+        # stands beside the old tree's leftovers.
         stale = sorted(existing_keys - {f"{full_key}/{rel}" for _, rel, _ in files_to_upload})
-        for stale_key in stale:
-            self.boto_client.delete_object(Bucket=self.bucket, Key=stale_key)
+        self.delete_keys(stale)
         if stale:
             logger.info(f"Swept {len(stale)} stale object(s) from {s3_uri}")
+
+        for item in marker_items:  # sequential and last: the parallel bulk gives no ordering
+            _upload_one(item)
 
         size_mb = sum(size for _, _, size in files_to_upload) / (1024 * 1024)
         logger.info(f"Uploaded folder ({len(files_to_upload)} files, {size_mb:.2f} MB) to {s3_uri}")
@@ -332,7 +343,8 @@ class S3Client:
         overwrite: bool = True,
         show_progress: bool = False,
     ) -> str:
-        """Returns ``local_path``; an existing one is replaced when ``overwrite``, else raises."""
+        """Returns ``local_path``; an existing one is removed first when ``overwrite``, else raises. A folder larger than
+        the free space at ``local_path`` raises before the transfer."""
         full_key = self.full_key(key, subfolder)
         s3_uri = self.s3_uri(key, subfolder)
 
@@ -346,7 +358,6 @@ class S3Client:
                 shutil.rmtree(local_path)
             else:
                 raise FileExistsError(f"Local folder already exists: {local_path}. Use overwrite=True to replace.")
-        os.makedirs(local_path, exist_ok=True)
         prefix = full_key.rstrip("/") + "/"
         # A key ending in "/" is a folder marker (the S3 console's "Create folder"), not a file.
         files_to_download = [
@@ -355,6 +366,13 @@ class S3Client:
             if not obj["Key"].endswith("/")
         ]
         total_size = sum(size for _key, _relative_path, size in files_to_download)
+        free = free_disk_bytes(local_path)
+        if total_size > free:
+            raise OSError(
+                f"{s3_uri} holds {total_size / 1e9:.1f} GB but {local_path} has {free / 1e9:.1f} GB free. Free space "
+                f"there or download to a larger volume (for a training load's cache, HALO_S3_DATASET_CACHE_DIR)."
+            )
+        os.makedirs(local_path, exist_ok=True)
 
         # Pre-create the tree single-threaded so the workers never race on os.makedirs of a shared parent.
         for _s3_key, relative_path, _size in files_to_download:

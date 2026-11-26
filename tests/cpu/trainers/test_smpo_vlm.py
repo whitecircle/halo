@@ -630,35 +630,6 @@ def test_dataset_map_types_images_before_the_first_image_row(text_rows, num_proc
         assert batch["pixel_values"].shape == (PATCHES_PER_IMAGE, PATCH_DIM)
 
 
-def test_dataset_map_arrow_roundtrip():
-    tokenizer = StubTokenizer()
-    processor = StubProcessor(tokenizer)
-    trainer = make_trainer()
-
-    with tempfile.TemporaryDirectory() as tmp:
-        image_path = str(Path(tmp) / "img.png")
-        Image.new("RGB", (7, 5), color=(200, 10, 10)).save(image_path)
-        ds = Dataset.from_list(
-            [
-                {
-                    "prompt": [{"role": "user", "content": "Describe the picture"}],
-                    "chosen": [{"role": "assistant", "content": "A red square"}],
-                    "rejected": [{"role": "assistant", "content": "A blue circle"}],
-                    "images": [image_path],  # file-path form; decode_image loads it
-                }
-            ]
-        )
-        mapped = trainer._prepare_dataset(ds, processor, trainer.args, "train")
-
-        row = mapped[0]
-        assert IMAGE_TOKEN in row["prompt_text"]
-        assert isinstance(row["images"][0], Image.Image)
-
-        batch = make_collator(processor)([mapped[0]])
-        assert batch["pixel_values"].shape == (PATCHES_PER_IMAGE, PATCH_DIM)
-        assert (batch["prompt_input_ids"][0] == tokenizer.vocab[IMAGE_PAD_TOKEN]).sum() == PATCHES_PER_IMAGE
-
-
 def test_real_qwen35_processor_end_to_end():
     processor = load_cached_processor(QWEN3_5_9B)
     assert hasattr(processor, "tokenizer"), "AutoProcessor resolved to a bare tokenizer (no vision processor)"

@@ -8,12 +8,15 @@ from halo.environments.tasks.coding.program_source import is_output_only_change
 # Per graded submission, in order; ``episode/resubmission_improved`` reads it.
 SUBMISSION_PASS_FRACS_KEY = "submission_pass_fracs"
 IDENTICAL_RESUBMISSIONS_KEY = "identical_resubmissions"
-# Normalized; one whose grade the backend lost is not kept. Private: it leaves the record with the grading payload.
+# Normalized program -> (its submission ordinal, its grade); one whose grade the backend lost, or whose grading budget
+# ran out before any test failed, is not kept. Private: it leaves the record with the grading payload.
 GRADED_PROGRAMS_KEY = "_graded_programs"
 # Per failed graded submission, whether a scratchpad run was still left when its turn began: a run spent
 # in the same turn returned nothing the program could have been fixed from.
 FAILED_SUBMISSION_RUNS_LEFT_KEY = "_failed_submission_runs_left"
 TURN_RUNS_LEFT_KEY = "_turn_runs_left"
+# Set once a reply has refused a scratchpad call for the spent budget: a later such call was sent knowing it.
+RUN_REFUSAL_SHOWN_KEY = "_run_refusal_shown"
 # Normalized, and how many had run as the turn began: a run in the submission's own turn informed nothing.
 RUN_PROGRAMS_KEY = "_run_programs"
 TURN_RUN_PROGRAMS_KEY = "_turn_run_programs"

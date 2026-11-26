@@ -2,17 +2,13 @@
 
 import math
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING
 
 from halo.config_validation import ValidatedConfig, present, require_int
 from halo.distributed.expert_parallel.config import EPBufferBackend
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
 from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
-from halo.models.context_window import bounded_row_length
-
-if TYPE_CHECKING:
-    from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
 
 
 @dataclass
@@ -103,8 +99,8 @@ class ParallelismArguments(ValidatedConfig):
         default=LowpSpec.precision,
         metadata={
             "help": "Low-precision GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
-            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only; "
-            "Halo's paths measured slower than bf16. "
+            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT and "
+            "teacher distillation (on the student) only; Halo's paths measured slower than bf16. "
             "See agent-docs/optimization/low-precision-moe-kernels.md#usage."
         },
     )
@@ -154,6 +150,14 @@ class ParallelismArguments(ValidatedConfig):
             "See agent-docs/parallelism/expert-parallelism.md#model-loading."
         },
     )
+    frozen_quantized_experts: bool = field(
+        default=ParallelismConfig.frozen_quantized_experts,
+        metadata={
+            "help": "Keep a block-scaled release's routed experts in their shipped NVFP4/MXFP8 layout as a frozen "
+            "base, dequantized per expert GEMM, instead of a bf16 copy (Inkling 2). "
+            "See agent-docs/models/inkling2.md#frozen-quantized-experts."
+        },
+    )
     ep_buffer_backend: EPBufferBackend = field(
         default=ParallelismConfig.ep_buffer_backend,
         metadata={
@@ -175,7 +179,8 @@ class ParallelismArguments(ValidatedConfig):
     tensor_parallel_size: int = field(
         default=ParallelismConfig.tp_size,
         metadata={
-            "help": "Tensor-parallel size for attention, embeddings and lm_head (> 1 enables TP); it must divide "
+            "help": "Tensor-parallel size (> 1 enables TP): attention, MLP and the lm_head's vocab dim (a tied "
+            "embedding's too) on a dense model, attention only on a MoE; it must divide "
             "the NVLink domain, and FSDP2 data-parallelizes across the TP groups. Not compatible with context, "
             "expert-tensor or pipeline parallelism, or with any LoRA."
         },
@@ -310,18 +315,61 @@ class ParallelismArguments(ValidatedConfig):
             require_int(type(self).__name__, pipeline_split=layers)
 
 
-def _reject_lowp_outside_sft(lowp: LowpSpec) -> None:
+def _reject_unsupported_lowp(lowp: LowpSpec, trainer_cls) -> None:
     """Refuse a low-precision setting a trainer without ``SUPPORTS_LOWP_PRECISION`` would parse and ignore."""
     if lowp.precision != "bf16":
         raise ValueError(
-            f"lowp_precision={lowp.precision!r} is only validated for SFT training; this "
-            "trainer runs in bf16. Remove lowp_precision from the config (or use the SFT script)."
+            f"lowp_precision={lowp.precision!r} is not supported by {trainer_cls.__name__}, which would train in "
+            f"bf16. Remove lowp_precision from the config, or use a trainer that sets SUPPORTS_LOWP_PRECISION."
         )
     ignored = lowp.non_default_shape_fields()
     if ignored:
         raise ValueError(
-            f"{', '.join(ignored)} apply only to SFT training and would be silently dropped here. "
-            "Remove them from the config, or run the SFT script."
+            f"{', '.join(ignored)} are not supported by {trainer_cls.__name__} and would be silently dropped. "
+            "Remove them from the config, or use a trainer that sets SUPPORTS_LOWP_PRECISION."
+        )
+
+
+def _declared_forward_budget(trainer_cls, training_config, row_sources: tuple) -> tuple[int, int]:
+    """``(rows per forward, row length)`` the run declares to the EP dispatch gate; ``(0, 0)`` for a config with no
+    ``max_length`` field unless the trainer's rows are generation-shaped. Length 0 is unbounded: the gate then judges
+    the model's context window. A generation-shaped run also sizes the rows of an evaluation it runs."""
+    generation_shaped = trainer_cls.GENERATION_SHAPED_ROWS
+    if not (generation_shaped or hasattr(training_config, "max_length")):
+        return 0, 0
+    batch_sizes = [int(getattr(training_config, "per_device_train_batch_size", 0) or 0)]
+    if generation_shaped and (
+        getattr(training_config, "eval_strategy", "no") not in ("no", None)
+        or getattr(training_config, "eval_on_start", False)
+    ):
+        batch_sizes.append(int(getattr(training_config, "per_device_eval_batch_size", 0) or 0))
+    rows = trainer_cls.FORWARD_ROWS_PER_EXAMPLE * max(batch_sizes)
+    return rows, trainer_cls.declared_row_length(training_config, *row_sources) or 0
+
+
+def reject_frozen_experts_without_peft_adapters(dist_args, model_config) -> None:
+    """``frozen_quantized_experts`` trains a PEFT adapter, with or without expert adapters beside it: no save exports
+    the frozen banks, so a full fine-tune over them would fail at its first checkpoint, and expert adapters alone are
+    served by no engine and merged into no packed expert. Runs before ``split_expert_lora_targets`` peels the
+    expert targets."""
+    if not dist_args.frozen_quantized_experts:
+        return
+    if not getattr(model_config, "use_peft", False):
+        raise ValueError(
+            "frozen_quantized_experts needs use_peft: true with LoRA targets: the frozen expert banks are exported by "
+            "no save, so a full fine-tune over them fails at its first checkpoint, while an adapter run saves its "
+            "adapters alone."
+        )
+    targets = model_config.lora_target_modules
+    if targets is not None and all(
+        expert_target_projections(target) for target in ([targets] if isinstance(targets, str) else targets)
+    ):
+        raise ValueError(
+            "frozen_quantized_experts needs a LoRA target outside the routed experts, and lora_target_modules "
+            f"{targets!r} names none: expert targets train as native expert adapters with no PEFT model beside them, "
+            "which adapter sync and the export-engine-adapter tool serve only beside an attention adapter, and no "
+            "merge folds a delta into the packed experts. Add an attention target, such as o_proj: "
+            "lora_target_modules: [o_proj, gate_up_proj, down_proj]."
         )
 
 
@@ -331,17 +379,19 @@ def parallelism_config_from_args(
     trainer_cls,
     training_config=None,
     supports_init_from_scratch: bool = False,
-    expert_lora: "ExpertLoraSpec | None" = None,
+    expert_lora: ExpertLoraSpec | None = None,
+    row_sources: tuple = (),
 ) -> ParallelismConfig:
     """The ``ParallelismConfig`` the parsed arguments describe. Refuses here, before any model loads, a CP/PP size
     ``trainer_cls`` rejects, ``lowp_*`` without ``SUPPORTS_LOWP_PRECISION``, ``init_from_scratch`` without
     ``supports_init_from_scratch``, and ``full_determinism`` on an EP group spanning NVLink domains.
-    ``training_config`` also declares the token budget the DeepEP dispatch-ceiling gate judges. ``expert_lora`` is
+    ``training_config`` also declares the token budget the DeepEP dispatch-ceiling gate judges, with ``row_sources``
+    the script's other objects that carry a row-length bound (the script arguments, the rollout config). ``expert_lora`` is
     passed here, not assigned onto the result: only construction runs its PP and expert-TP refusals, and
     ``ep_config()`` caches the ``EPConfig``."""
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not trainer_cls.SUPPORTS_LOWP_PRECISION:
-        _reject_lowp_outside_sft(lowp)
+        _reject_unsupported_lowp(lowp, trainer_cls)
 
     # Only SFT threads init_from_scratch into the loader; elsewhere the run would fine-tune pretrained weights.
     if not supports_init_from_scratch and dist_args.init_from_scratch:
@@ -353,6 +403,8 @@ def parallelism_config_from_args(
     trainer_cls.reject_undeclared_axes(
         cp_size=dist_args.context_parallel_size, pp_size=dist_args.pipeline_parallel_size
     )
+
+    rows_per_forward, row_length = _declared_forward_budget(trainer_cls, training_config, row_sources)
 
     # Fields both dataclasses spell identically forward themselves; only renames and derivations stay explicit.
     kwargs = {
@@ -367,16 +419,14 @@ def parallelism_config_from_args(
         ep_fp32_experts=dist_args.fp32_experts,
         expert_lora=expert_lora,
         lowp=lowp,
-        # No max_length field (generation-shaped budgets) declares no rows; ``max_length: null`` declares rows and
-        # leaves their length to the gate's context-window resolution.
-        ep_rows_per_device=(
-            trainer_cls.FORWARD_ROWS_PER_EXAMPLE * int(getattr(training_config, "per_device_train_batch_size", 0) or 0)
-            if hasattr(training_config, "max_length")
-            else 0
-        ),
-        ep_declared_max_length=bounded_row_length(training_config) or 0,
+        ep_rows_per_device=rows_per_forward,
+        ep_declared_max_length=row_length,
     )
     config = ParallelismConfig(**kwargs)
+    # An open-ended generation-shaped row has only the context window to be judged by, which every node-local run
+    # exceeds; the Gin ceiling it can hit on a cross-domain group is the one worth refusing at load.
+    if trainer_cls.GENERATION_SHAPED_ROWS and not row_length and not config.requires_rdma:
+        config.ep_rows_per_device = 0
     if config.pp_size > 1:
         # One MoE forward carries one microbatch, not the whole step.
         microbatches = config.pp_microbatch_count(getattr(training_config, "gradient_accumulation_steps", 1) or 1)

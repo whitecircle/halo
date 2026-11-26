@@ -157,9 +157,20 @@ def _resolve(config, request) -> str:
 _MASK_CARRIER = {"gemma": SDPA, "gemma2": FLEX}
 
 
-@pytest.mark.parametrize("arch", ["blackwell", "hopper"])
-@pytest.mark.parametrize("request_", [None, *_FLASH, SDPA], ids=lambda r: str(r))
-@pytest.mark.parametrize("text_model_type", ["gemma", "gemma2"])
+@pytest.mark.parametrize(
+    ("text_model_type", "request_", "arch"),
+    [
+        pytest.param("gemma", None, "blackwell", id="gemma-None-blackwell"),
+        pytest.param("gemma", None, "hopper", id="gemma-None-hopper"),
+        pytest.param("gemma2", None, "blackwell", id="gemma2-None-blackwell"),
+        pytest.param("gemma2", None, "hopper", id="gemma2-None-hopper"),
+        pytest.param("gemma", FA2, "blackwell", id="gemma-flash_attention_2-blackwell"),
+        pytest.param("gemma2", FA3, "hopper", id="gemma2-flash_attention_3-hopper"),
+        pytest.param("gemma", FA4, "blackwell", id="gemma-flash_attention_4-blackwell"),
+        pytest.param("gemma", SDPA, "blackwell", id="gemma-sdpa-blackwell"),
+        pytest.param("gemma2", SDPA, "hopper", id="gemma2-sdpa-hopper"),
+    ],
+)
 def test_a_prefix_lm_never_resolves_to_a_flash_kernel(text_model_type, request_, arch):
     """No flash kernel reads ``token_type_ids``, so a flash run would train every answer bidirectionally."""
     _, config = _tiny(text_model_type)

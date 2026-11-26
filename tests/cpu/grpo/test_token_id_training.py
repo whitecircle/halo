@@ -1,18 +1,125 @@
 """Env-GRPO ``train_on_sampled_tokens``: parsing ``token_id:N`` logprobs and the per-turn row assembly. A row's
 completion is that turn's captured ids verbatim, its prompt the serving-template render of the prior history."""
 
+import asyncio
+import json
 import types
+from unittest import mock
 
 import pytest
 import torch
 
-from halo.environments.engine_wire import _extract_token_ids, _extract_token_logprobs
-from halo.environments.episode import RolloutResult
-from halo.environments.messages import Message, Trajectory
+import halo.environments.protocols.mcp as mcp_module
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY
+from halo.environments.episodes.messages import Message, Trajectory
+from halo.environments.rollouts.engine_wire import _extract_token_ids, _extract_token_logprobs
+from halo.environments.rollouts.episode_loop import RolloutResult
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
+from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
-from tests.common.models import GPT_OSS_20B
+from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
+from halo.trainers.metrics.world_metrics import WorldMetrics
+from tests.common.env_grpo_batch import engine_view_env
+from tests.common.models import GPT_OSS_20B, QWEN3_6_MOE_35B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
+from tests.cpu.environments.test_mcp_lifecycle import _StubMCPEnv
+
+
+class _ToolAwareTokenizer:
+    model_max_length = 4096
+
+    def apply_chat_template(self, messages, *, tools, tokenize, add_generation_prompt):
+        schema = json.dumps(tools) if tools else ""
+        text = schema + "".join(f"<{m['role']}>{m['content']}" for m in messages)
+        return text + ("<assistant>" if add_generation_prompt else "")
+
+    def __call__(self, text, *, add_special_tokens):
+        return {"input_ids": list(text.encode())}
+
+
+class _DiscoveryRenderHost(AsyncRolloutMixin, TrajectoryTokenizeMixin):
+    """Run the real startup and row builders without a model, Ray workers or an engine."""
+
+    _rollout_start_callback = None
+    _rollout_backend = None
+    _rollout_routing_replay = False
+
+    def __init__(self, env, loop, tokenizer, train_on_sampled_tokens):
+        self._rollout_env = env
+        self._loop = loop
+        self._tokenizer = self.processing_class = tokenizer
+        self._warned_once = set()
+        self._world_metrics = WorldMetrics()
+        self.async_config = types.SimpleNamespace(
+            isr_engine_reference=False,
+            train_on_sampled_tokens=train_on_sampled_tokens,
+            rollout_chat_template_kwargs={},
+            max_train_row_tokens=None,
+        )
+        self._start_rollout_pool = mock.Mock()
+        self._form_weight_sync_group = mock.Mock()
+        self.add_callback = mock.Mock()
+        self._is_tp_follower = lambda: False
+        self._broadcast_object_from_tp_leader = lambda schema: schema
+
+
+def test_dynamic_tool_rerender_before_startup_raises():
+    env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=True, get_tools_schema=lambda: [])
+    host = _DiscoveryRenderHost(env, None, _ToolAwareTokenizer(), train_on_sampled_tokens=False)
+    with pytest.raises(RuntimeError, match="Dynamic tool schema has not been discovered at rollout startup"):
+        host._render_messages_to_ids([Message.user("task")], True, {})
+
+
+@pytest.mark.parametrize("episode_scratch", [False, True])
+@pytest.mark.parametrize(
+    ("train_on_sampled_tokens", "sampled_ids"),
+    [(False, [1]), (True, None), (True, [1])],
+    ids=["trajectory", "missing-sampled-ids", "missing-prompt-ids"],
+)
+def test_all_mcp_rerenders_match_the_connected_prompt(
+    monkeypatch, episode_scratch, train_on_sampled_tokens, sampled_ids
+):
+    """A nested MCP schema discovered at startup is present in every re-rendered training prompt."""
+
+    async def list_tools():
+        schema = {"type": "object", "properties": {"values": {"type": "array", "items": {"type": "integer"}}}}
+        tool = types.SimpleNamespace(name="stub_tool", description="a stub", inputSchema=schema)
+        return types.SimpleNamespace(tools=[tool])
+
+    monkeypatch.setattr(mcp_module, "ClientSession", lambda read, write, **kwargs: read.session)
+    reference, env = (_StubMCPEnv(scratch_allowlist=True, episode_scratch=episode_scratch) for _ in range(2))
+    reference.stub_session.list_tools = env.stub_session.list_tools = list_tools
+    tokenizer = _ToolAwareTokenizer()
+    user = Message.user("task")
+    trajectory = Trajectory()
+    trajectory.add_message(user)
+    trajectory.add_message(Message.assistant("done", token_ids=sampled_ids))
+    rollout = RolloutResult(prompt="task", trajectory=trajectory)
+
+    def render_reference():
+        text = tokenizer.apply_chat_template(
+            [user.to_dict()], tools=reference.get_tools_schema(), tokenize=False, add_generation_prompt=True
+        )
+        return tokenizer(text, add_special_tokens=False)["input_ids"]
+
+    before_discovery = render_reference()
+    with asyncio.Runner() as runner:
+        runner.run(reference.connect())
+        expected = render_reference()
+        runner.run(reference.disconnect())
+        host = _DiscoveryRenderHost(env, runner.get_loop(), tokenizer, train_on_sampled_tokens)
+        host._init_async_components()
+        assert expected != before_discovery
+        for _ in range(2):
+            ((row,),) = host._tokenize_step_rows([rollout])
+            assert row.prompt_ids.tolist() == expected
+    assert len(env.transports) == 1 and env.stub_transport.exited
+
+
+_WIRE_ARGUMENTS = json.dumps({"code": "print(int(input()) + 1)"})
 
 
 def _choice(tokens):
@@ -61,8 +168,10 @@ def _make_trainer_stub(tok):
         _tokenizer=tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
-        _carry_reasoning=False,
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
+        _rollout_env=engine_view_env(False),
         _rows_over_cap=0,
     )
     # gpt-oss ships model_max_length as the unset sentinel, so _context_limit falls back to the config.
@@ -91,8 +200,10 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
         _tokenizer=fake_tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
-        _carry_reasoning=False,
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
+        _rollout_env=engine_view_env(False),
         _rows_over_cap=0,
     )
     stub.model = types.SimpleNamespace(config=types.SimpleNamespace(max_position_embeddings=131072))
@@ -110,6 +221,34 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
     assert len(rows) == 1
     assert rows[0][0].tolist() == engine_prompt, "row prompt must be the engine's rendered ids verbatim"
     assert rows[0][1].tolist() == comp
+
+
+class _EffortRecorder:
+    """Records the ``reasoning_effort`` every render receives; one id per character."""
+
+    model_max_length = 100_000
+
+    def __init__(self):
+        self.efforts = []
+
+    def apply_chat_template(self, messages, tools=None, tokenize=False, add_generation_prompt=False, **kwargs):
+        self.efforts.append(kwargs.get("reasoning_effort", "<<unset>>"))
+        return "".join(f"<{m['role']}>{m.get('content', '')}" for m in messages)
+
+    def __call__(self, text, add_special_tokens=False):
+        return {"input_ids": [ord(c) for c in text]}
+
+
+def test_a_turn_without_engine_prompt_ids_renders_its_prompt_at_the_episodes_level():
+    """The fallback render stands in for the engine's: it must state the level the episode was sampled at, or the
+    row trains under a prompt the model never saw."""
+    traj = Trajectory(reasoning_effort="high")
+    traj.add_message(Message.user("solve it"))
+    traj.add_message(Message.assistant("done", token_ids=[7, 8, 9]))
+    recorder = _EffortRecorder()
+    rows = _make_trainer_stub(recorder)._tokenize_trajectory_turns(RolloutResult(prompt="solve it", trajectory=traj))
+    assert rows[0][1].tolist() == [7, 8, 9]
+    assert recorder.efforts and set(recorder.efforts) == {"high"}, recorder.efforts
 
 
 def test_per_turn_assembly_uses_sampled_ids_verbatim():
@@ -203,7 +342,7 @@ def test_fallback_context_render_is_the_engine_view():
             return [1, 2, 3]
 
         stub = _render_stub(render)
-        stub._carry_reasoning = carry
+        stub._rollout_env = engine_view_env(carry)
         stub._tokenize_trajectory_turns(_episode())
         assert seen == [expected], carry
 
@@ -240,8 +379,10 @@ def _turns_stub():
     stub = types.SimpleNamespace(
         _warned_once=set(),
         _rollout_routing_replay=False,
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
-        _carry_reasoning=False,
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
+        _rollout_env=engine_view_env(False),
         _rows_over_cap=0,
     )
     stub._render_messages_to_ids = lambda *a, **k: [1, 2, 3]
@@ -264,7 +405,7 @@ def test_old_logps_aligned_1to1_with_sampled_ids():
     rows = _turns_stub()._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
 
     assert len(rows) == 2
-    for (_, comp, mask, old, _routing, _negative_only), ids, lps in zip(
+    for (_, comp, mask, old, _routing, _negative_only, _candidates), ids, lps in zip(
         rows, [[10, 11, 12], [20, 21]], [[-0.1, -0.2, -0.3], [-0.4, -0.5]], strict=True
     ):
         assert comp.tolist() == ids
@@ -290,7 +431,7 @@ def test_turns_path_records_context_overflow():
     stub._context_limit = lambda: 4  # render=3 prompt tokens + 5 completion ids = 8 > 4
     stub._batch_errors = BatchBuildFence()
     stub.async_config = types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None)
-    stub._carry_reasoning = False
+    stub._rollout_env = engine_view_env(False)
     stub._rows_over_cap = 0
     traj = Trajectory()
     traj.add_message(Message.user("q"))
@@ -307,8 +448,10 @@ def _render_stub(render):
         _rollout_routing_replay=False,
         _rollout_backend="vllm",
         _batch_errors=BatchBuildFence(),
-        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
-        _carry_reasoning=False,
+        async_config=types.SimpleNamespace(
+            rollout_chat_template_kwargs={}, max_train_row_tokens=None, score_centering_top_k=None
+        ),
+        _rollout_env=engine_view_env(False),
         _rows_over_cap=0,
         eos_token_id=2,
         pad_token_id=0,
@@ -323,6 +466,53 @@ def _render_stub(render):
     for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):
         setattr(stub, name, types.MethodType(getattr(Trainer, name), stub))
     return stub
+
+
+def _qwen36_render_stub():
+    """The real render under the Qwen3.6 effort template, which writes one block per argument (``arguments|items``)."""
+    tok = load_cached_tokenizer(QWEN3_6_MOE_35B)
+    tok.chat_template = (REPO_ROOT / "jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja").read_text()
+    stub = _render_stub(None)
+    stub.processing_class = stub._tokenizer = tok
+    stub._tools_schema = None
+    stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
+    return stub
+
+
+def _stored_call_episode(arguments) -> RolloutResult:
+    """A tool call stored with ``arguments`` (the engine's wire form is JSON text), then a turn with sampled ids and no
+    engine prompt ids, whose prompt the trainer re-renders."""
+    call = {"id": "c1", "type": "function", "function": {"name": "python_repl", "arguments": arguments}}
+    traj = Trajectory()
+    traj.add_message(Message.user("solve it"))
+    traj.add_message(Message.assistant("", tool_calls=[call], token_ids=[5, 6], prompt_token_ids=[1, 2]))
+    traj.add_message(Message.tool("1", tool_call_id="c1", name="python_repl"))
+    traj.add_message(Message.assistant("done", token_ids=[7, 8]))
+    return RolloutResult(prompt="solve it", trajectory=traj)
+
+
+def test_a_per_turn_render_parses_a_stored_calls_wire_form_arguments():
+    """The engine parses the text before its template iterates the arguments; a re-render handing the template the
+    text raises, and the episode drops as unrenderable."""
+    stub = _qwen36_render_stub()
+    result = _stored_call_episode(_WIRE_ARGUMENTS)
+    rows = stub._tokenize_trajectory_turns(result)
+    assert not result.trajectory.episode_invalid, result.trajectory.info[EPISODE_INVALID_REASON_KEY]
+    assert [row.completion_ids.tolist() for row in rows] == [[5, 6], [7, 8]]
+    history = _stored_call_episode(json.loads(_WIRE_ARGUMENTS)).trajectory.messages[:3]
+    as_mapping = stub.processing_class.apply_chat_template(
+        [m.to_dict(include_thinking=True) for m in history], tokenize=False, add_generation_prompt=True
+    )
+    assert rows[1].prompt_ids.tolist() == stub._tokenizer(as_mapping, add_special_tokens=False)["input_ids"]
+
+
+def test_a_whole_trajectory_render_parses_a_stored_calls_wire_form_arguments():
+    stub = _qwen36_render_stub()
+    wire, mapping = _stored_call_episode(_WIRE_ARGUMENTS), _stored_call_episode(json.loads(_WIRE_ARGUMENTS))
+    rendered = stub._tokenize_trajectory(wire)
+    assert not wire.trajectory.episode_invalid, wire.trajectory.info[EPISODE_INVALID_REASON_KEY]
+    assert int(rendered[2].sum()) > 0
+    assert [t.tolist() for t in rendered] == [t.tolist() for t in stub._tokenize_trajectory(mapping)]
 
 
 def test_unrenderable_trajectory_invalidates_the_episode_instead_of_the_run():
@@ -426,6 +616,51 @@ def test_prefix_render_failure_on_a_later_turn_masks_the_earlier_rows_too():
 
     assert traj.episode_invalid
     assert len(rows) == 1 and int(rows[0][2].sum()) == 0
+
+
+def _played_notes_episode() -> tuple[CodeContestsEnvironment, Trajectory, list[list[dict]]]:
+    """Three notes turns played through a code-contests env, each with sampled ids but no engine prompt ids, so the
+    trainer re-renders every turn's prompt; returned with the prompt the env sent for each turn."""
+    env = CodeContestsEnvironment(language="python", sandbox=LocalSubprocessSandbox(), notes={})
+    ids, steps = env.reset(["Add one to n."], [{"answer": json.dumps({"tests": [{"input": "1\n", "output": "2\n"}]})}])
+    sent = [steps[0].observation]
+    for text, arguments in (
+        ("n + 1 fits", {"text": "## idea\nn + 1"}),
+        ("record it", {"text": "## tests\nsample ok"}),
+        ("submit next", {"text": "## next\nsubmit"}),
+    ):
+        call = {"id": "c", "function": {"name": "notes", "arguments": json.dumps(arguments)}}
+        context = {"finish_reason": "stop", "tool_calls": [call], "token_ids": [5]}
+        sent.append(env.step(ids, [text], [context])[0].observation)
+    return env, env.get_trajectories(ids)[0], sent
+
+
+def test_a_rewriting_views_per_turn_render_is_the_prompt_the_env_sent():
+    """The notes view pins the notes last, so no turn's prompt is a prefix of the next one's: each turn's render must
+    read the env's own view of the history before it."""
+    env, traj, sent = _played_notes_episode()
+    seen = []
+
+    def render(msgs, add_generation_prompt, _kwargs, include_thinking=True):
+        seen.append([m.to_dict(include_thinking=True) for m in msgs])
+        return [1, 2, 3]
+
+    stub = _render_stub(render)
+    stub._rollout_env = env
+    rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
+    assert len(rows) == 3 and seen == sent[:3]
+
+
+def test_a_rewriting_view_drops_an_episode_with_a_turn_missing_its_sampled_ids():
+    """No one render of a rewritten history is what the engine saw, so the re-tokenized fallback a plain env takes
+    would train on context never sent."""
+    env, traj, _ = _played_notes_episode()
+    next(m for m in traj.messages if m.role == "assistant").token_ids = None
+    stub = _render_stub(lambda *_a, **_k: [1, 2, 3])
+    stub._rollout_env = env
+    rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
+    assert [row.loss_mask.tolist() for row in rows] == [[0]]
+    assert traj.episode_invalid and "rewrites earlier turns" in traj.info[EPISODE_INVALID_REASON_KEY]
 
 
 if __name__ == "__main__":

@@ -14,7 +14,7 @@ Shared term fields, `on_error` and the launch probe: [Reward Terms](README.md).
 | `requirements`, `scale` | —, `10` | `{name, description, weight}` items (`weight > 0`, default 1), each scored `0..scale`; a veto judge refuses `scale` |
 | `checks` | — | `{name, description, veto, weight, unless}` items; `veto` default `false`; `weight >= 0`, default 1 (0 for a veto check); `unless` an episode fact the environment establishes, under which the check never fires. `environment` takes the checks the environment declares ([Environment checks](#environment-checks)) |
 | `model`, `base_url` | `openai/gpt-5.6-luna`, OpenRouter | Any OpenAI-compatible endpoint, a local vLLM included; one neither loopback nor a vendor's own host needs `api_key_env` |
-| `api_key_env` | `OPENROUTER_API_KEY` | Key variable. Another name is that key alone: unset, the launch probe fails, with no fallback. At the default, a loopback `base_url` reads `VLLM_API_KEY`, then `OPENAI_API_KEY`, and needs neither; OpenRouter's host reads only `OPENROUTER_API_KEY` and `api.openai.com` only `OPENAI_API_KEY`; any other host is refused, so name its key here |
+| `api_key_env` | `OPENROUTER_API_KEY` | Key variable. Another name is that key alone: unset, the launch probe fails, with no fallback. At the default, a loopback `base_url` reads only `VLLM_API_KEY` and needs none; OpenRouter's host reads only `OPENROUTER_API_KEY` and `api.openai.com` only `OPENAI_API_KEY`; any other host is refused, so name its key here |
 | `reasoning_effort` | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; `null` sends no such field |
 | `temperature` | unset | Reasoning models refuse an explicit one |
 | `view` | `final` | `final`, `full` or `digest` ([Views](#views)) |
@@ -32,17 +32,19 @@ The grading prompt wraps each part in its own tag, in this order: `<setting>` (t
 
 - The parts are tagged, not headed, so a task's markdown heading or a program's comment never reads as a section of the prompt.
 - Every part but `<setting>`, the term's own text, is escaped: the `<` of any of these tags or of `<reasoning>` that the quoted text spells, in any case, is written `&lt;`. Policy text, a tool result or a task can neither close its part nor forge a reasoning block.
-- The judge grades the policy's actions, answers and tool results, and reads its reasoning as context only.
+- A veto judge's checks fire only on evidence quoted from the policy's actions (its visible text, a call's arguments,
+  a tool result), never from its reasoning. They carry a line to read the reasoning only where the view shows
+  reasoning; with none sampled, `include_reasoning: false`, or `final`, they ask for quoted actions alone.
 
 ### Views
 
-- **`final`**: the recorded final answer ([What a scorer reads](README.md#what-a-scorer-reads)). Without one, the judge sees `(The episode ended without a final answer.)` and the last assistant turn; a reward model reads an empty answer.
+- **`final`**: the recorded final answer ([What a scorer reads](README.md#what-a-scorer-reads)). Without one, the judge sees `(The episode ended without a final answer.)` and the last assistant turn.
 - **`full`**: every turn after the prompt, numbered (`[3] assistant`): reasoning in `<reasoning>`, each call as `→ name (call id)` with verbatim arguments, each result under `[4] tool name (call id)`.
 - **`digest`**: `full` with each item cut to its head (tool results: head and tail), then `Final answer:` whole.
 
 A turn header (`full` and `digest`) notes a reasoning cap hit, an engine cut, an empty turn, or calls all unknown or refused.
 
-A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM under a thinking budget, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an identical resubmission, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts.
+A turn cut mid-call shows the call as `→ name (call id; cut by the engine before the turn closed; never run)`, its arguments the policy's own text where the rollout decodes it (vLLM with thinking off, or under a reasoning cap whose close marker is one token, in training and in the eval alike; [Cut tool calls](../../async-grpo/monitoring.md#cut-tool-calls)) and the parser's salvage elsewhere. A veto may quote it. A call the environment refused unrun (past its budget, malformed, a mislabelled program, an unknown tool) shows as `→ name (call id; refused unrun; never run)`; a disabled tool's call is not marked refused. Its arguments stay quotable, as a cut call's are, and a check's own wording says whether a refused call counts. An environment's own note on a call (`Message.call_notes`, by call id) follows these marks: code contests marks where the [scratchpad budget ran out](../../async-grpo/environments/tasks/code-contests/reward.md#audit-judge).
 
 ### The length cut
 
@@ -52,6 +54,12 @@ A view over `max_view_chars` is cut in two stages:
 2. The view keeps two thirds of the budget from its head and one third from its tail, with a marker between, so the final answer survives.
 
 The reference is cut the same way. Renderers: `halo/rewards/samples.py`.
+
+## Requests
+
+The grading prompt goes to `base_url` for every scored completion and eval sample, OpenRouter by default; a loopback `base_url` keeps it on the machine. Under `full` and `digest` it holds the policy's reasoning (unless `include_reasoning: false`) and the tool results. Only text is sent: a message's image parts are dropped. A keyless server on another host still needs `api_key_env` naming a variable set to some value, since an empty one is refused. Which nodes send the requests: [Probe and retries](README.md#probe-and-retries). On the environment arm the judge's time counts against the episode's deadline ([Settlement](README.md#settlement)).
+
+A reply that leaves out a requirement or check, scores one with a non-finite number, gives a non-boolean `fired`, or is cut at `max_tokens` (reasoning included) is unparseable: no verdict, with an error naming the `finish_reason`. A score outside `0..scale` is clamped. A failed request or prompt build logs one warning per completion; an unparseable reply logs none and shows only in `judge/<name>/scored` and, on the environment arm, the episode's invalid reason.
 
 ## Veto judge
 
@@ -107,7 +115,7 @@ Per completion, averaged per step on both arms (the online arm logs 0 on a rank 
 | `judge/<name>/veto` | Veto judge: a `veto: true` check fired (1/0) |
 | `judge/<name>/unsupported_flags` | Veto judge: flags dropped for lack of a counting quote |
 | `judge/<name>/exempted_flags` | Veto judge: flags dropped because the episode fact a check stands exempt under holds |
-| `judge/<name>/completion_tokens` | The judge's completion tokens |
-| `judge/<name>/cost_usd` | Environment arm: request cost, where the endpoint reports one (OpenRouter does) |
+| `judge/<name>/completion_tokens` | The judge's completion tokens, over parsed replies only |
+| `judge/<name>/cost_usd` | Environment arm: request cost, where the endpoint reports one (OpenRouter does), over parsed replies only |
 
 The environment arm also keeps the rationale and each fired check's quote on the trajectory (`reward_details`).

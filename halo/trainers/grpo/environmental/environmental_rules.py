@@ -2,19 +2,20 @@
 
 import dataclasses
 import logging
-import math
+from collections.abc import Mapping
 
-from halo.environments.episode_keys import ANSWER_KEY
+from halo.configs.grpo_environmental import ReasoningCostArguments
+from halo.environments.episodes.episode_keys import ANSWER_KEY
+from halo.environments.episodes.reasoning_effort import REASONING_BUDGET_KEY, REASONING_PRICE_KEY
 from halo.environments.rollout_config import (
     IDENTITY_SAMPLER,
     REASONING_END_TOKEN_EXAMPLES,
     SGLANG_BACKEND,
-    VALID_REASONING_EFFORTS,
     VLLM_BACKEND,
 )
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.training_args_overrides import uses_evaluation
+from halo.trainers.construction.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,17 @@ def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:
             "schema forwards an assistant message's reasoning_content to the chat template is unverified, "
             "so the carried thought could be dropped without a trace. Serve rollouts with vLLM, or turn "
             "carry_reasoning off."
+        )
+
+
+def reject_whole_trajectory_render_of_rewritten_view(env, train_on_sampled_tokens: bool) -> None:
+    """An environment whose view rewrites earlier turns shows each turn a prompt that is no prefix of the next one's, so
+    one render of the whole trajectory would train turns on context the engine never sent."""
+    if env.rewrites_history_in_view and not train_on_sampled_tokens:
+        raise ValueError(
+            f"{type(env).__name__} rewrites earlier turns in each turn's prompt, so only per-turn training rows "
+            "match what the engine saw: set train_on_sampled_tokens: true (a vLLM server also needs "
+            "--return-tokens-as-token-ids)."
         )
 
 
@@ -106,41 +118,91 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
             )
 
 
-def reject_inert_reasoning_terms(async_config, env, *, budgeted: bool, every_budget_soft: bool) -> None:
-    """A price with no level to read charges nothing, a floor where no episode carries a thinking cap never fires, and
-    a price past a budget prices nothing unless every drawable budget is soft. A term waived in groups that earned no
-    objective needs a reward that prices success above zero, or it charges no training episode."""
-    terms_on = async_config.reasoning_price is not None or async_config.reasoning_floor > 0
-    objective = env.objective_term if terms_on else None
-    if terms_on and not async_config.reasoning_terms_in_failed_groups and (objective is None or objective.weight <= 0):
+def reject_negative_reward_terms_under_maxrl(async_config, *, price_on: bool) -> None:
+    """Called only under ``use_maxrl``. MaxRL divides by the group mean reward, which assumes non-negative rewards. The reasoning price and floor
+    subtract from an episode's reward, so a priced or floored run can go negative by design; every step checks the
+    rewards anyway, and this catches the cases the config already decides."""
+    terms = [
+        name
+        for name, on in (("reasoning_price", price_on), ("reasoning_floor", async_config.reasoning_floor > 0))
+        if on
+    ]
+    if terms:
         raise ValueError(
-            "reasoning_price and reasoning_floor are waived in a training group no episode of which earned the "
-            "objective, but the reward prices no success above zero (no environment term, or one of weight <= 0), "
-            "so every group would read as failed and the terms would charge no training episode: give the "
-            "environment term a positive weight, or set reasoning_terms_in_failed_groups: true."
+            f"use_maxrl with {' and '.join(terms)} on: {'they subtract' if len(terms) > 1 else 'it subtracts'} from "
+            "the reward, which can make it negative, and MaxRL divides each advantage by the group's mean reward, "
+            "which needs non-negative rewards. Turn MaxRL off, or train without the reasoning terms."
         )
-    if async_config.reasoning_price is not None:
-        if env.reasoning_effort is None:
-            raise ValueError(
-                "reasoning_price is set but the environment's reasoning_effort is unset, so no episode carries a "
-                "level to be priced at."
-            )
-        if set(async_config.reasoning_price) != set(VALID_REASONING_EFFORTS):
-            levels, admitted = set(async_config.reasoning_price), set(VALID_REASONING_EFFORTS)
-            raise ValueError(
-                f"reasoning_price must map exactly the effort levels {sorted(admitted)}; "
-                f"unknown {sorted(levels - admitted)}, missing {sorted(admitted - levels)}"
-            )
-    if async_config.reasoning_floor > 0 and not budgeted:
-        raise ValueError(
-            "reasoning_floor prices an episode against its per-turn thinking cap, but no episode of this run "
-            "carries one: no drawable effort level sets thinking_tokens and rollout_max_thinking_tokens is unset."
+
+
+def reject_inert_reasoning_terms(
+    async_config, env, level_terms: Mapping[str | None, tuple[int | None, float]]
+) -> None:
+    """Refuse reasoning options that would charge nothing or charge every episode: a profile key, cap or failed-group
+    switch that no drawn level reads, a floor without a budget or a priced success, a profile key among the template
+    variables the model reads. Each error names its case."""
+    price_on = any(price > 0 for _, price in level_terms.values())
+    floor_on = async_config.reasoning_floor > 0
+    if env.reasoning_effort is None:
+        set_keys = sorted(
+            {key for profile in env.reasoning_effort_profiles.values() for key in profile}
+            & {REASONING_BUDGET_KEY, REASONING_PRICE_KEY}
         )
-    if async_config.reasoning_price_past_budget and not every_budget_soft:
+        if set_keys:
+            raise ValueError(
+                f"reasoning_effort_profiles set {set_keys} but the environment's reasoning_effort is unset, so no "
+                "episode carries a level to read them at."
+            )
+    if not price_on and async_config.reasoning_price_cap != ReasoningCostArguments.reasoning_price_cap:
         raise ValueError(
-            "reasoning_price_past_budget prices reasoning past a soft per-turn budget, but a drawable effort level's "
-            "budget is enforced or unset, so its turns would go unpriced: set thinking_tokens and "
-            "enforce_thinking_cap: false on every level the environment draws, or price every reasoning token."
+            f"reasoning_price_cap set while no level the environment draws sets {REASONING_PRICE_KEY} in its effort "
+            "profile: nothing reads it. Remove it, or price a level."
+        )
+    if not (price_on or floor_on) and async_config.reasoning_terms_in_failed_groups:
+        raise ValueError(
+            "reasoning_terms_in_failed_groups set while no drawn level prices reasoning and reasoning_floor is off: it "
+            "chooses where the reasoning terms charge. Turn one on, or remove it."
+        )
+    if floor_on and env.reasoning_effort is None:
+        raise ValueError(
+            f"reasoning_floor charges a failed episode its shortfall under its level's {REASONING_BUDGET_KEY}, but "
+            "the environment's reasoning_effort is unset, so no episode carries a level."
+        )
+    if floor_on:
+        unbudgeted = sorted(level for level, (budget, _) in level_terms.items() if not budget)
+        if unbudgeted:
+            raise ValueError(
+                f"reasoning_floor charges a failed episode its shortfall under its level's {REASONING_BUDGET_KEY}, but "
+                f"the drawn level(s) {unbudgeted} set none above 0 in reasoning_effort_profiles."
+            )
+    unread = sorted(
+        level for level, (budget, price) in level_terms.items() if budget is not None and price == 0 and not floor_on
+    )
+    if unread:
+        raise ValueError(
+            f"the drawn level(s) {unread} set {REASONING_BUDGET_KEY} with no {REASONING_PRICE_KEY} while "
+            "reasoning_floor is off: nothing reads it. Price the level, turn the floor on, or remove it."
+        )
+    misplaced = sorted({REASONING_BUDGET_KEY, REASONING_PRICE_KEY} & set(async_config.rollout_chat_template_kwargs))
+    if misplaced:
+        raise ValueError(
+            f"rollout_chat_template_kwargs carries {misplaced}: they are effort-profile keys "
+            "(environment_kwargs.reasoning_effort_profiles), and a template variable is text the model may read."
+        )
+    objective = env.objective_term if price_on or floor_on else None
+    unpriced_success = objective is None or objective.weight <= 0
+    if floor_on and unpriced_success:
+        raise ValueError(
+            "reasoning_floor charges an episode that earned no objective, but the reward prices no success above zero "
+            "(no environment term, or one of weight <= 0), so it would charge every episode: give the environment "
+            "term a positive weight, or turn the floor off."
+        )
+    if price_on and not async_config.reasoning_terms_in_failed_groups and unpriced_success:
+        raise ValueError(
+            "the reasoning terms are waived in a training group no episode of which earned the objective, but the "
+            "reward prices no success above zero (no environment term, or one of weight <= 0), so every group would "
+            "read as failed and the terms would charge no training episode: give the environment term a positive "
+            "weight, or set reasoning_terms_in_failed_groups: true."
         )
 
 
@@ -173,9 +235,9 @@ def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None,
     """Forced closes would train with the episode's advantage and teach the model to stop closing its reasoning."""
     if forced_close_ids is not None and not is_correction:
         raise ValueError(
-            "a vLLM thinking budget can be enforced but the importance-sampling correction is off "
+            "a vLLM reasoning cap can be enforced but the importance-sampling correction is off "
             "(train_on_sampled_tokens + vllm_importance_sampling_correction): the reasoning closes the "
-            "engine forces at the budget would train with the episode's advantage."
+            "engine forces at the cap would train with the episode's advantage."
         )
 
 
@@ -189,8 +251,7 @@ def reject_unresolved_forced_closes(
             f"rollout_reasoning_end_token {marker!r} is not a marker this tokenizer writes, and a vLLM thinking cap can "
             f"bind: the closes the engine forces would stay in the policy loss and teach the model to stop closing "
             f"its reasoning. Name the end string the server's reasoning parser forces ({REASONING_END_TOKEN_EXAMPLES}), "
-            f"or run with no cap: unset rollout_max_thinking_tokens and rollout_max_answer_tokens, and every level's "
-            f"enforced thinking_tokens."
+            f"or run with no cap: unset rollout_max_thinking_tokens and rollout_max_answer_tokens."
         )
 
 
@@ -254,31 +315,54 @@ def reject_unsupported_engine_reference(client_cls, async_config, is_correction:
         )
 
 
-def reject_prefetch_past_retry_budget(client_cls, async_config, args) -> None:
-    """On an engine whose pause aborts turns in flight, a turn aborted ``max_retries + 1`` times fails its episode, and
-    a round stays in flight for ``prefetch_depth`` rounds of ``steps_per_generation × num_iterations``
-    micro-batches."""
-    if not client_cls.PAUSE_ABORTS_IN_FLIGHT or not async_config.prefetch_active():
+def reject_unsupported_score_centering(async_config) -> None:
+    """Score centering reads the candidates SGLang returns beside each sampled token as the plain sampler's full
+    distribution, through the chunked head, and owns the token's importance weight."""
+    top_k = async_config.score_centering_top_k
+    if top_k is None:
         return
-    depth, every = async_config.prefetch_depth, async_config.sync_weights_every_n_steps
-    round_micro_batches = args.steps_per_generation * args.num_iterations
-    syncs = math.ceil(depth * round_micro_batches / (args.gradient_accumulation_steps * every))
-    # An eval pushes off the cadence; at every step's push it takes that step's place and adds none.
-    if every > 1 and args.eval_strategy not in ("no", None):
-        syncs += 1
-    if syncs > async_config.max_retries:
-        raise ValueError(
-            f"Every {client_cls.BACKEND_NAME} weight sync aborts the turns in flight, and at prefetch_depth={depth} a "
-            f"prefetched round stays in flight across up to {syncs} syncs (rounds of steps_per_generation × "
-            f"num_iterations = {round_micro_batches} micro-batches, gradient_accumulation_steps="
-            f"{args.gradient_accumulation_steps}, sync_weights_every_n_steps={every}, and one for an eval between "
-            f"cadence pushes): a long turn aborted at each of "
-            f"them outruns its max_retries={async_config.max_retries} re-issues and fails its episode. Shorten the "
-            "span (it grows with prefetch_depth, steps_per_generation and num_iterations, falls as "
-            "sync_weights_every_n_steps rises, and is never below 1), raise max_retries to "
-            f"{syncs} with (1 + max_retries) × request_timeout still within episode_timeout, or turn prefetch off "
-            "(enable_prefetch: false at prefetch_depth: 1)."
+    reasons = []
+    if async_config.rollout_backend != SGLANG_BACKEND:
+        reasons.append(
+            f"rollout_backend: {async_config.rollout_backend!r} (vLLM returns each candidate as one JSON object "
+            "through a single API-server process, which throttles rollout throughput as K grows; serve the rollouts "
+            "with SGLang)"
         )
+    if not async_config.train_on_sampled_tokens:
+        reasons.append("train_on_sampled_tokens: false (the candidates align with the sampled token ids)")
+    sources = async_config.rollout_field_sources()
+    plain = {sources[name]: value for name, value in IDENTITY_SAMPLER.items() if name != "temperature"}
+    moved = {name: current for name, value in plain.items() if (current := getattr(async_config, name)) != value}
+    if moved:
+        reasons.append(f"a filtered sampler {moved} (the candidates' log-probs are the unfiltered distribution's)")
+    if not async_config.use_chunked_grpo_logprobs:
+        reasons.append("use_chunked_grpo_logprobs: false (only the chunked head scores the candidates)")
+    if async_config.loss_forward_importance_weights:
+        reasons.append("loss_forward_importance_weights (it builds the token ratio score centering replaces)")
+    if async_config.balance_token_mass:
+        reasons.append("balance_token_mass (it reweights by the token ratio score centering replaces)")
+    if async_config.isr_engine_reference:
+        reasons.append("isr_engine_reference (its mask log-ratio comes from an engine re-score score centering skips)")
+    if reasons:
+        raise ValueError(f"score_centering_top_k={top_k} is not supported with: {'; '.join(reasons)}.")
+
+
+def reject_unsupported_score_centering_loss(top_k: int, args, *, misaligned_accumulation: bool) -> None:
+    """Score centering's surrogate carries a REINFORCE-style gradient through TRL's per-token coefficient over one
+    on-policy pass."""
+    reasons = []
+    if args.num_iterations > 1:
+        reasons.append(f"num_iterations={args.num_iterations} (TRL's PPO clip would replace the centered gradient)")
+    if misaligned_accumulation:
+        reasons.append(
+            "gradient_accumulation_steps straddling a generation round (later micro-batches run off-policy)"
+        )
+    if args.beta != 0.0:
+        reasons.append(f"beta={args.beta} (the surrogate's gradient would leak into TRL's KL term)")
+    if args.importance_sampling_level != "token":
+        reasons.append(f"importance_sampling_level={args.importance_sampling_level!r} (the centering is per token)")
+    if reasons:
+        raise ValueError(f"score_centering_top_k={top_k} is not supported with: {'; '.join(reasons)}.")
 
 
 def reject_unread_grpo_knobs(args) -> None:

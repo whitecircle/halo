@@ -16,12 +16,13 @@ from halo.model_loading.parallel.frozen_models import (
     on_policy_grpo_holds_reference,
     place_and_freeze,
 )
-from halo.models.config_access import config_sources
+from halo.models.fp8_rollout import RolloutWeightPrecision
+from halo.models.introspection.config_access import config_sources
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.training_args_overrides import disable_trl_liger
 from halo.trainers.grpo.grpo_rules import reject_unhonored_trl_options, reject_unread_reference
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
-from halo.trainers.training_args_overrides import disable_trl_liger
 
 logger = logging.getLogger(__name__)
 
@@ -91,6 +92,11 @@ class OnPolicyGRPOInitMixin:
     POLICY_GRADIENT_LOSS = True
     SYNCS_TO_EXTERNAL_GENERATOR = True
     REFERENCE_ALTERNATIVES = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
+    GENERATION_SHAPED_ROWS = True
+    # What the weight push stores on the rollout servers; the trainer's own weights stay bf16.
+    _rollout_weight_precision: RolloutWeightPrecision = "bf16"
+    # Set by a trainer that serves its policy as an adapter beside the launch base, which pushes no base.
+    _rollout_adapter_sync = False
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Returns ``(config, kwargs)``. TRL's Liger flag must go off before ``_init_distributed_config``, and
@@ -170,7 +176,12 @@ class OnPolicyGRPOInitMixin:
         self._validate_held_reference_model()
         self._reject_unreproducible_chunked_head()
         self._verify_full_logits_fit(self._loss_logits_width())
-        reject_unsyncable_model(self.model, self._rollout_backend)
+        reject_unsyncable_model(
+            self.model,
+            self._rollout_backend,
+            self._rollout_weight_precision,
+            adapter_sync=self._rollout_adapter_sync,
+        )
         self._install_weight_sync()
         self._disable_dropout_for_onpolicy()
 

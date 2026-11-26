@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 """A ``fully_shard`` layer recomputed K>1 times in one backward reaches the optimizer with every segment's gradient.
-torch 2.11's FSDP2 hooks one recompute only; ``training_step`` completes the rest."""
+transformers checkpoints a decoder layer's ``forward``, inside FSDP2's hooks, so each forward registers its own
+post-backward and reduce-scatters its segment within the backward. A group nested in a layer runs its hooks inside that
+checkpoint, which torch 2.11's FSDP2 hooks in one recompute only; ``training_step`` completes the rest."""
 
 import contextlib
 import datetime
 import json
 import math
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -168,6 +171,16 @@ def _param_groups(model: nn.Module) -> list:
 
 def _is_layer_group(group) -> bool:
     return ".layers." in repr(group)
+
+
+def _is_decoder_layer_group(group) -> bool:
+    """A group rooted at a decoder layer, not one nested inside it."""
+    return re.search(r"\.layers\.\d+\)$", repr(group)) is not None
+
+
+def _expected_reduces(run: dict, k: int) -> list[int]:
+    """A decoder layer's group reduces once per forward; a nested group once, plus one completion when K>1."""
+    return [k if decoder else (1 if k == 1 else 2) for decoder in run["decoder_layer_groups"]]
 
 
 def _build(family: str, ep_config: EPConfig) -> nn.Module:
@@ -353,6 +366,8 @@ def _train(
         )
         if not complete or k == 1:
             record["weights"].append([_full(p).tolist() for p in params])
+    # Group names are set at the root's lazy init, in the first forward.
+    record["decoder_layer_groups"] = [_is_decoder_layer_group(group) for group in groups if _is_layer_group(group)]
     model.eval()
     reference.eval()
     with torch.no_grad():
@@ -406,16 +421,16 @@ def _skipped_step_run(mesh, units: int) -> dict:
 
 
 def _guard_cases(ep_config: EPConfig, mesh) -> dict:
-    """One-layer groups, since torch's final callback finishes a unit of several layers itself."""
+    """One-layer groups, which no later visit of torch's final callback finishes."""
     out = {}
     model = _sharded("dense", ep_config, mesh, raf=False, nested=False, units=1)
     trainer = _Trainer(model, ep_config=None, window=NO_WINDOW)
     try:
         with patch.object(grad_sync, "complete_fsdp2_post_backward", lambda groups: 0):
             trainer.training_step(model, _rows(4, 0, 0, dist.get_rank()))
-        out["uncompleted_backward"] = None
+        out["without_completion"] = None
     except RuntimeError as error:
-        out["uncompleted_backward"] = str(error)
+        out["without_completion"] = str(error)
     for injected in ("unreduced", "gathered"):
         model = _sharded("dense", ep_config, mesh, raf=False, nested=False, units=1)
         trainer = _Trainer(model, ep_config=None, window=NO_WINDOW)
@@ -573,14 +588,15 @@ def test_every_recomputed_segment_reaches_the_sharded_gradient(runs, case):
 
 @pytest.mark.parametrize("case", MAIN)
 def test_one_forward_per_backward_leaves_the_step_bit_identical(runs, case):
-    """A K>1 step costs exactly one more reduce-scatter per layer group."""
+    """A step of K forwards costs one reduce-scatter per forward per decoder layer group."""
     for rank_runs in runs:
         run, twin = _run(rank_runs, f"{case}-k1"), _run(rank_runs, f"{case}-k1-twin")
         assert run["grads"] == twin["grads"]
         assert run["weights"] == twin["weights"]
         for k in K_VALUES:
-            sync_steps = [m for m in _run(rank_runs, f"{case}-k{k}")["micro"] if m["sync"]]
-            assert all(m["layer_reduces"] == [1 if k == 1 else 2] * len(m["layer_reduces"]) for m in sync_steps), k
+            run = _run(rank_runs, f"{case}-k{k}")
+            sync_steps = [m for m in run["micro"] if m["sync"]]
+            assert all(m["layer_reduces"] == _expected_reduces(run, k) for m in sync_steps), k
 
 
 @pytest.mark.parametrize("case", MAIN)
@@ -618,7 +634,7 @@ def test_the_compute_stream_waits_on_every_reduction(runs, case):
         for k in K_VALUES[1:]:
             run = _run(rank_runs, f"{case}-k{k}")
             assert run["recorded"] > 0 and run["unwaited"] == 0, (k, run["recorded"], run["unwaited"])
-            assert all(m["layer_reduces"] == [2] * len(m["layer_reduces"]) for m in run["micro"]), k
+            assert all(m["layer_reduces"] == _expected_reduces(run, k) for m in run["micro"]), k
 
 
 @pytest.mark.parametrize("units", UNIT_SIZES[False])
@@ -640,7 +656,7 @@ def test_accumulation_windows_keep_their_semantics(runs, family, window, units):
                 if flags["fsdp_defer_grad_sync"] and not microstep["sync"]:
                     assert microstep["any_reduce"] == 0, (k, microstep)
                 if microstep["sync"]:
-                    assert microstep["layer_reduces"] == [1 if k == 1 else 2] * len(microstep["layer_reduces"]), k
+                    assert microstep["layer_reduces"] == _expected_reduces(run, k), k
 
 
 @pytest.mark.parametrize("units", UNIT_SIZES[False])
@@ -667,8 +683,7 @@ def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs,
             assert run["norm_rel"] and max(run["norm_rel"]) < PARITY_RTOL, (k, run["norm_rel"])
             assert all(run["sharded_after_step"]) and run["logit_rel"] < PARITY_RTOL, k
             assert run["recorded"] > 0 and run["unwaited"] == 0, k
-            expected = 1 if k == 1 else 2
-            assert all(m["layer_reduces"] == [expected] * len(m["layer_reduces"]) for m in run["micro"]), k
+            assert all(m["layer_reduces"] == _expected_reduces(run, k) for m in run["micro"]), k
 
 
 @pytest.mark.parametrize("units", UNIT_SIZES[False])
@@ -682,11 +697,10 @@ def test_a_recomputed_step_that_overflows_on_one_rank_is_skipped_on_every_rank(s
         assert run["logit_rel"] < PARITY_RTOL, run["logit_rel"]
 
 
-def test_the_guard_refuses_a_backward_left_unfinished(guard_runs):
-    """Raises instead of stepping partial gradients."""
+def test_every_forward_of_a_recomputed_layer_reduces_inside_the_backward(guard_runs):
+    """With the completion stubbed out, the guard finds nothing a K=4 backward left undone."""
     for rank_runs in guard_runs:
-        message = rank_runs["uncompleted_backward"]
-        assert message is not None and "post-backward left undone" in message
+        assert rank_runs["without_completion"] is None, rank_runs["without_completion"]
 
 
 @pytest.mark.parametrize(

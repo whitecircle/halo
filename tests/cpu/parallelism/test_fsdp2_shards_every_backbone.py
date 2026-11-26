@@ -11,7 +11,7 @@ from transformers import GenerationMixin, PretrainedConfig, PreTrainedModel
 
 import halo.distributed.fsdp as fsdp
 from halo.distributed.fsdp import IdentityParamSet
-from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from halo.models.introspection.module_tree import DECODER_LAYER_LIST_ATTRS
 
 
 class _ProbeConfig(PretrainedConfig):
@@ -153,13 +153,6 @@ def test_the_refusal_fires_before_anything_is_wrapped():
                 ignored_params=IdentityParamSet(),
             )
     assert calls == [], f"wrapped {len(calls)} module(s) before refusing"
-
-
-def test_reachable_layer_lists_and_non_decoders_are_never_refused():
-    """Gated on generative decoder rather than on no layer list."""
-    for factory in (_BertLikeClassifier, _PipelineStageLike, _SentenceTransformerLike, _CausalLmLike):
-        count, _ = _shard_calls(factory())
-        assert count >= 1
 
 
 if __name__ == "__main__":

@@ -9,7 +9,6 @@ from functools import partial
 import torch
 import torch.nn as nn
 from peft import LoraConfig
-from peft.tuners.tuners_utils import BaseTunerLayer
 
 from halo.checkpoint.adapters import (
     adapter_layout_mismatch,
@@ -21,20 +20,15 @@ from halo.checkpoint.parallel.adapters import read_adapter_across_ranks
 from halo.checkpoint.parallel.resume_weights import built_from_checkpoint_across_ranks
 from halo.checkpoint.parallel.writing import chunked_saveable_tensors
 from halo.distributed.fsdp import reshard_fsdp2_modules
-from halo.models.param_roles import persistent_buffers
-from halo.models.peft_adapters import lora_fold_targets, lora_folded_data, tuner_adapter_param_ids
-from halo.models.unwrapping import strip_base_layer_segment
+from halo.distributed.lora_fold import lora_folded_data
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import strip_base_layer_segment
+from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-
-def has_injected_lora(backbone: nn.Module) -> bool:
-    """Structural: a remote-code backbone's own ``lora_``-named parameters (jina's LoRA parametrizations) are base
-    weights."""
-    return any(isinstance(module, BaseTunerLayer) for module in backbone.modules())
 
 
 def require_injected_lora_config(model: nn.Module) -> LoraConfig:

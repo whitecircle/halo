@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """Rows train on the engine's prompt ids, so a server left on the checkpoint's template fails nothing, and the reasoning
-terms then charge for a contract the model never read. Byte-comparing renders cannot refuse, as an engine derives toggles
-the trainer's render lacks; a prompt that ignores the level can be read off the server alone."""
+terms then charge for a contract the model never read. With thinking on, byte-comparing renders cannot refuse, as an
+engine derives toggles the trainer's render lacks; a prompt that ignores the level can be read off the server alone.
+With thinking off, a probe the server does not answer refuses like a render that differs."""
 
 import logging
 from types import SimpleNamespace
@@ -15,9 +16,10 @@ from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.fake_engines import fake_server_class
 
 _MESSAGES = [{"role": "user", "content": "Probe."}]
-_LOW = SimpleNamespace(level="low", thinking_budget=1000, budget_soft=False)
-_HIGH = SimpleNamespace(level="high", thinking_budget=4000, budget_soft=True)
+_LOW = SimpleNamespace(level="low")
+_HIGH = SimpleNamespace(level="high")
 _LEVEL_IDS = {"low": 11, "high": 12, None: 13}
+_THINKING_OFF = {"enable_thinking": False}
 
 
 def _trainer_ids(effort) -> list[int]:
@@ -39,13 +41,14 @@ def engine(request):
     server.close()
 
 
-def _verify(server, client_cls, trainer=_trainer_ids, efforts=(_LOW, _HIGH)) -> None:
+def _verify(server, client_cls, trainer=_trainer_ids, efforts=(_LOW, _HIGH), template_kwargs=None) -> None:
     rollout = RolloutConfig(
         model_name="m",
         backend=client_cls.BACKEND_KEY,
         capture_routed_experts=True,
         max_tokens=4096,
         max_thinking_tokens=2048,
+        chat_template_kwargs=template_kwargs or {},
     )
     verify_server_chat_template([server.url], trainer, _MESSAGES, list(efforts), rollout, connection_timeout=5.0)
 
@@ -66,7 +69,9 @@ def test_the_probe_sends_each_contract_and_no_tools(engine):
     assert not any("tools" in body or "return_routed_experts" in body for body in bodies)
     assert not any("thinking_token_budget" in body for body in bodies)
     assert bodies[0]["max_tokens"] == 1
-    assert bodies[0]["chat_template_kwargs"]["reasoning_budget"] == 1000
+    assert all("reasoning_budget" not in body.get("chat_template_kwargs", {}) for body in bodies), (
+        "the template is told the level alone"
+    )
 
 
 def test_a_matching_server_passes_with_no_warning(engine, caplog):
@@ -83,6 +88,80 @@ def test_a_render_that_differs_only_warns_since_an_engine_derives_a_toggle(engin
     with caplog.at_level(logging.WARNING):
         _verify(server, client_cls)
     assert "first at token 3 of 4/3" in caplog.text
+
+
+def test_with_thinking_off_a_render_that_differs_is_refused(engine):
+    """The request carries enable_thinking, so nothing derived explains a difference: a server template that ignores
+    the switch samples an open reasoning block the trainer's render closes."""
+    server, client_cls = engine
+    server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2, 99]
+    with pytest.raises(ValueError, match="first at token 3 of 4/3.*enable_thinking") as refused:
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+    assert client_cls.CHAT_TEMPLATE_FLAG in str(refused.value)
+    bodies = [body for path, body in server.posted if path == "/v1/chat/completions"]
+    assert all(body["chat_template_kwargs"]["enable_thinking"] is False for body in bodies)
+
+
+def _differs_at_the_second_contract(body: dict) -> list[int]:
+    return [1, 11, 2] if _level_of(body) == "low" else [1, 12, 2, 99]
+
+
+def test_with_thinking_off_a_second_contract_that_differs_is_refused(engine):
+    """Episodes drawn at the second level sample under its prompt, which the first one's agreement says nothing of."""
+    server, client_cls = engine
+    server.render_prompt = _differs_at_the_second_contract
+    with pytest.raises(ValueError, match="reasoning_effort high, first at token 3 of 4/3.*enable_thinking"):
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+
+
+def test_with_thinking_on_a_second_contract_that_differs_stays_silent(engine, caplog):
+    server, client_cls = engine
+    server.render_prompt = _differs_at_the_second_contract
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls)
+    assert "differently" not in caplog.text
+
+
+def test_with_thinking_off_a_matching_server_passes(engine, caplog):
+    server, client_cls = engine
+    server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2]
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+    assert "differently" not in caplog.text
+
+
+def test_with_thinking_off_a_reply_without_prompt_ids_is_refused(engine):
+    """Nothing else tells a server template that ignores enable_thinking from the trainer's."""
+    server, client_cls = engine
+    server.render_prompt = lambda body: None
+    with pytest.raises(ValueError, match="returned no prompt ids.*rollout_thinking: true") as refused:
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+    assert client_cls.CHAT_TEMPLATE_FLAG in str(refused.value)
+
+
+def test_with_thinking_off_a_server_that_does_not_answer_the_probe_is_refused(engine, caplog):
+    """A busy server timing the probe out leaves its template as unchecked as a reply without prompt ids; with thinking
+    on the probe is skipped with a warning."""
+    server, client_cls = engine
+    server.render_prompt = lambda body: [1, _LEVEL_IDS[_level_of(body)], 2]
+    server.status["/v1/chat/completions"] = 400
+    with pytest.raises(ValueError, match="did not answer the chat-template probe.*rollout_thinking: true"):
+        _verify(server, client_cls, template_kwargs=_THINKING_OFF)
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls)
+    assert "Could not read the prompt ids of" in caplog.text
+
+
+def test_with_thinking_off_a_trainer_render_that_raises_still_passes_with_a_warning(engine, caplog):
+    """The script's verify_template_closes_thinking already refuses a template that fails at a level the run draws."""
+    server, client_cls = engine
+
+    def raises(effort):
+        raise ValueError("this template needs a level")
+
+    with caplog.at_level(logging.WARNING):
+        _verify(server, client_cls, trainer=raises, efforts=(_LOW, None), template_kwargs=_THINKING_OFF)
+    assert "this template needs a level" in caplog.text
 
 
 def test_a_trainer_template_with_no_level_cannot_refuse(engine):

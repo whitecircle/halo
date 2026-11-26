@@ -1,14 +1,15 @@
 # Pipeline Parallelism
 
 PP splits a model's decoder layers into contiguous **stages**, each owning a rank block. It is the
-outermost parallelism dimension and the only one designed to cross NVLink domains: the only traffic
-leaving a domain is the pipeline's point-to-point boundary activations. Between machines on a fast link it
+outermost parallelism dimension, and each stage covers whole NVLink domains: with one domain per
+stage, the only traffic leaving a domain at every microbatch is the pipeline's point-to-point boundary
+activations. Between machines on a fast link it
 is not a speedup for a model that fits on one machine ([measured](#measured-throughput)).
 
 **The expert axes are the only other sharding PP composes with: EP, or pure ETP, never both.**
 FSDP2 data parallelism runs inside each stage. Every other pairing is refused by the
 [capability matrix](README.md#supported-combinations). The bubble arithmetic and the bandwidth
-argument: [GPU Training Theory §9](../reference/gpu-training-theory.md#pipeline-parallelism-the-bubble-and-the-boundary).
+argument: [GPU Training Theory → Pipeline parallelism](../reference/gpu-training-theory.md#pipeline-parallelism).
 
 ## Why PP is the cross-node dimension
 
@@ -17,10 +18,10 @@ Per-step traffic that crosses RDMA, by mode:
 | Mode | What crosses | Volume |
 |---|---|---|
 | FSDP2 1D full-shard | per-shard-group param all-gather + grad reduce-scatter | ~2–3× param bytes |
-| HSDP | one gradient all-reduce | ~1× param bytes, plus a param replica per domain |
+| HSDP | one gradient all-reduce of each rank's shard | `2·(Rd−1)/Rd × param bytes / Rs` per rank (`Rd` domains of `Rs` ranks), plus a param replica per domain |
 | EP `ep_scope=global` | DeepEP dispatch/combine | sparse token bytes per MoE layer |
 | TP / CP | **forbidden cross-node** | — |
-| **PP** | **boundary activations, point-to-point** | `B·S·H` per microbatch per stage edge (`× hc_mult` / `× hc_count` for the hyper-connection families — [cost below](#boundary-cost)) |
+| **PP** | **boundary activations, point-to-point** | `2·B·S·H` bytes (bf16) per microbatch per stage edge, each direction (`× hc_mult` / `× hc_count` for the hyper-connection families — [cost below](#boundary-cost)) |
 
 When that trade pays, and when it does not (inside one domain, or on an NVL72 rack):
 [When pipeline parallelism is worth it](README.md#when-pipeline-parallelism-is-worth-it).
@@ -49,7 +50,7 @@ directories with `scripts/after_training/merge_pp_stages.py` before `from_pretra
 
 ## Rank layout
 
-PP carves the world first; every other mode runs unchanged inside one stage:
+Each stage takes a contiguous block of `world_size / pipeline_parallel_size` ranks, and every other mode runs unchanged inside one stage:
 
 ```text
 stage_world_size = world_size / pipeline_parallel_size
@@ -62,8 +63,8 @@ batch — stage 0 reads `input_ids`, the last stage reads `labels`. The trainer'
 the stage-local DP rank, never the global rank.
 
 **Stage boundaries fall on NVLink-domain boundaries** (`stage_world_size % nvlink_domain_size == 0`,
-enforced at config time). Every EP/TP/ETP/CP group is a domain-local rank block, so this keeps them
-strictly inside one stage. `pp_size` must therefore divide the domain count: `pp2` on one 8-GPU node
+enforced at config time). TP, ETP, CP and node-scope EP groups are domain-local rank blocks, and a
+global-scope EP group fits inside its stage's ranks, so every group stays strictly inside one stage. `pp_size` must therefore divide the domain count: `pp2` on one 8-GPU node
 leaves `stage_world_size = 4` and is rejected at the default domain sizing. Single-rank stages are
 rejected too (the stage FSDP wrap assumes DP ≥ 2).
 
@@ -138,6 +139,7 @@ MTP-carrying checkpoint names that reason first.
 | Nemotron-H text class (`NemotronHModel`) | registered | any split offset, as its blocks follow no period and each reads its mask by its own `block_type`; without a cache every Mamba layer scans from a zero state. `text_only_model: true`, since the composite keeps its head below its root and is refused. `auto` resolves to `bias_update` on the EP layers. The hub's `num_nextn_predict_layers: 1` is metadata and passes |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
+| Inkling 2 (`Inkling2TextModel`) | refused | each decoder layer reads a learned mix of every completed residual block before it (`block_states`), a stack the loop grows layer by layer, which one activation at a stage boundary does not carry |
 | Any other backbone (Bailing, Mistral 4, LFM-2, Cohere2 MoE, Qwen3-Next, …) | not registered | refused by name |
 
 Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second
@@ -168,11 +170,11 @@ One bf16 tensor crosses each stage edge per microbatch per direction (the activa
 gradient back) and nothing else: masks, `position_ids` and `labels` are re-sliced on every rank from
 the batch it already holds, and shape inference exchanges meta tensors once.
 
-| Boundary | bytes/token, one direction | 32k-token microbatch, one crossing | NVLink (400 GB/s) | EFA share (50 GB/s) |
+| Boundary | bytes/token, one direction | 32k-token microbatch, one crossing | NVLink 5 (900 GB/s, spec) | EFA (92.8 to 96.2 GB/s, measured below) |
 |---|---:|---:|---:|---:|
-| plain residual, `H=4096` | 8 KiB | 256 MiB | 0.7 ms | 5.4 ms |
-| hyper-connection stream, `H=4096, hc_mult=4` (GLM-5.3-Flash, DeepSeek-V4-Flash) | 32 KiB | 1 GiB | 2.7 ms | 21 ms |
-| hyper-connection stream, `H=2560, hc_count=4` (Qwen3.8-Flash-Next) | 20 KiB | 640 MiB | 1.7 ms | 13 ms |
+| plain residual, `H=4096` | 8 KiB | 256 MiB | 0.3 ms | 2.9 ms |
+| hyper-connection stream, `H=4096, hc_mult=4` (GLM-5.3-Flash, DeepSeek-V4-Flash) | 32 KiB | 1 GiB | 1.2 ms | 11.2 ms |
+| hyper-connection stream, `H=2560, hc_count=4` (Qwen3.8-Flash-Next) | 20 KiB | 640 MiB | 0.75 ms | 7.0 to 7.2 ms |
 
 Forward plus backward doubles each cell; `1f1b` waits on every P2P batch before the dependent
 compute, so those figures are exposed, not overlapped. torch keeps `2 × pipeline_microbatches`
@@ -182,8 +184,7 @@ traffic; the cut position does not.
 
 Measured between two B300 nodes over EFA, NCCL send/recv from each rank to its peer on the other node
 moves 92.8 GB/s per GPU pair at 256 MiB and 96.2 GB/s at 1 GiB, and keeps that rate with all eight pairs
-sending at once (776 GB/s in total). That is about twice the EFA column, so the two crossings above take
-2.9 ms and 11.2 ms there.
+sending at once (776 GB/s in total). The EFA column above uses those rates.
 
 ### Split-offset constraint
 
@@ -208,12 +209,12 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
   stage runs a different collective program than its MoE peers and deadlocks at the gradient norm,
   so such a partition raises at setup. Choose a `pipeline_parallel_size` or `pipeline_split` that
   reaches the MoE layers on every stage.
-- The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_size>1`) or sharded as
-  stage-mesh DTensors (`ep_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
-  rejected under PP.
+- The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_group_size>1`) or sharded as
+  stage-mesh DTensors (`ep_group_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
+  rejected under PP at `ep_group_size==1`.
 - EP gradient sync runs in one deferred post-backward sweep (`EPConfig.sweep_reduces_across_replicas`), since
   per-backward hooks would fire on every microbatch and re-scale grads already synced. The sweep is
-  off at `ep_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
+  off at `ep_group_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
   syncs the experts. Router and replicated averages reduce over the stage's rank block, never the
   world.
 - The gradient norm is exact and rank-uniform: one world all-reduce of each rank's local squared
@@ -231,8 +232,10 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 - Equivalence gates: gpt-oss against a bf16 ep1 twin (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`,
   both sides on the unfused expert-output sum, since the fused un-permute rounds a rank's local top-k
   sum once), and every other registered MoE family against its unsplit ep1 twin through the real
-  trainer at `ep2` (`test_pp_family_vs_reference.py`). One released checkpoint has run the split as a correctness
-  smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
+  trainer at `ep2` (`test_pp_family_vs_reference.py`; fp32 under ETP, and for a hyper-connection family wherever no DeepEP dispatch
+  runs, since its base and scale gradients sit 4 to 5 orders under their layer's largest and bf16 accumulation order
+  decides them; a bf16 `ep2` row leaves those parameters unscored and the fp32 ETP row covers them). One released
+  checkpoint has run the split as a correctness smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
   relative loss gap 3.4e-4, largest 1.16e-3), as two `torchrun` agents on one host.
 
 ## PP + ETP (MoE)
@@ -331,8 +334,9 @@ rank.
   once per step, so each rank keeps a full gradient of its stage's FSDP-managed parameters until
   then: 2 B/param in bf16, 4 B/param under `fp32_grad_reduce` or `fp32_non_ep_params` (warned at
   config time).
-- **Turn GC off where memory allows**, dense or with EP. A microbatch's activations are already `1/m`
-  of a step. TRL's `SFTConfig` turns `gradient_checkpointing` on by default; both shipped recipes set
+- **Turn GC off where memory allows**, dense or with EP. Under `1f1b` the first stage holds up to `pp_size`
+  microbatches over its share of the layers, as much as accumulating over the same microbatches without
+  PP. TRL's `SFTConfig` turns `gradient_checkpointing` on by default; both shipped recipes set
   it off ([Measured throughput](#measured-throughput)).
 
 ## Measured throughput
@@ -341,7 +345,7 @@ Between machines on a fast link, PP is not a speedup for a model that fits on on
 
 Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per arm. The arms of a block train the same rows at the same tokens per GPU per step. Peaks are allocated GiB, the highest rank of each stage. Every gpt-oss row runs grouped GEMM and `moe_balancing: bias_update`, and the Qwen3-8B and gpt-oss rows run packed `HuggingFaceH4/ultrachat_200k`.
 
-**A logged PP rate counts padding.** `num_input_tokens_seen` counts every row of a PP batch at `max_length`, so the rate `EfficiencyCallback` logs from it reads high: 17,709 for the 17,608 below, 15,820 for 15,715, and 2,556 for GLM-5.3-Flash's 2,423. The PP rates on this page divide the attended tokens of the matching non-PP arm, on the same rows, by PP's step time. To compare a PP run with another layout, compare step times at equal tokens.
+**A PP rate counts attended tokens.** A PP batch is padded to `max_length`, and the count reads its `attention_mask`, or the `row_lengths` of packed rows, so the rate `EfficiencyCallback` logs equals the one of any other layout on the same rows. Halo 1.2.0 counted every padded row and logged 17,709 for the 17,608 below, 15,820 for 15,715, and 2,556 for GLM-5.3-Flash's 2,423; the PP rates on this page divide the attended tokens of the matching non-PP arm, on the same rows, by PP's step time.
 
 ![Tokens/s/GPU on B300. Two 8-GPU machines on a fast link: Qwen3-8B pp2 × dp8 at 17,608 is 4.0% below dp16 and 1.63× dp8 × tp2; gpt-oss-20b pp2 × ep8 at 15,715 is 15.9% below ep8 with DP and 3.82× ep16. Forced onto plain TCP sockets, pp2 × dp8 holds 15,414 where dp16 falls to 1,117. One machine: pp2 × dp4 is 8.5% below dp8, and pp2 × ep4 is 9.2% above ep8. GLM-5.3-Flash full fine-tune: pp2 × ep8 at 2,423 is 1.61× ep16, and ep8 with DP runs out of memory](../assets/benchmarks/pp_throughput.png)
 
@@ -357,7 +361,7 @@ Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per a
 | | `ep16` global | 4,115 | 60.9 | 3,806 | 31.1 |
 
 - Against DP, with any experts local, PP runs 4.0% and 1.3% below `dp16`, GC off then on, and 15.9% and 14.3% below `ep8` with DP.
-- Against the layouts that cross the link it leads: 1.63× and 2.22× over `dp8 × tp2`, 3.82× and 3.36× over `ep16`, whose dispatch crosses it in every MoE layer. Both PP rates repeat within 0.4%.
+- It leads the TP and cross-node EP layouts: 1.63× and 2.22× over `dp8 × tp2`, 3.82× and 3.36× over `ep16`, whose dispatch crosses it in every MoE layer. Both PP rates repeat within 0.4%.
 - PP's memory saving falls on its last stage: 0.68× the DP row's peak on Qwen3-8B and 0.45× on gpt-oss-20b, GC off. The first stage holds 0.98× and 0.84×.
 - GC off raises PP's own rate 18.9% on Qwen3-8B and 22.8% on gpt-oss-20b, for 1.9× and 2.1× the allocated peak. The whole-device peaks are 49.2 GiB on stage 0 and 35.7 GiB on stage 1 for Qwen3-8B, 70.4 and 40.8 GiB for gpt-oss-20b.
 
@@ -367,7 +371,7 @@ Halo 1.2.0, B300, tokens per second per GPU over the steady steps, one run per a
 
 **Qwen3.5 and 3.6, which fit either way.** The text tower through its class, two 8-GPU machines, `max_length` 8192, packed, m=8, `moe_balancing: none`, median of steps 4–13 on the same rows. Qwen3.5-35B-A3B with GC off: `pp2 × ep8` attends 15,306 tok/s/GPU against 15,758 for `ep8` + DP (0.97×), at 126.7 / 62.7 GiB against 148.7. With GC on: 12,202 against 12,994 (0.94×), at 59.5 / 39.1 GiB against 91.0. Qwen3.6-35B-A3B with GC off: 15,202 against 15,698 (0.97×), at 126.5 / 63.0 GiB against 149.0. PP costs 3 to 6% here and pays in memory, the far stage most. A one-step save merged with `merge_pp_stages.py`, took its tower back with `reattach_vision_tower.py` and loaded as the composite with no key missing or unexpected.
 
-**Two more text towers, on GC.** `pp2 × ep8` at m=8 on Qwen3.8-Flash-Next and Nemotron 3.5 Super VL runs out of memory in the first step with GC off, at about 260 of 267.7 GiB with eight full graphs live on a stage. With GC on, 13 steps ran at 16.89 and 13.69 s a step, 1,940 and 2,394 tok/s/GPU as logged, which counts padding, at 115.7 / 78.2 and 100.9 / 96.8 GiB.
+**Two more text towers, on GC.** `pp2 × ep8` at m=8 on Qwen3.8-Flash-Next and Nemotron 3.5 Super VL runs out of memory in the first step with GC off, at about 260 of 267.7 GiB. With GC on, 13 steps ran at 16.89 and 13.69 s a step, 1,940 and 2,394 tok/s/GPU as logged by 1.2.0, which counted padding, at 115.7 / 78.2 and 100.9 / 96.8 GiB.
 
 **One 8-GPU machine**, GC off, `max_length` 8192, 524k tokens (64 rows) per step, m=16 (a 1/17 bubble), median of steps 6–15. A single `torchrun` refuses an NVLink domain smaller than its node (`nvlink_domain_size` must be a multiple of `gpus_per_node`), so the `pp2` rows run two `torchrun` agents in one container, `--nnodes=2 --nproc_per_node=4` with `--node_rank=0` on `CUDA_VISIBLE_DEVICES=0,1,2,3` and `--node_rank=1` on `4,5,6,7`: each agent is a 4-GPU node to the toolkit, and each half is one stage. The traffic between the halves stays inside the host, over NCCL shared memory, so these rows price the schedule and the narrower groups, not an inter-node link. The `dp8` and `ep8` rows run one agent on the host's 8-GPU domain.
 
@@ -505,7 +509,7 @@ the `DIST_SHARED_FILESYSTEM` umbrella):
 |---|---|---|
 | Stage parts `model-ppSSSSS-of-PPPPP-*.safetensors`, with the stage's [external tables](../reference/checkpoints.md#external-tables) as `model-ppSSSSS-of-PPPPP-tableNN-*` | one rank per stage (`stage_local_rank == 0`) | one rank per stage per **node** (`is_pp_shard_writer`) |
 | Index, `config.json`, tokenizer, a text-only run's untouched vision tower (`model-wrapper-*`) | global rank 0 | one rank per node; the index is the full one |
-| `optimizer_meta.pt`, `scheduler.pt`, `trainer_state.json`, `router_balancing_biases.pt`, offline GRPO's `reference_logps.pt` | global rank 0 | one rank per node, whole |
+| `optimizer_meta.pt`, `scheduler.pt`, `trainer_state.json`, `router_balancing_biases.pt`, `moe_expert_token_counts.json` (every stage's layers), offline GRPO's `reference_logps.pt` | global rank 0 | one rank per node, whole |
 | `optimizer_shard_<rank>.pt`, `rng_state_<rank>.pth` | every rank | every rank, on its own node |
 
 Because the parts carry the unsplit model's names, the **weights are topology-independent**: a

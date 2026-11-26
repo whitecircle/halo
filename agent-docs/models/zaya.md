@@ -36,7 +36,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 ## Limitations
 
-**Gradient checkpointing** is unavailable in every mode. Upstream declares support, but `patch_zaya_gradient_checkpointing_refusal` (`halo/models/zaya.py`) clears `ZayaPreTrainedModel.supports_gradient_checkpointing`, so `gradient_checkpointing_enable` raises rather than failing deep in the first backward. The underlying fault is environmental: on the CUDA 13.2 image, backward recompute through CCA's `nn.Conv1d` pair (`conv_qk_depthwise`, `conv_qk_grouped`) hits `cuDNN error: CUDNN_STATUS_INTERNAL_ERROR`.
+**Gradient checkpointing** is unavailable in every mode. Upstream declares support, but `patch_zaya_gradient_checkpointing_refusal` (`halo/models/families/zaya.py`) clears `ZayaPreTrainedModel.supports_gradient_checkpointing`, so `gradient_checkpointing_enable` raises rather than failing deep in the first backward. The underlying fault is environmental: on the CUDA 13.2 image, backward recompute through CCA's `nn.Conv1d` pair (`conv_qk_depthwise`, `conv_qk_grouped`) hits `cuDNN error: CUDNN_STATUS_INTERNAL_ERROR`.
 
 **EP + per-layer GC** is refused separately, by `ZAYA.supports_gradient_checkpointing=False`: the cross-layer `prev_router_hidden_states` plus a per-layer checkpoint re-wrap produce a polynomial backward recompute cascade.
 
@@ -50,7 +50,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 ## Document isolation under packing
 
-Every mixer is isolated, on every backend. `ZayaModel.forward` declares `position_ids` but never forwards them to the layers, so `patch_zaya_packed_document_isolation` (`halo/models/zaya.py`) stashes them on each attention module and each CCA projection for the duration of the model forward:
+Every mixer is isolated, on every backend. `ZayaModel.forward` declares `position_ids` but never forwards them to the layers, so `patch_zaya_packed_document_isolation` (`halo/models/families/zaya.py`) stashes them on each attention module and each CCA projection for the duration of the model forward:
 
 - **Attention**: the dense backends build a packed mask from `position_ids` at the model level; on flash the patch's registry view re-injects them into the flash interface, without which a packed row runs as one causal sequence.
 - **CCA**: upstream runs the q/k conv pair (depthwise then grouped, kernel 2 each) as two `nn.Conv1d` over the whole row and shifts the delayed value by one token, so a document's first tokens read the previous document's last ones. The patched projection folds the two conv weights into one grouped map per input shift, applies each to the q/k states shifted by that much with the tokens before the document start zeroed, and resets the delayed value to its row-start state at every document start: each document reads as it would alone. On a single-document row it is upstream's arithmetic (equal in fp64, values and gradients); in bf16 it replaces the upstream conv with three small GEMMs at the same error against fp64 (6.8e-3 relative on a ZAYA1-8B projection, as the upstream conv, both measured on CPU), and keeps the two shifted q/k copies for backward: about 3 KiB more activation per token per layer than the upstream conv pair (7.9 against 5 KiB).
@@ -65,7 +65,7 @@ Cached decoding keeps upstream's path; a cached prefill takes the patched one an
 
 `count_i` is tokens routed to expert *i* over the last optimizer step, summed across DP/EP ranks. The gate masks discarded picks to index 0 with zero weight, and the load recorder re-points them to the counter's last slot, so discards inflate neither expert 0 nor the real-expert mean. `mean_count` averages over the real experts, the discard-slot bias is clamped, and γ is sign-only and tiny.
 
-The counts come from `patch_zaya_router_load_recording` (`halo/models/zaya.py`), which scatter-adds the router's own indices inside `ZayaRouter.forward` — one mechanism for EP and plain FSDP2, since both keep the gate intact.
+The counts come from `patch_zaya_router_load_recording` (`halo/models/families/zaya.py`), which scatter-adds the router's own indices inside `ZayaRouter.forward` — one mechanism for EP and plain FSDP2, since both keep the gate intact.
 
 ```yaml
 moe_balancing: auto              # resolves to bias_update for Zaya

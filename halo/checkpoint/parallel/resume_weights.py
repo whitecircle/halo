@@ -36,8 +36,8 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_exp
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_dims
 from halo.log import KEY_PREVIEW_COUNT
-from halo.models.param_roles import persistent_buffers
-from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers, unwrap_toolkit_wrappers
+from halo.models.introspection.param_roles import persistent_buffers
+from halo.models.introspection.unwrapping import find_peft_model, unwrap_framework_wrappers, unwrap_toolkit_wrappers
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import DeferredRankFailure, rank0_verdict, rank_consensus, run_on_rank0_raising_everywhere
 from halo.runtime.dtensor import copy_full_tensor

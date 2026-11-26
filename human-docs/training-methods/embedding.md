@@ -7,9 +7,9 @@ Fine-tune a text encoder for retrieval, semantic similarity, deduplication or cl
 ## Data
 
 The collator reads columns **by position**, not by name: the label is the first of `label`, `labels`,
-`score`, `scores` that exists, and every other column is one text input. The table's shape picks the
-loss: anchor-positive pairs train `mnrl` (the default) or `cached_mnrl`, a third negative column adds
-`triplet`, a float score trains `cosent` or `angle`, and a 0/1 label the contrastive losses
+`score`, `scores` that exists, and every other column is one text input. The table's shape decides which
+`loss_type` fits: anchor-positive pairs train `mnrl` (the default) or `cached_mnrl`, a third negative
+column adds `triplet`, a float score trains `cosent` or `angle`, and a 0/1 label the contrastive losses
 ([shapes and losses](../../agent-docs/training-methods/embedding.md#dataset-formats) ↗). Embedding
 training is text-only.
 
@@ -31,8 +31,8 @@ Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/e
   `batch_sampler`.
 
 sentence-transformers owns tokenization and the pipeline around the backbone, so the chat-template and
-special-token knobs, the freeze patterns, `tools_field`, `log_decoded_samples`, `text_only_model` and
-`tokenizer_backend: gigatoken` raise at startup. Context and pipeline parallelism are refused, and LoRA
+special-token knobs, the freeze patterns, `tools_field`, `reasoning_effort_field`, `log_decoded_samples`,
+`text_only_model` and `tokenizer_backend: gigatoken` raise at startup. Context and pipeline parallelism are refused, and LoRA
 runs on plain data parallelism only, on a MoE at `use_grouped_gemm: false`. Under expert or tensor
 parallelism, and on a MoE at the default `use_grouped_gemm`, a checkpoint whose pipeline carries a module
 past pooling and normalization (a `Dense` head) is refused.

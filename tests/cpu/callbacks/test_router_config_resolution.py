@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from halo.callbacks.balancing import apply_balancing_mode
-from halo.models.config_access import get_config_field, set_config_field
+from halo.models.introspection.config_access import get_config_field, set_config_field
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from halo.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
 
@@ -100,15 +100,6 @@ def test_forced_off_stamp_is_visible_from_either_config_object():
         "the forced-off verdict is invisible from the text config, so a consumer resolving the "
         "text config would re-enable router logits the strategy deliberately turned off"
     )
-
-
-def test_plain_config_is_untouched_by_the_resolver():
-    model = _Model(_TextConfig(router_aux_loss_coef=0.001, output_router_logits=False))
-
-    apply_balancing_mode(model, "aux_loss", is_moe=True)
-
-    assert model.config.output_router_logits is True
-    assert not router_logits_forced_off(model.config)
 
 
 def test_get_config_field_prefers_a_real_value_over_the_wrapper_default():

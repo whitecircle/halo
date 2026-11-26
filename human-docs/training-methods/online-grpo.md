@@ -6,8 +6,8 @@ It covers one prompt, one answer, one turn: math, structured output and anything
 Multi-turn tool use belongs on [Async GRPO with Environments](async-grpo-environments.md), and
 pre-scored data on [Offline GRPO](offline-grpo.md).
 
-Generation runs on a **separate vLLM container** that receives the updated weights over NCCL after each
-optimizer step. Start it first, on GPUs no trainer rank uses ([Rollout Servers](../rollout-servers.md)).
+Generation runs on a **separate vLLM container** that receives the updated weights over NCCL before the first
+generation after each optimizer step. Start it first, on GPUs no trainer rank uses ([Rollout Servers](../rollout-servers.md)).
 
 ## Data
 
@@ -25,18 +25,28 @@ longer than `max_prompt_length` is dropped, not truncated.
 
 The reward is a list of terms, each scoring a completion in `[0, 1]` and logged as
 `rewards/<name>/mean`. The default is one `accuracy` term: 1.0 when the last `\boxed{...}` equals
-`answer`. `format`, `judge` and `reward_model` terms add a regex check, a generative judge graded
-against your rubric, and a served scorer:
+`answer`. A `format` term checks the completion against `pattern`
+([GRPO Rewards](rewards.md#accuracy-and-format)):
 
 ```yaml
 rewards:
   - source: accuracy
   - source: format
     weight: 0.5
+    pattern: '\\boxed\{.+\}'
 ```
 
-Every judge and reward model is probed at launch, so a bad URL, key or model name fails the launch, not
-every step ([Reward Terms](../../agent-docs/training-methods/grpo/rewards/README.md) ↗).
+A `judge`, `reward_model` or `whitecircle` term adds a rubric graded by a chat model, a served classifier
+or a check against your White Circle policies. [GRPO Rewards](rewards.md) covers how to choose and set
+one up, what each sends off your machine, and what an outage does to the run and which metric shows it.
+
+Once a vLLM server serves the model ([Run](#run)) and the recipe names your White Circle environment, one line
+trains against its policies. The [White Circle cookbook](../cookbooks/halo-whitecircle-cookbook.md)
+creates the policies with `halo run create-whitecircle-policies`.
+
+```bash
+WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+```
 
 ## Run
 
@@ -63,11 +73,18 @@ off. Serve MoE models with the compose default `--moe-backend triton`
 
 ## What to watch
 
-- `rewards/accuracy/mean` is progress. `frac_reward_zero_std` is the share of groups that gave no signal.
+- `rewards/accuracy/mean` is progress. `frac_reward_zero_std` is the share of groups that gave no signal
+  under `scale_rewards: group`. Under `batch` it reads 1 only when the whole step tied, so set
+  `drop_degenerate_groups: true` and read `sampling/degenerate_group_frac`.
 - `sampling/importance_sampling_ratio/mean` near 1 means trainer and engine agree on the policy. A drift
   away from 1 means they disagree about the template, the sinks or dropout.
 - Every logged step's rollouts land in `<output_dir>/completions/` as parquet. Read them when the
   rewards are all zero: usually the policy never emits `\boxed{}`.
+
+`packed_microbatch_tokens`, `balance_rank_tokens` and `log_phase_times` speed up and time a step: see
+[Packed micro-batches](../../agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches) ↗,
+[Rank balance](../../agent-docs/training-methods/async-grpo/performance.md#rank-balance) ↗ and
+[Phase times](../../agent-docs/training-methods/async-grpo/monitoring.md#phase-times) ↗.
 
 Every knob, the weight-sync refusals, LoRA and batch geometry:
 [Online GRPO reference](../../agent-docs/training-methods/grpo/online.md) ↗.

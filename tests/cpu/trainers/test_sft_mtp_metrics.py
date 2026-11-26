@@ -9,8 +9,8 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.mtp.acceptance import MtpAcceptance
 from halo.models.mtp.head import MtpLossSplit
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from halo.trainers.sft import _record_loss_metrics
-from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import fake_world
 
 _LABELS = torch.tensor([[LABEL_IGNORE_INDEX, 1, 2, 3]])

@@ -4,8 +4,8 @@
 #     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
 
 # --- Model ---
-# Must be a BF16 (dequantized) gpt-oss checkpoint — EP cannot load the MXFP4-quantized openai/gpt-oss-20b.
-model_name_or_path: unsloth/gpt-oss-20b-BF16
+# The release as OpenAI ships it, its MXFP4 experts decoded to bf16 while loading. See agent-docs/models/gpt-oss.md.
+model_name_or_path: openai/gpt-oss-20b
 model_init_kwargs:
   output_router_logits: true          # moe_balancing auto resolves to aux_loss, which sets this too
   router_aux_loss_coef: 0.001         # the hub config ships 0.9, which would dominate the loss
@@ -36,7 +36,7 @@ expert_parallel_size: 16
 ep_scope: global
 
 # (B) Node-local EP + DP across nodes (lower comms): uncomment instead of (A), and set
-#     use_grouped_gemm: true below (the loop path is 28% slower at ep8).
+#     use_grouped_gemm: true below (grouped ran 31-34% faster at ep8: agent-docs/optimization/grouped-gemm.md).
 # expert_parallel_size: 8
 # ep_scope: node
 
@@ -51,7 +51,7 @@ ep_scope: global
 # ep_scope: node
 # nvlink_domain_size: 72         # or `export NVLINK_DOMAIN_SIZE=72`
 
-use_grouped_gemm: false               # 2 experts/rank at ep16, square non-128-aligned FFN: see agent-docs/models/gpt-oss.md
+use_grouped_gemm: false               # 2 experts/rank at ep16 leave grouped GEMM few launches to fuse: agent-docs/models/gpt-oss.md
 max_concurrent_loading: 2             # ranks loading at once per node
 
 # --- Attention & kernels ---
@@ -63,7 +63,7 @@ max_length: 8192
 per_device_train_batch_size: 1     # layout (A) ceiling: pdbs x max_length <= 8192 tokens/rank
 per_device_eval_batch_size: 1      # the same ceiling binds eval batches
 gradient_accumulation_steps: 4
-gradient_checkpointing: false   # ~33 GB of activations per 8,192-token row
+gradient_checkpointing: false   # faster while activations fit: agent-docs/optimization/throughput-benchmarks.md
 num_train_epochs: 1.0
 
 # --- Optimizer & LR schedule ---

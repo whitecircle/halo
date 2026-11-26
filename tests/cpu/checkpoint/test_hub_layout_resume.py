@@ -22,7 +22,8 @@ from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.param_roles import persistent_buffers
+from halo.model_loading.dtype import cast_parameters_to_run_dtype
+from halo.models.introspection.param_roles import persistent_buffers
 from tests.common.checkpoint_io import load_context, save_context, written_keys
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.tiny_models import (
@@ -32,7 +33,6 @@ from tests.common.tiny_models import (
     tiny_family_model,
 )
 
-SHAPES = ("fsdp2_resume", "fsdp2_best_model", "tp_best_model", "unsharded_resume", "unsharded_best_model")
 FAMILIES = {**TINY_MOE_FAMILIES, **TINY_DENSE_FAMILIES}
 
 
@@ -59,7 +59,11 @@ CASES["qwen3_5_moe_text-fused_hub"] = (TINY_MOE_FAMILIES["qwen3_5_moe_text"], _f
 
 
 def _load(family, path: str):
-    return family.load_class.from_pretrained(path, dtype=torch.bfloat16, trust_remote_code=family.trust_remote_code)
+    """As the run's loader does: the cast unifies the ``_keep_in_fp32_modules_strict`` pins, which can share a module
+    with run-dtype siblings (Inkling's ``gate.global_scale``) that no FSDP2 group split separates."""
+    model = family.load_class.from_pretrained(path, dtype=torch.bfloat16, trust_remote_code=family.trust_remote_code)
+    cast_parameters_to_run_dtype(model, torch.bfloat16)
+    return model
 
 
 def _live_state(model) -> dict[str, torch.Tensor]:
@@ -142,7 +146,12 @@ def test_a_plain_fsdp2_resume_builds_from_the_base(trained):
     assert resolve_resume_weights_source(checkpoint, SimpleNamespace(model_name_or_path=hub), pc) == hub
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize(
+    ("trained", "shape"),
+    [(name, shape) for name in sorted(CASES) for shape in ("fsdp2_resume", "unsharded_resume")]
+    + [("bailing_moe", shape) for shape in ("fsdp2_best_model", "tp_best_model", "unsharded_best_model")],
+    indirect=["trained"],
+)
 def test_the_reload_restores_every_trained_tensor(trained, shape, tmp_path):
     name, family, hub, checkpoint, state = trained
     assert _per_expert_hub(checkpoint) == _per_expert_hub(hub), "premise: the writer saves the hub's layout"

@@ -13,9 +13,9 @@ from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
 from halo.models.attention.fa4_entry_points import install_fa4_entry_point_wrapper
-from halo.models.config_access import text_config
-from halo.models.model_classes import mapped_model_class
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.model_classes import mapped_model_class
+from halo.models.introspection.module_tree import backbone_with_layers
 from halo.models.moe.family_specs import GPT_OSS, find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 

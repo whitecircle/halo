@@ -41,5 +41,7 @@ template asks you to disclose the scaffold and models you used.
    re-signing are in [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 5. Never commit secrets, `.env` or keys.
 
-Building images, running tests and the docs tooling are covered in
-[Development environment](../agent-docs/contributing/development-environment.md) ↗.
+The [contributor guide](../agent-docs/contributing/README.md) ↗ covers building
+the image, the test tiers and the docs tooling.
+[Development environment](../agent-docs/contributing/development-environment.md) ↗
+covers the IDE and dev-container setup.

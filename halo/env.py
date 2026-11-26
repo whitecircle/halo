@@ -29,17 +29,25 @@ def _is_set(raw: str | None) -> TypeGuard[str]:
     return raw is not None and bool(raw.strip())
 
 
+def parse_flag(raw: str) -> bool | None:
+    """Boolean spelling, any case: ``1/true/yes/on`` → True, ``0/false/no/off`` → False, any other value → None."""
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    return None
+
+
 def env_flag(name: str, default: bool = False) -> bool:
     """Boolean env var, any case: ``1/true/yes/on`` → True, ``0/false/no/off`` → False, unset → ``default``. Any other
     value warns once per name and falls back to ``default``, so a typo cannot flip a default-on knob off."""
     raw = os.environ.get(name)
     if not _is_set(raw):
         return default
-    value = raw.strip().lower()
-    if value in _TRUE_VALUES:
-        return True
-    if value in _FALSE_VALUES:
-        return False
+    value = parse_flag(raw)
+    if value is not None:
+        return value
     if name not in _warned_flags:
         _warned_flags.add(name)
         logger.warning(f"Ignoring invalid {name}={raw!r} (expected 1/true/yes/on or 0/false/no/off); using {default}.")
@@ -105,6 +113,11 @@ def env_positive_float(name: str, default: float) -> float:
 
 def nccl_timeout() -> timedelta:
     return timedelta(minutes=env_positive_int("DIST_NCCL_TIMEOUT_MINUTES", DEFAULT_NCCL_TIMEOUT_MINUTES))
+
+
+def weight_sync_gather_ahead() -> int:
+    """EP layers whose expert gather the RL weight sync issues ahead of the one being forwarded; ``0`` is in turn."""
+    return env_non_negative_int("HALO_WEIGHT_SYNC_GATHER_AHEAD", 1)
 
 
 def watchdog_bounded_seconds() -> float:

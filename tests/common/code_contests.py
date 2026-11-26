@@ -4,7 +4,7 @@ subprocess or network."""
 import re
 from typing import Any, NamedTuple
 
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tools.definitions import NativeToolCall

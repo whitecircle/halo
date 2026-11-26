@@ -24,8 +24,8 @@ from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from halo.data.vlm_render import resolve_image_token_ids
 from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import resolve_preference_vlm_run
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, NEMOTRON_H
-from halo.models.nemotron_h import apply_nemotron_h_patches
 from halo.trainers.distillation.self_distillation import _teacher_inputs
 from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model, word_level_tokenizer
 from tests.common.tiny_processors import tiny_processor
@@ -85,7 +85,7 @@ def _baked_rows(processor) -> Dataset:
     rows = [{"conversation": _TURNS, "images": [_image()]}, {"conversation": _TEXT_TURNS, "images": []}]
     config = _bake_config()
     config.images_field = "images"
-    return tokenize_vlm_dataset(Dataset.from_list(rows), processor, config, "train")
+    return tokenize_vlm_dataset(Dataset.from_list(rows), processor, config, "train", eos_token_ids=frozenset())
 
 
 def test_the_runtime_collator_hands_the_forward_its_grid_and_the_pixels_reach_the_loss():
@@ -247,7 +247,7 @@ def test_a_video_part_is_refused_by_the_bake_instead_of_dropping_its_row(monkeyp
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets"))
     rows = Dataset.from_list([{"conversation": _TEXT_TURNS}, {"conversation": _VIDEO_TURNS}])
     with pytest.raises(ValueError, match="video"):
-        tokenize_vlm_dataset(rows, tiny_processor(_MODEL_TYPE), _bake_config(), "train")
+        tokenize_vlm_dataset(rows, tiny_processor(_MODEL_TYPE), _bake_config(), "train", eos_token_ids=frozenset())
 
 
 def _image_dataset() -> DatasetDict:

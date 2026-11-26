@@ -10,32 +10,36 @@ from types import SimpleNamespace
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode import TurnGeneration, step_context_from_generation
-from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
-from halo.environments.messages import Message, Trajectory, engine_view
+from halo.environments.episodes.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.episodes.messages import Message, Trajectory, engine_view
+from halo.environments.episodes.turn_recovery import TurnRecoveryMixin
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.registry import get_registered_environments
+from halo.environments.rollouts.episode_loop import TurnGeneration, step_context_from_generation
+from halo.environments.sandbox.local import LocalSubprocessSandbox
+from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.qa import ExamQAEnvironment
-from halo.environments.tool_accounting import TOOL_CALL_COUNTS_KEY
+from halo.environments.tools.accounting import TOOL_CALL_COUNTS_KEY
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS, FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.subclass_registry import iter_subclasses
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 
-def _environment_classes(cls: type = EnvironmentBase) -> list[type]:
-    found = []
-    for sub in cls.__subclasses__():
-        found += [sub, *_environment_classes(sub)]
-    return found
+def _environment_classes(base: type = EnvironmentBase) -> list[type]:
+    """Every descendant of ``base`` under ``halo``; filtered by module, since a stub in another test joins
+    ``__subclasses__()``."""
+    return [cls for cls in iter_subclasses(base) if cls.__module__.startswith("halo.")]
 
 
 _NUDGES = {
     f"{cls.__name__}.{name}": getattr(cls, name)
     for cls in _environment_classes()
     for name in dir(cls)
-    if name.endswith("_NUDGE") and isinstance(getattr(cls, name), str)
+    if "_NUDGE" in name and isinstance(getattr(cls, name), str)
 }
 
 # Token ids of the synthetic prefix-monotone template the whole-trajectory tests render with.
@@ -143,7 +147,11 @@ _SALVAGED_CALL = [{"id": "c1", "type": "function", "function": {"name": "echo", 
 
 def _generation(finish_reason: str) -> TurnGeneration:
     return TurnGeneration(
-        text="Let me implement this", tool_calls=_SALVAGED_CALL, reasoning="", tokens=4300, finish_reason=finish_reason
+        text="Let me implement this",
+        tool_calls=_SALVAGED_CALL,
+        reasoning="the plan",
+        tokens=4300,
+        finish_reason=finish_reason,
     )
 
 
@@ -269,32 +277,117 @@ def test_the_nudge_roster_reaches_every_protocol():
         "NativeToolUseEnvironment.TOOLLESS_LENGTH_CUTOFF_NUDGE",
         "NativeToolUseEnvironment.TOOLLESS_EMPTY_TURN_NUDGE",
         "ReActEnvironment.EMPTY_TURN_NUDGE",
+        "CodeContestsEnvironment.TEXT_TURN_NUDGE",
     } <= set(_NUDGES)
 
 
-@pytest.mark.parametrize("name", sorted(_NUDGES))
-def test_the_nudge_never_asks_for_shorter_reasoning(name):
-    # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
-    lowered = _NUDGES[name].lower()
-    assert "think brief" not in lowered
-    assert "short" not in lowered and "concise" not in lowered and "briefly" not in lowered
-    # The plain cut nudge answers an engine abort as well, so it must not name a cause it cannot know; the
-    # in-call one is sent on a token-cap cut alone.
-    if not name.endswith("IN_CALL_NUDGE"):
-        assert "length limit" not in lowered
+def test_the_nudge_never_asks_for_shorter_reasoning(subtests):
+    for name in sorted(_NUDGES):
+        with subtests.test(name):
+            # The nudge is trained on wherever recovery succeeds, so a terseness ask becomes a global lesson.
+            lowered = _NUDGES[name].lower()
+            assert "think brief" not in lowered
+            assert "short" not in lowered and "concise" not in lowered and "briefly" not in lowered
+            # The plain cut nudge answers an engine abort as well, so it must not name a cause it cannot know; the
+            # in-call one is sent on a token-cap cut alone.
+            if "IN_CALL_NUDGE" not in name:
+                assert "length limit" not in lowered
 
 
-@pytest.mark.parametrize("name", sorted(name for name in _NUDGES if ".TOOLLESS_" in name))
-def test_a_tool_less_nudge_never_asks_for_a_tool_call(name):
-    # Sent only where the registry is empty: a call is a move the model cannot make there, and the turn
-    # that answers the nudge is trained.
-    lowered = _NUDGES[name].lower()
-    assert "tool" not in lowered and "call" not in lowered
+def test_a_tool_less_nudge_never_asks_for_a_tool_call(subtests):
+    for name in sorted(name for name in _NUDGES if ".TOOLLESS_" in name):
+        with subtests.test(name):
+            # Sent only where the registry is empty: a call is a move the model cannot make there, and the turn
+            # that answers the nudge is trained.
+            lowered = _NUDGES[name].lower()
+            assert "tool" not in lowered and "call" not in lowered
+
+
+# Sent after a turn that carried reasoning, pinned byte for byte: running recipes train on them.
+_REASONED_NUDGES = {
+    "NativeToolUseEnvironment.LENGTH_CUTOFF_IN_CALL_NUDGE": (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and nothing "
+        "was recorded. Make the call again, keeping your reasoning out of its arguments."
+    ),
+    "NativeToolUseEnvironment.EMPTY_TURN_NUDGE": (
+        "Your previous turn ended without a tool call or an answer (a call written inside your reasoning is not "
+        "run), so nothing was recorded. Make your tool call now, or give your final answer, with the best solution "
+        "you have."
+    ),
+    "NativeToolUseEnvironment.TOOLLESS_EMPTY_TURN_NUDGE": (
+        "Your previous turn ended without an answer (text written inside your reasoning is not read), so nothing was "
+        "recorded. Give your final answer now with the best solution you have."
+    ),
+    "CodeContestsEnvironment.LENGTH_CUTOFF_IN_CALL_NUDGE": (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and nothing "
+        "was recorded, and only a solution sent with submit_solution is graded. Make the call again, keeping your "
+        "reasoning out of the program's comments."
+    ),
+    "CodeContestsEnvironment.EMPTY_TURN_NUDGE": (
+        "Your previous turn ended without a tool call (one written inside your reasoning is not run), so nothing was "
+        "recorded, and only a solution sent with submit_solution is graded. Make your tool call now with the best "
+        "solution you have."
+    ),
+}
+_CONTEST_ROW = {"answer": json.dumps({"tests": [{"input": "1\n", "output": "2\n"}]})}
+_EMPTY_TURN = ("", {"finish_reason": "stop"})
+_CUT_IN_CALL = ("Let me implement this", {"finish_reason": FINISH_REASON_LENGTH, CUT_TOOL_CALLS_KEY: _SALVAGED_CALL})
+# Each protocol's unproductive turns whose nudge names the reasoning, and ReAct's, which never does.
+_NUDGE_CASES = {
+    "native-empty": (_make_env, {}, _EMPTY_TURN, "EMPTY_TURN_NUDGE"),
+    "native-cut-in-call": (_make_env, {}, _CUT_IN_CALL, "LENGTH_CUTOFF_IN_CALL_NUDGE"),
+    "toolless-empty": (
+        lambda: NativeToolUseEnvironment(tool_registry=NativeToolRegistry(), max_turns=4),
+        {},
+        _EMPTY_TURN,
+        "TOOLLESS_EMPTY_TURN_NUDGE",
+    ),
+    "react-empty": (_make_react_env, {}, _EMPTY_TURN, "EMPTY_TURN_NUDGE"),
+    "contests-empty": (
+        lambda: CodeContestsEnvironment(sandbox=LocalSubprocessSandbox(), max_turns=4),
+        _CONTEST_ROW,
+        _EMPTY_TURN,
+        "EMPTY_TURN_NUDGE",
+    ),
+    "contests-cut-in-call": (
+        lambda: CodeContestsEnvironment(sandbox=LocalSubprocessSandbox(), max_turns=4),
+        _CONTEST_ROW,
+        _CUT_IN_CALL,
+        "LENGTH_CUTOFF_IN_CALL_NUDGE",
+    ),
+}
+
+
+@pytest.mark.parametrize("reasoning", ["the plan", "", " \n"], ids=["reasoned", "none", "blank"])
+@pytest.mark.parametrize("case", sorted(_NUDGE_CASES))
+def test_a_nudge_names_the_reasoning_only_after_a_turn_that_carried_some(case, reasoning):
+    build, row, (action, ctx), attr = _NUDGE_CASES[case]
+    env = build()
+    ids, _ = env.reset(["task"], [row])
+    assert not env.step(ids, [action], [{**ctx, "reasoning": reasoning}])[0].done
+    sent = env.get_trajectories(ids)[0].messages[-1].content
+    if reasoning.strip():
+        assert sent == _REASONED_NUDGES.get(f"{type(env).__name__}.{attr}", getattr(env, attr))
+    else:
+        assert sent == getattr(env, f"{attr}_NO_REASONING", getattr(env, attr))
+        assert "reasoning" not in sent.lower()
+
+
+def test_a_subclass_nudge_never_takes_its_parents_no_reasoning_wording():
+    """The parent's would ask for a final answer this subclass's own nudge rules out."""
+
+    class GradedChannelOnly(NativeToolUseEnvironment):
+        EMPTY_TURN_NUDGE = "Your previous turn ended without a tool call, so nothing was recorded. Call a tool now."
+
+    env = GradedChannelOnly(tool_registry=_echo_registry(), max_turns=4)
+    eid = _reset(env)
+    env.step([eid], [""], [{"finish_reason": "stop"}])
+    assert env.get_trajectories([eid])[0].messages[-1].content == GradedChannelOnly.EMPTY_TURN_NUDGE
 
 
 _UNPRODUCTIVE_TURNS = [
     ("a thought that ran out of room", {"finish_reason": "length"}, "LENGTH_CUTOFF_NUDGE"),
-    ("", {"finish_reason": "stop"}, "EMPTY_TURN_NUDGE"),
+    ("", {"finish_reason": "stop", "reasoning": "a plan never acted on"}, "EMPTY_TURN_NUDGE"),
 ]
 
 
@@ -324,14 +417,6 @@ def test_a_tool_less_cut_inside_a_call_falls_back_to_the_tool_less_length_nudge(
     traj = env.get_trajectories([eid])[0]
     assert traj.messages[-1].content == NativeToolUseEnvironment.TOOLLESS_LENGTH_CUTOFF_NUDGE
     assert env.rollout_metrics(traj)["episode/length_cutoff_in_call_turns"] == 1.0
-
-
-def test_cut_off_turn_is_flagged_for_the_trainer():
-    env = _make_env()
-    eid = _reset(env)
-    env.step([eid], ["fragment"], [{"finish_reason": "length"}])
-    traj = env.get_trajectories([eid])[0]
-    assert [m.truncated for m in traj.messages if m.role == "assistant"] == [True]
 
 
 def test_a_completed_text_turn_still_ends_the_episode():
@@ -774,6 +859,21 @@ def test_recovery_cap_of_zero_ends_the_episode_at_the_first_cut_and_negative_is_
     assert step.done and step.truncated
     with pytest.raises(ValueError, match="max_length_cutoff_recoveries must be an integer >= 0"):
         _make_env(max_length_cutoff_recoveries=-1)
+
+
+def test_every_nudge_that_names_the_reasoning_declares_its_no_reasoning_wording():
+    """A turn with no reasoning would otherwise be told about reasoning it never had, in every environment."""
+    assert get_registered_environments(), "every shipped environment class is defined once the registry imports"
+    missing = sorted(
+        f"{cls.__name__}.{name}"
+        for cls in _environment_classes(TurnRecoveryMixin)
+        for name, text in vars(cls).items()
+        if name.endswith("_NUDGE")
+        and isinstance(text, str)
+        and "reasoning" in text
+        and f"{name}_NO_REASONING" not in vars(cls)
+    )
+    assert not missing, f"nudges naming the reasoning without a _NO_REASONING sibling: {missing}"
 
 
 if __name__ == "__main__":

@@ -16,7 +16,7 @@ from halo.models.attention.layout import (
     has_gated_delta_net_layers,
     has_linear_attention_layers,
 )
-from halo.models.config_access import config_sources, model_type_matches
+from halo.models.introspection.config_access import config_sources, model_type_matches
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 _crossing_allowed_warned: set[tuple[str | None, str]] = set()
 
 # Families whose stateful mixers keep documents apart on ``seq_idx`` alone: LFM2's ShortConv, dense, MoE and VL alike,
-# and the Mamba conv and scan of Nemotron-H (halo/models/nemotron_h.py).
+# and the Mamba conv and scan of Nemotron-H (halo/models/families/nemotron_h.py).
 _SEQ_IDX_MODEL_TYPE_PREFIXES = ("lfm2", "nemotron_h")
 # Dense families measured to keep packed documents apart; a MoE family's verdict is on its spec. No config states
 # whether a forward carries position_ids into its mask or keeps a recurrence per document.

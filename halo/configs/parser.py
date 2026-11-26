@@ -32,6 +32,15 @@ _TOOLKIT_KEY_DEFAULTS = {
     ),
 }
 
+# A key that changed meaning under its old name, refused with the remedy instead of read as the new field.
+_RETIRED_KEYS = {
+    "num_rollout_workers": (
+        "it was a per-rank actor count (default 64) and is now rollout_actor_budget, a per-node budget (default 256; "
+        "cluster-wide with ray_address). Without ray_address set rollout_actor_budget to the old value times the "
+        "node's rollout ranks; with ray_address the old value was already the cluster-wide total, so keep it."
+    ),
+}
+
 _NONE_STRINGS = ("None", "null", "none")
 
 # Pre-seeded on every argparse destination, so a flag left off the command line stays recognizable.
@@ -119,6 +128,12 @@ def _load_yaml(yaml_file: str) -> dict[str, Any]:
     return YAML(typ="safe").load(Path(yaml_file)) or {}
 
 
+def _reject_retired_keys(keys) -> None:
+    retired = {key: _RETIRED_KEYS[key] for key in keys if key in _RETIRED_KEYS}
+    if retired:
+        raise ValueError("; ".join(f"'{key}' is retired: {remedy}" for key, remedy in retired.items()))
+
+
 def _init_field_names(dataclass_type) -> set[str]:
     return {f.name for f in dataclasses.fields(dataclass_type) if f.init}
 
@@ -190,6 +205,7 @@ class HaloArgumentParser(HfArgumentParser):
         """Refuse a raw value its field's annotation rules out, then build: ``HfArgumentParser.parse_dict`` runs
         neither argparse ``choices`` nor a type cast. Annotations come from the class: ``HfArgumentParser.__init__``
         rewrites ``Field.type`` in place, where ``Optional[Literal[...]]`` loses its ``None``."""
+        _reject_retired_keys(values)
         for dataclass_type in self.dataclass_types:
             annotations = get_type_hints(dataclass_type)
             for field in dataclasses.fields(dataclass_type):
@@ -221,6 +237,7 @@ class HaloArgumentParser(HfArgumentParser):
             if key in overrides:
                 raise ValueError(f"Duplicate CLI override provided: {key!r}")
             overrides[key] = value
+        _reject_retired_keys(overrides)
         unmatched = set(overrides) - self._declared_field_names()
         if unmatched:
             raise ValueError(

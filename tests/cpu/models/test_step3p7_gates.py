@@ -27,8 +27,8 @@ from halo.distributed.tensor_parallel.parallelize_attention import (
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks
 from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from halo.models.attention.selection import resolve_attn_implementation, supports_fa4_backward
-from halo.models.config_access import get_config_field
-from halo.models.modality import config_declares_multimodality, is_vlm_model
+from halo.models.introspection.config_access import get_config_field
+from halo.models.introspection.modality import config_declares_multimodality, is_vlm_model
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR

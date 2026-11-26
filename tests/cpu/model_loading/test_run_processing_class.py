@@ -27,8 +27,8 @@ from halo.entrypoints import model_setup
 from halo.entrypoints.model_setup import install_resolved_tokenizer
 from halo.model_loading.model_preparation import resolve_auto_model_class
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
-from halo.trainers import checkpointing
-from halo.trainers.checkpointing import CheckpointingMixin
+from halo.trainers.loop import checkpointing
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.checkpoint_io import save_context
 from tests.common.models import (
     PINNED_REVISIONS,

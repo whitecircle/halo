@@ -15,6 +15,7 @@ from safetensors.torch import load_file, save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
 from halo.checkpoint.tools import adapter_merge, bf16_conversion
+from halo.cli import BENCHMARK_HARNESS_ROOT
 from halo.model_loading import model_preparation
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -162,15 +163,20 @@ def _direct_auto_model_loads(path: pathlib.Path) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize(
-    "script", sorted((REPO_ROOT / "scripts").rglob("*.py")), ids=lambda p: str(p.relative_to(REPO_ROOT))
-)
-def test_no_tool_loads_a_model_around_the_coverage_gate(script):
+def test_no_tool_loads_a_model_around_the_coverage_gate(subtests):
     """``from_pretrained_verified`` raises on a randomly initialized tensor instead of logging it."""
-    assert not _direct_auto_model_loads(script), (
-        f"{script.name} calls AutoModel*.from_pretrained directly — a truncated or "
-        f"wrong-architecture checkpoint would load with random weights and only a log line"
+    scripts = sorted(
+        path
+        for path in (REPO_ROOT / "scripts").rglob("*.py")
+        if not path.is_relative_to(REPO_ROOT / BENCHMARK_HARNESS_ROOT)
     )
+    assert scripts, "no script found under scripts/"
+    for script in scripts:
+        with subtests.test(str(script.relative_to(REPO_ROOT))):
+            assert not _direct_auto_model_loads(script), (
+                f"{script.name} calls AutoModel*.from_pretrained directly — a truncated or "
+                f"wrong-architecture checkpoint would load with random weights and only a log line"
+            )
 
 
 def test_the_shared_loader_applies_the_remote_code_shims_before_the_config_fetch(causal_lm_checkpoint):

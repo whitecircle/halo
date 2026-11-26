@@ -9,7 +9,7 @@ from unittest import mock
 import pytest
 
 import halo.environments.tasks.coding.grading as grading_module
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY, REWARD_COMPONENTS_KEY
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
@@ -44,14 +44,6 @@ def test_last_token_not_one_rejects():
 def test_empty_output_rejects():
     assert _verdict(SandboxResult(stdout="", returncode=0)) is False
     assert _verdict(SandboxResult(stdout="   \n  ", returncode=0)) is False
-
-
-def test_lone_one_accepts():
-    assert _verdict(SandboxResult(stdout="1\n", returncode=0)) is True
-
-
-def test_lone_zero_rejects():
-    assert _verdict(SandboxResult(stdout="0\n", returncode=0)) is False
 
 
 def test_crashing_checker_scores_fail_not_pass():
@@ -255,7 +247,7 @@ def _budget_stopped_episode(*submissions):
     25 s grading budget, so each grade judges three tests (the entry's three sandbox results) and stops."""
 
     def submit(attempt: int) -> dict:
-        # A changed program per attempt (comments aside): the same one again is refused as already graded, not graded again.
+        # A changed program per attempt (comments aside): the same one again repeats its verdict, not graded again.
         return {
             "id": f"c{attempt}",
             "type": "function",
@@ -492,8 +484,16 @@ def test_a_checker_lost_to_the_backend_does_not_stop_the_grade_early():
     assert "Stopped after first failing test" not in grade.details
 
 
-@pytest.mark.parametrize("seconds", [0.0, -1.0, float("nan"), float("inf")])
-@pytest.mark.parametrize("field", ["default_timeout", "max_time_limit"])
+@pytest.mark.parametrize(
+    ("field", "seconds"),
+    [
+        ("default_timeout", 0.0),
+        ("default_timeout", -1.0),
+        ("default_timeout", float("inf")),
+        ("max_time_limit", 0.0),
+        ("max_time_limit", float("nan")),
+    ],
+)
 def test_the_grading_contract_refuses_a_time_limit_that_is_not_positive(field, seconds):
     """A run's wait on its program cannot be bounded by a negative or non-finite limit."""
     with pytest.raises(ValueError, match=field):

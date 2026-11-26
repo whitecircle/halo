@@ -1,7 +1,8 @@
-"""Generation and retry configuration for rollout collection. Free of Ray and rollout-engine imports:
-``AsyncRolloutConfig`` builds one and the actors receive it pickled."""
+"""Generation and retry configuration for rollout collection, and the tokenizer and chat-template checks it rests on.
+Free of Ray and rollout-engine imports: ``AsyncRolloutConfig`` builds one and the actors receive it pickled."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, get_args
 
@@ -19,13 +20,11 @@ SAMPLER_FILTERS_OFF = {"top_k": -1, "min_p": 0.0, "repetition_penalty": 1.0}
 # The sampler whose reported log-probs are the raw model distribution's: every filter off, temperature and top-p 1.
 IDENTITY_SAMPLER = {"temperature": 1.0, "top_p": 1.0, **SAMPLER_FILTERS_OFF}
 
-# Chat-template variable carrying an episode's per-turn thinking budget; per episode, never run-wide.
-REASONING_BUDGET_TEMPLATE_VAR = "reasoning_budget"
-# Set true beside it when the engine does not enforce the budget, so a template states it as a target, not a cut.
-REASONING_BUDGET_SOFT_TEMPLATE_VAR = "reasoning_budget_soft"
 ReasoningEffortChoice = Literal["low", "medium", "high", "random"]
 RANDOM_REASONING_EFFORT = "random"
 VALID_REASONING_EFFORTS = tuple(level for level in get_args(ReasoningEffortChoice) if level != RANDOM_REASONING_EFFORT)
+# The chat-template variable that closes the reasoning block (rollout_thinking: false writes it as False).
+ENABLE_THINKING = "enable_thinking"
 # Example end strings of the families' reasoning parsers, for the knob's help and its refusal.
 REASONING_END_TOKEN_EXAMPLES = (
     "Qwen3.x '</think>', Gemma 4 '<channel|>', gpt-oss '<|end|><|start|>assistant<|channel|>final<|message|>'"
@@ -49,7 +48,8 @@ class RolloutConfig:
     max_episode_tokens: int | None = None
     """The most tokens one episode may sample over all its turns; None = only the per-turn caps and max_turns."""
     max_thinking_tokens: int | None = None
-    """Per-turn reasoning-token cap (vLLM ``thinking_token_budget``); None = only a level's own budget caps it."""
+    """Per-turn reasoning-token cap (vLLM ``thinking_token_budget``), the same at every effort level; None =
+    ``max_tokens`` less ``max_answer_tokens`` caps it where that is set, else nothing does."""
     max_answer_tokens: int | None = None
     """The most a turn may generate past its reasoning cap; None = ``max_tokens`` alone bounds the turn."""
     reasoning_end_token_id: int | None = None
@@ -59,6 +59,9 @@ class RolloutConfig:
     """Capture the sampled token ids and the engine's rendered prompt ids, so training uses what the server rendered
     and the model emitted. Off in a hand-built config; ``get_rollout_config`` derives it from
     ``train_on_sampled_tokens``."""
+    capture_candidate_logprobs: int = 0
+    """Candidate log-probs requested per generated token (score centering's ``K``) on SGLang; 0 = none. Needs
+    ``capture_token_ids``, which the candidates align with."""
     capture_routed_experts: bool = False
     """Capture the engine's per-token MoE routing (the raw ``routed_experts`` payload) for R3 routing replay; needs
     ``--enable-return-routed-experts`` and the triton MoE backend the weight sync also needs."""
@@ -66,7 +69,7 @@ class RolloutConfig:
     """Token ids that end a turn: the model's tool-call terminator, without which a non-eos terminator lets the model
     play the whole episode in one turn."""
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
-    """Chat-template variables sent with every request; never the per-episode effort or thinking-budget keys."""
+    """Chat-template variables sent with every request; never the per-episode effort level."""
     model_name: str | None = None
     """Model name for /v1/chat/completions; the server's loaded model when omitted."""
     request_timeout: float = 120.0
@@ -78,6 +81,31 @@ class RolloutConfig:
     """Max retry attempts for a transient engine failure."""
     retry_base_wait: float = 1.0
     """Base wait time in seconds for exponential backoff."""
+
+    @property
+    def thinking(self) -> bool:
+        """Whether the policy opens a reasoning block: off where the run's template variables close it."""
+        return self.chat_template_kwargs.get(ENABLE_THINKING) is not False
+
+
+def verify_template_closes_thinking(tokenizer, template_kwargs: Mapping[str, Any]) -> None:
+    """The chat-template check of ``rollout_thinking: false``. Raises when the template renders the same generation
+    prompt with ``enable_thinking`` false and true: it ignores the switch, so whether the policy reasons is the
+    template's fixed choice. A template that opens the block anyway gets reasoning written into the visible message on
+    vLLM, whose parser then reads the turn as content."""
+    messages = [{"role": "user", "content": "Probe."}]
+
+    def generation_prompt(enable_thinking: bool) -> str:
+        kwargs = {**template_kwargs, ENABLE_THINKING: enable_thinking}
+        return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kwargs)
+
+    if generation_prompt(False) == generation_prompt(True):
+        raise ValueError(
+            "rollout_thinking: false needs a chat template that closes the reasoning block on enable_thinking: false, "
+            "and this one renders the same generation prompt either way. Set chat_template: to one that reads the "
+            "switch (such as jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja) and serve the same file, or set "
+            "rollout_thinking: true."
+        )
 
 
 def resolve_rollout_stop_token_ids(tokenizer, names: list[str]) -> list[int] | None:

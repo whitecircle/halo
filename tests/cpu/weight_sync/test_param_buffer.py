@@ -59,6 +59,18 @@ def _snapshot(
     )
 
 
+def test_a_tensor_the_caller_made_is_its_own_snapshot_and_a_live_one_is_copied():
+    made = torch.arange(8, dtype=torch.float32)
+    kwargs = {"device": None, "buffered_bytes": 0, "budget": _BUDGET, "flush": lambda: None}
+    assert snapshot_to_sync_device("w", made, owned=True, **kwargs) is made
+    live = snapshot_to_sync_device("w", made, **kwargs)
+    assert live is not made and torch.equal(live, made)
+    strided = made.reshape(2, 4).t()
+    assert snapshot_to_sync_device("w", strided, owned=True, **kwargs).is_contiguous(), "a strided tensor still copies"
+    elsewhere = snapshot_to_sync_device("w", made, owned=True, **{**kwargs, "device": torch.device("meta")})
+    assert elsewhere.device.type == "meta", "a tensor off the sync device still moves"
+
+
 def test_a_snapshot_is_contiguous_and_on_the_requested_device():
     """Both wire formats send flat bytes. The CPU stands in for the sync GPU."""
     strided = torch.arange(16, dtype=torch.float32).reshape(4, 4).t()

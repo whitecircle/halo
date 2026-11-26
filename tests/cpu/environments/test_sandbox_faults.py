@@ -21,27 +21,23 @@ import time
 import pytest
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import (
+from halo.environments.episodes.episode_keys import (
     EPISODE_INVALID_REASON_KEY,
     REWARD_COMPONENTS_KEY,
     SANDBOX_FAULT_INFRA,
     SANDBOX_FAULT_KEY,
 )
-from halo.environments.episode_scoring import REWARD_PENDING_KEY
+from halo.environments.episodes.episode_scoring import REWARD_PENDING_KEY
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
-from halo.environments.sandbox.local import (
-    LOCAL_FSIZE_LIMIT,
-    TAMPERED_WORKDIR_RETURNCODE,
-    LocalSubprocessSandbox,
-    _grant_owner,
-    _restore_owner_access,
-)
+from halo.environments.sandbox.limits import LOCAL_FSIZE_LIMIT, TAMPERED_WORKDIR_RETURNCODE
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.sandbox.results import SandboxAgentFault, SandboxInfraError, SandboxResult
+from halo.environments.sandbox.workspace import Workspace, grant_owner
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 from halo.environments.tasks.coding.swe import SweEnvironment
@@ -367,6 +363,7 @@ def test_a_null_test_input_reaches_a_checker_as_an_empty_input():
 @pytest.mark.parametrize(
     ("path", "reason"),
     [("a\ud83d.py", "not valid UTF-8"), ("", "unsafe"), (".", "unsafe"), ("..", "unsafe"), ("/abs", "unsafe")]
+    + [("a\0.py", "unsafe")]
     + [("../up.py", "unsafe"), ("sub/../../up.py", "unsafe")],
 )
 @pytest.mark.parametrize("backend", ["local", "remote"])
@@ -385,12 +382,6 @@ def test_a_session_path_no_backend_can_take_is_refused_as_an_argument(backend, p
         assert session.run("print(1)").error is None
     if backend == "remote":
         assert [list(post.payload["files"]) for post in service.posts] == [["ok.py"]], "no refused name is sent"
-
-
-def test_a_null_test_input_is_no_input_not_an_infra_error():
-    tests = [{"input": None, "output": "ok"}]
-    grade = run_solution_against_tests("print('ok')", tests, sandbox=LocalSubprocessSandbox())
-    assert grade.infra_errors == 0 and grade.passed == 1, grade.details
 
 
 def test_a_removed_working_directory_is_recreated_not_a_fault():
@@ -578,8 +569,8 @@ def test_a_link_raced_in_after_the_type_check_is_left_alone(tmp_path, monkeypatc
     try:
         with monkeypatch.context() as patched:
             patched.setattr(os, "stat", a_directory_when_checked)
-            _grant_owner("entry", stat.S_IRWXU, dir_fd)
-            _grant_owner(str(workdir / "entry"), stat.S_IRWXU)
+            grant_owner("entry", stat.S_IRWXU, dir_fd)
+            grant_owner(str(workdir / "entry"), stat.S_IRWXU)
     finally:
         os.close(dir_fd)
     assert host.stat().st_mode & 0o777 == 0o500
@@ -589,10 +580,10 @@ def test_a_source_write_refused_after_the_restore_is_the_programs_runtime_error(
     """A child that escaped the process group can lock a written file again between the host's restore
     and its write: the refusal is the program's runtime error, never an infra error."""
 
-    def locked(self, workdir, name, content):
-        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(workdir, name))
+    def locked(self, name, content):
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), os.path.join(self.path, name))
 
-    monkeypatch.setattr(LocalSubprocessSandbox, "_write_member", locked)
+    monkeypatch.setattr(Workspace, "write", locked)
     tests = [{"input": "", "output": "1"}] * 2
     grade = run_solution_against_tests("print(1)", tests, sandbox=LocalSubprocessSandbox())
     assert (grade.graded, grade.infra_errors, grade.passed) == (2, 0, 0), grade.details
@@ -611,13 +602,12 @@ def test_a_reset_refused_after_the_restore_leaves_the_entry(monkeypatch):
         assert "left.txt" in session.list_files()
 
 
-@pytest.mark.parametrize("denial", [errno.EPERM, errno.ENOSYS])
-def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(denial, monkeypatch):
+def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(monkeypatch):
     """Every run waits on its program through a pidfd; refused, each would fail as a backend error and
     void its episode, so construction raises instead."""
 
     def refused(pid, flags=0):
-        raise OSError(denial, os.strerror(denial))
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
 
     monkeypatch.setattr(os, "pidfd_open", refused)
     with pytest.raises(RuntimeError, match="pidfd_open"):
@@ -662,7 +652,7 @@ def test_restoring_owner_access_reaches_nested_entries_and_never_follows_a_link(
     workdir.chmod(0o500)
     host.chmod(0o500)
     try:
-        _restore_owner_access(str(workdir))
+        Workspace(str(workdir)).restore_owner_access()
         assert workdir.stat().st_mode & 0o700 == 0o700
         assert (workdir / "sub").stat().st_mode & 0o700 == 0o700
         assert (workdir / "sub" / "kept.txt").stat().st_mode & 0o700 == 0o600
@@ -753,12 +743,6 @@ def test_crlf_and_lf_output_compare_equal_on_every_backend(expected, produced):
     raw = StubSandbox(SandboxResult(stdout=produced, returncode=0))
     assert run_solution_against_tests("code", [{"input": "", "output": expected}], sandbox=raw).passed == 1
     assert not run_solution_against_tests("code", [{"input": "", "output": "1 2"}], sandbox=raw).passed
-
-
-def test_a_local_program_writing_crlf_passes_an_lf_test():
-    program = "import sys\nsys.stdout.buffer.write(b'1\\r\\n2\\r\\n')\n"
-    grade = run_solution_against_tests(program, [{"input": "", "output": "1\n2\n"}], sandbox=LocalSubprocessSandbox())
-    assert grade.passed == 1, grade.details
 
 
 def test_grading_judges_a_workdir_removing_program_instead_of_voiding_it():

@@ -197,22 +197,22 @@ def test_a_required_schema_parameter_is_enforced_even_when_the_handler_has_a_def
         tool.execute()
 
 
-def _string_tool(seen: list):
+def _string_tool(seen: list, *, refuse_closing_tag: bool = True):
     """A tool with a required and an optional ``string`` parameter and an ``integer`` one; its handler
     records what it receives."""
     return NativeTool(
         name="run_code",
         description="d",
         parameters=[
-            ToolParameter("code", "string", "code"),
-            ToolParameter("stdin", "string", "input", required=False),
+            ToolParameter("code", "string", "code", refuse_closing_tag=refuse_closing_tag),
+            ToolParameter("stdin", "string", "input", required=False, refuse_closing_tag=refuse_closing_tag),
             ToolParameter("max_results", "integer", "n", required=False),
         ],
         handler=lambda code, stdin="", max_results=5: seen.append((code, stdin, max_results)) or "ran",
     )
 
 
-@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}, ("print(1)",)])
+@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}])
 def test_a_list_or_object_for_a_string_parameter_is_refused_before_the_handler_runs(value):
     """A list ``code`` passed on fails inside the sandbox, read as the backend's fault."""
     seen = []
@@ -235,6 +235,40 @@ def test_a_json_scalar_for_a_string_parameter_reaches_the_handler_as_its_string(
     assert tool.execute(code="c", stdin=value) == "ran"
     assert asyncio.run(tool.execute_async(code="c", stdin=value)) == "ran"
     assert seen == [("c", received, 5)] * 2
+
+
+@pytest.mark.parametrize("value", ["1 2\n</stdin>", "1 2\n</stdin>\n  ", "</stdin>"])
+def test_a_string_argument_ending_in_its_own_closing_tag_is_refused_on_both_paths(value):
+    """Markup of the call's own syntax leaked into a value, run as given, feeds the program a line it never reads:
+    refused at binding, naming the tag, before the handler runs."""
+    seen = []
+    tool = _string_tool(seen)
+    refusal = r"^run_code: not run — the stdin argument ends with a stray `</stdin>` tag"
+    with pytest.raises(ToolArgumentError, match=refusal):
+        tool.bind({"code": "c", "stdin": value})
+    with pytest.raises(ToolArgumentError, match=refusal):
+        tool.execute(code="c", stdin=value)
+    with pytest.raises(ToolArgumentError, match=refusal):
+        asyncio.run(tool.execute_async(code="c", stdin=value))
+    assert seen == []
+
+
+def test_a_parameter_that_does_not_refuse_its_closing_tag_keeps_the_value():
+    """The refusal is the parameter's opt-in: an external tool's value may end in its own markup."""
+    seen = []
+    tool = _string_tool(seen, refuse_closing_tag=False)
+    assert tool.execute(code="c", stdin="1 2\n</stdin>") == "ran"
+    assert seen == [("c", "1 2\n</stdin>", 5)]
+
+
+@pytest.mark.parametrize("value", ["a </stdin> b", "1 2\n</code>", "</stdin>x", "<stdin>1 2"])
+def test_a_tag_inside_a_value_or_another_parameters_tag_binds(value):
+    """Only the value's own closing tag at its end is the leak; the same text elsewhere, or another
+    parameter's tag, is input a program may read."""
+    seen = []
+    tool = _string_tool(seen)
+    assert tool.execute(code="c", stdin=value) == "ran"
+    assert seen == [("c", value, 5)]
 
 
 def test_a_null_string_argument_is_an_omission():
@@ -447,22 +481,25 @@ def _bindable(handler, name: str) -> bool:
     )
 
 
-@pytest.mark.parametrize("source", sorted(_registries_under_test()))
-def test_every_declared_parameter_binds_to_its_handler(source):
+def test_every_declared_parameter_binds_to_its_handler(subtests):
     """Binding admits only the declared schema, so a name the handler has no keyword for raises on every call, while
     the keyword it owns keeps its default. ``functools.partial`` is unwrapped, as pre-bound keywords arrive that
     way."""
-    mismatches = []
-    for tool in _registries_under_test()[source].list_tools():
-        for handler in (tool.handler, tool.async_handler):
-            if handler is None:
-                continue
-            mismatches += [
-                f"{tool.name}.{parameter.name} -> {getattr(handler, '__qualname__', handler)}"
-                for parameter in tool.parameters
-                if not _bindable(handler, parameter.name)
-            ]
-    assert not mismatches, f"declared tool parameters that reach no handler keyword: {mismatches}"
+    registries = _registries_under_test()
+    assert registries, "no tool registry is built for the binding check"
+    for source in sorted(registries):
+        with subtests.test(source):
+            mismatches = []
+            for tool in registries[source].list_tools():
+                for handler in (tool.handler, tool.async_handler):
+                    if handler is None:
+                        continue
+                    mismatches += [
+                        f"{tool.name}.{parameter.name} -> {getattr(handler, '__qualname__', handler)}"
+                        for parameter in tool.parameters
+                        if not _bindable(handler, parameter.name)
+                    ]
+            assert not mismatches, f"declared tool parameters that reach no handler keyword: {mismatches}"
 
 
 def test_the_binding_check_would_catch_a_misspelled_parameter():

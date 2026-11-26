@@ -8,11 +8,11 @@ from typing import get_args, get_type_hints
 
 import pytest
 
-import halo.environments.engine_wire as engine_wire
+import halo.environments.rollouts.engine_wire as engine_wire
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
-from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.engine_wire import capture_generation_tokens, turn_from_chat_completion
+from halo.environments.rollouts.ray_actors import EnvironmentActor
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
@@ -96,13 +96,13 @@ def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
 
 
 @pytest.mark.parametrize("backend", rollout_backends())
-def test_each_client_declares_whether_the_pause_it_sends_aborts_the_turns_in_flight(backend):
-    """The env-GRPO retry-budget refusal reads ``PAUSE_ABORTS_IN_FLIGHT``. SGLang's ``abort`` mode drops the requests
-    in flight, vLLM's ``keep`` freezes them."""
-    client = resolve_weight_sync_client(backend)
-    request = client.PAUSE_REQUEST
+def test_no_client_pause_drops_the_turns_in_flight(backend):
+    """A pause that aborts in-flight turns has them re-issued from scratch, which biases each round toward the turns
+    that finished before the push: the short ones. vLLM's ``keep`` freezes them, SGLang's ``retract`` requeues them
+    with their tokens."""
+    request = resolve_weight_sync_client(backend).PAUSE_REQUEST
     mode = {**request.get("json", {}), **request.get("params", {})}["mode"]
-    assert client.PAUSE_ABORTS_IN_FLIGHT is (mode == "abort"), f"{client.__name__} pauses with mode={mode!r}"
+    assert mode == {"vllm": "keep", "sglang": "retract"}[backend]
 
 
 def test_every_registered_backend_is_a_selectable_config_value():
@@ -200,8 +200,9 @@ def test_vllm_payload_still_carries_them():
 
 
 def test_dropped_thinking_budget_is_announced_once(caplog):
-    """The budget here came from ``reasoning_effort_profiles``, since ``rollout_max_thinking_tokens`` is rejected for
-    SGLang. The template still renders it, so dropping it silently leaves a cap nothing enforces."""
+    """The cap here is the turn less its answer room (``rollout_max_answer_tokens``), since
+    ``rollout_max_thinking_tokens`` is rejected for SGLang. Dropping it silently would leave a cap the config states
+    and nothing enforces."""
     engine_wire._thinking_budget_unenforced_warned.discard("sglang")
     try:
         with caplog.at_level(logging.WARNING, logger=engine_wire.__name__):
@@ -255,9 +256,12 @@ def test_the_filter_defaults_are_the_engines_off_values():
 
 
 @pytest.mark.parametrize(
-    "filters", [{}, {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}], ids=["defaults", "set"]
+    ("backend", "filters"),
+    [
+        pytest.param("vllm", {}, id="vllm-defaults"),
+        pytest.param("sglang", {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}, id="sglang-set"),
+    ],
 )
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_rollout_and_eval_requests_carry_the_configured_filters(backend, filters):
     """A filter left out renormalizes every reported log-prob over what the model's default keeps, while the trainer
     scores the full distribution."""

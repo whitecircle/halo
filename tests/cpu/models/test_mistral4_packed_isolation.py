@@ -1,14 +1,13 @@
 #!/usr/bin/env python
-"""``Mistral4Attention.forward`` forwards only ``**kwargs`` to the attention interface, so a flash backend runs a
-packed row as one dense sequence. Flash kernels cannot run on CPU, so a spy checks the interface's inputs."""
+"""Packed-document isolation on Mistral4. A flash backend isolates a packed row's documents only when
+``Mistral4Attention`` hands ``position_ids`` to the attention interface; flash kernels cannot run on CPU, so a spy
+checks the interface's inputs."""
 
 import pytest
 import torch
 import transformers.models.mistral4.modeling_mistral4 as m4
 from transformers import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import ALL_ATTENTION_FUNCTIONS, Mistral4ForCausalLM
-
-from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
 
 SEED = 1234
 
@@ -44,47 +43,31 @@ def _packed_inputs(doc_lens: tuple[int, ...], vocab: int = 128, seed: int = 7):
 
 
 class _SpyInterface:
-    """Records whether each call saw ``position_ids``, then answers with the module's own eager."""
+    """Records the ``position_ids`` each call saw, then answers with the module's own eager."""
 
     def __init__(self):
-        self.saw_position_ids: list[bool] = []
+        self.position_ids: list[torch.Tensor | None] = []
 
     def __call__(self, module, query, key, value, attention_mask, **kwargs):
-        self.saw_position_ids.append(kwargs.get("position_ids") is not None)
-        kwargs.pop("position_ids", None)
+        self.position_ids.append(kwargs.pop("position_ids", None))
         return m4.eager_attention_forward(module, query, key, value, attention_mask, **kwargs)
 
 
-def test_flash_interface_position_ids_defect_and_patch():
+def test_flash_interface_receives_position_ids():
     model = _tiny_model()
     input_ids, position_ids = _packed_inputs((5, 4, 3))
 
     spy = _SpyInterface()
     ALL_ATTENTION_FUNCTIONS.register("flash_spy", spy)
-    original_forward = m4.Mistral4Attention.forward
-    original_registry = m4.ALL_ATTENTION_FUNCTIONS
     model.config._attn_implementation = "flash_spy"
-    try:
-        model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
-        assert spy.saw_position_ids and not any(spy.saw_position_ids), (
-            "flash interfaces received position_ids WITHOUT the patch — transformers fixed "
-            "Mistral4Attention upstream; retire patch_mistral4_flash_packed_position_ids"
-        )
-
-        patch_mistral4_flash_packed_position_ids()
-        spy.saw_position_ids.clear()
-        model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
-        assert spy.saw_position_ids and all(spy.saw_position_ids), (
-            "the patch did not deliver position_ids to the flash interface — packed documents "
-            "attend across each other on every shipped mistral4 recipe (FA2 + packing)"
-        )
-
-        patched_forward = m4.Mistral4Attention.forward
-        patch_mistral4_flash_packed_position_ids()
-        assert m4.Mistral4Attention.forward is patched_forward, "patch must be idempotent"
-    finally:
-        m4.Mistral4Attention.forward = original_forward
-        m4.ALL_ATTENTION_FUNCTIONS = original_registry
+    model(input_ids=input_ids, position_ids=position_ids, use_cache=False)
+    received = spy.position_ids
+    assert len(received) == model.config.num_hidden_layers and all(
+        seen is not None and torch.equal(seen, position_ids) for seen in received
+    ), (
+        "Mistral4Attention dropped position_ids before the flash interface — packed documents attend across each "
+        "other on every shipped mistral4 recipe (FA2 + packing)"
+    )
 
 
 def test_dense_path_isolates_documents():

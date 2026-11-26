@@ -15,7 +15,7 @@ trains with GRPO. For pre-collected rewards use [Offline GRPO](../grpo/offline.m
 
 1. The trainer pushes its weights to the engines over NCCL, then hands one prompt per batch row to `RolloutManager`, which dispatches round-robin across Ray actors and server URLs.
 2. Each actor holds its own environment instance: POST `/v1/chat/completions`, parse the reply and its `tool_calls`, run the step, repeat until done or `max_turns`.
-3. The environment grades each trajectory; the trainer builds training rows from the engine's sampled tokens and computes the GRPO loss.
+3. The environment grades each finished episode, and the actor that played it waits for any external reward term (`judge`, `reward_model`, `whitecircle`) before handing it back, inside `episode_timeout`; the trainer builds training rows from the engine's sampled tokens and computes the GRPO loss.
 
 ![One async GRPO step: weight push, multi-turn episodes on Ray actors against the rollout servers, grading, one training row per assistant turn, GRPO loss](../../assets/diagrams/batch_rollout_pipeline.png)
 
@@ -40,7 +40,7 @@ dataset without it is refused at trainer construction:
 - `code_contests` / `codeforces` (hidden-test payload), `exam_qa`, `qa_search` and the `react_*` presets (graded
   final answer) require it, as does [`swe`](environments/tasks/swe.md#reward) without a `test_function`, unless
   judge-only;
-- `native_*` and `mcp` need none.
+- `native_*` and `mcp` need none: they grade a row's `answer` where it has one, and without one any finished episode grades 1, so the `environment` term rewards finishing ([Native Tool-Use](environments/protocols/native-tool-use.md#reward)).
 
 Rename columns with `prompt_field` / `answer_field` and forward extras with `context_fields`. A `context_fields`
 entry, or an `answer_field` renamed away from `answer`, that names no column raises at startup.
@@ -51,8 +51,10 @@ entry, or an `answer_field` renamed away from `answer`, that names no column rai
   the script refuses an image part earlier, while it processes the dataset.
 - The trainer forces `remove_unused_columns: false` (warning when a config sets it true): pruning would strip `answer`
   and the `context_fields` columns.
-- The environment owns the system turn and the tool schema: there is no `system_prompt` field and `tools_field` is
-  rejected. An override, where accepted, is `environment_kwargs.system_prompt`; the ReAct presets refuse it.
+- The environment owns the system turn, the tool schema and the episode's level: there is no `system_prompt` field,
+  and `tools_field` and `reasoning_effort_field` are rejected. An override, where accepted, is
+  `environment_kwargs.system_prompt`; the ReAct presets refuse it. A row's own level goes through `context_fields`
+  ([Effort levels](reasoning.md#effort-levels)).
 - `text_only_model` is rejected: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would
   miss a multimodal server's `model.language_model.layers.*`.
 
@@ -113,9 +115,9 @@ python scripts/environments/inference/eval_env.py \
 
 - [Servers and Launch](setup.md): GPU split, backends, weight sync, multi-node
 - [Episodes](episodes.md): sampling, turn and episode budgets, tool calls, unproductive turns
-- [Reasoning Budgets](reasoning.md): effort levels, reasoning budgets, the reasoning length reward
+- [Reasoning Budgets](reasoning.md): effort levels, the engine's reasoning cap, the per-level budget and price
 - [Objective and Stability](objective.md): training rows, importance sampling, advantages, KL
-- [Memory and Throughput](performance.md): the logits wall, chunked log-probs, sizing
+- [Memory and Throughput](performance.md): the logits plane, chunked log-probs, sizing
 - [Monitoring](monitoring.md): logged metrics, saved trajectories, early stop
 - [Evaluation](evaluation.md): eval during training, the offline runner, re-grading
 - [Troubleshooting](troubleshooting.md): symptoms and fixes

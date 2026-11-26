@@ -10,12 +10,12 @@ from accelerate.data_loader import prepare_data_loader
 from torch.utils.data import DataLoader
 
 from halo.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
-from halo.trainers.dataloaders import (
+from halo.trainers.loop.dataloaders import (
     _select_gathered_chunks,
     dp_representative_ranks,
     dp_scoped_gather,
 )
-from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
 from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 

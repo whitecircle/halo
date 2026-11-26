@@ -13,6 +13,20 @@ from halo.runtime.ranks import is_global_main_process
 logger = logging.getLogger(__name__)
 
 
+def _probe_conversation(**assistant_fields: str) -> list[dict[str, str]]:
+    return [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a", **assistant_fields},
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "a", **assistant_fields},
+    ]
+
+
+# Two exchanges, so a template ending a turn at the next role marker (GLM) closes one; the second variant carries
+# ``thinking``, the only message gpt-oss harmony emits its marker for.
+TEXT_PROBE_CONVERSATIONS = (_probe_conversation(), _probe_conversation(thinking="t"))
+
+
 def reject_missing_response_marker(
     response_prompt_template: str | list[int] | None,
     train_on_completions_only: bool,
@@ -52,13 +66,9 @@ def verify_marker_renders_in_chat_template(
 ) -> None:
     """An absent marker would mask every label. Probes with and without ``thinking`` (gpt-oss harmony emits the marker
     only for a thinking message)."""
-    probe_conversations = (
-        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
-        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "thinking": "t"}],
-    )
     verify_marker_renders(
         lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
-        probe_conversations,
+        TEXT_PROBE_CONVERSATIONS,
         assistant_message_template,
     )
 
@@ -114,28 +124,33 @@ def reject_unusable_response_marker(
         verify_marker_renders_in_chat_template(tokenizer, response_prompt_template)
 
 
+def _token_ids(value: Any) -> set[int]:
+    if isinstance(value, int):
+        return {value}
+    if isinstance(value, (list, tuple)):
+        return {v for v in value if isinstance(v, int)}
+    return set()
+
+
 def resolve_eos_token_ids(
     tokenizer: PreTrainedTokenizerBase,
     model_config: Any = None,
+    generation_config: Any = None,
 ) -> frozenset[int]:
-    """The tokenizer's eos and the model config's ``eos_token_id`` (or ``text_config``'s), where GLM-4 lists its role
-    markers. A distinct pad is no terminator, else a turn missing its own would train on the trailing pad."""
-    ids: set[int] = set()
-
-    def _collect(value: Any) -> None:
-        if isinstance(value, int):
-            ids.add(value)
-        elif isinstance(value, (list, tuple)):
-            ids.update(v for v in value if isinstance(v, int))
-
-    _collect(tokenizer.eos_token_id)
-    if model_config is not None:
-        _collect(getattr(model_config, "eos_token_id", None))
-        text_config = getattr(model_config, "text_config", None)
-        if text_config is not None:
-            _collect(getattr(text_config, "eos_token_id", None))
-
-    return frozenset(ids)
+    """The ids that end an assistant turn, the ones a served model stops at: the tokenizer's eos, the model config's
+    ``eos_token_id``, where GLM-4 lists its role markers (its ``text_config``'s only where the top level declares none,
+    since a text config the checkpoint leaves unset holds its class default: Inkling's 2, ``#``), and the generation
+    config's, which vLLM stops at too (gpt-oss's ``<|call|>``, Gemma 4's ``<|tool_response>``). A pad only the
+    generation config lists is no terminator (Qwen3's ``<|endoftext|>``), else a turn missing its own would train on
+    the trailing pad."""
+    declared = getattr(model_config, "eos_token_id", None)
+    if declared is None:
+        declared = getattr(getattr(model_config, "text_config", None), "eos_token_id", None)
+    ids = _token_ids(tokenizer.eos_token_id) | _token_ids(declared)
+    served = _token_ids(getattr(generation_config, "eos_token_id", None)) - ids
+    if served:
+        served.discard(tokenizer.pad_token_id)
+    return frozenset(ids | served)
 
 
 def ends_with_terminator(input_ids, tokenizer, eos_token_ids) -> bool:

@@ -36,14 +36,16 @@ _ROLLOUT_SERVERS = REPO_ROOT / "agent-docs" / "infrastructure" / "rollout-server
 _TRAINER_AXIS_SUPPORT = {"CP": lambda cls: cls.SUPPORTS_CP, "PP": lambda cls: cls.PP_REFUSAL is None}
 
 # Derived, since a restated capability is a second copy, and one it forgets lets the restriction table omit that
-# family's row and still pass.
+# family's row and still pass. Only capabilities on by default: one refused by default is an opt-in, whose admitted
+# families its own page names.
 _EP_RESTRICTABLE_FLAGS = tuple(
     sorted(
         {
             *(
                 f"FAMILY.{spec_field.name}"
                 for spec_field in dataclasses.fields(MoEFamilySpec)
-                if spec_field.name.startswith("supports_") or spec_field.name.endswith("_refusal")
+                if (spec_field.name.startswith("supports_") and spec_field.default is True)
+                or (spec_field.name.endswith("_refusal") and spec_field.default is None)
             ),
             *(
                 name

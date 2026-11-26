@@ -8,6 +8,7 @@ from dataclasses import replace
 import pytest
 
 from halo.rewards.samples import (
+    CALL_NOTES_KEY,
     CUT_CALL_NOTE,
     CUT_MARKER,
     CUT_TOOL_CALLS_KEY,
@@ -181,6 +182,26 @@ def test_a_call_refused_unrun_renders_marked_beside_the_calls_that_ran():
     assert render_actions(sample, View.FULL, max_chars=10_000).count("print(1)") == 2
     (wire,) = [m for m in scored_messages(sample, View.FULL) if m["role"] == "assistant"]
     assert REFUSED_CALL_IDS_KEY not in wire and len(wire["tool_calls"]) == 2
+
+
+def test_an_environments_note_on_a_call_renders_after_its_refused_mark_and_on_that_call_alone():
+    refused, submitted = {**CALL, "id": "call_2"}, {**CALL, "id": "call_3"}
+    turn = {
+        **TURNS[0],
+        "tool_calls": [CALL, refused, submitted],
+        REFUSED_CALL_IDS_KEY: ["call_2"],
+        CALL_NOTES_KEY: {"call_2": "budget spent", "call_3": "no run left"},
+    }
+    sample = ScoringSample(prompt=PROMPT, completion=[turn])
+    for rendered in (
+        render_transcript([turn], include_reasoning=False),
+        render_digest(sample, include_reasoning=False),
+    ):
+        assert "→ run (call call_1)\n" in rendered
+        assert f"→ run (call call_2; {REFUSED_CALL_NOTE}; budget spent)\n" in rendered
+        assert "→ run (call call_3; no run left)\n" in rendered
+    (wire,) = [m for m in scored_messages(sample, View.FULL) if m["role"] == "assistant"]
+    assert CALL_NOTES_KEY not in wire
 
 
 def test_the_digest_cuts_a_cut_calls_arguments_like_every_other_argument():

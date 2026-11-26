@@ -22,7 +22,7 @@ from halo.checkpoint.reading import (
     resolve_checkpoint_weights,
 )
 from halo.log import KEY_PREVIEW_COUNT, warn_once
-from halo.models.modality import is_vlm_model, is_vlm_name
+from halo.models.introspection.modality import is_vlm_model, is_vlm_name
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import (
     rank0_verdict,

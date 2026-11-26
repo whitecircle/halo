@@ -9,8 +9,8 @@ from typing import Any
 import torch
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-from halo.models.module_tree import backbone_with_layers, decoder_layers
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.unwrapping import base_transformers_model
 
 RUN_PLAN_VERSION = 1
 CHECKPOINTING_OFF = 0

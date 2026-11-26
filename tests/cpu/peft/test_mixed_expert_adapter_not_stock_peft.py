@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import json
 import os
-import warnings
 
 import pytest
 import torch
@@ -65,24 +64,10 @@ def _write_mixed_adapter(directory, *, spec=SPEC, stock_label: bool = False) -> 
         return json.load(fh)
 
 
-def test_expert_keys_are_classified_as_expert_adapters():
-    assert is_expert_lora_key(EXPERT_KEY_A) and is_expert_lora_key(EXPERT_KEY_B)
-
-
 def test_stock_peft_cannot_load_the_mixed_adapter(tmp_path):
     _write_mixed_adapter(tmp_path)
     with pytest.raises(KeyError, match=MIXED_EXPERT_LORA_PEFT_TYPE):
         PeftModel.from_pretrained(_TinyLM(), str(tmp_path))
-
-
-def test_stock_peft_drops_expert_keys_without_warning(tmp_path):
-    """Canary: if a future PEFT rejects or warns about unexpected adapter keys, this fails and the marker can go."""
-    _write_mixed_adapter(tmp_path, stock_label=True)
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        PeftModel.from_pretrained(_TinyLM(), str(tmp_path))  # accepted: no raise on the grouped keys
-    noticed = [w for w in caught if any(t in str(w.message).lower() for t in ("expert", "unexpected", "ignor"))]
-    assert not noticed, [str(w.message) for w in noticed]
 
 
 def test_mixed_config_keeps_every_lora_field(tmp_path):
@@ -136,11 +121,12 @@ def test_the_expert_config_records_every_field_a_resume_holds_to_the_live_run():
 
 
 def test_an_expert_only_adapter_config_round_trips_through_the_resume_and_merge_readers(tmp_path):
-    write_adapter_config(expert_lora_adapter_config(SPEC, "org/base"), str(tmp_path))
+    write_adapter_config(expert_lora_adapter_config(SPEC, "org/base", "c0ffee"), str(tmp_path))
 
     assert read_adapter_config(str(tmp_path)) == {
         "peft_type": EXPERT_LORA_PEFT_TYPE,
         "base_model_name_or_path": "org/base",
+        "revision": "c0ffee",
         **expert_lora_config_fields(SPEC),
     }
     live = {"lora_alpha": SPEC.alpha, "use_rslora": SPEC.use_rslora}

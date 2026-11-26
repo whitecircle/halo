@@ -1,26 +1,26 @@
 # Troubleshooting
 
-The failures people hit most, with the fix. The full symptom → cause list is
+The failures people hit most, with the fix. The full list of symptoms and causes is
 [Troubleshooting](../agent-docs/reference/troubleshooting.md) ↗ in the
 reference.
 
 ## First things to check
 
-- **You are inside the right Docker image.** `halo:blackwell` for B200/B300,
+- You are inside the right Docker image. `halo:blackwell` for B200/B300,
   `halo:hopper` for H100/H200. The host has no usable Python, and an import
   error for `flash_attn` or `deep_ep` almost always means the wrong image.
-- **The container got `--gpus all` and `--env-file .env`.** Halo never loads
+- The container got `--gpus all` and `--env-file .env`. Halo never loads
   `.env` itself. The GPU `make` targets (`train`, `test-gpu-*`) and the compose
   `training` service pass it; a container you start by hand needs the flag. A
   missing `HF_TOKEN` or `WANDB_API_KEY` usually means it is missing.
-- **Caches point at a disk with space.** Run `df -h` on wherever `HF_HOME`,
+- Caches point at a disk with space. Run `df -h` on wherever `HF_HOME`,
   `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` resolve.
 
 ## Single-node
 
 | Symptom | Cause → fix |
 | --- | --- |
-| CUDA out of memory | Activations dominate. In order: `gradient_checkpointing: true`, a smaller `per_device_train_batch_size` or `max_length`, then sharding (TP for dense, EP or ETP for MoE) or LoRA/QLoRA. |
+| CUDA out of memory | In order: `gradient_checkpointing: true`, a smaller `per_device_train_batch_size` or `max_length`, then sharding (TP for dense, EP or ETP for MoE) or LoRA/QLoRA. |
 | CUDA out of memory while a dense model loads under plain FSDP2 or DDP | Every GPU loads the whole model before sharding, so it must fit on one GPU. Use TP ([Parallelism](parallelism.md)). |
 | Config rejected at startup (`must divide`, `not supported`, …) | The validator refuses shapes that would hang or crash mid-run. The message names the rule; valid shapes are in [Parallelism](parallelism.md). |
 | `expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` | EP between 2 and the NVLink domain size on a single-domain job. Use `ep_size=2`, `ep_size` = the domain size, or `ep4 + etp2` for a 4-way split on 8 GPUs. `ep4 + tp2` is rejected the same way. |
@@ -43,7 +43,7 @@ reference.
 | Symptom | Cause → fix |
 | --- | --- |
 | Nodes never join, or the rendezvous times out | The torchrun arguments differ across nodes, a node started late, the master address is not routable on the fabric (a TCPStore connect timeout naming the host and port), or a stale process holds the port (`pkill -f torchrun`). |
-| Hang at step 0, then a watchdog timeout | A rank never reached a collective. Dump every rank's stack ([below](#getting-eyes-on-a-hung-run), once per node); the rank that is not in a collective is the culprit. |
+| Hang at step 0, then a watchdog timeout | A rank never reached a collective. Dump every rank's stack ([below](#getting-eyes-on-a-hung-run), once per node) and read the rank that is somewhere its peers are not (the data loader, another branch). A collective does not block the CPU, so a waiting rank's stack shows the first line that needed a GPU result, which can be later than the stuck collective. If every rank is waiting, PyTorch's flight recorder names the collective they disagree on ([Debugging](../agent-docs/reference/debugging.md#4-diagnosing-multi-node-hangs) ↗). |
 | Watchdog timeout during a large gathered checkpoint save | Slow work outlasted the watchdog. Raise `DIST_NCCL_TIMEOUT_MINUTES` (default 30), the one watchdog setting: a config's `ddp_timeout` is refused. |
 | A rank waits hours, then aborts during a download, a dataset map or pack, or a queued model load | The rank going first outlasted `DIST_STORE_TIMEOUT_HOURS` (default 4). Raise it. |
 | `Output filesystem is declared SHARED but …`, `Input filesystem …` (or `… declared PER-NODE …`) at startup | The filesystem flag contradicts the mount of `output_dir` (Output) or of the HF caches (Input). Set `DIST_OUTPUT_SHARED_FILESYSTEM` or `DIST_INPUT_SHARED_FILESYSTEM` (or the `DIST_SHARED_FILESYSTEM` umbrella) to `1` for a shared FS or `0` for per-node disks, or move the directory the message names. On NFS whose attribute cache outlasts the probe, raise `DIST_FS_PROBE_TIMEOUT_SECONDS`. |
@@ -58,7 +58,7 @@ reference.
 ## RL runs (vLLM / SGLang)
 
 Server setup is in [Rollout Servers](rollout-servers.md), which also covers
-tool parsers, thinking budgets and port binding.
+tool parsers, reasoning caps and port binding.
 
 | Symptom | Cause → fix |
 | --- | --- |
@@ -72,12 +72,12 @@ tool parsers, thinking budgets and port binding.
 | `ncclP2pImportShareableBuffer ... invalid argument` in the SGLang log on the first update | cuMem differs between the containers. Keep the compose default `NCCL_CUMEM_ENABLE=1` on the server and restart it, since it holds a half-written model. |
 | `… cannot serve this run: it serves no tool parser …` at startup, with `could not detect tool-call parser from chat template` in the SGLang log | The default `auto` turned the parser off on this template (the Qwen3 2507 releases, Ling-mini-2.0). Set `SGLANG_TOOL_PARSER=qwen25` for Qwen3, `hermes` for Ling ([Rollout Servers](rollout-servers.md#sglang-instead)). |
 | `… cannot serve this run: routing_replay: rollout needs the routed experts …` | Start the server with `VLLM_ENABLE_R3=1` or `SGLANG_ENABLE_R3=1`. `--enable-torch-compile` on SGLang is refused with it too, since it returns corrupt rows. |
-| `… does not support weight sync …` right after launch | No engine takes an online update for this family. Train it with [Offline GRPO](training-methods/offline-grpo.md) ([Rollout engines](supported-matrix.md#rollout-engines)). |
+| `… does not support weight sync …` right after launch | No engine takes a weight push for this family. Train it with [Offline GRPO](training-methods/offline-grpo.md) ([Rollout engines](supported-matrix.md#rollout-engines)). Where the message names `rollout_adapter_sync` (Inkling 2 on vLLM), environmental GRPO trains its LoRA with `rollout_adapter_sync: true` ([Rollout Servers](rollout-servers.md#what-weight-sync-does)). |
 | Rollout server restarts forever with `VLLM_ENABLE_R3` or `SGLANG_ENABLE_R3` set | Routed-experts capture is MoE-only; the engine exits on a dense model and the compose `restart` policy loops it. Unset the variable for a dense model. |
 | SGLang exits at start with "Unsupported head dimensions" | GLM-4 MoE Lite on Blackwell. Start the server with `--attention-backend triton` (`SGLANG_ATTENTION_BACKEND=triton` for compose). |
 | `GENERATION is paused or wedged` at startup | A previous trainer died attached to the engine. Lift the pause (`POST /resume` on vLLM, `/continue_generation` on SGLang), or restart the container if that sync had started sending. |
 | "Excluded N of M `lora_target_modules` matches from PEFT injection" at startup | Expected. Those modules have no stock LoRA fit (a Gemma 4 vision-tower projection wrapper, DeepSeek-V4's grouped `o_a_proj`); everything else is adapted. |
-| `a vLLM thinking budget can be enforced but the importance-sampling correction is off` | Turn `train_on_sampled_tokens` and `vllm_importance_sampling_correction` back on. |
+| `a vLLM reasoning cap can be enforced but the importance-sampling correction is off` | Turn `train_on_sampled_tokens` and `vllm_importance_sampling_correction` back on. |
 | `consecutive steps produced no valid episode anywhere in the world` | Two steps in a row had nothing to train on; the message ends with the cause. `reward term 'audit' scored nothing` is a judge outage: fix `OPENROUTER_API_KEY` or the provider and resume. A rollout error points at the server or the sandbox. |
 | A `bubblewrap` sandbox fails to start (`Can't mount proc on /newroot/proc`, `loopback: Failed RTM_NEWADDR`) | The container lacks the rights the sandbox needs ([Async GRPO](training-methods/async-grpo-environments.md#the-environments) lists them). |
 
@@ -97,5 +97,5 @@ training container with the flag. The `make` targets do not add it.
 
 For where the time goes, use `enable_torch_profiler: true` and
 `halo run trace-report` ([Monitoring](monitoring.md#profiling)). The full
-toolbox, including the NCCL flight recorder for mismatched collectives, is
+toolbox, including PyTorch's flight recorder for mismatched NCCL collectives, is
 [Debugging](../agent-docs/reference/debugging.md) ↗.

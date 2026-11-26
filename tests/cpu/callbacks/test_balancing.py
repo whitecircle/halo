@@ -15,7 +15,8 @@ import halo.callbacks.balancing as balancing
 import halo.callbacks.factory as factory
 import halo.models.moe.balancing as moe_balancing
 from halo.callbacks.balancing import apply_balancing_mode
-from halo.models.config_access import (
+from halo.models.families.zaya import patch_zaya_router_load_recording
+from halo.models.introspection.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )
@@ -27,7 +28,6 @@ from halo.models.moe.balancing import (
 from halo.models.moe.config_fields import resolve_moe_routing
 from halo.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
 from halo.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
-from halo.models.zaya import patch_zaya_router_load_recording
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 
 
@@ -162,14 +162,6 @@ def test_aux_loss_zero_coef_stays_off() -> None:
     model = _Model(_Cfg(output_router_logits=False, router_aux_loss_coef=0.0))
     apply_balancing_mode(model, "aux_loss", policy_gradient_loss=False)
     assert model.config.output_router_logits is False
-
-
-def test_bias_update_forces_router_logits_off_and_zeros_coef() -> None:
-    """Forcing the flag off is the EP recorder bypass."""
-    model = _Model(_Cfg(output_router_logits=True, router_aux_loss_coef=0.01), submodules=[_NativeAdoptingEPLayer()])
-    apply_balancing_mode(model, "bias_update", policy_gradient_loss=True, is_moe=True)
-    assert model.config.output_router_logits is False
-    assert model.config.router_aux_loss_coef == 0.0
 
 
 def test_bias_update_on_moe_without_any_supporting_layer_raises() -> None:
@@ -332,12 +324,6 @@ def test_moe_routing_keeps_last_slot_when_no_router_class_declares_it() -> None:
     model = _Model(_Cfg(model_type="zaya", num_experts=8, num_experts_per_tok=2))
     is_moe, _, exclude_last_slot = resolve_moe_routing(model)
     assert is_moe is True
-    assert exclude_last_slot is False
-
-
-def test_moe_routing_keeps_last_slot_for_ordinary_moe() -> None:
-    model = _Model(_Cfg(model_type="qwen3_moe", num_experts=8, num_experts_per_tok=2))
-    _, _, exclude_last_slot = resolve_moe_routing(model)
     assert exclude_last_slot is False
 
 

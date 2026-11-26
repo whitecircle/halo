@@ -183,14 +183,13 @@ def test_tensor_parallelism_is_refused_on_the_unplanned_attention():
 
 
 def test_a_flash_request_falls_back_to_sdpa_and_padding_free_is_refused():
-    """The class supports no flash kernel. No backend serves a padding-free row on the M-RoPE decoder (SDPA reads no
-    ``cu_seqlens``)."""
+    """The class supports no flash kernel, and SDPA reads no ``cu_seqlens``, so a padding-free row has no backend."""
     config = _config()
     config._attn_implementation = resolve_attn_implementation(
         config, "flash_attention_2", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
     )
     assert config._attn_implementation == "sdpa"
-    with pytest.raises(ValueError, match="rotates by M-RoPE.*the dense backends take no cu_seqlens"):
+    with pytest.raises(ValueError, match="padding_free requires a varlen"):
         reject_unsupported_collator_options(
             None,
             padding_free=True,
@@ -212,17 +211,18 @@ def test_tree_packing_is_refused():
 
 @pytest.mark.parametrize("model_type", QWEN4_EXP.model_types)
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_weight_sync_is_refused_on_both_engines(backend, model_type):
-    with pytest.raises(ValueError, match="does not support weight sync"):
+def test_weight_sync_needs_the_live_ep_layers_on_both_engines(backend, model_type):
+    """Without them the push would forward the stock fused expert tensors, which both loaders drop with no error."""
+    with pytest.raises(ValueError, match="carries no live EP layer"):
         reject_unsyncable_model(StockModel(model_type), backend)
 
 
 @pytest.mark.parametrize("backend", ["vllm", "sglang"])
-def test_weight_sync_is_refused_with_live_ep_layers(backend):
+def test_weight_sync_is_admitted_with_live_ep_layers(backend):
+    """SGLang's need for the image's mix-up refresh is checked at the startup preflight, not at construction."""
     model = _tiny_model()
     _wrap_every_block(model)
-    with pytest.raises(ValueError, match="does not support weight sync"):
-        reject_unsyncable_model(model, backend)
+    reject_unsyncable_model(model, backend)
 
 
 if __name__ == "__main__":

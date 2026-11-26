@@ -35,8 +35,8 @@ from halo.model_loading.parallel.lazy_plan import (
     lazy_load_prologue,
 )
 from halo.model_loading.parallel.model_source import ModelSource
-from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, built_level_path, tie_flag_configs
-from halo.models.module_tree import split_layer_path
+from halo.models.introspection.config_access import TIE_WORD_EMBEDDINGS_FLAG, built_level_path, tie_flag_configs
+from halo.models.introspection.module_tree import split_layer_path
 from halo.models.moe.config_fields import resolve_expert_count
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.load_coordination import timed_global_load

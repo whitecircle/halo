@@ -72,7 +72,7 @@ def tokenize_offline_grpo_rows(
     return columns
 
 
-def tokenize_offline_splits(train_dataset, eval_dataset, args, processing_class, model_config):
+def tokenize_offline_splits(train_dataset, eval_dataset, args, processing_class, model_config, generation_config):
     num_proc = resolve_map_num_proc(args.dataset_num_proc)
     # In fn_kwargs, not closed over: the map fn must stay picklable, and the cache key fingerprints fn_kwargs.
     tokenize_kwargs = {
@@ -81,7 +81,7 @@ def tokenize_offline_splits(train_dataset, eval_dataset, args, processing_class,
         "max_completion_length": args.max_completion_length,
         "advantage_method": args.advantage_method,
         "best_completion_emphasis": args.best_completion_emphasis,
-        "eos_token_ids": resolve_eos_token_ids(resolve_tokenizer(processing_class), model_config),
+        "eos_token_ids": resolve_eos_token_ids(resolve_tokenizer(processing_class), model_config, generation_config),
         "drop_degenerate_groups": args.drop_degenerate_groups,
     }
 

@@ -2,11 +2,13 @@
 policies every loaded model takes."""
 
 import logging
+import os
 
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    GenerationConfig,
     PretrainedConfig,
     PreTrainedModel,
 )
@@ -15,7 +17,7 @@ from transformers.models.auto.modeling_auto import (
     MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES,
 )
 
-import halo.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
+import halo.models.upstream.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
 from halo.checkpoint.model_card import HUB_TAGS
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified, reject_adapter_directory
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
@@ -26,6 +28,7 @@ from halo.models.attention.backend_setup import (
     patch_transformers_flash_varlen_int_seqlen,
     patch_transformers_packed_sequence_probe,
 )
+from halo.models.attention.dsa_indexer import patch_glm5_next_indexer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.masked_matmul import dsa_matmul_enabled, install_glm5_next_masked_matmul
 from halo.models.attention.prefix_lm import apply_prefix_lm_causal_decoder
@@ -36,14 +39,14 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.config_access import drop_toolkit_stamps, model_type_matches, narrow_to_text_config
+from halo.models.families.inkling2 import apply_inkling2_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.qwen4_exp.forwards import apply_qwen4_exp_patches, verify_qwen4_exp_patched
+from halo.models.families.zaya import apply_zaya_patches
 from halo.models.hyper_connections import apply_hyper_connection_patches
-from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
-from halo.models.model_classes import auto_map_references, mapped_model_class
+from halo.models.introspection.config_access import drop_toolkit_stamps, model_type_matches, narrow_to_text_config
+from halo.models.introspection.model_classes import auto_map_references, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec
-from halo.models.nemotron_h import apply_nemotron_h_patches
-from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
-from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -127,6 +130,17 @@ def resolve_build_config(
     return config
 
 
+def find_generation_config(model_name_or_path: str, *, revision: str | None = None) -> GenerationConfig | None:
+    """The checkpoint's ``generation_config.json``, ``None`` where it ships none. A local file that does not parse
+    raises: the stops it lists would be lost in silence."""
+    try:
+        return GenerationConfig.from_pretrained(model_name_or_path, revision=revision)
+    except OSError:
+        if os.path.isfile(os.path.join(model_name_or_path, "generation_config.json")):
+            raise
+        return None
+
+
 def declared_load_ignores(config) -> tuple[str, ...]:
     """What the class ``config`` loads through drops at load (``_keys_to_ignore_on_load_unexpected``); none for a
     remote-code class no mapping names, which builds what it stores."""
@@ -165,10 +179,6 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # Else each forward's mask construction reads whether position_ids hold packed documents, for a mask flash ignores.
     if is_flash_attn_implementation(attn_implementation):
         patch_transformers_packed_sequence_probe()
-    # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
-    # packed path never engages and packed documents attend across each other.
-    if is_flash_attn_implementation(attn_implementation) and model_type_matches(model_config, "mistral4"):
-        patch_mistral4_flash_packed_position_ids()
     # Else every attention layer of a padded batch re-derives the unpad set, a nonzero and a host read each, and
     # again in the checkpoint recompute.
     if is_flash_attn_implementation(attn_implementation):
@@ -177,6 +187,9 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # its model forward lacks (it never passes position_ids down to attention or the CCA convs).
     if model_type_matches(model_config, "zaya"):
         apply_zaya_patches()
+    # Else its router matmuls fp32 hidden states against the weight the run dtype cast to bf16.
+    if model_type_matches(model_config, "inkling2"):
+        apply_inkling2_patches()
     # Else packed documents cross the Mamba scan, autocast runs its fp32 body in bf16, the trainer clamps a time step
     # no engine clamps, and Radio's layer scale trains a value no engine reads.
     if model_type_matches(model_config, "nemotron_h"):
@@ -189,6 +202,9 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # of a long step, and cuDNN on Hopper.
     if attn_implementation == "sdpa" and model_type_matches(model_config, "glm5_next") and dsa_matmul_enabled():
         install_glm5_next_masked_matmul()
+    # Else a padded row's DSA indexer scores every query against every pool in one call, 96 fp32 bytes a squared token.
+    if model_type_matches(model_config, "glm5_next"):
+        patch_glm5_next_indexer()
     # Else each hyper-connection and its mix launch some 450 kernels a forward and backward, most of them on a Sinkhorn
     # matrix of 64 bytes a token, and copy the residual streams into fp32 several times over.
     apply_hyper_connection_patches(model_config)
@@ -224,12 +240,14 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
 def apply_run_model_policies(
     model, model_config, *, sinks_policy: SinksPolicy, attn_implementation: str, sinks_pretrained: bool = True
 ) -> None:
-    """The run policies every loaded model takes: Hub tags, generation config, prefix-LM causal default, sinks policy.
+    """The run policies every loaded model takes: Hub tags, generation config, prefix-LM causal default, family patches
+    present, sinks policy.
     ``sinks_pretrained=False`` skips only a neutralized policy, with no pretrained sinks to neutralize. A sink-dropping
     backend over live sinks raises."""
     model.add_model_tags(list(HUB_TAGS))
     sanitize_generation_config(model)
     apply_prefix_lm_causal_decoder(model, model_config)
+    verify_qwen4_exp_patched(model)
     if sinks_pretrained or sinks_policy is not SinksPolicy.NEUTRALIZED:
         apply_sinks_policy(model, model_config, policy=sinks_policy, attn_implementation=attn_implementation)
     verify_live_sinks_carried(model)

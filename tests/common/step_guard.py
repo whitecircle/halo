@@ -6,8 +6,8 @@ from types import SimpleNamespace
 import torch
 from transformers import Trainer
 
+from halo.trainers.loop.step_guard import NonFiniteStepGuardMixin
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
-from halo.trainers.step_guard import NonFiniteStepGuardMixin
 
 
 class HFBase:

@@ -61,6 +61,7 @@ _EXPECTED = {
         "profiler_wait": "5",
         "profiler_warmup": "1",
         "project_name": "'default-project'",
+        "reasoning_effort_field": "None",
         "report_mfu_diagnostics": "False",
         "reset_sinks": "True",
         "router_balancing_rate": "0.001",
@@ -104,13 +105,17 @@ _EXPECTED = {
     },
     "OnlineGRPOScriptArguments": {
         "answer_field": "'answer'",
+        "balance_rank_tokens": "False",
         "balance_token_mass": "False",
         "drop_degenerate_groups": "False",
         "early_stop_entropy_band": "None",
         "early_stop_logratio_gap": "None",
         "early_stop_patience": "3",
+        "log_phase_times": "False",
+        "loss_forward_importance_weights": "False",
         "max_prompt_length": "None",
         "opd_positive_advantage_only": "True",
+        "packed_microbatch_tokens": "None",
         "prompt_field": "'prompt'",
         "reasoning_effort": "None",
         "rewards": "factory:[{'source': 'accuracy'}]",
@@ -123,15 +128,18 @@ _EXPECTED = {
         "rlrr_tau": "0.1",
         "rlrr_xi_neg": "-0.001",
         "rlrr_xi_pos": "0.001",
+        "rollout_weight_precision": "'bf16'",
         "scale_rewards_std_floor": "0.0",
         "sdpg_beta_base": "1.0",
         "sdpg_beta_decay_steps": "0",
         "sdpg_beta_warmup_steps": "0",
         "sdpg_hint_template": "'\\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\\n'",
+        "sdpg_jsd_beta": "0.5",
         "sdpg_loss": "'reverse_kl'",
         "sdpg_temperature": "1.0",
         "system_prompt": "None",
         "use_chunked_grpo_logprobs": "False",
+        "use_maxrl": "False",
         "use_rlrr": "False",
         "use_sdpg": "False",
     },
@@ -165,6 +173,8 @@ _EXPECTED = {
         "tree_packing": "False",
         "tree_share_markers": "factory:[]",
         "tree_share_requires": "None",
+        "token_sources": "None",
+        "eval_token_sources": "None",
     },
     "SMPOScriptArguments": {
         "freeze_vision_tower": "False",
@@ -195,10 +205,12 @@ _EXPECTED = {
         "sdpg_beta_decay_steps": "0",
         "sdpg_beta_warmup_steps": "0",
         "sdpg_hint_template": "'\\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\\n'",
+        "sdpg_jsd_beta": "0.5",
         "sdpg_loss": "'reverse_kl'",
         "sdpg_temperature": "1.0",
         "system_prompt": "None",
         "train_on_completions_only": "True",
+        "use_chunked_distillation_loss": "False",
     },
     "TeacherDistillScriptArguments": {
         "freeze_vision_tower": "False",
@@ -249,16 +261,18 @@ def _own_field_defaults(cls) -> dict[str, str]:
     return {name: default for name, default in actual.items() if common.get(name) != default}
 
 
-@pytest.mark.parametrize("cls_name", sorted(_EXPECTED))
-def test_fields_and_defaults_unchanged(cls_name):
-    actual = _own_field_defaults(_CLASSES[cls_name])
-    expected = _EXPECTED[cls_name]
-    assert actual == expected, (
-        f"{cls_name} field surface drifted.\n"
-        f"missing: {sorted(set(expected) - set(actual))}\n"
-        f"added: {sorted(set(actual) - set(expected))}\n"
-        f"re-defaulted: { {k: (expected[k], actual[k]) for k in set(expected) & set(actual) if expected[k] != actual[k]} }"
-    )
+def test_fields_and_defaults_unchanged(subtests):
+    assert _EXPECTED, "no script-argument class is pinned"
+    for cls_name in sorted(_EXPECTED):
+        with subtests.test(cls_name):
+            actual = _own_field_defaults(_CLASSES[cls_name])
+            expected = _EXPECTED[cls_name]
+            assert actual == expected, (
+                f"{cls_name} field surface drifted.\n"
+                f"missing: {sorted(set(expected) - set(actual))}\n"
+                f"added: {sorted(set(actual) - set(expected))}\n"
+                f"re-defaulted: { {k: (expected[k], actual[k]) for k in set(expected) & set(actual) if expected[k] != actual[k]} }"
+            )
 
 
 if __name__ == "__main__":

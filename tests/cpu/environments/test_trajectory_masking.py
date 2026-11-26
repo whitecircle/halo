@@ -9,7 +9,7 @@ from types import MethodType, SimpleNamespace
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.models import QWEN3_0_6B
@@ -233,7 +233,7 @@ def test_episode_generation_tokens_mean_max_p90():
         for v in vals
     ]
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.async_config = SimpleNamespace(truncation_alarm_rate=None)
+    host.async_config = SimpleNamespace(truncation_alarm_rate=None, episode_error_rate_limit=None)
     host._metrics = {"train": defaultdict(list)}
     host._log_rollout_metrics(results, "train", [[] for _ in vals])
     m = host._metrics["train"]

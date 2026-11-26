@@ -2,7 +2,7 @@
 """Gradio Environment Playground: interactive UI for testing GRPO environments.
 
 Episodes run against a live rollout server through the offline eval's driver
-(:func:`halo.environments.eval_runner.run_episode`), so one is generated and graded exactly as the trainer collects it.
+(:func:`halo.environments.rollouts.eval_runner.run_episode`), so one is generated and graded exactly as the trainer collects it.
 """
 
 import argparse
@@ -14,11 +14,16 @@ from typing import Any
 
 import gradio as gr
 
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import EVAL_STATS_KEY, reject_answerless_examples, run_episode
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import ANSWER_KEY
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.registry import build_environment, get_registered_environments
 from halo.environments.rollout_config import RolloutConfig
+from halo.environments.rollouts.eval_runner import (
+    EVAL_STATS_KEY,
+    reject_answerless_examples,
+    resolve_eval_extra_body,
+    run_episode,
+)
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
 from halo.inference.openai_client import build_openai_client
 from scripts.cli_arguments import add_openai_endpoint_args
@@ -113,22 +118,16 @@ def run_playground_episode(
         url = server_url if server_url.startswith("http") else f"http://{server_url}"
         client = build_openai_client(base_url=url, api_key_override=api_key)
 
-        start_time = time.time()
-        trajectory = asyncio.run(
-            run_episode(
-                env,
-                prompt,
-                context,
-                client,
-                rollout=RolloutConfig(
-                    # None: an unset model name is dropped and a single-model server answers; an empty string 404s.
-                    model_name=model_name or None,
-                    temperature=temperature,
-                    max_tokens=int(max_tokens),
-                    top_p=top_p,
-                ),
-            )
+        rollout = RolloutConfig(
+            # None: an unset model name is dropped and a single-model server answers; an empty string 404s.
+            model_name=model_name or None,
+            temperature=temperature,
+            max_tokens=int(max_tokens),
+            top_p=top_p,
         )
+        extra_body = resolve_eval_extra_body(env, rollout)
+        start_time = time.time()
+        trajectory = asyncio.run(run_episode(env, prompt, context, client, rollout=rollout, extra_body=extra_body))
         elapsed = time.time() - start_time
         return render_transcript(trajectory), render_summary(env_type, trajectory, elapsed, int(max_turns))
     finally:

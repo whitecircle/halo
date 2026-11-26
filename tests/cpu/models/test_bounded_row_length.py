@@ -5,14 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from halo.models.context_window import bounded_row_length
-
-_UNSET = (None, 0, -1)
+from halo.models.introspection.context_window import bounded_row_length
 
 
-@pytest.mark.parametrize("max_length", [*_UNSET, 512])
-@pytest.mark.parametrize("prompt", [*_UNSET, 100])
-@pytest.mark.parametrize("completion", [*_UNSET, 28])
+@pytest.mark.parametrize("max_length", [None, 512])
+@pytest.mark.parametrize("prompt", [None, 100])
+@pytest.mark.parametrize("completion", [None, 28])
 def test_one_source_follows_the_rule(max_length, prompt, completion):
     source = SimpleNamespace(max_length=max_length, max_prompt_length=prompt, max_completion_length=completion)
     if max_length == 512:

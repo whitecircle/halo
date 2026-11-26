@@ -13,7 +13,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, LagunaConfig, Pretrai
 
 from halo.checkpoint.config_export import drop_unshipped_auto_map, finalize_exported_config, save_model_config
 from halo.checkpoint.weights_source import config_schema_source
-from halo.models.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR
+from halo.models.introspection.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR
 from tests.common.models import TINY_LAGUNA_CONFIG
 
 # What ``poolside/Laguna-S-2.1``'s config.json declares beside the in-library ``laguna`` model type.

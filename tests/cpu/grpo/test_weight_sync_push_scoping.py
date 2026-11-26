@@ -58,6 +58,7 @@ def _stub_trainer(model: nn.Module, client):
     trainer.async_config = SimpleNamespace(sync_weights_every_n_steps=1, rollout_backend="sglang")
     trainer.parallelism_config = ParallelismConfig()
     trainer._weight_sync_client = client
+    trainer.first_push_verified = True
     return trainer
 
 

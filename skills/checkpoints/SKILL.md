@@ -47,7 +47,7 @@ Read the script's `--help` before running it — don't guess the flags.
 | Trained with | Gathered save (default) | If you used the sharded option | To get one HF checkpoint |
 |---|---|---|---|
 | Dense FSDP2 / DDP | loadable | — | use directly |
-| LoRA / QLoRA | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
+| LoRA / QLoRA | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); a native EP expert-LoRA adapter merges automatically through its streaming mode (or train with `merge_expert_lora_on_save: true`) |
 | Embedding LoRA (in-place injected) | loadable, adapters folded in | — | use directly (`SentenceTransformer(path)`) |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
 | EP — every family (each family's `MoEFamilySpec.model_types` in `halo/models/moe/family_specs.py`; read them there, and `moe_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
@@ -57,7 +57,8 @@ Read the script's `--help` before running it — don't guess the flags.
 
 Other tools: `convert_to_bf16.py`, `quantize_to_lowp.py` (an artifact tool, not a speedup),
 `reset_sinks.py`, `unfuse_moe_experts.py` (only for a per-expert-only serving loader),
-`merge_models.py`, `reattach_vision_tower.py` — what each does and refuses:
+`merge_models.py`, `reattach_vision_tower.py`, `export_engine_adapter.py` (a saved adapter as the directory a
+rollout engine loads by path, the serving route where no merge exists: Inkling 2) — what each does and refuses:
 `agent-docs/reference/scripts-reference.md#post-training-scripts`.
 
 **Training sidecars:** export through `merge_peft_adapters.py` or `convert_to_bf16.py`, which re-apply

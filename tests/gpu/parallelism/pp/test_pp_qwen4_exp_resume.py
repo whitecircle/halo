@@ -21,7 +21,7 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.pp import _load_stage_lazy
 from halo.models.external_tables import named_external_tables
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import shared_output_dir, world_all

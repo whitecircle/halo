@@ -5,8 +5,8 @@ model, not as a fork of it, so a new family costs little code. For what is
 already supported, see [Supported models](models.md).
 
 Plain FSDP2 needs no code. Any `AutoModelForCausalLM` trains as is, multimodal
-checkpoints included (loaded through the full vision-and-text class). Code comes
-in only for parallelism:
+checkpoints included (loaded through the full vision-and-text class). You write
+code only for parallelism:
 
 ```txt
 HuggingFace model load
@@ -17,7 +17,7 @@ HuggingFace model load
 
 ## What an EP layer costs
 
-Each MoE family adds one file under `halo/distributed/expert_parallel/families/`
+To add a MoE family you write one file under `halo/distributed/expert_parallel/families/`
 naming the HF MoE class it claims, one frozen `MoEFamilySpec` holding its config
 `model_type` spellings and capabilities (`halo/models/moe/family_specs.py`), and
 one import line in the family roster.
@@ -26,7 +26,8 @@ one import line in the family roster.
   an existing one subclasses that instead: Laguna reuses GLM-4's in 21 lines,
   Qwen3-Next reuses Qwen3.5-MoE's in 25, and Qwen3.8-Flash-Next reuses
   Qwen3-Next's in 11.
-- Every other EP layer file is under 90 lines.
+- Every other EP layer file is under 90 lines, except Inkling 2's at 117 (frozen
+  quantized expert banks).
 - GPT-OSS is the outlier at 168, because of its interleaved, biased gate/up
   weights and its own clamped SwiGLU compute.
 
@@ -45,14 +46,14 @@ On a MoE model it shards attention only, and the one list to edit is
 
 ## Vendoring
 
-A model that transformers doesn't ship yet can be vendored under
+You can vendor a model that transformers doesn't ship yet under
 `halo/models/<name>/`: its `configuration_*.py` and `modeling_*.py`, registered on
 import, with a CPU test that proves the registration. Remove the copy once
 upstream ships the model.
 
 No model is vendored. The only model classes Halo adds are the
 sequence-classification heads transformers doesn't ship, for Gemma 4 and
-Qwen3.5/3.6 MoE (`halo/models/seq_cls_heads.py`).
+Qwen3.5/3.6 MoE (`halo/models/upstream/seq_cls_heads.py`).
 
 The step-by-step procedure for each mode is in
 [Adding a Model](../agent-docs/models/adding-a-model.md) ↗.

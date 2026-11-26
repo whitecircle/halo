@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-import halo.trainers.training_args_overrides as base_mod
-from halo.trainers.training_args_overrides import align_save_on_each_node
+import halo.trainers.construction.training_args_overrides as base_mod
+from halo.trainers.construction.training_args_overrides import align_save_on_each_node
 
 
 @pytest.mark.parametrize(

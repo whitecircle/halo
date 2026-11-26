@@ -13,7 +13,7 @@ it for `${VAR}` substitution.
 connection limit and the TF32 fix, so don't copy `-e NCCL_*=...` flags from
 other clusters. The exceptions are the EFA recipe (`make ... EFA=1`), the
 no-fabric recipe a GRPO trainer shares with its rollout server
-([cookbook container](cookbooks/README.md#start-the-training-container)), and
+([Before a GRPO run](cookbooks/README.md#before-a-grpo-run)), and
 `NCCL_SOCKET_IFNAME` on a multi-homed host ([Clusters](clusters.md)).
 
 ## Paths
@@ -31,17 +31,26 @@ put all four on it; unset, they pick the local mount other than `/` with the
 most free space.
 The compose `training` service uses it for `TMPDIR` and `HALO_DATA_ROOT`,
 and the vLLM compose file refuses to start without it, even for the server
-alone; its HF cache follows the host's `HF_HOME`. Export `HALO_SCRATCH` once,
-or set it in the repo-root `.env`, to choose the volume yourself.
+alone; its HF cache follows the host's `HF_HOME`. Export `HALO_SCRATCH` in the shell
+to choose the volume yourself: `make` does not read `.env`, so a value set only there moves compose alone.
 
 ## Secrets
 
-`.env` holds the ones you need: `HF_TOKEN` (gated models and datasets),
-`WANDB_API_KEY`, the `AWS_*` trio for `s3://` (or a mounted `~/.aws`),
-`OPENAI_API_KEY` / `OPENROUTER_API_KEY` for the external-LLM judge and the
-generation scripts, `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` for the
-matching web-search backend (`duckduckgo` needs none), and `VLLM_API_KEY` for a
-keyed OpenAI-compatible endpoint.
+`.env` holds the ones you need:
+
+- `HF_TOKEN`: gated models and datasets.
+- `WANDB_API_KEY`: Weights & Biases logging.
+- The `AWS_*` trio: `s3://` datasets. A mounted `~/.aws` works instead.
+- `OPENAI_API_KEY` / `OPENROUTER_API_KEY`: the external-LLM judge and the
+  generation scripts.
+- `WHITECIRCLE_API_KEY`: a `whitecircle` reward term.
+- `SERPER_API_KEY` / `TAVILY_API_KEY` / `BRAVE_API_KEY` / `KEENABLE_API_KEY`:
+  the matching web-search backend. `duckduckgo` needs none.
+- `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`, or a mounted `~/.modal.toml`: the
+  `modal` code sandbox
+  ([Modal](../agent-docs/training-methods/async-grpo/environments/sandbox.md#modal) ↗).
+- `BASETEN_API_KEY`: the `baseten` code sandbox.
+- `VLLM_API_KEY`: a keyed OpenAI-compatible endpoint.
 
 ## When to set the others
 
@@ -72,11 +81,17 @@ the default.
 - **Dataset map and packing workers:** `HALO_DATASET_NUM_PROC` overrides the default (three
   quarters of the CPUs the process may use, at most 64; all but two in
   `prepare_dataset.py`), for example on a memory-tight host.
-- **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels),
-  `HALO_HC_KERNELS=0` (the hyper-connections of GLM-5 Next and DeepSeek-V4),
-  `HALO_DSA_MATMUL=0` (the DSA layers of GLM-5 Next on SDPA) or
-  `HALO_FLEX_SLIDING=0` on every rank (FlexAttention on SDPA runs of Gemma 4 and Step-3.7,
-  also needed for `full_determinism` on more than one GPU).
+- **A fused kernel fails on your GPU:** turn off the one that fails
+  ([Turning off a fused kernel](../agent-docs/reference/troubleshooting.md#turning-off-a-fused-kernel) ↗).
+  - `HALO_FUSED_GLU=0`: the GLU kernels.
+  - `HALO_HC_KERNELS=0`: the hyper-connections of GLM-5 Next and DeepSeek-V4.
+  - `HALO_DSA_MATMUL=0`: the DSA layers of GLM-5 Next, which go back to stock SDPA.
+  - `HALO_QSA_KERNEL=off`: the QSA layers of Qwen3.8-Flash-Next, which go back
+    to tiled SDPA.
+  - `HALO_GATED_RESIDUAL_KERNELS=0`: the gated residuals of Qwen3.8-Flash-Next.
+  - `HALO_FLEX_SLIDING=0` on every rank: FlexAttention on SDPA runs of
+    sliding-window models such as Gemma 4 and Step-3.7. A `full_determinism`
+    run of such a model on more than one GPU needs it too.
 - **A weight sync that raises naming `HALO_WEIGHT_SYNC_CHUNK_MB`:** set it above the
   held size the message states, as Step-3.7 Flash needs under `fp32_non_ep_params`
   (`1536`).

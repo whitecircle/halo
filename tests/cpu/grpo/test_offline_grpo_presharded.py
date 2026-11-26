@@ -7,8 +7,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 
 GROUP_IDS = [0, 0, 1, 1, 2, 2, 3, 3]
 

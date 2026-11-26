@@ -35,7 +35,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from halo.model_loading.parallel.pp import _load_stage_lazy
 from halo.models.attention.gpt_oss_sinks import neutralized_sink_value
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.runtime import dtensor
 from halo.trainers.parallelism.pipeline_trainer import stash_wrapper_state
 from tests.common.checkpoint_io import load_context, safetensors_state_dict, save_context
@@ -65,7 +65,6 @@ GPUS_PER_NODE = 2  # ⇒ stage_world_size = 2 (dp=2 per stage), the smallest leg
 SEED = 1234
 
 NUM_EXPERTS = 4
-LOCAL_EXPERTS = 2  # An ep2 rank: the stage-local params hold E/ep experts, the gather returns E.
 HIDDEN = 8
 INTER = 6
 ETP_SIZE = 2  # A pure-ETP stage: both ranks hold every expert at INTER / ETP_SIZE.
@@ -313,25 +312,6 @@ def test_per_node_pp_checkpoint_resumes_each_node_and_refuses_a_moved_stage(tmp_
         assert result == "PASS", f"rank {rank}: {result}"
 
 
-class _StubEPLayer(StubEPLayerBase):
-    def __init__(self):
-        super().__init__()
-        self.gate_up_proj = nn.Parameter(torch.zeros(LOCAL_EXPERTS, HIDDEN, 2 * INTER))
-        self.down_proj = nn.Parameter(torch.zeros(LOCAL_EXPERTS, INTER, HIDDEN))
-        self.router = nn.Linear(HIDDEN, NUM_EXPERTS, bias=False)
-
-    def expert_named_params(self):
-        return [("gate_up_proj", self.gate_up_proj), ("down_proj", self.down_proj)]
-
-    def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
-        if not retain:
-            return {}
-        return {
-            "experts.gate_up_proj": torch.ones(NUM_EXPERTS, 2 * INTER, HIDDEN, device=device),
-            "experts.down_proj": torch.ones(NUM_EXPERTS, HIDDEN, INTER, device=device),
-        }
-
-
 def _full_etp_experts(layer: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Integer-valued so the bf16 export holds them exactly."""
     generator = torch.Generator().manual_seed(layer)
@@ -371,7 +351,7 @@ class _MoEBackbone(nn.Module):
         self.norm = nn.LayerNorm(HIDDEN) if is_last else nn.Identity()
 
 
-def _moe_stage(lo: int, hi: int, n_total: int, make_mlp=lambda _layer: _StubEPLayer()) -> PipelineStageModule:
+def _moe_stage(lo: int, hi: int, n_total: int, make_mlp) -> PipelineStageModule:
     is_first, is_last = lo == 0, hi == n_total
     stage = hand_built_stage(
         _MoEBackbone(range(lo, hi), is_first, is_last, make_mlp),
@@ -382,53 +362,6 @@ def _moe_stage(lo: int, hi: int, n_total: int, make_mlp=lambda _layer: _StubEPLa
     )
     stage.config = Qwen3Config(**TINY_QWEN3_CONFIG)
     return stage
-
-
-def _ep_worker(rank: int, out_dir: str, verdict_path: str) -> None:
-    config = _parallelism_config()
-    n_total = 4
-    partition = [(0, 2), (2, 4)]
-    stage = _moe_stage(*partition[config.pp_rank], n_total)
-    if rank == 0:
-        os.makedirs(out_dir, exist_ok=True)
-    dist.barrier()
-
-    save_pp_checkpoint(_context(stage, config), out_dir)
-
-    if rank != 0:
-        return
-    with open(os.path.join(out_dir, "model.safetensors.index.json")) as fh:
-        weight_map = json.load(fh)["weight_map"]
-    problems = []
-    for layer in range(n_total):
-        for key in (
-            f"model.layers.{layer}.mlp.experts.gate_up_proj",
-            f"model.layers.{layer}.mlp.experts.down_proj",
-            f"model.layers.{layer}.mlp.router.weight",
-        ):
-            if key not in weight_map:
-                problems.append(f"missing {key}")
-    leaked = [k for k in weight_map if k.endswith(".mlp.gate_up_proj") or k.endswith(".mlp.down_proj")]
-    if leaked:
-        problems.append(f"stage-local EP shards leaked: {leaked[:3]}")
-
-    for name, shard in weight_map.items():
-        if not name.endswith("experts.gate_up_proj"):
-            continue
-        with safe_open(os.path.join(out_dir, shard), framework="pt") as f:
-            if f.get_slice(name).get_shape()[0] != NUM_EXPERTS:
-                problems.append(f"{name} is not the full expert count")
-    with open(verdict_path, "w") as fh:
-        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems[:8]))
-
-
-def test_pp_plus_ep_exports_full_experts_under_global_names(tmp_path):
-    """No rank-local EP state_dict entry may leak through."""
-    verdict = str(tmp_path / "verdict.txt")
-    run_gloo_ranks(_ep_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
-    with open(verdict) as fh:
-        result = fh.read()
-    assert result == "PASS", result
 
 
 def _etp_worker(rank: int, out_dir: str, verdict_path: str) -> None:

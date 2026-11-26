@@ -3,6 +3,7 @@ n-gram table."""
 
 import contextlib
 import dataclasses
+import tempfile
 
 import torch
 import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
@@ -11,14 +12,15 @@ from torch.utils._pytree import tree_leaves
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import PrefixChange
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
 from halo.model_loading.checkpoint_keys import is_expert_bank_merge
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.external_tables import ExternalTable, named_external_tables
-from halo.models.qwen4_exp.forwards import patch_qwen4_exp_document_forwards
-from halo.models.qwen4_exp.sparse_attention import QSASelection
+from halo.models.families.qwen4_exp.forwards import patch_qwen4_exp_document_forwards
+from halo.models.families.qwen4_exp.sparse_attention import QSASelection
 from halo.models.segment_markers import document_ids, segment_marker_kwargs, segment_markers_for
 from tests.common.models import TINY_QWEN4_EXP_CONFIG
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_SHARD_SIZE, tiny_family_model
@@ -93,7 +95,9 @@ def transformers_forwards():
     patch_qwen4_exp_document_forwards()
     installed = {cls: cls.forward for cls in _DOCUMENT_FORWARD_CLASSES}
     for cls, forward in installed.items():
-        cls.forward = forward.__wrapped__
+        # A checkpointing layer's replacement sits inside transformers' checkpoint wrapper.
+        replacement = forward.__wrapped__ if issubclass(cls, GradientCheckpointingLayer) else forward
+        cls.forward = replacement.__wrapped__
     try:
         yield
     finally:
@@ -134,12 +138,40 @@ def stamped_config(directory: str):
 
 
 def load_host_table_model(
-    directory: str, *, dtype: torch.dtype = torch.float32, model_class=AutoModelForCausalLM
+    directory: str, *, dtype: torch.dtype = torch.float32, model_class=AutoModelForCausalLM, device=None
 ) -> PreTrainedModel:
-    """``directory`` through the family patches and ``finalize_loaded_model``, as the loaders do."""
-    model = model_class.from_pretrained(directory, config=stamped_config(directory), dtype=dtype)
+    """``directory`` through the family patches and ``finalize_loaded_model``, as the loaders do; on ``device`` when
+    given, so the finalization's kernel warm-ups see the device the run uses."""
+    kwargs = {} if device is None else {"device_map": {"": device}}
+    model = model_class.from_pretrained(directory, config=stamped_config(directory), dtype=dtype, **kwargs)
     finalize_loaded_model(model)
     return model
+
+
+def load_tiny_cuda_model(dtype: torch.dtype) -> PreTrainedModel:
+    """The seeded tiny text model through ``load_host_table_model``, then on the current GPU. The checkpoint directory
+    stays: the host n-gram table reads from it."""
+    directory = tempfile.mkdtemp()
+    build_tiny_qwen4_exp_checkpoint(directory)
+    return load_host_table_model(directory, dtype=dtype).cuda()
+
+
+def training_batch(model: PreTrainedModel, kind: str, documents: tuple[int, ...] = (40, 30, 20)) -> dict:
+    """On the GPU: ``packed`` is one row of ``documents`` with its segment markers, ``padded`` two rows left- and
+    right-padded."""
+    vocab = model.config.get_text_config().vocab_size
+    ids = torch.randint(2, vocab, (1, sum(documents)), generator=torch.Generator().manual_seed(1)).cuda()
+    if kind == "packed":
+        positions = packed_positions([list(documents)]).cuda()
+        markers = {
+            k: v.cuda() if hasattr(v, "cuda") else v for k, v in packed_markers(model.config, positions).items()
+        }
+        return {"input_ids": ids, "labels": ids, "position_ids": positions, **markers}
+    ids = ids.expand(2, -1).contiguous()
+    mask = torch.ones_like(ids)
+    mask[0, -25:] = 0
+    mask[1, :15] = 0
+    return {"input_ids": ids, "labels": ids.masked_fill(mask == 0, -100), "attention_mask": mask}
 
 
 def ngram_table(model: torch.nn.Module) -> ExternalTable:

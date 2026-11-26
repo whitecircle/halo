@@ -26,7 +26,7 @@ from halo.checkpoint.tools.offline_export import (
 from halo.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from halo.model_loading.dtype import DTYPE_BY_NAME
 from halo.model_loading.model_preparation import declared_load_ignores
-from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
+from halo.models.introspection.config_access import TIE_WORD_EMBEDDINGS_FLAG, config_sources
 from halo.models.moe.balancing import is_balancing_state_key
 from halo.models.mtp.spec import tail_load_patterns
 

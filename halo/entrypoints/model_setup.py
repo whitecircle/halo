@@ -41,7 +41,7 @@ from halo.model_loading.tokenizer_setup import (
     reject_dropped_chat_template,
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
+from halo.models.attention.layout import has_gated_delta_net_layers
 from halo.models.attention.selection import (
     FA4_DEDICATED_HEAD_DIM,
     FLASH_ATTENTION_DETERMINISTIC_ENV,
@@ -54,10 +54,10 @@ from halo.models.attention.selection import (
     preferred_flash_impl,
     uses_fa4_dedicated_head_dim,
 )
-from halo.models.context_window import is_bounded_length, resolve_length_to_context
-from halo.models.modality import is_vlm_model
+from halo.models.introspection.context_window import is_bounded_length, resolve_length_to_context
+from halo.models.introspection.modality import is_vlm_model
 from halo.models.mtp.spec import MtpHeadRequest
-from halo.models.seq_cls_heads import multimodal_sequence_classification_model_types
+from halo.models.upstream.seq_cls_heads import multimodal_sequence_classification_model_types
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
@@ -148,9 +148,8 @@ def default_training_rows_attn_implementation(
       (:func:`is_fa4_demoted_by_determinism`), pinned or not: the loader would demote FA4 to SDPA, which runs a packed
       row as one dense ``[L, L]`` mask with K/V repeated per query head.
 
-    Neither multi-document rule applies to ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`), whose
-    varlen path faults FA2, nor without an FA2 build. ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the
-    checks that need no config only."""
+    Neither multi-document rule applies without an FA2 build. ``checkpoint_config`` omitted is fetched (COLLECTIVE),
+    past the checks that need no config only."""
     pinned = model_config.attn_implementation or None
     several_documents = packing or padding_free
     deterministic_fa4_pin = pinned == "flash_attention_4" and several_documents and flash_attention_deterministic()
@@ -173,11 +172,7 @@ def default_training_rows_attn_implementation(
             f"FlashAttention-4's varlen kernels are not validated with {refused}, and this run forwards rows that "
             f"reach them (packed, padding-free or padded, in training or evaluation)"
         )
-    if (
-        not several_documents
-        or not is_flash_attn_2_available()
-        or (padding_free and has_mrope_rotary(checkpoint_config))
-    ):
+    if not several_documents or not is_flash_attn_2_available():
         return pinned
     if (
         pinned is None
@@ -270,6 +265,22 @@ def plan_row_attention(
         init_from_scratch=init_from_scratch,
     )
     return plan
+
+
+def grpo_row_attn_implementation(
+    model_config: ModelArguments, grpo_config, *, packed_microbatches: bool, sinks_reset: bool, checkpoint_config
+) -> str | None:
+    """Attention for an on-policy GRPO script whose trainer forwards padded rows. Packed micro-batches need a varlen
+    flash backend; live sinks keep the loader's pick, as FA2 carries none."""
+    if packed_microbatches and sinks_reset:
+        return plan_row_attention(
+            model_config,
+            grpo_config,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
+            packing=True,
+            checkpoint_config=checkpoint_config,
+        ).attn_default
+    return default_padded_attn_implementation(model_config, sinks_reset=sinks_reset)
 
 
 def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:

@@ -15,8 +15,8 @@ from safetensors.torch import load_file, save_file
 
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.parallel.adapters import restore_adapters, save_peft_adapters
+from halo.models.introspection.param_roles import persistent_buffers
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.models.param_roles import persistent_buffers
 from tests.common.checkpoint_io import save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks

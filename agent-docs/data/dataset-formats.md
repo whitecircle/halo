@@ -42,10 +42,11 @@ test together: a column missing from any dataset, or whose feature type differs 
 dropped, with no fixed allowlist.
 
 The **declared** render columns are the exception. A declared `conversation_field` must be in every
-entry: a source without it raises, naming that source. `tools_field` may be missing from some entries,
-which get a null-filled column of the carrying entry's type, so a mixed corpus keeps its tools. A
-declared column the intersection loses anyway (a type mismatch across the entries, which no fill can
-bridge) raises rather than rendering the whole corpus without it.
+entry: a source without it raises, naming that source. `tools_field` and `reasoning_effort_field` may be
+missing from some entries, or held as nulls only (Arrow's `null` type), which get a null-filled column of
+the carrying entry's type, so a mixed corpus keeps its tools and levels. A declared column typed differently
+across the datasets (two entries, or one entry's train and test) raises as a type mismatch naming them, rather
+than rendering the whole corpus without it.
 
 **Which rows a ratio keeps** is drawn without replacement from `numpy.random.default_rng(seed)`
 (PCG64) — seed `42`, `+1` for the `test` split and stepped per list entry, so every rank selects the
@@ -89,10 +90,21 @@ its own default (`messages` for teacher distillation, `prompt` elsewhere), so a 
 raises whether or not the YAML names one. Scripts that render no conversation (preference, reward,
 classification, embedding) declare none and skip the check.
 
-`tools_field` is checked the same way for a single dataset. Across a `dataset:` list it raises only
-when **no** source carries the column and warns per source otherwise — a tool-use corpus concatenated
-with plain chat is a legitimate shape, and only the rows of the sources without the column render
-toolless. Pre-processed datasets skip both checks; their rows are already tokenized.
+`tools_field` and `reasoning_effort_field` (each row's own level, rendered as the template's
+`reasoning_effort`: [Configuration Reference](../reference/configuration-reference.md#commonscriptarguments))
+are checked the same way for a single dataset. Across a `dataset:` list each raises only when **no**
+source carries its column in either split and otherwise warns, naming each source's splits without it —
+a tool-use or effort-labeled corpus concatenated with plain chat is a legitimate shape, and only the rows
+of the splits without the column render toolless or with no level. Pre-processed datasets skip these
+checks; their rows are already tokenized. `reasoning_effort_field` is also refused at setup under a chat
+template that renders a conversation alike at no level, `none`, `low`, `medium` and `high`, whether closed by an
+assistant turn or open on its generation prompt (`reject_unrendered_reasoning_effort`,
+`halo/model_loading/tokenizer_setup.py`), as the hub Qwen3, Qwen3.5/3.6, GLM-4.7 and Gemma 4 templates do. The
+template that renders the rows is probed: the run's tokenizer on the text path, a VLM run's processor on its own
+template (not the tokenizer it holds), and the tokenizer of an offline text bake
+([Pre-Processing](dataset-preparation.md)). A template refusing a level it does not take (Mistral 4 `low`, Qwen3.8
+`high`) reads the level and passes, as does one reading it in one form only (Command A reads `none` in its generation
+prompt alone).
 
 ## SFT
 
@@ -101,6 +113,10 @@ toolless. Pre-processed datasets skip both checks; their rows are already tokeni
 ```
 
 Multi-turn: include all turns in the single `prompt` list.
+
+Tool-use rows keep the OpenAI message shape: an assistant turn carries `tool_calls`, a `tool` turn its
+result, and `tools_field` names the column of tool schemas. A call's `arguments` is a mapping or its JSON
+text: [Tool-call arguments](#tool-call-arguments).
 
 ```yaml
 conversation_field: "prompt"             # conversation column (default "prompt")
@@ -114,6 +130,18 @@ assistant_message_template: "<|start_header_id|>assistant<|end_header_id|>\n\n" 
 Pipeline: load → filter empties → apply chat template → tokenize (sequences over `max_length` are dropped) → optional packing. Datasets load with `keep_in_memory=False`, so Arrow files are memory-mapped, not copied into RAM.
 
 Offline pre-processing (tokenization, packing, sharding) is optional, see [SFT Dataset Pre-Processing](dataset-preparation.md).
+
+## datatrove token folders
+
+`token_sources` reads a folder that datatrove's `DocumentTokenizer` or `DocumentTokenizerMerger` wrote, flat, its files in name order (`halo/data/sources/token_shards.py`). Each non-empty `<name>.ds` needs two files beside it:
+
+| File | Holds |
+|---|---|
+| `<name>.ds` | Token ids back to back, little-endian, with no header: 2 bytes each for a vocabulary of at most 65,536 ids, else 4 |
+| `<name>.ds.index` | The end of every document in tokens, cumulative within the file, as little-endian `uint64` with no leading 0 |
+| `<name>.ds.metadata` | First line `<tokenizer>\|<bytes per token>`, then the token count |
+
+An empty `.ds` is skipped, as is everything else in the folder: the empty files a task with no input leaves, the merger's total `<name>.ds.metadata` with no `.ds` beside it, and `.ds.loss` masks, which no row reads. The token width comes from each file's metadata, and all files of one folder, and all folders of one run, must share it. How the folders train, mix and resume, and what a folder is refused for: [Pre-training](../training-methods/pretraining.md#training-from-datatrove-token-folders).
 
 ## SFT-VLM
 
@@ -135,7 +163,7 @@ The embedded-parts declaration is read from the column's **Arrow schema**: the p
 
 The verdict is **agreed across ranks** (all-reduce MAX — any image-declaring rank wins), because on a pre-sharded corpus every rank probes a disjoint slice: its own first row, and the Arrow schema `datasets` inferred for its own shard set. A split verdict would pair one arm's barrier against the other's store wait, so the probe spends one collective per call whatever the answer.
 
-The checkpoint half is `is_vlm_model` (`halo/models/modality.py`), judged on the config that `probe_checkpoint` (`halo/model_loading/parallel/model_source.py`) reads once, on every rank, at the pinned revision: a `model_type` registered under `AutoModelForImageTextToText` **whose mapped class does not end in `ForCausalLM`** (mistral4 and fuyu are registered there but decode text), or a config carrying a `vision_config`. This covers natively-multimodal models (Qwen3.5/3.6, Gemma3/4, Mistral3) with no name list. A config transformers **knows** decides both ways: a `model_type` present in `CONFIG_MAPPING` that matches neither test is text-only, and the name is never consulted.
+The checkpoint half is `is_vlm_model` (`halo/models/introspection/modality.py`), judged on the config that `probe_checkpoint` (`halo/model_loading/parallel/model_source.py`) reads once, on every rank, at the pinned revision: a `model_type` registered under `AutoModelForImageTextToText` **whose mapped class does not end in `ForCausalLM`** (mistral4 and fuyu are registered there but decode text), or a config carrying a `vision_config`. This covers natively-multimodal models (Qwen3.5/3.6, Gemma3/4, Mistral3) with no name list. A config transformers **knows** decides both ways: a `model_type` present in `CONFIG_MAPPING` that matches neither test is text-only, and the name is never consulted.
 
 The name-substring heuristic (`-vl`, `vl-`, `vl2`, `llava`, `vision`, `pixtral`, `molmo`, `idefics`, `paligemma`, `cogvlm`, `minicpm-v`, `qwen3.5-`, `qwen3.6-`) runs only when the config cannot load (offline, or a raw weights dir without `config.json`) or its `model_type` is unregistered (remote code). The hints match mid-word — a path containing `revision` reads as a VLM — so pass an explicit config where the path is uncontrolled.
 
@@ -269,6 +297,36 @@ The template lands on the tokenizer and, for a VLM run, on its processor as well
 (`adopt_tokenizer_chat_template`): a processor renders and saves with a `chat_template` of its own,
 so the processor is what decides both the VLM rows and the exported `chat_template.jinja`. The same
 holds for `prepare_dataset.py --is_vlm` and `patch_vocab.py --chat_template`.
+
+### Tool-call arguments
+
+A tool call's `arguments` is a mapping or its JSON text (the OpenAI wire form). The text is parsed into the
+mapping, as a serving engine parses a request's before it renders, unless the chat template writes the text
+as stored. `supports_wire_form_arguments` (`halo/data/chat_render.py`) renders one probe call both ways, once
+per template and separately for a render that declares tools and one that does not (a tokenizer holding named
+templates renders the first with its `tool_use` one). A row keeps its text where the template writes it
+verbatim (the bundled `qwen3-native.jinja`, `ling-native.jinja` and `gpt-oss-harmony.jinja`), renders it as it renders the mapping
+(`qwen3-multiturn.jinja` leaves calls out) or raises on the mapping alone. Every other template takes the
+mapping:
+
+- one that writes a block per argument (Qwen3.5/3.6, Gemma 4, GLM native) raises on the text;
+- one that applies `tojson` to it writes a quoted, escaped string;
+- one that raises on both probes tells nothing, so it takes what a serving engine hands it: Mistral v0.3's
+  checks a call id's length, and a single-turn template (the bundled `*-instruct` ones) refuses the multi-turn probe.
+
+Parsing reads empty text as no arguments and raises on other text that is not a JSON object, also under a
+single-turn template, whose render leaves the call out. Every text renderer applies the rule
+(`resolve_template_conversation`): SFT (`conversation_field` rows, self-distillation
+included), preference text (DPO and SMPO) and its generation-eval prompts,
+classification, the offline and online GRPO prompts, the env-GRPO prompt-length probe and the generation
+CLIs' reward-model scoring (`encode_for_scoring`). KTO and reward modeling, whose rows TRL templates itself,
+and a `source: reward_model` reward term (`ServedRewardModel`) hand a call to the template as stored. The VLM render
+(`render_vlm_text`, `halo/data/vlm_render.py`) applies it under the processor's own template to every row it
+renders: SFT-VLM and VLM self-distillation, the `--is_vlm` bake, and the SMPO and Bradley-Terry reward image
+rows. A VLM row's messages keep every key beside their role and content (`tool_calls`, `reasoning_content`, a
+tool reply's `tool_call_id` and `name`) through the row map's pinned schema, as JSON text
+(`MESSAGE_FIELDS_KEY`), so such a row renders as the text path renders it, its image placeholders aside, except
+under a template that writes a tool reply only from string content ([Inkling](../models/inkling.md#multimodal-training)).
 
 ### Special-token ownership
 

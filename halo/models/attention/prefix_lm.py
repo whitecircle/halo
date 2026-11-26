@@ -6,8 +6,8 @@ from __future__ import annotations
 import torch
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.models.config_access import model_type_matches
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.config_access import model_type_matches
+from halo.models.introspection.module_tree import backbone_with_layers
 
 # transformers sets the text config's ``use_bidirectional_attention`` when a checkpoint leaves it unset (every
 # published PaliGemma does), so each decoder attention module is built with ``is_causal=False``.

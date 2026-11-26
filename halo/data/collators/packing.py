@@ -16,6 +16,7 @@ from halo.data.completion_spans import (
     PACKED_SPAN_POLICY,
     build_span_labels,
     mask_batch_to_completion_spans,
+    resolve_span_bounds,
     resolve_spans_or_warn,
 )
 from halo.data.turn_markers import (
@@ -128,9 +129,8 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             warnings.warn(
                 "DataCollatorWithPacking received rows without `seq_lengths`: each row collates as "
                 "ONE document, so any concatenated documents inside it attend across each other. "
-                "This is what `packing_strategy: wrapped` produces (pack_dataset emits no "
-                "boundaries there); use `bfd`/`bfd_split` for document isolation, or ignore this "
-                "if cross-document attention is intended.",
+                "Pack with `bfd`, `bfd_split` or `wrapped`, which all emit the document lengths, "
+                "or ignore this if cross-document attention is intended.",
                 stacklevel=2,
             )
 
@@ -153,8 +153,12 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             # by every other route.
             batch["labels"][batch["position_ids"] == 0] = LABEL_IGNORE_INDEX
             batch = self._mask_packed_labels(batch, examples)
+            row_lengths = self._real_row_lengths(batch, examples)
             if self.flatten_to_single_row:
-                batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
+                batch = flatten_packed_batch(batch, row_lengths)
+            else:
+                # Rows keep their padding and carry no mask, so the real tokens count off the lengths.
+                batch["row_lengths"] = torch.tensor(row_lengths, dtype=torch.long)
             # The varlen set is only defined on the flattened [1, total] row; PP keeps its rows.
             varlen = self.emit_varlen_always or (
                 self.emit_varlen_on_flash_restart and positions_restart(batch["position_ids"])
@@ -208,6 +212,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         self.train_on_last_assistant_only = train_on_last_assistant_only
         self.response_token_ids = tokenize_response_template(response_prompt_template, self.tokenizer)
         self.eos_token_ids = eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(self.tokenizer)
+        self.span_bounds = resolve_span_bounds(self.tokenizer, self.response_token_ids, self.eos_token_ids)
 
         warn_if_pad_equals_eos(self.tokenizer)
 
@@ -225,6 +230,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
                 self.train_on_last_assistant_only,
                 self.response_prompt_template,
                 tokenizer=self.tokenizer,
+                span_bounds=self.span_bounds,
             )
 
         return batch
@@ -264,6 +270,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
             response_prompt_template=self.response_prompt_template,
             tokenizer=self.tokenizer,
             row_label="packed document",
+            span_bounds=self.span_bounds,
         )
         return build_span_labels(labels, input_ids, spans, restore_end=True)
 
@@ -326,6 +333,7 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
 
         if self.eos_token_ids is None:
             self.eos_token_ids = resolve_eos_token_ids(self.tokenizer)
+        self.span_bounds = resolve_span_bounds(self.tokenizer, self.response_token_ids, self.eos_token_ids)
 
         warn_if_pad_equals_eos(self.tokenizer)
 
@@ -341,5 +349,6 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
             response_prompt_template=self.response_prompt_template,
             tokenizer=self.tokenizer,
             row_label="flattened sample",
+            span_bounds=self.span_bounds,
         )
         return build_span_labels(labels, input_ids, spans)

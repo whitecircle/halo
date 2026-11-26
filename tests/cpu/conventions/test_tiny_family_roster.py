@@ -225,6 +225,12 @@ def test_ring_is_refused_for_its_own_linear_attention_class():
         reject_unsupported_ulysses_model(tiny_family_model(TINY_BAILING_RING_FAMILY), 2)
 
 
+def test_inkling2_cp_is_refused_naming_its_short_convolutions():
+    """Without its own entry the refusal is the generic no-wrapper one, which hides why no wrapper can exist."""
+    with pytest.raises(CPConfigError, match="Inkling2(Dynamic)?ShortConvolution"):
+        reject_unsupported_ulysses_model(tiny_family_model(TINY_MOE_FAMILIES["inkling2_text"]), 2)
+
+
 @pytest.mark.parametrize("suite", CP_SUITES)
 def test_the_cp_rows_run_every_cp_roster_family_once(suite):
     families = [shlex.split(args)[1] for args, _ in MANIFEST[suite].launches()]
@@ -240,11 +246,13 @@ def test_every_engine_runs_the_push_exactness_rows_of_every_family_it_takes():
         (parse_push_exact_row(shlex.split(args)), spec.markers) for args, spec in MANIFEST[PUSH_EXACT_SUITE].launches()
     ]
     assert {row.family for row, _ in rows} == set(PUSH_EXACT_CHECKPOINTS)
-    # A real step's bar is gross on these two, so the name-by-name rounds are what catch a dropped name.
+    # A real step's bar is gross on these, so the name-by-name rounds are what catch a dropped name.
     assert {(row.family, row.backend) for row, _ in rows if row.reach} == {
         ("laguna", "vllm"),
         ("gemma4_text", "vllm"),
         ("gemma4_text", "sglang"),
+        ("qwen4_exp_text", "vllm"),
+        ("qwen4_exp_text", "sglang"),
     }
     registry = ep_layer_class_by_model_type()
     for backend in rollout_backends():

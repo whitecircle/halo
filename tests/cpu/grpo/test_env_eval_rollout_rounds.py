@@ -9,9 +9,9 @@ import pytest
 from trl import GRPOTrainer
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.grpo.environmental.environmental_rules import reject_straddling_eval_groups
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 
 SENTINEL = object()
 

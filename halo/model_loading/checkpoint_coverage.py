@@ -17,14 +17,14 @@ from transformers.utils import CONFIG_NAME
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE
 from halo.env import env_flag
 from halo.model_loading.remote_code import reject_untieable_list_ties
-from halo.models.config_access import drop_toolkit_stamps
-from halo.models.conversion_overrides import verify_conversion_overrides_intact
+from halo.models.introspection.config_access import drop_toolkit_stamps
+from halo.models.upstream.conversion_overrides import verify_conversion_overrides_intact
 
 logger = logging.getLogger(__name__)
 
 ALLOW_MISSING_CHECKPOINT_KEYS_ENV = "HALO_ALLOW_MISSING_CHECKPOINT_KEYS"
-# accelerate's switch under an FSDP launch for keeping the checkpoint's weights on each node's local rank 0 only;
-# transformers reads it inside ``from_pretrained``.
+# accelerate's switch under an FSDP launch for materializing weights on each node's local rank 0 only; transformers
+# reads it inside ``from_pretrained``.
 _FSDP_CPU_RAM_EFFICIENT_LOADING = "FSDP_CPU_RAM_EFFICIENT_LOADING"
 
 
@@ -89,9 +89,10 @@ def verify_checkpoint_coverage(
 
 @contextmanager
 def full_weights_on_every_rank() -> Iterator[None]:
-    """Turn ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the scope. Under an accelerate FSDP launch it leaves off-rank-0
-    weights as CPU zero copies until ``accelerator.prepare``'s broadcast, which a frozen model never gets and which
-    anything using the policy first (a reference sweep, a teacher on its device) precedes."""
+    """Turn ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the scope. Under an accelerate FSDP launch transformers loads
+    the checkpoint's tensors on every rank, but leaves a key the checkpoint lacks (a task head on a base checkpoint) on
+    the meta device off each node's local rank 0 and marks it initialized; only a broadcast from rank 0 would fill
+    it."""
     previous = os.environ.get(_FSDP_CPU_RAM_EFFICIENT_LOADING)
     os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = "false"
     try:

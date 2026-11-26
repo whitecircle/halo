@@ -1,23 +1,30 @@
 #!/usr/bin/env python
 """What a code-contests submission scores: 1 when it passes every hidden test, else 0; every graded submission after
 the first pays a flat price, stated to the model nowhere. A scratchpad run on no input says so, so the next run
-is not spent the same way."""
+is not spent the same way. The judge, never the model, reads where the scratchpad budget ran out."""
 
 import json
 
 import pytest
 
-from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
+from halo.environments.episodes.episode_keys import REWARD_COMPONENTS_KEY
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
-from halo.environments.tasks.coding.code_contests_prompts import NO_STDIN_NOTE
+from halo.environments.tasks.coding.code_contests_prompts import (
+    FIRST_RUN_REFUSAL_NOTE,
+    LATER_RUN_REFUSAL_NOTE,
+    NO_RUN_LEFT_NOTE,
+    NO_STDIN_NOTE,
+)
 from halo.environments.tasks.coding.submission_record import FAILED_WITH_NO_RUNS_LEFT, SUBMISSION_PASS_FRACS_KEY
-from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
+from halo.environments.tools.accounting import EPISODE_TOOL_BUDGETS_KEY
 from halo.environments.tools.definitions import NativeToolCall
+from halo.rewards.samples import CALL_NOTES_KEY, REFUSED_CALL_NOTE, render_transcript
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
 from tests.common.code_contests import StubSandbox, retired_budget_phrases
+from tests.common.repo import REPO_ROOT
 
 PENALTY = 0.2
 PROFILES = {"high": {"max_submissions": 3, "max_test_calls": 8}}
@@ -26,6 +33,7 @@ PROFILES = {"high": {"max_submissions": 3, "max_test_calls": 8}}
 TESTS = {"answer": {"tests": [{"input": str(i), "output": "ok"} for i in range(4)]}}
 # The resubmission-price rule no task message states.
 PRICE_RULE = "every resubmission costs part of the score"
+_JUDGE_CONTEXTS = sorted((REPO_ROOT / "examples/grpo/environmental/code-contests-judge").glob("*.txt"))
 
 
 class _PassesSandbox(SandboxExecutor):
@@ -114,6 +122,71 @@ def test_the_no_runs_left_fact_holds_only_when_every_failed_submission_had_no_ru
         ]
         env._execute_tool_calls(calls, traj)
     assert (FAILED_WITH_NO_RUNS_LEFT in env._scoring_sample(traj).facts) is exempt
+
+
+def _step_calls(env, ids, *calls):
+    """One turn of ``(call id, tool, code)`` calls, each naming python where the run lists languages."""
+    language = {"language": "python"} if env.chooses_language else {}
+    tool_calls = [
+        {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps({"code": code, **language})},
+        }
+        for call_id, name, code in calls
+    ]
+    return env.step(ids, [""], [{"finish_reason": "stop", "tool_calls": tool_calls}])[0]
+
+
+_SPENT_BUDGET_MARKS = {
+    "s3": NO_RUN_LEFT_NOTE,  # the last run spent the budget silently a turn before
+    "r4a": FIRST_RUN_REFUSAL_NOTE,
+    "r4b": FIRST_RUN_REFUSAL_NOTE,  # beside the first in its turn, sent before any reply had said so
+    "r5": LATER_RUN_REFUSAL_NOTE,
+    "s5": NO_RUN_LEFT_NOTE,
+}
+
+
+@pytest.mark.parametrize("notes", [None, {}], ids=["plain", "notes"])
+@pytest.mark.parametrize("language", ["python", ["python", "cpp"]], ids=["python_repl", "run_code"])
+@pytest.mark.parametrize(
+    ("max_test_calls", "marks"), [(2, _SPENT_BUDGET_MARKS), (8, {})], ids=["runs_spent", "runs_left"]
+)
+def test_the_judge_view_marks_runs_refused_for_the_spent_budget_and_submissions_with_no_run_left(
+    language, notes, max_test_calls, marks
+):
+    """The environment knows when the hidden scratchpad budget ran out, which the replies alone leave a judge to
+    guess: the runs refused before any reply said so and those sent after are marked apart, and so is every submission
+    whose turn began with no run left (``s2`` shares its turn with the last run). The policy is shown none of it."""
+    env = _env(
+        language=language,
+        notes=notes,
+        reasoning_effort_profiles={"high": {"max_submissions": 3, "max_test_calls": max_test_calls}},
+    )
+    ids, _ = env.reset(["solve it"], [{"reasoning_effort": "high", **TESTS}])
+    run = env.test_tool_name
+    _step_calls(env, ids, ("r1", run, "print(1)"))
+    _step_calls(env, ids, ("r2", run, "print(2)"), ("s2", "submit_solution", "program = '0'"))
+    _step_calls(env, ids, ("s3", "submit_solution", "program = '1'"))
+    _step_calls(env, ids, ("r4a", run, "print(4)"), ("r4b", run, "print(5)"))
+    last = _step_calls(env, ids, ("r5", run, "print(6)"), ("s5", "submit_solution", "program = '2'"))
+    assert last.done, "the third submission spends the budget"
+    sample = env._scoring_sample(last.trajectory)
+    marked = {call_id: note for m in sample.completion for call_id, note in (m.get(CALL_NOTES_KEY) or {}).items()}
+    assert marked == marks
+    view = render_transcript(sample.completion, include_reasoning=False)
+    for call_id, note in marks.items():
+        refused = "" if note == NO_RUN_LEFT_NOTE else f"{REFUSED_CALL_NOTE}; "
+        assert f"(call {call_id}; {refused}{note})\n" in view
+    shown = json.dumps(last.observation)
+    assert not any(note in shown for note in (NO_RUN_LEFT_NOTE, FIRST_RUN_REFUSAL_NOTE, LATER_RUN_REFUSAL_NOTE))
+
+
+@pytest.mark.parametrize("path", _JUDGE_CONTEXTS, ids=lambda path: path.name)
+def test_every_judge_context_quotes_the_run_budget_marks_the_view_writes(path):
+    """The audit's checks name these marks; a context that words them otherwise leaves a judge matching nothing."""
+    text = path.read_text()
+    assert all(f'"{note}"' in text for note in (FIRST_RUN_REFUSAL_NOTE, LATER_RUN_REFUSAL_NOTE, NO_RUN_LEFT_NOTE))
 
 
 def test_a_judge_check_exempt_under_a_fact_the_environment_never_establishes_is_refused():

@@ -14,7 +14,7 @@ import torch
 from transformers.core_model_loading import PrefixChange, WeightConverter, WeightRenaming, revert_weight_conversion
 
 from halo.model_loading.checkpoint_keys import build_key_plan, is_expert_bank_merge, resolve_model_conversions
-from halo.models.param_roles import persistent_buffers
+from halo.models.introspection.param_roles import persistent_buffers
 
 
 def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:

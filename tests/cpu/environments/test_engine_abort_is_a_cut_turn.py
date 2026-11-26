@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.messages import Message, Trajectory
+from halo.environments.episodes.messages import Message, Trajectory
 from halo.inference.response import FINISH_REASON_ABORT, FINISH_REASON_LENGTH
 
 

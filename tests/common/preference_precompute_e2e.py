@@ -1,6 +1,7 @@
 """The DPO / KTO ``precompute_ref_log_probs`` resume body. A Path-B resume builds the policy from the checkpoint first,
 so TRL's sweep would score trained weights and zero every log-ratio; checkpoints carry the untrained columns
-(``reference_logps.pt``) instead. A control not told the checkpoint must miss, and a missing sidecar must refuse."""
+(``reference_logps.pt``) instead. A control not told the checkpoint must rederive different columns; a missing
+sidecar must refuse."""
 
 import argparse
 import math
@@ -85,7 +86,7 @@ def precompute_resume_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_rows(kind: str, n: int, start: int = 0) -> dict:
+def build_text_rows(kind: str, n: int, start: int = 0) -> dict:
     """Text rows with ragged completions, so rows and a swapped reference score differently; ``start`` keeps each
     split's rows its own."""
     ids = range(start, start + n)
@@ -194,10 +195,10 @@ def run_precompute_resume(
         shutil.rmtree(shared, ignore_errors=True)
         ctx.on_teardown(lambda: shutil.rmtree(shared, ignore_errors=True))
         # Built once for every rank and phase, so each tokenizes the same rows.
-        Dataset.from_dict(_build_rows(kind, N_ROWS)).save_to_disk(dataset_dirs["train"])
+        Dataset.from_dict(build_text_rows(kind, N_ROWS)).save_to_disk(dataset_dirs["train"])
         start = N_ROWS
         for name, n in EVAL_SPLITS.items():
-            Dataset.from_dict(_build_rows(kind, n, start)).save_to_disk(dataset_dirs[name])
+            Dataset.from_dict(build_text_rows(kind, n, start)).save_to_disk(dataset_dirs[name])
             start += n
     ctx.barrier()
     pc = ParallelismConfig(**config_fields(mode))
@@ -329,9 +330,12 @@ def run_precompute_resume(
         checks["control_reference_misses_the_base_run"] = (
             metrics["control_reference_max_logp_delta"] > CONTROL_MIN_LOGP_DELTA
         )
-        checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
-            control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
-        )
+        checks["control_first_step_loss_is_finite"] = math.isfinite(control_delta)
+        # Balanced KTO losses can cancel even when reference columns differ substantially.
+        if kind == "dpo":
+            checks["control_first_step_loss_misses_continuous"] = math.isfinite(control_delta) and (
+                control_delta > TOL.control_min_loss_shift(TOL.replayed_resume_loss_abs)
+            )
     else:
         checks["control_sweep_of_the_base_reproduces_the_base_run"] = _columns_equal(control_columns, base_columns)
 

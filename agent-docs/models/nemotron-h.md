@@ -1,6 +1,6 @@
 # Nemotron-H
 
-`model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.20. The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`), which [`mtp_loss_weight`](#mtp-head) builds and a stock class does not. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
+`model_type` `nemotron_h_omni` (`NemotronH_Omni_Reasoning_V3`, the release `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`) wrapping the text tower `nemotron_h` (`NemotronHForCausalLM`), both native in transformers 5.23 (the version the image pins). The text tower holds 120.7B parameters, 112.7B of them routed experts, beside a 0.84B vision tower and connector and a 2.9B multi-token head (`mtp.*`), which [`mtp_loss_weight`](#mtp-head) builds and a stock class does not. It has 88 layers: 40 Mamba-2, 40 MoE and 8 attention. A MoE layer routes 512 gateless experts at top-22 beside one shared expert, on a 1024-wide latent it projects into from hidden 4096 and back. The vision tower is C-RADIO: 32 layers, 16 heads at head_dim 80.
 
 Nemotron 3.5 Lightning (`nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16`) is that text class alone, with no composite around it and no latent ([Lightning](#lightning)). Everywhere else on this page, "the release" means Super VL.
 
@@ -15,7 +15,7 @@ The release has trained through the toolkit at `ep8` on 8× B300, with real weig
 - **Packed rows:** at the cut, a document's mean logit gap against itself alone is at most 5.49e-5 with the markers across the three texts the row has read, with no position past its bar, and 1.13 without them.
 - **Resume:** exact at the 9-layer cut: loss delta 0, final weights equal, optimizer state bit-exact, no warm restart.
 - **Exports:** byte for byte against the release at the 9-layer cut on both routes, with an NLL gap of at most 6e-5 on reload, and at full depth: 41,643 tensors on the text-only route and 42,101 on the composite one (the release's 42,037 plus 64 `lambda1`), each with an NLL gap of 0.0013. `reattach_vision_tower.py` turns the text-only export back into the release's 43,079 tensors with no `config.json` difference.
-- **Adapters:** the LoRA recipe's folded export differs from the release on its targets and the moved bias alone (41,112 tensors, 531 identical), and loads and generates in stock transformers at an NLL of 2.03296 against 2.03301. `merge_peft_adapters.py` merges attention and Mamba adapters byte for byte the same with `--trust_remote_code` on or off, changing 152 tensors of the release (80 Mamba, 32 attention, 40 bias), and refuses a mixed adapter.
+- **Adapters:** the LoRA recipe's folded export differs from the release on its targets and the moved bias alone (41,112 tensors, 531 identical), and loads and generates in stock transformers at an NLL of 2.03296 against 2.03301. `merge_peft_adapters.py` merges attention and Mamba adapters byte for byte the same with `--trust_remote_code` on or off, changing 152 tensors of the release (80 Mamba, 32 attention, 40 bias), and refuses an adapter holding expert LoRA ([LoRA](#lora)).
 
 What these rows leave:
 
@@ -32,7 +32,7 @@ The family's layers, balancing and refused modes below apply, and these differ:
 
 - **Load:** natively, with its keys at the root and no `text_only_model` to set. Upstream's ignore list drops the 270 `mtp.*` keys. On a tiny copy of the layout, each rank's lazy load holds what `from_pretrained` does.
 - **Rows:** text only, as the release has no vision tower.
-- **Size:** 63 GB gathered and about 40 GB static per GPU for a full fine-tune at `ep8`, by arithmetic, and a dispatch tops out at about 127,000 tokens per rank (the 32-bit wire index). So FSDP2 alone is not held back by size as it is on Super VL, though it has not run on these weights, and the figures under [EP layer](#ep-layer), [Memory](#memory) and HSDP below are Super VL's.
+- **Size:** 63 GB gathered and about 40 GB static per GPU for a full fine-tune at `ep8`, by arithmetic. So FSDP2 alone is not held back by size as it is on Super VL, though it has not run on these weights, and the figures under [EP layer](#ep-layer), [Memory](#memory) and HSDP below are Super VL's.
 - **Time-step limit:** the config declares none, so the class default (0, inf) applies, which both engines apply too. A stock reload keeps upstream's floor ([Mamba layers](#mamba-layers)).
 - **Recipe:** `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`.
 - **Export:** the release's own `config.json` with this run's changes, its `auto_map` absent, so there are no modules to copy ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)). `layers_block_type` keeps `mamba` and `attention`, the spellings SGLang's config class requires, and no `time_step_limit` reaches the file, so it holds no JSON float tag. vLLM's and SGLang's config readers parse the file; SGLang's refuses transformers' `linear_attention` and `full_attention`. Stock `from_pretrained` reloads a tiny copy's export to the release's tensors and logits. A depth cut writes its layer list in transformers' spelling, which SGLang refuses, so serve a full-depth export.
@@ -59,12 +59,12 @@ On the real weights:
 
 ## Mamba layers
 
-`apply_nemotron_h_patches` (`halo/models/nemotron_h.py`) replaces upstream's module-level scan and leaves the mixer's forward in place:
+`apply_nemotron_h_patches` (`halo/models/families/nemotron_h.py`) replaces upstream's module-level scan and leaves the mixer's forward in place:
 
 - **Per-group scan.** A group's heads share B and C, which upstream copies per head. The output matches upstream's to 1e-7. On one layer and one GPU at 8,192 tokens it takes 31.8 ms against 34.7 ms and 5.23 GiB of scan memory against 8.29 GiB, by arithmetic about 1.05× faster over a step. Autocast is off inside it, as it would run this fp32 body in bf16.
 - **Documents.** A row holding several documents scans each from a zero state, with its chunks counted from its first token. Documents share a padded batch while it costs at most 1.25× their tokens.
 - **No fused kernel.** The patch pins `mamba2_split_conv1d_scan_combined` off, so a later `mamba-ssm` install cannot read `in_proj` and `out_proj` past their adapters or refuse `seq_idx`.
-- **Time-step limit.** The mixer takes the config's `time_step_limit` (0, inf), which the release declares and both engines apply. Upstream clamps at `time_step_min` 0.001 instead. On the release, 11–20% of the time steps sit below that floor, and the two clamps move one layer's output by 0.6–5.7% rel L2. On real text the config's limit scores 0.05–0.09 nats better than upstream's floor at every length that ran.
+- **Time-step limit.** The mixer takes the config's `time_step_limit`: Super VL declares (0, inf), and Lightning declares none, so the class default (0, inf) applies. Both engines run their prefill at (0, inf) without reading the field. Upstream clamps at `time_step_min` 0.001 instead. In four of Super VL's Mamba layers on 8,192 tokens, 11–20% of the time steps sit below that floor, and the two clamps move a layer's output by 0.6–5.7% rel L2. Scoring the same weights on real text, one run per length, upstream's floor reads 0.05–0.09 nats higher on Super VL from 8k to 50k tokens and 0.11 higher on Lightning at 8k.
 - **Radio's `lambda1`.** It stays a buffer at 1.0: the release stores none and neither engine reads one, so a trained value would serve as 1.0.
 
 The conv runs `causal_conv1d`, which takes `seq_idx` on CUDA. Under reentrant checkpointing at `conv_dim` 10240 it ran without a fault, at +37% on a Mamba layer.
@@ -80,7 +80,7 @@ The conv runs `causal_conv1d`, which takes `seq_idx` on CUDA. Under reentrant ch
 
 ![A forward and backward at EP8 and 8,192 tokens per rank, split by block kind: Super VL takes 2.54 s at 3,226 tok/s per rank, 64.8% Mamba and 32.6% MoE; Lightning takes 0.766 s at 10,694 tok/s per rank, 58.0% Mamba and 36.2% MoE; attention and the head take the rest](../assets/benchmarks/nemotron_block_time.png)
 
-At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and the head 1.0%. By arithmetic the scan is 2–2.5% of the FLOPs, as a B300's fp32 GEMM runs at 32.5T MAC/s against 726T for bf16. No native scan kernel ships. TF32 would take the step to 1.13× of upstream's body at 3e-4 output error per layer, and stays off. MFU costs a Mamba layer by its parameters (`6N`), with no term for the scan, so a low MFU here means the scan. A whole training step adds the optimizer and the reduce: [Memory](#memory) gives those rates.
+At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and the head 1.0%. The scan runs in fp32, and a full-precision fp32 GEMM runs at about 69 TFLOP/s against about 1,400 TFLOP/s sustained in bf16 (measured on one B300, [GPU Training Theory, The arithmetic rate](../reference/gpu-training-theory.md#the-arithmetic-rate)). No native scan kernel ships. TF32 would take the step to 1.13× of upstream's body at 3e-4 output error per layer, and stays off. MFU costs a Mamba layer by its parameters (`6N`), with no term for the scan, so a low MFU here means the scan. A whole training step adds the optimizer and the reduce: [Memory](#memory) gives those rates.
 
 ## EP layer
 
@@ -88,13 +88,13 @@ At 8,192 the Mamba layers take 64.8% of that step, MoE 32.6%, attention 1.6% and
 
 - **Wire.** The latent travels between ranks, so `fc1_latent_proj` and `fc2_latent_proj` stay replicated around the dispatch. Routing reads the hidden state, in fp32 from the router's bf16 weight.
 - **Experts.** `up_proj` and `down_proj` with no gate, on the grouped kernel: two calls per layer. Autocast is off around `relu2`, which it would return in fp32 where `grouped_mm` casts nothing back. Keep `use_grouped_gemm` on: the stock per-expert loop's backward takes 2.0–2.2 s per layer at every length, against 14 ms grouped at 8,192.
-- **Layouts.** `ep8` is the production shape on 8 GPUs, 64 experts per rank. `ep4` on 8 GPUs is rejected by the [single-domain rule](../parallelism/README.md#supported-combinations). By arithmetic `ep2` fits LoRA only. A dispatch tops out at about 95,000 tokens per rank (the 32-bit wire index), and at 8,192 across domains. Pure ETP and EP+ETP (`up_proj` split on its intermediate axis) run on tiny models; on one node EP+ETP's expert share equals `ep8`'s.
+- **Layouts.** `ep8` is the production shape on 8 GPUs, 64 experts per rank. `ep4` on 8 GPUs is rejected by the [single-domain rule](../parallelism/README.md#supported-combinations). By arithmetic `ep2` fits LoRA only. A dispatch tops out at 8,192 tokens per rank across domains and has no ceiling within one. Pure ETP and EP+ETP (`up_proj` split on its intermediate axis) run on tiny models; on one node EP+ETP's expert share equals `ep8`'s.
 
-FSDP2 alone cannot hold the model: about 241 GB gathered plus 93 GB of sharded gradients and moments per GPU.
+FSDP2 alone, at its default ZeRO-2 analog, cannot hold the model: about 241 GB gathered plus 93 GB of sharded gradients and moments per GPU.
 
 ## Memory
 
-Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at the lengths below. Size a run by reserved memory against the device's 288 GB (275,040 MiB). Reserved differs by rank, so each cell is the range across ranks, and tok/s per rank includes the optimizer and the FSDP2 reduce.
+Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at the lengths below. Size a run by reserved memory against the 287.4 GB (267.7 GiB) that a B300's driver reports; NVIDIA lists 288 GB. Reserved differs by rank, so each cell is the range across ranks, and tok/s per rank includes the optimizer and the FSDP2 reduce.
 
 | Recipe | Tokens per rank | tok/s per rank | Peak allocated | Reserved |
 |---|---:|---:|---:|---:|
@@ -108,9 +108,9 @@ Measured at `ep8` on 8× B300 under reentrant checkpointing, on the recipes at t
 | SMPO, its Tulu rows | up to 2 × 4,096 | | 157–161 GB | 165–170 GB |
 | Offline GRPO | the recipe's rows | | 164–165 GB | 169–179 GB |
 
-![Peak allocated and reserved memory per GPU for each recipe against the device's 288 GB: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 185–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
+![Peak allocated and reserved memory per GPU for each recipe against a line at 288 GB, NVIDIA's figure for the device: LoRA reserves 118–165 GB, the full fine-tune at 8,192 tokens 185–202 GB, the 32,000-token and frozen 50,000-token rows reach 283 GB, and Lightning's full fine-tune reserves 55–60 GB](../assets/benchmarks/nemotron_memory.png)
 
-The full fine-tune at 8,192 takes 21.28 s a step over 20 steps. The 32,000 and frozen 50,000 rows are at the limit: their top ranks reached 99.4% and 99% of the device over 5 steps, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
+The full fine-tune at 8,192 takes 21.28 s a step over 20 steps. The 32,000 and frozen 50,000 rows are at the limit, with 283 GB reserved on their top ranks against the 287.4 GB the driver reports, so no longer row has a measured fit. Frozen experts train with `freeze_layers_patterns` on `*.mixer.up_proj` and `*.mixer.down_proj`, 7.93B trainable parameters.
 
 The tower's forward and backward alone, with frozen experts and no optimizer state, at exact lengths:
 
@@ -156,7 +156,7 @@ The weight sync carries no head and refuses the family, so a server drafts with 
 - An adapter on `conv1d` raises at the first forward, as the mixer reads its weight directly.
 - The latent projections and shared experts have no route.
 - A list target also matches Radio's `q_proj` on the composite. Train adapters with `text_only_model: true`, or pass a regex string, which leaves the experts out.
-- `merge_peft_adapters.py` merges attention and Mamba adapters and refuses expert ones, so the recipe folds both with `merge_expert_lora_on_save: true`, a 251 GB write per save.
+- `merge_peft_adapters.py` merges attention and Mamba adapters and refuses expert ones, as the hub stores the expert layers under `backbone.*` ([Streaming merge](../optimization/peft.md#streaming-merge)); the recipe folds both with `merge_expert_lora_on_save: true`, a 251 GB write per save.
 
 ## Balancing
 
@@ -194,4 +194,4 @@ The transport preflight's default parameter does not exist on this family: pass 
 
 - **CP:** the scan is a recurrence along the sequence axis.
 - **TP:** `NemotronHAttention` is not in `TP_SHARDABLE_ATTENTION_CLASSES`. Attention is 0.24% of the parameters, and two KV heads would cap it at 2.
-- **HSDP:** refused with EP, and pure DP cannot hold the model.
+- **HSDP:** refused with EP, and pure DP at the default ZeRO-2 analog cannot hold the model ([EP layer](#ep-layer)).

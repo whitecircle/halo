@@ -65,7 +65,8 @@ def test_a_server_that_reports_no_instance_is_not_read_at_each_open(monkeypatch)
 
 def test_group_formation_records_the_instance(monkeypatch):
     client = offline_client(VLLMWeightSyncClient)
-    info = {"vllm_env": {_IDENTITY_KEY: "1"}, "vllm_config": {"instance_id": "launch-1"}}
+    identity = f"{VLLMWeightSyncClient.IMAGE.build}|vllm_layerwise_reload_patch"
+    info = {"vllm_env": {_IDENTITY_KEY: identity}, "vllm_config": {"instance_id": "launch-1"}}
 
     def request(method, path, **kwargs):
         return SimpleNamespace(status_code=200, json=lambda: info if path == "/server_info" else {"world_size": 1})
@@ -74,7 +75,7 @@ def test_group_formation_records_the_instance(monkeypatch):
     monkeypatch.setattr(client, "_check_server_version", lambda: None)
     monkeypatch.setattr(client, "probe_generation", lambda: None)
 
-    client._fetch_engine_world_size()
+    client.require_engine_world_size()
 
     assert client._group_instance == "launch-1"
 

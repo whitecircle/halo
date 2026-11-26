@@ -13,7 +13,7 @@ from transformers import AutoModelForSequenceClassification
 
 import halo.environments.registry as environment_registry
 import halo.models.moe.balancing as moe_balancing
-import halo.models.seq_cls_heads as seq_cls_heads
+import halo.models.upstream.seq_cls_heads as seq_cls_heads
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP, ep_layer_classes
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase

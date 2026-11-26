@@ -35,6 +35,10 @@ class TPLeaderBroadcastMixin:
     def _is_tp_follower(self) -> bool:
         return self._get_tp_or_etp_process_group() is not None and self._get_tp_group_src_rank() != get_global_rank()
 
+    def _get_tp_or_etp_group_size(self) -> int:
+        group = self._get_tp_or_etp_process_group()
+        return 1 if group is None else dist.get_world_size(group)
+
     def _get_tp_or_etp_process_group(self) -> dist.ProcessGroup | None:
         if self.parallelism_config.is_tp_mode:
             return tp_group(self._device_mesh)

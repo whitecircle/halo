@@ -11,9 +11,9 @@ from typing import NamedTuple
 
 import torch
 
-from halo.models.config_access import get_config_field, text_config
-from halo.models.module_tree import backbone_with_layers, decoder_layers
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.config_access import get_config_field, text_config
+from halo.models.introspection.module_tree import backbone_with_layers, decoder_layers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 
 # The key/value head split a GatedDeltaNet mixer is built from. Kimi Delta Attention also spells its layers
 # ``linear_attention`` but declares a single ``linear_num_heads``.
@@ -341,12 +341,6 @@ def resolve_num_key_value_heads(cfg) -> int:
     if declared:
         return int(declared)
     return int(get_config_field(cfg, "num_attention_heads", per_layer_reduce=max))
-
-
-def has_mrope_rotary(cfg) -> bool:
-    """Read off the text config's class, which lists ``mrope_section`` among the rope keys transformers' validation
-    skips, as a checkpoint may omit the section and take the rotary's own default."""
-    return "mrope_section" in (getattr(text_config(cfg), "ignore_keys_at_rope_validation", None) or ())
 
 
 class AttentionCall(NamedTuple):

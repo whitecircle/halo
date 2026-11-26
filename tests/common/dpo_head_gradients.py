@@ -9,7 +9,7 @@ import torch
 import torch.nn.functional as F
 
 import halo.trainers.preference.chunked_dpo as chunked_dpo
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
 
 
 def gradient_difference(actual, expected):

@@ -16,7 +16,6 @@ import pytest
 import torch
 from torch.distributed.tensor import DTensor
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
-from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 from transformers.models.bailing_hybrid.configuration_bailing_hybrid import BailingHybridConfig
 from transformers.models.mixtral import MixtralConfig
 from transformers.models.qwen3 import Qwen3Config
@@ -44,8 +43,8 @@ from halo.model_loading.parallel.pp import _load_stage_lazy
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec, wraps_experts
-from halo.trainers.accelerator import accelerate_manages_ddp
-from tests.common.distributed import fake_process_group_mesh
+from halo.trainers.construction.accelerator import accelerate_manages_ddp
+from tests.common.distributed import apply_hf_tensor_parallelism, fake_process_group_mesh
 from tests.common.models import TINY_MIXTRAL_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -247,7 +246,7 @@ def tp_materialized_model(sharding_model):
     exists for. Sharded by transformers' own ``apply_tensor_parallelism`` over a fake process group, which slices
     locally with no collective."""
     with fake_process_group_mesh(rank=0, world_size=_TP_SIZE) as mesh:
-        yield apply_tensor_parallelism(sharding_model, mesh)
+        yield apply_hf_tensor_parallelism(sharding_model, mesh)
 
 
 @pytest.fixture(scope="module")

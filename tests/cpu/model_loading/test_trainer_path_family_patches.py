@@ -18,7 +18,7 @@ from halo.configs.embedding import EmbeddingConfig
 from halo.configs.script_arguments import ModelArguments
 from halo.model_loading.parallel import whole_model
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
-from halo.models.qwen4_exp.ngram_table import HostNGramTable
+from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
 from tests.common.qwen4_exp import NGRAM_TABLE_PATH, build_tiny_qwen4_exp_checkpoint
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint

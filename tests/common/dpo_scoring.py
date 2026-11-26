@@ -15,8 +15,8 @@ from trl.trainer.dpo_trainer import DataCollatorForPreference
 from halo.distributed.fsdp import fsdp2_param_groups, reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.module_tree import hidden_state_backbone
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.module_tree import hidden_state_backbone
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.consensus import barrier_on_exit
 from halo.runtime.dtensor import to_local
 from halo.runtime.ranks import get_global_rank

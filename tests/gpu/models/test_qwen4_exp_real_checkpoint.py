@@ -26,9 +26,9 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_str
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.config_access import text_config
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP, named_external_tables
-from halo.models.qwen4_exp.sparse_attention import qsa_attention_forward, select_qsa_keys
+from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward, select_qsa_keys
+from halo.models.introspection.config_access import text_config
 from tests.common.checkpoint_io import loading_problems
 from tests.common.datasets import repository_text_rows
 from tests.common.distributed import shared_output_dir
@@ -53,9 +53,10 @@ QSA_TIE_SWAPPED_BLOCKS = 1
 # Fraction of the reference's largest magnitude, in bf16.
 QSA_OUTPUT_REL_MAX = 2e-2
 # Fraction of the alone logits' largest magnitude in fp32, and the positions allowed past it: tokens a near-tie still
-# routes to another expert.
+# routes to another expert, and every later token of the document that reads them. Over 48 seeded rows that is up to
+# 5% of a document; a row without its markers puts 99.7% or more of each later document there.
 ISOLATED_REL_MAX = 2e-2
-ROUTING_FLIP_MAX_FRACTION = 2e-2
+ROUTING_FLIP_MAX_FRACTION = 1e-1
 EP_LOSS_ABS_MAX = 1e-2
 LOSS_TOKENS = 1024
 EXPORT_LR = 1e-3

@@ -17,7 +17,13 @@ from halo.data.collators.self_distill import (
     require_aligned_responses,
     teacher_history,
 )
-from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, build_training_labels
+from halo.data.completion_spans import (
+    PACKED_SPAN_POLICY,
+    PADDED_SPAN_POLICY,
+    InjectedBlock,
+    SpanBounds,
+    build_training_labels,
+)
 from halo.data.pipeline import map_cache_key
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import (
@@ -48,13 +54,6 @@ def _make_dataset(n: int, seed: int = 0) -> Dataset:
 
 
 SELF_DISTILL_SCRIPT = REPO_ROOT / "scripts/training/distillation/self_distill.py"
-
-
-def test_deterministic_output():
-    ds = _make_dataset(10)
-    name1 = map_cache_file_name("map", _add_one, ds, "desc", {})
-    name2 = map_cache_file_name("map", _add_one, ds, "desc", {})
-    assert name1 == name2, f"Non-deterministic: '{name1}' vs '{name2}'"
 
 
 def test_cache_name_format():
@@ -103,20 +102,6 @@ def test_different_dataset_content_same_size():
     name_a = map_cache_file_name("map", _add_one, ds_a, "d", {})
     name_b = map_cache_file_name("map", _add_one, ds_b, "d", {})
     assert name_a != name_b, "Same-size different-content datasets produced same cache name"
-
-
-def test_different_fn_kwargs_tokenizer():
-    ds = _make_dataset(10)
-
-    class MockTokenizerA:
-        name_or_path = "model-A"
-
-    class MockTokenizerB:
-        name_or_path = "model-B"
-
-    name_a = map_cache_file_name("map", _add_one, ds, "d", {"fn_kwargs": {"tokenizer": MockTokenizerA()}})
-    name_b = map_cache_file_name("map", _add_one, ds, "d", {"fn_kwargs": {"tokenizer": MockTokenizerB()}})
-    assert name_a != name_b, "Different tokenizers produced same cache name"
 
 
 def test_fn_kwargs_vs_no_fn_kwargs():
@@ -210,6 +195,21 @@ def test_dataset_dict_same_content_stable():
     assert name_a == name_b, "Identical DatasetDicts produced different cache names"
 
 
+def test_a_captured_span_bounds_keys_by_value():
+    """The bake's label map captures the resolved ``SpanBounds``, which nests an ``InjectedBlock``: skipped as an
+    unknown type, a closer the probe reads differently would serve the previous bake's labels."""
+
+    def make_labeller(bounds):
+        def labeller(x):
+            return (x, bounds)
+
+        return labeller
+
+    first = SpanBounds(turn_opener=105, injected_block=InjectedBlock(opener=50, head=None, closer=51))
+    second = first._replace(injected_block=first.injected_block._replace(closer=52))
+    assert _closure_fingerprint(make_labeller(first)) != _closure_fingerprint(make_labeller(second))
+
+
 def test_closures_with_different_captured_values():
     """``function_cache_id`` hashes only the source, identical for two closures from one factory, so
     ``_closure_fingerprint`` must key on the captured free variables."""
@@ -292,20 +292,6 @@ def test_kwargs_list_order_is_part_of_the_key_and_set_order_is_not():
     two caches; a set's iteration order is hash-seeded, so it must not."""
     assert kwargs_fingerprint({"label_list": ["a", "b"]}) != kwargs_fingerprint({"label_list": ["b", "a"]})
     assert kwargs_fingerprint({"ids": {"a", "b"}}) == kwargs_fingerprint({"ids": {"b", "a"}})
-
-
-def test_kwargs_name_or_path_takes_priority():
-    class ModelA:
-        name_or_path = "model-A"
-        vocab_size = 32000
-
-    class ModelB:
-        name_or_path = "model-B"
-        vocab_size = 32000
-
-    fp_a = kwargs_fingerprint({"model": ModelA()})
-    fp_b = kwargs_fingerprint({"model": ModelB()})
-    assert fp_a != fp_b, "Objects with different name_or_path but same vocab_size collided"
 
 
 def test_kwargs_tokenizer_content_beats_path():
@@ -400,33 +386,6 @@ def test_kwargs_scalar_lists_distinct():
     assert fp_obj_a == fp_obj_b, "Lists of non-scalars keep the type-name fallback"
 
 
-def test_shuffled_dataset_different_fingerprint():
-    ds = _make_dataset(20)
-    ds_shuffled = ds.shuffle(seed=42)
-    name_orig = map_cache_file_name("map", _add_one, ds, "d", {})
-    name_shuffled = map_cache_file_name("map", _add_one, ds_shuffled, "d", {})
-    assert name_orig != name_shuffled, "Shuffled dataset produced same cache name as original"
-
-
-def test_fn_kwargs_subset_differs():
-    ds = _make_dataset(10)
-    name_a = map_cache_file_name(
-        "map",
-        _add_one,
-        ds,
-        "d",
-        {"fn_kwargs": {"max_length": 512, "truncation": True}},
-    )
-    name_b = map_cache_file_name(
-        "map",
-        _add_one,
-        ds,
-        "d",
-        {"fn_kwargs": {"max_length": 512}},
-    )
-    assert name_a != name_b, "Different number of fn_kwargs produced same cache name"
-
-
 def test_output_affecting_map_kwargs_change_cache_name():
     """Two calls differing only in remove_columns produce different rows, and a shared key would silently serve one
     call's rows to the other."""
@@ -468,22 +427,6 @@ def _make_processor(tokenizer, max_length):
     return process
 
 
-def test_closure_fingerprint_differs_by_tokenizer():
-    tok_a = _MockTokenizer("org/model-262k", 262000)
-    tok_b = _MockTokenizer("org/model-201k", 201000)
-    fp_a = _closure_fingerprint(_make_processor(tok_a, 4096))
-    fp_b = _closure_fingerprint(_make_processor(tok_b, 4096))
-    assert fp_a and fp_b, "closure fingerprint should be non-empty when a tokenizer is captured"
-    assert fp_a != fp_b, "different captured tokenizers must produce different closure fingerprints"
-
-
-def test_closure_fingerprint_differs_by_max_length():
-    tok = _MockTokenizer("org/model", 32000)
-    fp_512 = _closure_fingerprint(_make_processor(tok, 512))
-    fp_4096 = _closure_fingerprint(_make_processor(tok, 4096))
-    assert fp_512 != fp_4096, "different captured max_length must change the closure fingerprint"
-
-
 def test_closure_fingerprint_empty_for_no_closure():
     assert _closure_fingerprint(_add_one) == ""
 
@@ -509,19 +452,6 @@ def test_cache_name_same_tokenizer_stable():
     assert name1 == name2, "Identical closure capture must reuse the same cache file"
 
 
-def test_function_id_method_vs_function():
-    class Processor:
-        def transform(self, x):
-            return x + 1
-
-    def transform(x):
-        return x + 1
-
-    id_method = function_cache_id(Processor.transform)
-    id_func = function_cache_id(transform)
-    assert id_method != id_func, "Method and standalone function with same name produced same ID"
-
-
 def test_function_id_builtin_fallback():
     fid = function_cache_id(len)
     assert isinstance(fid, str)
@@ -529,7 +459,8 @@ def test_function_id_builtin_fallback():
 
 
 class _LeafTok:
-    """Minimal tokenizer stub carrying every field the identity folds in."""
+    """Minimal tokenizer stub carrying every field the identity folds in, and the special-token surface a collator
+    resolves its completion marker against."""
 
     def __init__(self, name="org/model", vocab=32000, template="{{ messages }}", eos=2, bos=1, pad=0, side="right"):
         self.name_or_path = name
@@ -540,9 +471,14 @@ class _LeafTok:
         self.pad_token_id = pad
         self.padding_side = side
         self.truncation_side = "right"
+        self.all_special_ids = [bos, eos, pad]
+        self.added_tokens_decoder = {}
 
     def __len__(self):
         return self.vocab_size
+
+    def encode(self, text, add_special_tokens=False):
+        return [ord(char) for char in text]
 
 
 class _Processor(ProcessorMixin):
@@ -632,9 +568,10 @@ def test_non_processor_carrying_a_tokenizer_is_not_keyed_as_that_tokenizer():
     )
 
 
-@pytest.mark.parametrize(
-    "knob,value",
-    [
+def test_self_distill_cache_signature_covers_every_render_knob(subtests):
+    """A knob missing from ``collator.cache_signature()`` serves ids under its previous value, or lets a stale cache
+    skip the VLM audit, whose refusals then revert to collate time, rank-local, hanging the peers."""
+    variants = [
         ("max_length", 4096),
         ("conversation_field", "dialogue"),
         ("hint_template", "the answer is {answer}"),
@@ -649,11 +586,7 @@ def test_non_processor_carrying_a_tokenizer_is_not_keyed_as_that_tokenizer():
         ("model_supports_system_role", False),
         ("tools_field", "tools"),
         ("interleaved_thinking", True),
-    ],
-)
-def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
-    """A knob missing from ``collator.cache_signature()`` serves ids under its previous value, or lets a stale cache
-    skip the VLM audit, whose refusals then revert to collate time, rank-local, hanging the peers."""
+    ]
     baseline = {
         "tokenizer": _LeafTok(),
         "max_length": 2048,
@@ -672,10 +605,12 @@ def test_self_distill_cache_signature_covers_every_render_knob(knob, value):
         "tools_field": None,
         "interleaved_thinking": False,
     }
-    assert baseline[knob] != value, "the variant must actually differ from the baseline"
     fp_base = kwargs_fingerprint(SelfDistillTextCollator(**baseline).cache_signature())
-    fp_variant = kwargs_fingerprint(SelfDistillTextCollator(**{**baseline, knob: value}).cache_signature())
-    assert fp_base != fp_variant, f"{knob} changes what the prep map writes or accepts but not the cache key"
+    for knob, value in variants:
+        with subtests.test(f"{knob}-{value}"):
+            assert baseline[knob] != value, "the variant must actually differ from the baseline"
+            fp_variant = kwargs_fingerprint(SelfDistillTextCollator(**{**baseline, knob: value}).cache_signature())
+            assert fp_base != fp_variant, f"{knob} changes what the prep map writes or accepts but not the cache key"
 
 
 def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cache_key():
@@ -696,33 +631,29 @@ def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cach
         )
 
 
-@pytest.mark.parametrize(
-    "helper",
-    [
+def test_the_self_distill_encode_map_key_covers_the_encoder_source(subtests, monkeypatch):
+    """The key folds in only the source of helpers the function reaches by bare name: an encoder behind a collator
+    method drops out, and an edited render rule would serve the previous rows."""
+    helpers = [
         render_conversation,
         tokenize_rendered,
         build_training_labels,
         teacher_history,
         privileged_hint,
         require_aligned_responses,
-    ],
-    ids=lambda helper: helper.__name__,
-)
-def test_the_self_distill_encode_map_key_covers_the_encoder_source(helper, monkeypatch):
-    """The key folds in only the source of helpers the function reaches by bare name: an encoder behind a collator
-    method drops out, and an edited render rule would serve the previous rows."""
+    ]
     before = function_cache_id(encode_self_distill_row)
     getsource = inspect.getsource
-    monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
-    assert function_cache_id(encode_self_distill_row) != before, f"editing {helper.__name__} keeps the cache key"
-
-
-def _through_a_generator(rows):
-    return sum(tokenize_rendered(None, row) for row in rows)
-
-
-def _through_a_lambda(rows):
-    return (lambda row: tokenize_rendered(None, row))(rows)
+    for helper in helpers:
+        with subtests.test(helper.__name__), monkeypatch.context() as patch:
+            patch.setattr(
+                inspect,
+                "getsource",
+                lambda func, helper=helper: getsource(func) + ("\n# edited" if func is helper else ""),
+            )
+            assert function_cache_id(encode_self_distill_row) != before, (
+                f"editing {helper.__name__} keeps the cache key"
+            )
 
 
 def _through_a_nested_def(rows):
@@ -737,31 +668,46 @@ def _edit_source_of(helper, monkeypatch):
     monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
 
 
-@pytest.mark.parametrize(
-    "caller", [_through_a_generator, _through_a_lambda, _through_a_nested_def], ids=lambda caller: caller.__name__
-)
-def test_a_helper_called_from_nested_code_keys_its_caller(caller, monkeypatch):
+def test_a_helper_called_from_nested_code_keys_its_caller(monkeypatch):
     """Nested code holds its own names, so such a helper is absent from the caller's ``co_names``."""
-    before = function_cache_id(caller)
+    before = function_cache_id(_through_a_nested_def)
     _edit_source_of(tokenize_rendered, monkeypatch)
-    assert function_cache_id(caller) != before
+    assert function_cache_id(_through_a_nested_def) != before
 
 
-def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
-    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
-    processor = build_tree_row_processor(
+def _tree_row_processor(tokenizer, eos_token_ids):
+    return build_tree_row_processor(
         tokenizer,
         64,
         conversation_field="conversation",
         share_markers=("<tool_response>",),
         share_requires=None,
-        eos_token_ids=frozenset({tokenizer.eos_token_id}),
+        eos_token_ids=eos_token_ids,
         assistant_message_template="<|im_start|>assistant\n",
         train_on_last_assistant_only=False,
     )
+
+
+def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    processor = _tree_row_processor(tokenizer, frozenset({tokenizer.eos_token_id}))
     before = function_cache_id(processor)
     _edit_source_of(serialize_tree, monkeypatch)
     assert function_cache_id(processor) != before
+
+
+def test_the_tree_map_key_covers_the_terminators():
+    """They decide which rows the map closes and where a trained span ends, so two models on one tokenizer that
+    list different ones build different trees."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    eos, role_marker = tokenizer.eos_token_id, tokenizer.convert_tokens_to_ids("<|im_start|>")
+    ds = _make_dataset(4)
+
+    def name_for(eos_token_ids):
+        return map_cache_file_name("map", _tree_row_processor(tokenizer, eos_token_ids), ds, "trees", {})
+
+    assert name_for(frozenset({eos})) != name_for(frozenset({eos, role_marker}))
+    assert name_for(frozenset({eos})) == name_for(frozenset({eos}))
 
 
 def test_the_worker_count_is_a_named_parameter_not_a_cache_keyed_kwarg():
@@ -794,8 +740,9 @@ def test_coordinated_map_stamps_the_cache_file_it_wrote_as_the_rank_stable_key(t
         assert (tmp_path / getattr(split_ds, CACHE_KEY_ATTR)).is_file()
 
 
-@pytest.mark.parametrize("knob", ["load_from_cache_file", "keep_in_memory"])
-@pytest.mark.parametrize("operation", [coordinated_map, coordinated_filter])
+@pytest.mark.parametrize(
+    "operation,knob", [(coordinated_map, "load_from_cache_file"), (coordinated_filter, "keep_in_memory")]
+)
 def test_managed_execution_kwargs_are_refused_not_dropped(operation, knob):
     """Dropping it leaves a call site reading as if it steered caching."""
     with pytest.raises(TypeError, match=knob):

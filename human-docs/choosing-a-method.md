@@ -25,18 +25,18 @@ change. The last column is the name you pass to `halo launch`
 ## Similar methods compared
 
 - **DPO, SMPO or KTO.** All three train on preference data. DPO scores against a
-  frozen reference model, a second copy in memory unless you train LoRA or
-  precompute the reference log-probs. SMPO needs no reference: its bounded loss
-  stops pushing a pair once it is well separated, and an SFT term protects
-  generation quality. KTO takes unpaired thumbs-up / thumbs-down labels and
-  keeps a reference under DPO's rules.
+  frozen reference model, a second copy in memory unless you train LoRA or,
+  under EP, ETP, TP or PP, precompute the reference log-probs. SMPO needs no
+  reference: its bounded loss stops pushing a pair once it is well separated,
+  and an SFT term protects generation quality. KTO takes unpaired thumbs-up /
+  thumbs-down labels and keeps a reference under DPO's rules.
 - **Preference training or reward modeling.** Same pairs, different output.
   DPO, SMPO and KTO change the policy. `reward/reward-model` trains a scorer you use later,
   for rejection sampling or as a GRPO reward.
 - **Offline, online or async GRPO.** Offline GRPO trains on pre-scored
   completions and generates nothing. Online GRPO (RLVR) generates single-turn
   completions and scores them with verifiable rewards. Async GRPO with
-  environments adds multi-turn tool use and overlaps rollouts with training.
+  environments adds multi-turn tool use and can overlap rollouts with training.
   Each scores against a reference only while its KL term is on (`kl_beta`
   offline, `beta` online and async).
 - **Teacher or self-distillation.** `teacher-distill` learns from a separate,

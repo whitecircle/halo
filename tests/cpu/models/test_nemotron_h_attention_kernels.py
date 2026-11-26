@@ -27,7 +27,7 @@ from halo.models.attention.selection import (
     has_head_dim_beyond_flash,
     resolve_attn_implementation,
 )
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from tests.common.attention_stubs import CompileCountingCute, install_compile_counting_cute
 from tests.common.models import (
     NEMOTRON_H_RELEASE_TEXT_CONFIG,
@@ -156,12 +156,6 @@ def test_the_auto_detected_backend_lands_on_the_release(release_config, blackwel
 def test_an_fp32_run_leaves_the_half_precision_kernels(release_config):
     resolved = resolve_attn_implementation(release_config, FA4, torch.float32, sinks_policy=SinksPolicy.NEUTRALIZED)
     assert resolved == "sdpa"
-
-
-def test_the_label_reaches_the_module_of_each_tower(cute):
-    model = _on_fa4()
-    assert model.vision_model.config._attn_implementation == FA4
-    assert model.language_model.model.config._attn_implementation == FA4
 
 
 def test_one_image_runs_the_vision_tower_non_causal_and_the_text_tower_at_its_ratio(cute):

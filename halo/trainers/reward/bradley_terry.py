@@ -33,7 +33,7 @@ from halo.data.pipeline.rejected_rows import report_rejected_rows
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.runtime.consensus import agree_probe_across_ranks
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.ctor_slots import get_ctor_config, resolve_ctor_positions
+from halo.trainers.construction.ctor_slots import get_ctor_config, resolve_ctor_positions
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,

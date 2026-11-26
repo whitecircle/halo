@@ -20,8 +20,8 @@ from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
-from halo.models.config_access import config_export_ready
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.introspection.config_access import config_export_ready
 from halo.models.moe import router_aux_gradient
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.config_fields import resolve_expert_count

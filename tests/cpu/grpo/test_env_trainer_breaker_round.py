@@ -8,7 +8,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.loss.importance_sampling import _BreakerOptimizerSkipCallback
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 

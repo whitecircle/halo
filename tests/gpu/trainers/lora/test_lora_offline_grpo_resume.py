@@ -22,7 +22,7 @@ from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters, model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.unwrapping import find_peft_model
+from halo.models.introspection.unwrapping import find_peft_model
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.adapters import (
     is_lora_b_key,

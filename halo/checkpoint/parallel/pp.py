@@ -28,7 +28,7 @@ from halo.checkpoint.writing import StreamingShardWriter, merge_shard_index, sav
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.log import KEY_PREVIEW_COUNT
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 from halo.runtime.collectives import barrier, combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit, rank_consensus, reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor

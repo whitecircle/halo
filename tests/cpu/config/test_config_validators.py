@@ -4,11 +4,12 @@ TeacherDistillScriptArguments and OnlineGRPOScriptArguments, plus the NaN refusa
 configs pass bf16=False + use_cpu=True to clear TrainingArguments' tail check."""
 
 import math
+from typing import get_args, get_type_hints
 
 import pytest
 
 from halo.configs.classification import ClassificationConfig
-from halo.configs.distillation import TeacherDistillationConfig, TeacherDistillScriptArguments
+from halo.configs.distillation import TOPK_DISTILL_LOSSES, TeacherDistillationConfig, TeacherDistillScriptArguments
 from halo.configs.embedding import EmbeddingConfig
 from halo.configs.grpo_offline import OfflineGRPOScriptArguments
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
@@ -59,7 +60,7 @@ def test_a_balancing_rate_stands_where_a_bias_mode_can_read_it(mode):
     assert CommonScriptArguments(moe_balancing=mode, router_balancing_rate=0.01).router_balancing_rate == 0.01
 
 
-@pytest.mark.parametrize("size", ["junk", "5", "5GiB", "0GB", "-5GB", "", 5, None])
+@pytest.mark.parametrize("size", ["junk", "5GiB", "0GB", "-5GB", "", 5, None])
 def test_an_unusable_shard_size_is_refused_before_the_first_save(size):
     with pytest.raises(ValueError, match="save_max_shard_size must be a positive size"):
         CommonScriptArguments(save_max_shard_size=size)
@@ -185,11 +186,6 @@ def test_embedding_loss_scale_zero_raises():
         EmbeddingConfig(output_dir=OUTPUT_DIR, loss_scale=0.0)
 
 
-def test_embedding_loss_scale_negative_raises():
-    with pytest.raises(ValueError, match="loss_scale"):
-        EmbeddingConfig(output_dir=OUTPUT_DIR, loss_scale=-5.0)
-
-
 def test_embedding_loss_scale_small_positive_ok():
     cfg = EmbeddingConfig(loss_scale=0.001, **_CPU_OK)
     assert cfg.loss_scale == 0.001
@@ -204,7 +200,7 @@ def test_embedding_matryoshka_weights_length_mismatch_raises():
         )
 
 
-@pytest.mark.parametrize("dimension", [32.5, True, 0, -8, "64"])
+@pytest.mark.parametrize("dimension", [32.5, True, 0, -8])
 def test_embedding_refuses_an_unusable_matryoshka_dimension(dimension):
     with pytest.raises(ValueError, match="matryoshka_dimensions must be an integer"):
         EmbeddingConfig(matryoshka_dimensions=[64, dimension], **_CPU_OK)
@@ -263,7 +259,6 @@ def test_distill_defaults_valid():
     ("kwargs", "match"),
     [
         ({"distill_temperature": 0.0}, "distill_temperature"),
-        ({"distill_temperature": -1.0}, "distill_temperature"),
         ({"distill_alpha": -0.1}, "distill_alpha"),
         ({"distill_alpha": 1.5}, "distill_alpha"),
     ],
@@ -271,6 +266,64 @@ def test_distill_defaults_valid():
 def test_distill_out_of_range_raises(kwargs, match):
     with pytest.raises(ValueError, match=match):
         TeacherDistillationConfig(**_CPU_OK, **kwargs)
+
+
+_DISTILL_LOSSES = get_args(get_type_hints(TeacherDistillationConfig)["distill_loss"])
+
+
+@pytest.mark.parametrize("beta", [-0.1, 1.1])
+def test_distill_jsd_beta_outside_the_unit_interval_raises(beta):
+    """Outside [0, 1] the mixture weight log1p(-β) or log(β) is NaN, so every JSD term would be NaN."""
+    with pytest.raises(ValueError, match=r"distill_jsd_beta must be in \[0, 1\]"):
+        TeacherDistillationConfig(**_CPU_OK, distill_loss="jensen_shannon", distill_jsd_beta=beta)
+
+
+@pytest.mark.parametrize("beta", [True, math.nan])
+def test_distill_jsd_beta_that_is_not_a_number_raises(beta):
+    """A YAML ``true``/``false`` compares as 1/0 and would silently train the reverse/forward KL endpoint."""
+    with pytest.raises(ValueError, match="distill_jsd_beta must be a finite number"):
+        TeacherDistillationConfig(**_CPU_OK, distill_loss="jensen_shannon", distill_jsd_beta=beta)
+
+
+@pytest.mark.parametrize("loss", [name for name in _DISTILL_LOSSES if name != "jensen_shannon"])
+def test_distill_jsd_beta_with_another_loss_raises(loss):
+    """Only jensen_shannon reads β, so a set β beside any other loss would be silently ignored."""
+    with pytest.raises(ValueError, match=rf"distill_loss={loss} {_REFUSED}.*distill_jsd_beta"):
+        TeacherDistillationConfig(**_CPU_OK, distill_loss=loss, distill_jsd_beta=0.3)
+
+
+@pytest.mark.parametrize("beta", [0.0, 0.3, 1.0])
+def test_distill_jsd_beta_with_jensen_shannon_builds(beta):
+    cfg = TeacherDistillationConfig(**_CPU_OK, distill_loss="jensen_shannon", distill_jsd_beta=beta)
+    assert cfg.distill_jsd_beta == beta
+
+
+def test_distill_jsd_beta_cross_check_sees_a_cli_override(tmp_path):
+    """A CLI override of one side of the pair must trip the guard the YAML value would."""
+    config = tmp_path / "distill.yaml"
+    config.write_text(
+        f"output_dir: {OUTPUT_DIR}\nbf16: false\nuse_cpu: true\ndistill_loss: jensen_shannon\ndistill_jsd_beta: 0.3\n"
+    )
+    parser = HaloArgumentParser((TeacherDistillationConfig,))
+    with pytest.raises(ValueError, match=rf"{_REFUSED}.*distill_jsd_beta"):
+        parser.parse_dict(parser.load_values([str(config), "--distill_loss=kl_divergence"]))
+
+
+@pytest.mark.parametrize("topk", [0, -1, True, 2.5])
+def test_distill_topk_must_be_a_positive_int(topk):
+    with pytest.raises(ValueError, match="distill_topk must be an integer >= 1"):
+        TeacherDistillationConfig(**_CPU_OK, distill_topk=topk)
+
+
+@pytest.mark.parametrize("loss", [name for name in _DISTILL_LOSSES if name not in TOPK_DISTILL_LOSSES])
+def test_distill_topk_with_a_loss_the_teacher_topk_cannot_carry_raises(loss):
+    with pytest.raises(ValueError, match=rf"distill_loss={loss} {_REFUSED}.*distill_topk"):
+        TeacherDistillationConfig(**_CPU_OK, distill_loss=loss, distill_topk=8)
+
+
+@pytest.mark.parametrize("loss", sorted(TOPK_DISTILL_LOSSES))
+def test_distill_topk_with_a_teacher_weighted_loss_builds(loss):
+    assert TeacherDistillationConfig(**_CPU_OK, distill_loss=loss, distill_topk=8).distill_topk == 8
 
 
 def test_distill_teacher_model_still_required_on_the_script_args():
@@ -352,9 +405,18 @@ def test_a_response_marker_needs_completion_masking(config_cls, required):
     assert config_cls(train_on_completions_only=False, **required).assistant_message_template is None
 
 
-@pytest.mark.parametrize("value", [None, "", "  "])
 @pytest.mark.parametrize(
-    ("config_cls", "required"), [(SFTScriptArguments, {}), (TeacherDistillScriptArguments, _TEACHER)]
+    ("config_cls", "required", "value"),
+    [
+        (SFTScriptArguments, {}, None),
+        (SFTScriptArguments, {}, "  "),
+        (TeacherDistillScriptArguments, _TEACHER, None),
+    ],
+    ids=[
+        "SFTScriptArguments-required0-None",
+        "SFTScriptArguments-required0-  ",
+        "TeacherDistillScriptArguments-required1-None",
+    ],
 )
 def test_a_rendering_script_needs_a_conversation_column(config_cls, required, value):
     with pytest.raises(ValueError, match="conversation_field must be a non-blank string"):

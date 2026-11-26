@@ -25,7 +25,7 @@ def _run_script(monkeypatch, tmp_path, *, presharded: bool, kl_beta: float, use_
         output_dir=str(tmp_path), kl_beta=kl_beta, use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none"
     )
     model_config = ModelArguments(model_name_or_path="local-policy", use_peft=use_peft)
-    parsed = (SimpleNamespace(reset_sinks=True), config, model_config, SimpleNamespace())
+    parsed = (SimpleNamespace(dataset="org/offline", reset_sinks=True), config, model_config, SimpleNamespace())
     splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))
 
     def model_load(*_args, **_kwargs):

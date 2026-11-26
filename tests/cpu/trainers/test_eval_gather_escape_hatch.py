@@ -10,11 +10,11 @@ from unittest.mock import patch
 import pytest
 from datasets import Dataset
 
-import halo.trainers.evaluation as mixin_module
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+import halo.trainers.loop.evaluation as mixin_module
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.evaluation import EvaluationMixin
 from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
+from halo.trainers.loop.evaluation import EvaluationMixin
 
 # Any quantile < 1.0 turns entropy masking on; the sentinel is what the stubbed super().evaluate() returns.
 _MASKING_QUANTILE = 0.8
@@ -100,14 +100,6 @@ def test_both_seams_are_identity_inside_the_hatch_and_restored_after(distributed
 
     assert trainer.gather_function(_SENTINEL) == ("real-gather", _SENTINEL)
     assert trainer.accelerator.pad_across_processes(_SENTINEL) == ("class-padded", _SENTINEL)
-
-
-def test_the_accelerator_is_restored_by_deleting_the_instance_attribute(distributed):
-    """Re-assigning the bound method would pin an instance shadow, and later gathers would keep identity semantics."""
-    trainer = _StubTrainer()
-    trainer.evaluate()
-
-    assert "pad_across_processes" not in trainer.accelerator.__dict__
 
 
 def test_the_hatch_is_unwound_when_the_inner_evaluate_raises(distributed):

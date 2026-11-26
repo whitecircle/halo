@@ -5,7 +5,7 @@ import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimizer_state_dict
 
 from halo.distributed.fsdp import reshard_fsdp2_modules
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 
 
 def local_optimizer_state(model, optimizer) -> dict:

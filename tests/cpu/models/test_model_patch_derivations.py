@@ -16,7 +16,7 @@ from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.peft_setup import _peft_module_casting_to_bf16
 from halo.models.attention.layout import resolve_qk_v_head_dims
 from halo.models.attention.selection import supports_fa4_backward
-from halo.models.zaya import patch_zaya_fp32_interlayer_residual
+from halo.models.families.zaya import patch_zaya_fp32_interlayer_residual
 
 
 def _config(model_type: str):

@@ -19,7 +19,7 @@ from halo.checkpoint.parallel.save import (
     select_checkpoint_saver,
 )
 from halo.models.external_tables import ExternalTable
-from halo.models.unwrapping import find_peft_model
+from halo.models.introspection.unwrapping import find_peft_model
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
 

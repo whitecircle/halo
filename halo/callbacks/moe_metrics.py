@@ -4,25 +4,34 @@ or group-limited routing moves it away from ``topk(router_logits)``. Asking for 
 
 from __future__ import annotations
 
+import json
 import logging
+from collections.abc import Sequence
 from functools import partial
 
 import torch
 import torch.distributed as dist
 from transformers import TrainerCallback
 
+from halo.checkpoint.format import MOE_EXPERT_TOKEN_COUNTS_FILE
 from halo.hardware import current_device
 from halo.kernels.histogram import accumulate_bincount
 from halo.log import warn_once
-from halo.models.config_access import (
+from halo.models.gradient_checkpointing import counts_toward_expert_load
+from halo.models.introspection.config_access import (
     get_config_field,
     set_config_field_run_scoped,
 )
+from halo.models.moe.balancing import resolve_expert_load_weights
 from halo.models.moe.router_logits import ROUTER_LOGITS_KEY, DeclaredRouter, declared_routers, router_logits_forced_off
+from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import rank_max
-from halo.runtime.ranks import get_global_world_size, is_global_main_process
+from halo.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process
 
 logger = logging.getLogger(__name__)
+
+# The schema of MOE_EXPERT_TOKEN_COUNTS_FILE, raised on any change a reader has to branch on.
+RUN_COUNTS_FORMAT = 1
 
 
 def compute_moe_load_metrics(
@@ -100,24 +109,143 @@ def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
     return None
 
 
+def merge_stage_counts(
+    stages: list[list[list[int]] | None], *, token_replicas: int, resumed: list[list[int]] | None
+) -> list[list[int]]:
+    """Every PP stage's reduced ``[num_layers, num_experts]`` totals, gathered in rank order and so in stage order, as
+    one list of layers. A stage's sum holds each token once per rank that routed it, ``token_replicas`` times, which is
+    divided out. ``resumed`` adds the totals a resumed checkpoint carried."""
+    layers = [layer for stage in stages if stage is not None for layer in stage]
+    if token_replicas > 1:
+        uneven = sum(count % token_replicas != 0 for layer in layers for count in layer)
+        if uneven:
+            # Partners routing the same tokens should pick the same experts; a tie broken differently shows here.
+            logger.warning(
+                f"{uneven} per-expert totals are not a multiple of the {token_replicas} ranks routing each token, so "
+                f"partner ranks routed the same tokens differently; {MOE_EXPERT_TOKEN_COUNTS_FILE} rounds them."
+            )
+        layers = [[(count + token_replicas // 2) // token_replicas for count in layer] for layer in layers]
+    if resumed is None:
+        return layers
+    if not layers:
+        return [list(layer) for layer in resumed]
+    if [len(layer) for layer in layers] != [len(layer) for layer in resumed]:
+        raise RuntimeError(
+            f"The resumed {MOE_EXPERT_TOKEN_COUNTS_FILE} holds {len(resumed)} layers of "
+            f"{sorted({len(layer) for layer in resumed})} experts, but this run routes {len(layers)} layers of "
+            f"{sorted({len(layer) for layer in layers})}: the counts came from another model. Delete the file from "
+            f"the checkpoint to count from the resume instead."
+        )
+    return [
+        [new + old for new, old in zip(layer, prior, strict=True)]
+        for layer, prior in zip(layers, resumed, strict=False)
+    ]
+
+
+def read_run_counts(path: str) -> dict:
+    """Parse a saved ``moe_expert_token_counts.json`` and refuse a format this release does not read. The resume runs
+    it inside its joined read, so a copy one node cannot read fails every rank, like a torn file."""
+    with open(path) as handle:
+        record = json.load(handle)
+    version = record.get("format_version") if isinstance(record, dict) else None
+    if version != RUN_COUNTS_FORMAT or not isinstance(record.get("counts"), list):
+        raise ValueError(
+            f"{MOE_EXPERT_TOKEN_COUNTS_FILE} has format_version {version!r}, and this release reads {RUN_COUNTS_FORMAT}."
+        )
+    return record
+
+
 class MoELoadMetricsBase(TrainerCallback):
     """Base for callbacks deriving ``moe/*`` from per-expert load counters; a summary waits in ``_pending`` until the
     next ``on_log``. ``reduce_group`` (``None`` = world) narrows to the stage under PP, where a world reduce would
-    blend stages holding different routers."""
+    blend stages holding different routers.
 
-    def __init__(self, exclude_last_slot: bool = False, log_every_n_steps: int = 1):
+    Every step's counts also add into this rank's running int64 totals before the counters are zeroed, logged step or
+    not. Those are reduced only when read (:meth:`run_counts_record`), which the trainer does at each checkpoint."""
+
+    def __init__(self, exclude_last_slot: bool = False, log_every_n_steps: int = 1, top_k: int | None = None):
         if log_every_n_steps < 1:
             raise ValueError(f"log_every_n_steps must be >= 1, got {log_every_n_steps}")
         self.exclude_last_slot = bool(exclude_last_slot)
         self.log_every_n_steps = int(log_every_n_steps)
+        self.top_k = top_k
         self.reduce_group: dist.ProcessGroup | None = None
         self._first_log = True
         self._pending: dict[str, float] = {}
+        # This rank's routed slots per layer since the first counted step, and the record a resume carried.
+        self._run_counts: list[torch.Tensor | None] = []
+        self._first_counted_step: int | None = None
+        self._resumed: dict | None = None
 
     def on_log(self, args, state, control, logs=None, **kwargs):
         if logs is not None and self._pending:
             logs.update(self._pending)
             self._pending = {}
+
+    def _count_step(self, global_step: int, per_layer: Sequence[torch.Tensor | None]) -> None:
+        """Add a step's counts into the running totals. Local and int64: a step adds no collective, and a long run's
+        totals stay exact."""
+        if self._first_counted_step is None:
+            self._first_counted_step = int(global_step)
+        if len(self._run_counts) < len(per_layer):
+            self._run_counts.extend([None] * (len(per_layer) - len(self._run_counts)))
+        for position, counts in enumerate(per_layer):
+            if counts is None:
+                continue
+            # Integer-valued: a tree-packed row's token weights are example counts.
+            counts = counts.detach().round().to(torch.int64)
+            total = self._run_counts[position]
+            self._run_counts[position] = counts if total is None else total.add_(counts)
+
+    def _leads_reduce_group(self) -> bool:
+        if not has_process_group():
+            return True
+        group = self.reduce_group
+        members = dist.get_process_group_ranks(group) if group is not None else range(dist.get_world_size())
+        return dist.get_rank() == min(members)
+
+    @torch.no_grad()
+    def run_counts_record(self, global_step: int, token_replicas: int) -> dict | None:
+        """COLLECTIVE (world). The whole model's routed token slots per layer and expert since the first counted step,
+        a resumed checkpoint's included, the same on every rank; ``None`` where no rank counted any. Under PP each stage
+        reduces its own layers, and one rank of each sends them to rank 0."""
+        active = [counts for counts in self._run_counts if counts is not None]
+        device = active[0].device if active else current_device()
+        num_layers, width = rank_max(
+            [len(self._run_counts), max((counts.numel() for counts in active), default=0)], group=self.reduce_group
+        )
+        totals = torch.zeros(num_layers, width, dtype=torch.int64, device=device)
+        for position, counts in enumerate(self._run_counts):
+            if counts is not None:
+                totals[position, : counts.numel()] = counts
+        # num_layers and width are agreed across the group, so every member skips or joins the reduce.
+        if get_global_world_size() > 1 and totals.numel():
+            dist.all_reduce(totals, op=dist.ReduceOp.SUM, group=self.reduce_group)
+        payload = totals.tolist() if totals.numel() and self._leads_reduce_group() else None
+        resumed = None if self._resumed is None else self._resumed["counts"]
+        layers = combine_across_ranks(
+            payload,
+            partial(merge_stage_counts, token_replicas=token_replicas, resumed=resumed),
+            what=MOE_EXPERT_TOKEN_COUNTS_FILE,
+        )
+        if not layers:
+            return None
+        first_step = self._resumed["first_step"] if self._resumed is not None else self._first_counted_step
+        return {
+            "format_version": RUN_COUNTS_FORMAT,
+            "first_step": first_step,
+            "last_step": int(global_step),
+            "top_k": self.top_k,
+            "discard_slot_last": self.exclude_last_slot,
+            "counts": layers,
+        }
+
+    def restore_run_counts(self, record: dict | None) -> None:
+        """Continue from a resumed checkpoint's record, as :func:`read_run_counts` checked it, or, where it holds none,
+        count from the first step after the resume."""
+        self._resumed = record
+        self._run_counts = []
+        self._first_counted_step = None
 
 
 class MoEMetricsCallback(MoELoadMetricsBase):
@@ -134,7 +262,7 @@ class MoEMetricsCallback(MoELoadMetricsBase):
     ):
         if topk < 1:
             raise ValueError(f"topk must be >= 1, got {topk}")
-        super().__init__(exclude_last_slot=exclude_last_slot, log_every_n_steps=log_every_n_steps)
+        super().__init__(exclude_last_slot=exclude_last_slot, log_every_n_steps=log_every_n_steps, top_k=topk)
         self.topk = int(topk)
         self.enable_router_logits = bool(enable_router_logits)
 
@@ -198,6 +326,7 @@ class MoEMetricsCallback(MoELoadMetricsBase):
     @torch.no_grad()
     def on_step_end(self, args, state, control, **kwargs):
         counters = self._counters
+        self._count_step(state.global_step, counters)
         # The gate reads rank-uniform trainer state, so no rank can skip the collective below.
         if state.global_step % self.log_every_n_steps != 0:
             self._reset_counters()
@@ -244,9 +373,10 @@ class MoEMetricsCallback(MoELoadMetricsBase):
         self._remove_hooks()
 
     def _router_hook(self, position: int, router: DeclaredRouter, module, inputs, output):
-        """Re-rank logits only if the router returns no selection. A checkpoint recompute re-runs the router, but every
-        metric is a per-layer share, so the doubled counts cancel."""
-        if not module.training:
+        """Re-rank logits only if the router returns no selection. A checkpoint recompute re-runs the router, and the
+        running totals are raw counts, so only the pass :func:`counts_toward_expert_load` names counts. A tree-packed
+        row's shared token counts once per example holding it, as the bias path's load recorder counts it."""
+        if not module.training or not counts_toward_expert_load():
             return
         with torch.no_grad():
             logits = output[router.logits_index] if isinstance(output, (tuple, list)) else output
@@ -268,11 +398,13 @@ class MoEMetricsCallback(MoELoadMetricsBase):
                 )
             if indices is None:
                 indices = torch.topk(logits, self.topk, dim=-1).indices
-            self._counters[position] = accumulate_bincount(self._counters[position], indices, logits.shape[-1])
+            self._counters[position] = accumulate_bincount(
+                self._counters[position], indices, logits.shape[-1], weights=resolve_expert_load_weights(indices)
+            )
 
     def _model_output_hook(self, module, inputs, output):
         """Fallback: per-layer logits off the model output, for a modeling declaring no router."""
-        if not module.training:
+        if not module.training or not counts_toward_expert_load():
             return
         router_logits = _extract_router_logits(output)
         if router_logits is None:
@@ -282,7 +414,9 @@ class MoEMetricsCallback(MoELoadMetricsBase):
                 self._counters = [None] * len(router_logits)
             for i, logits in enumerate(router_logits):
                 _, top_idx = torch.topk(logits, self.topk, dim=-1)
-                self._counters[i] = accumulate_bincount(self._counters[i], top_idx, logits.shape[-1])
+                self._counters[i] = accumulate_bincount(
+                    self._counters[i], top_idx, logits.shape[-1], weights=resolve_expert_load_weights(top_idx)
+                )
 
     def _remove_hooks(self) -> None:
         for handle in self._hook_handles:

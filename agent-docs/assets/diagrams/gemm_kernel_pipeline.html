@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM kernel pipeline</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --load: var(--halo-blue);
+    --mma: var(--halo-violet);
+    --out: var(--halo-indigo);
+    --lane-col: 316px;
+    --lane-h: 62px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .figure { position: relative; }
+
+  .group + .group { margin-top: var(--group-gap); }
+
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: var(--heading-gap);
+  }
+
+  .head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
+    color: var(--heading);
+    white-space: nowrap;
+  }
+
+  .head span {
+    font-size: 22px;
+    color: var(--secondary);
+  }
+
+  /* The tile: a band of X and a band of W cut into the same strips along K, and the tile of Y they make. */
+  .tile {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+  }
+
+  .operand { display: grid; gap: 4px; }
+
+  .operand i {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    background: var(--load);
+    font-style: normal;
+    font-size: 21px;
+    color: #000;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .operand.y i { background: var(--mma); }
+
+  .op {
+    font-size: 40px;
+    line-height: 1;
+    color: var(--secondary);
+  }
+
+  .part { display: flex; flex-direction: column; align-items: center; }
+
+  .part p {
+    margin-top: 12px;
+    font-size: 21px;
+    line-height: 1.3;
+    text-align: center;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .tile .words {
+    margin-left: 36px;
+    font-size: 23px;
+    line-height: 1.4;
+    color: var(--body);
+  }
+
+  .tile .words p + p { margin-top: 12px; }
+
+  /* The loop: one row per lane, one column per slot of time. */
+  .lanes {
+    display: grid;
+    grid-template-columns: var(--lane-col) repeat(var(--slots), minmax(0, 1fr));
+    grid-auto-rows: var(--lane-h);
+    gap: 4px;
+  }
+
+  .lane {
+    align-self: center;
+    line-height: 1.25;
+  }
+
+  .lane b {
+    display: block;
+    font-weight: 400;
+    font-size: 22px;
+    color: var(--text);
+  }
+
+  .lane span {
+    font-size: 19px;
+    color: var(--secondary);
+  }
+
+  .slot {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 9px;
+    font-size: 21px;
+    text-align: center;
+    line-height: 1.2;
+    font-variant-numeric: tabular-nums;
+    color: #000;
+  }
+
+  .slot.free { background: var(--surface); border: 1px solid var(--line); }
+
+  .slot.load { background: var(--load); }
+
+  .slot.arriving { background: color-mix(in oklab, var(--surface), var(--load) 34%); color: var(--text); }
+
+  .slot.mma { background: var(--mma); }
+
+  .slot.sum { background: color-mix(in oklab, var(--surface), var(--mma) var(--share)); color: var(--text); }
+
+  .slot.out { background: var(--out); }
+
+  .time {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-left: calc(var(--lane-col) + 4px);
+    margin-bottom: 12px;
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  .time i { flex: 1; height: 16px; }
+
+  .fused {
+    display: flex;
+    justify-content: flex-end;
+    margin-top: 40px;
+  }
+
+  .fused p {
+    font-size: 22px;
+    line-height: 1.35;
+    text-align: right;
+    color: var(--body);
+  }
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    column-gap: 24px;
+  }
+
+  .card {
+    padding: 24px 28px 26px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--surface);
+  }
+
+  .card .name {
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  .card .lines {
+    margin-top: 10px;
+    font-size: 22px;
+    line-height: 1.4;
+    color: var(--body);
+  }
+
+  .card .lines div + div { margin-top: 8px; }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>A GEMM block loads the next strip while it multiplies the current one</h1>
+    <p class="subtitle">Schematic of one block of a tensor-core GEMM kernel: {steps} steps along K and {stages} shared-memory stages drawn</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Schematic: the slots are not to scale, and a real block takes many more steps along K.</span>
+      <span class="s">More stages keep more loads in flight and need more shared memory.</span>
+      <span class="s">MMA is the matrix multiply-accumulate instruction of the tensor cores, and TMA, the Tensor Memory Accelerator, is not tensor memory.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * What is drawn: how many steps along K and how many shared-memory stages. Both are choices of the drawing, the
+   * smallest that show a stage being reused. The loop itself (per step a TMA load of a strip of X and of W into a
+   * stage, an MMA that reads the stage and adds to the accumulator, load k + 1 running beside MMA k, the epilogue
+   * after the last step) follows Colfax, "CUTLASS Tutorial: Efficient GEMM kernel designs with Pipelining", which
+   * pipelines with two alternating stages.
+   */
+  const LOOP = { steps: 3, stages: 2 };
+
+  /**
+   * Drawn size of the tile's rows, its columns and one strip of K, in px. Geometry only: no shape is claimed.
+   */
+  const TILE = { rows: 96, columns: 150, strip: 64 };
+
+  /**
+   * What the two generations share and where they differ: Colfax, the pipelining tutorial for Hopper and
+   * "Writing GEMM Kernels Using Tensor Memory For NVIDIA Blackwell GPUs", and the CUDA Programming Guide for the
+   * TMA.
+   */
+  const GENERATIONS = [
+    {
+      name: "Both generations",
+      lines: [
+        "Loads: the TMA, a hardware unit that copies a rectangle of a tensor from HBM into shared memory once one thread starts it",
+        "Accumulator: fp32 for bf16 operands",
+      ],
+    },
+    {
+      name: "Hopper (H100, H200)",
+      lines: ["MMA: wgmma, issued by a group of 4 warps", "Accumulator: in the registers of those warps"],
+    },
+    {
+      name: "Blackwell (B200, B300)",
+      lines: ["MMA: tcgen05.mma, started by a single thread", "Accumulator: in tensor memory, read out in the epilogue with tcgen05.ld"],
+    },
+  ];
+
+  if (LOOP.stages < 2) {
+    throw new Error("with one stage a load cannot run beside the multiply that reads the stage");
+  }
+
+  const SLOTS = LOOP.steps + 2;
+  fillValues({ steps: String(LOOP.steps), stages: String(LOOP.stages) });
+
+  const figure = document.getElementById("figure");
+  const steps = Array.from({ length: LOOP.steps }, (_, k) => k);
+
+  function group(title, note, ...children) {
+    const node = el("section", "group");
+    const head = el("div", "head");
+    head.append(el("h2", undefined, title), el("span", undefined, note));
+    node.append(head, ...children);
+
+    return node;
+  }
+
+  // The tile: X's band in strips side by side along K, W's band in the same strips stacked along K.
+  function operand(className, columns, rows, cells) {
+    const node = el("div", `operand ${className}`);
+    node.style.gridTemplateColumns = columns;
+    node.style.gridTemplateRows = rows;
+
+    for (const text of cells) {
+      node.append(el("i", undefined, text));
+    }
+
+    return node;
+  }
+
+  function part(mark, ...lines) {
+    const node = el("div", "part");
+    node.append(mark);
+    const caption = el("p");
+    lines.forEach((line, i) => caption.append(...(i ? [el("br"), line] : [line])));
+    node.append(caption);
+
+    return node;
+  }
+
+  const numbers = steps.map((k) => String(k + 1));
+  const tile = el("div", "tile");
+  const words = el("div", "words");
+  words.append(
+    el("p", undefined, "Step k loads strip k of X and strip k of W, multiplies them on the tensor cores and adds the product to the accumulator."),
+    el("p", undefined, `After the last step the accumulator holds the tile, and the epilogue writes it out.`),
+  );
+  tile.append(
+    part(operand("x", `repeat(${LOOP.steps}, ${TILE.strip}px)`, `${TILE.rows}px`, numbers), "X: the tile’s rows,", "all of K in strips"),
+    el("div", "op", "@"),
+    part(operand("w", `${TILE.columns}px`, `repeat(${LOOP.steps}, ${TILE.strip}px)`, numbers), "W: all of K in strips,", "the tile’s columns"),
+    el("div", "op", "="),
+    part(operand("y", `${TILE.columns}px`, `${TILE.rows}px`, [""]), "One tile of Y"),
+    words,
+  );
+
+  // The loop: step k loads in slot k into stage k mod stages, and its MMA reads that stage in slot k + 1.
+  const LANES = [
+    { key: "load", name: "Load warps", role: "start a TMA copy out of HBM" },
+    ...Array.from({ length: LOOP.stages }, (_, s) => ({ key: `stage${s}`, name: `Stage ${s + 1}`, role: "a buffer in shared memory" })),
+    { key: "mma", name: "Compute warps", role: "run the MMA on the tensor cores" },
+    { key: "sum", name: "Accumulator", role: "the running sum of the products" },
+    { key: "out", name: "Epilogue", role: "after the last step" },
+  ];
+  const cells = Object.fromEntries(LANES.map((lane) => [lane.key, Array(SLOTS).fill(null)]));
+  const range = (k) => (k === 0 ? "step 1" : `steps 1–${k + 1}`);
+
+  for (const k of steps) {
+    const stage = `stage${k % LOOP.stages}`;
+
+    if (cells[stage][k] !== null || cells[stage][k + 1] !== null) {
+      throw new Error(`stage ${k % LOOP.stages} is still held when step ${k + 1} loads into it`);
+    }
+
+    cells.load[k] = { kind: "load", text: `Load strips ${k + 1}` };
+    cells[stage][k] = { kind: "arriving", text: `Strips ${k + 1} arriving` };
+    cells[stage][k + 1] = { kind: "load", text: `Strips ${k + 1}, being read` };
+    cells.mma[k + 1] = { kind: "mma", text: `MMA ${k + 1}` };
+    cells.sum[k + 1] = { kind: "sum", text: `Holds ${range(k)}`, share: (k + 1) / LOOP.steps };
+  }
+
+  // The epilogue reads the finished sums out of the accumulator and writes them to HBM.
+  cells.sum[SLOTS - 1] = { kind: "sum", text: "Read out", share: 1 };
+  cells.out[SLOTS - 1] = { kind: "out", text: "Write the tile to HBM" };
+
+  const lanes = el("div", "lanes");
+  lanes.style.setProperty("--slots", SLOTS);
+  let epilogue;
+
+  for (const lane of LANES) {
+    const label = el("div", "lane");
+    label.append(el("b", undefined, lane.name), el("span", undefined, lane.role));
+    lanes.append(label);
+
+    for (const slot of cells[lane.key]) {
+      const node = el("div", `slot ${slot === null ? "free" : slot.kind}`, slot === null ? "" : slot.text);
+
+      if (slot !== null && slot.share !== undefined) {
+        // The accumulator's tint deepens with each step it has taken in.
+        node.style.setProperty("--share", `${Math.round(22 + 48 * slot.share)}%`);
+      }
+
+      if (slot !== null && slot.kind === "out") {
+        epilogue = node;
+      }
+
+      lanes.append(node);
+    }
+  }
+
+  const time = el("div", "time");
+  time.append("Time", el("i"));
+  const fused = el("div", "fused");
+  fused.append(el("p", undefined, "A bias, an activation or a type conversion can be fused into the epilogue, at no extra pass over memory."));
+
+  const cards = el("div", "cards");
+
+  for (const generation of GENERATIONS) {
+    const card = el("div", "card");
+    const lines = el("div", "lines");
+
+    for (const line of generation.lines) {
+      lines.append(el("div", undefined, line));
+    }
+
+    card.append(el("div", "name", generation.name), lines);
+    cards.append(card);
+  }
+
+  figure.append(
+    group("One block computes one tile of Y", "the tile’s share of X and W, cut into strips along K", tile),
+    group("Its loop over K", "one column per slot of time, one row per part of the block", time, lanes, fused),
+    group("What the two generations share, and where they differ", "the instruction and where the accumulator lives", cards),
+  );
+
+  // The time arrow runs across the slots, and the fused-epilogue line points up at the epilogue cell.
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
+  const axis = box(time.querySelector("i"));
+  arrow(wires, axis.l, (axis.t + axis.b) / 2, axis.r, (axis.t + axis.b) / 2, grey);
+  const cell = box(epilogue);
+  const note = box(fused.querySelector("p"));
+  arrow(wires, (cell.l + cell.r) / 2, note.t - 6, (cell.l + cell.r) / 2, cell.b + 4, grey);
+</script>
+</body>
+</html>

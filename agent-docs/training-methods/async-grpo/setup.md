@@ -30,7 +30,7 @@ loading is read rather than passed. Then it probes each one:
   `max_turns × rollout_max_tokens` and `rollout_max_episode_tokens`.
 - It **raises** on a server off the toolkit's image or launched with a flag the run needs
   ([Startup preflight](../../infrastructure/rollout-servers.md#startup-preflight)).
-- `verify_backend()` fails the launch on an unreachable external judge.
+- `verify_backend()` sends every external reward term (`judge`, `reward_model`, `whitecircle`) one probe sample from rank 0 and fails the launch on a term that returns no verdict ([Probe and retries](../grpo/rewards/README.md#probe-and-retries)).
 
 ## Starting a server
 
@@ -44,13 +44,20 @@ SGLANG_MODEL=<hub-id-or-path> SGLANG_CUDA_DEVICES=7 \
     docker compose -f docker-compose.sglang.yml up -d sglang-server
 ```
 
-Compose refuses to start either file without its host path: `HALO_SCRATCH` (vLLM, the training service's scratch
-volume) and `SGLANG_MODEL_DIR` (SGLang, the directory it mounts read-only). Export them, or set them once in the
-repo-root `.env`, which compose reads.
+Compose refuses to start either file without its host path: `HALO_SCRATCH` (vLLM: a large volume the server and the
+training service mount at the same path, which holds a checkpoint the server boots from and `rollout_adapter_dir`) and
+`SGLANG_MODEL_DIR` (SGLang, the directory it mounts read-only). Export them, or set them once in the repo-root `.env`,
+which compose reads.
 
 Confirm `/health` (`:8000` vLLM, `:30000` SGLang) first: rank 0 waits only `rollout_connection_timeout` (default
 120 s, 180 in the code-contests recipes) for a server still loading. Parsers, `--moe-backend triton` and the rest:
 [Rollout Servers](../../infrastructure/rollout-servers.md#vllm).
+
+## Candidate log-probs
+
+`score_centering_top_k` reads candidate log-probs from an SGLang server of the toolkit's image, which returns them as flat
+arrays; vLLM is refused, and a startup probe refuses a server that does not return them
+([Candidate log-probs](../../infrastructure/rollout-servers.md#candidate-log-probs)).
 
 ## Launching the trainer
 
@@ -76,12 +83,14 @@ rejected at config time: `ep4` on 4 trainer GPUs passes, on 8 it does not
 
 - `ep_size: 8` needs 9 GPUs or a second node, since the server holds one.
 - ZeRO-3 (`fsdp_reshard_after_forward: true`) is rejected wherever an expert-distribution group exists, since its
-  backward all-gather races the DeepEP combine. It runs only at `ep_size: 1` with no expert TP
+  backward all-gather races the DeepEP combine. It runs only at `ep_size: 1` with no expert TP, and not beside
+  attention TP with data parallelism
   ([ZeRO-2 vs ZeRO-3](../../parallelism/data-parallelism.md#zero-2-vs-zero-3-reshard_after_forward)).
 - `beta > 0` without PEFT holds a frozen reference: the script loads it like the policy (run dtype, `model_revision`,
   attention, `reset_sinks`), from `model_name_or_path` and never a resume checkpoint, and hands it to TRL in place of
   TRL's fp32 copy ([Online GRPO](../grpo/online.md#grpo-objective-for-verifiable-rewards)). It is an unsharded dense
-  replica per rank, warned about under EP, ETP and TP. Use `beta: 0`, or `use_peft: true` with an attention target
+  replica per rank, refused before it loads when it exceeds half the free GPU memory or 80% of the node's available host RAM
+  across its ranks ([sizing](../grpo/online.md#grpo-objective-for-verifiable-rewards)). Use `beta: 0`, or `use_peft: true` with an attention target
   off TP (which refuses adapters), to hold none.
 
 ## Weight synchronization
@@ -94,12 +103,13 @@ round's generation.
   steps.
 - `rollout_group_port` (default `51216`, either backend) is bound on the **trainer** host, one listener per server, so
   two servers sharing a port collide even on distinct hosts. With several servers it is the base: an entry with no
-  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0`. TRL's `vllm_group_port` is refused here; Online GRPO reads it.
+  `group_port` binds `rollout_group_port + index`, or its own kernel-assigned port when the base is `0` (under `single_group` it is the one port of the one group). TRL's `vllm_group_port` is refused here; Online GRPO reads it.
 - Startup and every push fail fast: an error on any rank raises on all ranks together. An engine restarted between
   syncs is the exception: the client reconnects and re-sends, with a warning
   ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
-- Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales
-  with total expert count, not `ep_size`.
+- Each EP layer's expert gather assembles the **full expert set** on the forwarding rank alone, which also holds the
+  layer issued ahead (`HALO_WEIGHT_SYNC_GATHER_AHEAD`, 1 by default), so that rank's peak scales with total expert
+  count, not `ep_size` ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 
 ## Multiple servers and prefetch
 
@@ -116,9 +126,17 @@ rollout_server_configs:
   - {url: "http://localhost:8001", group_port: 51217}
 ```
 
+- `rollout_sync_topology: single_group` forms one weight-sync group over every server and broadcasts each chunk once,
+  where the default `per_server` sends each chunk to each server over its own group; `auto` picks `single_group` for
+  two or more servers that report one model and one set of weight-loading flags
+  ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)). `single_group` takes one
+  `rollout_group_port` and no per-entry `group_port`. Online GRPO talks to one server and has no such field.
+- `rollout_adapter_sync: true` (LoRA; SGLang, or vLLM for Inkling 2 with `rollout_adapter_dir`) sends the adapter alone (after one base push on SGLang; on vLLM for Inkling 2 nothing is pushed) and pauses nothing: a round
+  in flight finishes on the adapter version it started with, and rounds drawn later name the newest
+  ([Adapter sync](../../infrastructure/rollout-servers.md#adapter-sync)).
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
-  rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
-  and the actors re-issue them, losing the decode they had done.
+  rounds in flight wait out the push, then resume under the new weights with the tokens they hold (vLLM freezes them,
+  SGLang requeues them).
 - Prefetch runs **`prefetch_depth` rounds deep** (default `1`): a step pops the oldest submitted round, then submits
   its own prompts. The worker collects every pending round at once and delivers them in submission order, so a round
   trains `prefetch_depth` rounds after it was drawn.
@@ -127,24 +145,18 @@ rollout_server_configs:
 - Raise `prefetch_depth` when every step misses while the servers drain at each round's tail; the next round's
   episodes fill them. Each round in flight holds its own `max_concurrent_rollouts`, so the servers carry up to
   `prefetch_depth` rounds' KV, every sync lands on all of them, and an eval round shares the servers with them.
-- A round spans up to `ceil(prefetch_depth × steps_per_generation × num_iterations ÷ (gradient_accumulation_steps ×
-  sync_weights_every_n_steps))` syncs, a bound never below 1, plus one for an eval between cadence pushes when
-  `sync_weights_every_n_steps` is above 1. On SGLang a turn aborted at each of them needs that
-  many re-issues, so a span above `max_retries` is refused before the model load, and again at trainer
-  construction, on one server that opts in as on several: the shipped SGLang recipes (`max_retries: 1`) take
-  `prefetch_depth: 1`. Deepen one by syncing less often, or raise `max_retries` to the span with
-  `(1 + max_retries) × request_timeout` still within `episode_timeout`.
-- `num_rollout_workers` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
+- `rollout_actor_budget` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
   `1` is refused where prefetch is off, naming `enable_prefetch: false` or the opt-in a one-server run left unset.
 
 `async/prefetch_hit_rate` shows which phase bounds the step, not server health. On a short single-turn environment it
-should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `num_rollout_workers`. On a multi-turn
+should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `rollout_actor_budget`. On a multi-turn
 one the round outlasts the update, so it sits near 0 at `prefetch_depth: 1`; a deeper pipeline raises it.
 
 ### Prefetch across a resume
 
 A checkpoint stores each rank's submitted-but-untrained rounds, oldest first (`prefetch_pending-<rank>-of-<world>.pt`),
 and a resume resubmits them in order before its first round.
+The same file carries the run's halting counters, so a resume at another world size, or from a checkpoint that has no file, restarts their patience at zero and logs it.
 
 - A save on a generation boundary (every save by default, since `steps_per_generation` equals the accumulation
   steps) resumes onto the batches an uninterrupted run trains. A save inside a round that feeds several optimizer
@@ -153,8 +165,10 @@ and a resume resubmits them in order before its first round.
   are not trained. Under a larger one it opens with cold rounds until the pipeline is full.
 - No file for this world size, or one drawn under another group size, round size or DP slice, resumes with cold
   rounds: those batches are skipped and the next ones train twice.
+- Under TP or ETP only each group's leader prefetches: a follower's file holds no rounds, and a resume gives it none to
+  resubmit, whatever the checkpoint's file held.
 - A file present on some ranks only (a non-shared filesystem under another rank-to-node placement, or a torn copy)
-  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds.
+  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds, which also resets the halting counters the files carry.
 
 ![One rollout server (compose default, prefetch unset): the push pauses the engine, so step time is sync + round + update](../../assets/diagrams/environmental_grpo_single_server.png)
 
@@ -168,9 +182,10 @@ address differs per server.
 
 - Use resolvable host names. A loopback URL in a run spanning several nodes is refused at startup: it reaches a
   different engine, or none, per node, and only the forwarding rank's node takes weight pushes. A launch on one node
-  with a `ray_address` head on it keeps its loopback URL.
-- `num_rollout_workers` actors are created per training rank, soft-pinned to its node; on a shared cluster the budget
-  divides by world size ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
+  keeps its loopback URL only while its Ray cluster has no other live node, since actors spill onto any node the
+  cluster has.
+- `rollout_actor_budget` is a per-node budget on a local Ray, split over the node's rollout ranks, and the cluster-wide
+  total on a shared one, split over every rollout rank; actors are soft-pinned to the rank's node ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - The trainer's NCCL address must be routable from the serving nodes: it defaults to the trainer's address on the route
   to each server; set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST` where the server cannot dial that back (NAT, asymmetric
   routing) ([Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)).
@@ -187,8 +202,9 @@ address differs per server.
 ## Shipped recipes
 
 `examples/grpo/environmental/<family>/<backend>/`: `gemma4`, `gptoss` and `qwen3_5`, each with `vllm/` and `sglang/`
-(`sglang/` ships ep1 files only). In a filename, `-lora-` / `-full-` is the adapter and `-ep1` / `-ep4` the expert distribution
-(none, or a 4-rank DeepEP group). Each header carries its launch line and server flags. One template sits at the root:
+(`sglang/` ships ep1 files only), plus `inkling2/vllm/` and `qwen4_exp/vllm/`. In a filename, `-lora-` / `-full-` is
+the adapter and `-ep<N>` the expert distribution (`-ep1` none, otherwise an N-rank DeepEP group: 2, 4 or 8). Each
+header carries its launch line and server flags. One template sits at the root:
 `environmental-grpo-template.yaml` (`react_math`). `code-contests-judge/` holds the audit judge's `context_file`s the
 code-contests recipes share ([Reward](environments/tasks/code-contests/reward.md)).
 
@@ -197,5 +213,6 @@ Start from `gptoss/vllm/gptoss-20b-code-contests-lora-ep1.yaml` for a tool-heavy
 
 - Every family recipe runs `beta: 0`; the root template runs `0.01`.
 - The code-contests recipes drive two servers at `episode_timeout: 2700`; launch them with
-  `DIST_NCCL_TIMEOUT_MINUTES=60` ([timeout bounds](performance.md#sizing-a-run)). The Qwen3.6 curriculum stages
-  run `episode_timeout: 3600` and need `DIST_NCCL_TIMEOUT_MINUTES=120`. The rest are single-server, prefetch off.
+  `DIST_NCCL_TIMEOUT_MINUTES=60` ([timeout bounds](performance.md#sizing-a-run)). The Qwen3.6 curriculum stages and
+  the notes recipes run `episode_timeout: 3600` and need `DIST_NCCL_TIMEOUT_MINUTES=120`. The rest are single-server,
+  prefetch off.

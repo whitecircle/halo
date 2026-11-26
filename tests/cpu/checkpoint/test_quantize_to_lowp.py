@@ -456,16 +456,15 @@ def test_fused_expert_names_name_no_per_expert_projection():
         assert never_fused not in HF_FUSED_EXPERT_KEYS
 
 
-@pytest.mark.parametrize("poison", [float("nan")])
 @pytest.mark.parametrize("fmt", ["mxfp8", "mxfp4", "nvfp4"])
-def test_verify_refuses_a_non_finite_weight(fmt, poison):
+def test_verify_refuses_a_non_finite_weight(fmt):
     """The relative error is NaN and ``max(x, nan)`` returns ``x``, so the running maximum stays 0.0 and the tool
     prints OK over a poisoned export."""
     with tempfile.TemporaryDirectory() as root:
         src, out = os.path.join(root, "src"), os.path.join(root, "out")
         os.makedirs(src)
         weight = torch.randn(64, 128, dtype=torch.bfloat16) * 0.02
-        weight[3, 7] = poison
+        weight[3, 7] = float("nan")
         save_file({"model.layers.0.mlp.down_proj.weight": weight}, os.path.join(src, "model.safetensors"))
         with pytest.raises(ValueError, match="non-finite"):
             lowp_export.quantize_checkpoint(src, out, fmt, verify=True)

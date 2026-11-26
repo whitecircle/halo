@@ -45,9 +45,10 @@ from halo.checkpoint.reading import (
 )
 from halo.checkpoint.weights_source import config_schema_source
 from halo.checkpoint.writing import sweep_after_full_save
-from halo.hardware import available_host_ram_bytes
+from halo.hardware import available_host_ram_bytes, free_disk_bytes, nearest_existing_path
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from halo.models.introspection.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 from halo.models.moe.balancing import is_balancing_state_key
 from halo.models.mtp.head import mtp_head_path
 from halo.models.mtp.spec import (
@@ -58,7 +59,6 @@ from halo.models.mtp.spec import (
     tail_load_patterns,
     unbuilt_tail_keys,
 )
-from halo.models.param_roles import declared_fp32_pins, fp32_pin_matches, is_normalization_module
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +213,7 @@ def save_full_checkpoint(
     processing_class=None,
     source_dir=None,
     *,
+    source_revision: str | None = None,
     include_resume_sidecars: bool = True,
     carried_tensors: Mapping[str, torch.Tensor] | None = None,
     **save_kwargs,
@@ -220,7 +221,8 @@ def save_full_checkpoint(
     """``save_pretrained`` plus a tool output's non-weight files, for full models only. The order is the contract:
     ``source_dir``'s files copy before the save so the live config and tokenizer overwrite them, stale weights are
     swept after it, and carried legacy tokenizer files the fresh processing class did not rewrite are dropped.
-    ``carried_tensors`` are written beside the model's own."""
+    ``source_revision`` pins a Hub ``source_dir``, whose config schema the export may carry. ``carried_tensors`` are
+    written beside the model's own."""
     if is_peft_model(model):
         raise ValueError(
             "save_full_checkpoint writes full model directories; an unmerged PEFT adapter save must "
@@ -238,7 +240,9 @@ def save_full_checkpoint(
         # A copied generation config would advertise sampling defaults this head has no forward for.
         with contextlib.suppress(FileNotFoundError):
             os.remove(os.path.join(output_dir, GENERATION_CONFIG_NAME))
-    finalize_exported_config(model.config, output_dir, source=source_dir or config_schema_source(model))
+    finalize_exported_config(
+        model.config, output_dir, source=source_dir or config_schema_source(model), revision=source_revision
+    )
     if processing_class is not None:
         carried = _file_versions(output_dir, _LEGACY_TOKENIZER_SIDECARS)
         processing_class.save_pretrained(output_dir)
@@ -261,6 +265,28 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
         local_files_only=is_offline_mode(),
         ignore_patterns=list(WEIGHT_DUMP_IGNORE_PATTERNS),
     )
+
+
+def resolve_adapter_base_revision(base_path: str, recorded: str | None, override: str | None = None) -> str | None:
+    """The Hub revision to read an adapter's base at: ``override`` where given, else the commit the adapter's save
+    ``recorded``. A Hub base with neither is read at its default branch, with a warning, as the adapter cannot say
+    which commit it was trained on (stock PEFT records none unless asked); a local directory has no revision."""
+    if os.path.isdir(base_path):
+        return None
+    if override is not None:
+        if recorded is not None and override != recorded:
+            logger.warning(
+                f"The adapter records revision {recorded} of its base {base_path} and the caller names {override}: "
+                f"reading the base at {override}, which is not the commit the adapter was trained on."
+            )
+        return override
+    if recorded is None:
+        logger.warning(
+            f"The adapter records no revision of its base {base_path}, so the base is read at the repo's default "
+            f"branch. That is not the commit the adapter was trained on if the run pinned model_revision or the repo "
+            f"has moved since; --base_revision of merge_peft_adapters.py and export_engine_adapter.py names the commit."
+        )
+    return recorded
 
 
 def _class_load_ignores(model) -> tuple[str, ...]:
@@ -367,19 +393,11 @@ def reject_sibling_adapter(input_dir: str) -> None:
         )
 
 
-def _nearest_existing_path(path: str) -> str:
-    """``path`` resolved, or its nearest existing ancestor, whose volume a directory yet to be created lands on."""
-    target = os.path.realpath(path)
-    while not os.path.exists(target):
-        target = os.path.dirname(target)
-    return target
-
-
 def cross_device_bytes(paths: Iterable[str], output_dir: str) -> int:
     """Estimated bytes of ``paths`` that :func:`~halo.checkpoint.atomic.link_or_copy_file` copies rather than links:
     those on another filesystem. Undercounts where the output's filesystem refuses a link anyway (a second bind mount,
     a protected hard link, a project-quota boundary)."""
-    device = os.stat(_nearest_existing_path(output_dir)).st_dev
+    device = os.stat(nearest_existing_path(output_dir)).st_dev
     return sum(status.st_size for status in map(os.stat, paths) if status.st_dev != device)
 
 
@@ -394,7 +412,7 @@ def preflight_resource_warning(tool: str, output_dir: str, *, disk_bytes: int | 
                 f"free host memory or run on a larger host. Continuing — this is an estimate."
             )
     if disk_bytes:
-        free = shutil.disk_usage(_nearest_existing_path(output_dir)).free
+        free = free_disk_bytes(output_dir)
         if disk_bytes > free:
             logger.warning(
                 f"{tool}: the output volume for {output_dir} has ~{free / 1e9:.1f} GB free but "

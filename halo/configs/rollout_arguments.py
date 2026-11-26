@@ -79,9 +79,10 @@ class RolloutBudgetArguments(ValidatedConfig):
         default=RolloutConfig.max_thinking_tokens,
         metadata={
             "help": "Per-turn reasoning-token cap (vLLM thinking_token_budget) that then forces the answer out of "
-            "the rest of the turn; a level's smaller enforced thinking_tokens wins, and under a soft level it is "
-            "the ceiling. Needs a reasoning parser on the vLLM server; unset leaves reasoning to the levels' "
-            "budgets. See agent-docs/training-methods/async-grpo/reasoning.md#reasoning-budget."
+            "the rest of the turn; every effort level runs under it, and the model is never told it. Needs a "
+            "reasoning parser on the vLLM server; unset = rollout_max_tokens less rollout_max_answer_tokens caps "
+            "reasoning where that is set, else nothing does. "
+            "See agent-docs/training-methods/async-grpo/reasoning.md#reasoning-cap."
         },
     )
     rollout_max_answer_tokens: int | None = field(
@@ -96,7 +97,7 @@ class RolloutBudgetArguments(ValidatedConfig):
         default="</think>",
         metadata={
             "help": "The string the server's reasoning parser ends reasoning with, encoded as vLLM encodes it "
-            f"({REASONING_END_TOKEN_EXAMPLES}). Wherever a vLLM thinking budget can bind, the trainer gives a "
+            f"({REASONING_END_TOKEN_EXAMPLES}). Wherever a vLLM reasoning cap can bind, the trainer gives a "
             "forced run of its ids ratio 0 in the loss. "
             "See agent-docs/training-methods/async-grpo/objective.md#forced-reasoning-closes."
         },

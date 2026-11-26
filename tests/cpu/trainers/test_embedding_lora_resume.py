@@ -35,8 +35,8 @@ from transformers import (
 from transformers.trainer_utils import rotate_checkpoints
 
 import halo.checkpoint.parallel.adapters as peft_mod
-import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.embedding.trainer as embedding_module
+import halo.trainers.loop.checkpointing as checkpointing_mod
 from halo.checkpoint.adapters import resume_adapter_dir
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
@@ -53,10 +53,10 @@ from halo.checkpoint.tools.model_merge import merge_models
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.peft_adapters import lora_fold_targets
+from halo.models.peft_adapters import has_adapter_layers, lora_fold_targets
 from halo.runtime import filesystem
 from halo.trainers.embedding.embedding_rules import reject_modules_outside_backbone
-from halo.trainers.embedding.injected_lora import folded_backbone_chunks, has_injected_lora
+from halo.trainers.embedding.injected_lora import folded_backbone_chunks
 from halo.trainers.embedding.trainer import EmbeddingTrainer
 from scripts.training.embedding import inject_lora
 from tests.common.adapters import injected_lora_fold
@@ -170,6 +170,7 @@ def _host(model) -> EmbeddingTrainer:
     host = object.__new__(EmbeddingTrainer)
     host.model = model
     host.parallelism_config = ParallelismConfig()
+    host.callback_handler = SimpleNamespace(callbacks=())
     return host
 
 
@@ -652,7 +653,7 @@ def test_a_backbones_own_lora_parameters_are_not_injected_lora(run):
     native = _with_native_lora(model)
 
     assert native, "premise: the backbone carries lora_-named parameters of its own"
-    assert not has_injected_lora(model[0].auto_model)
+    assert not has_adapter_layers(model[0].auto_model)
 
 
 def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_injected_ones(run):
@@ -663,7 +664,7 @@ def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_inje
 
     written = {key for chunk in folded_backbone_chunks(backbone, retain=True) for key in chunk}
 
-    assert has_injected_lora(backbone)
+    assert has_adapter_layers(backbone)
     assert all(name in written for name in native), "the fold dropped the backbone's own LoRA factors"
     assert not [key for key in written if ".lora_A.default" in key or ".base_layer" in key]
     assert all(f"encoder.layer.{i}.attention.self.query.weight" in written for i in range(NUM_LAYERS))

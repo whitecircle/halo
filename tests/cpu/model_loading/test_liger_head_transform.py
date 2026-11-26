@@ -14,8 +14,8 @@ from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig, Glm4MoeLiteForC
 from halo.model_loading.liger import cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.model_loading.liger.fused_modules import apply_fused_modules_to_model
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.head_transform import HeadTransform
-from halo.models.nemotron_h import apply_nemotron_h_patches
 from tests.common.models import (
     TINY_ALTERNATING_SLIDING_CONFIG,
     TINY_COHERE2_MOE_CONFIG,

@@ -4,6 +4,7 @@ and the dense shards, and the forwarding rank streams them under hub names, PEFT
 from __future__ import annotations
 
 import logging
+from collections import deque
 from collections.abc import Iterable, Iterator
 from functools import partial
 from typing import Protocol
@@ -17,11 +18,18 @@ from halo.diagnostics.profiling import log_cuda_memory
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.lora_fold import lora_folded_data
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
-from halo.env import env_flag
+from halo.env import env_flag, weight_sync_gather_ahead
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
-from halo.models.config_access import config_model_types, get_config_field
+from halo.models.fp8_rollout import Fp8RolloutPlan, RolloutWeightPrecision, fp8_rollout_refusal
+from halo.models.introspection.config_access import config_model_types, get_config_field
+from halo.models.introspection.unwrapping import (
+    base_transformers_model,
+    plain_peft_param_name,
+    unwrap_framework_wrappers,
+)
 from halo.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
@@ -29,8 +37,8 @@ from halo.models.moe.balancing import (
     resolve_balancing_slot,
 )
 from halo.models.moe.config_fields import has_routed_experts
-from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
-from halo.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
+from halo.models.peft_adapters import LoraFolds, lora_fold_targets
+from halo.runtime.collectives import collective_side_stream
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
@@ -39,13 +47,16 @@ from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
+# The rank the push sends from: accelerate's main process, which `sync_weights_to_client` takes as the forwarding rank.
+FORWARDING_RANK = 0
+
 
 class WeightSyncSender(Protocol):
     """What a push sends through: one engine client, or a pool of them."""
 
     def scope_co_load_groups(self, module_names: Iterable[str]) -> None: ...
 
-    def update_named_param(self, name: str, weights: torch.Tensor) -> None: ...
+    def update_named_param(self, name: str, weights: torch.Tensor, *, owned: bool = False) -> None: ...
 
     def finish_weight_update(self) -> None: ...
 
@@ -167,42 +178,98 @@ def _reject_unservable_model_types(config, backend: str, client_cls) -> None:
         )
 
 
-def _reject_refused_families(families: list[tuple[str, type[EPMoELayerBase]]], client_cls) -> None:
+def _reject_refused_families(
+    families: list[tuple[str, type[EPMoELayerBase]]], client_cls, *, adapter_sync: bool = False
+) -> None:
+    """Refuses a family with a ``weight_sync_refusal``. Under ``adapter_sync`` no base is pushed, so a family validated
+    as an adapter on this engine (``adapter_sync_backends``) passes."""
     for where, cls in families:
-        if cls.FAMILY.weight_sync_refusal is not None:
-            raise ValueError(
-                f"{cls.__name__} (at {where!r}) does not support weight sync, which feeds "
-                f"{client_cls.ENGINE_RELEASE}'s model.load_weights directly: {cls.FAMILY.weight_sync_refusal}. "
-                f"Online and environmental GRPO cannot train this model. Train it offline: offline GRPO needs no "
-                f"server (agent-docs/training-methods/grpo/offline.md)."
-            )
+        if cls.FAMILY.weight_sync_refusal is None:
+            continue
+        if adapter_sync and client_cls.BACKEND_KEY in cls.FAMILY.adapter_sync_backends:
+            continue
+        validated = ", ".join(cls.FAMILY.adapter_sync_backends)
+        adapter_route = (
+            f" rollout_adapter_sync serves its LoRA adapters beside the launch base on rollout_backend: {validated}."
+            if validated
+            else ""
+        )
+        raise ValueError(
+            f"{cls.__name__} (at {where!r}) does not support weight sync, which feeds "
+            f"{client_cls.ENGINE_RELEASE}'s model.load_weights directly: {cls.FAMILY.weight_sync_refusal}."
+            f"{adapter_route} Online and environmental GRPO cannot train this model otherwise. Train it offline: "
+            f"offline GRPO needs no server (agent-docs/training-methods/grpo/offline.md)."
+        )
 
 
-def reject_unsyncable_config(config, backend: str) -> None:
+def serves_family_as_adapter(config, backend: str) -> bool:
+    """Whether ``config`` is a family an engine run validated ``rollout_adapter_sync`` on for ``backend``."""
+    if config is None:
+        return False
+    return any(backend in cls.FAMILY.adapter_sync_backends for cls in ep_layer_classes_for_config(config))
+
+
+def _named_families(
+    model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]
+) -> list[tuple[str, type[EPMoELayerBase]]]:
+    """Each live EP layer's class by its path; without live layers (the stock module tree), the registry's classes for
+    the model's config, which carry the same contract."""
+    if ep_layers:
+        return [(name, type(module)) for name, module in ep_layers.items()]
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    return [(f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)]
+
+
+def base_push_refusal(model: torch.nn.Module) -> str | None:
+    """Why no engine takes this model's full weights (its family's ``weight_sync_refusal``), ``None`` where they push."""
+    families = _named_families(model, dict(named_ep_layers(model)))
+    return next((cls.FAMILY.weight_sync_refusal for _where, cls in families if cls.FAMILY.weight_sync_refusal), None)
+
+
+def pushes_base(model: torch.nn.Module, *, adapter_sync: bool) -> bool:
+    """Whether a sync writes the served base. ``False`` for an adapter-synced policy over a base no push carries: its
+    servers keep the launch base and form no weight-sync group."""
+    return not (adapter_sync and base_push_refusal(model) is not None)
+
+
+def _reject_unquantizable_rollout(config, backend: str, precision: RolloutWeightPrecision) -> None:
+    """Refuses ``rollout_weight_precision: fp8_block`` on a family no GPU row has validated it for."""
+    if precision == "bf16":
+        return
+    if (reason := fp8_rollout_refusal(config)) is not None:
+        raise ValueError(
+            f"rollout_weight_precision={precision!r} with rollout_backend={backend!r} and model_type "
+            f"{sorted(config_model_types(config))} is refused: {reason}. Set rollout_weight_precision: bf16."
+        )
+
+
+def reject_unsyncable_config(
+    config, backend: str, precision: RolloutWeightPrecision = "bf16", *, adapter_sync: bool = False
+) -> None:
     """What ``config`` alone settles, for a script to raise before the load and the server preflights a refused family
-    would pay for first. ``None`` for a config no rank could read, which the trainer's gate still sees as a model."""
+    would pay for first. ``None`` for a config no rank could read, which the trainer's gate still sees as a model.
+    ``adapter_sync`` pushes no base, so a refused family validated as an adapter on ``backend`` passes."""
     if config is None:
         return
     client_cls = resolve_weight_sync_client(backend)
     _reject_unservable_model_types(config, backend, client_cls)
     registry = f"model_type registry for {config.model_type}"
-    _reject_refused_families([(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls)
+    _reject_refused_families(
+        [(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls, adapter_sync=adapter_sync
+    )
+    _reject_unquantizable_rollout(config, backend, precision)
 
 
-def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
+def _reject_engine_fit(
+    model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase], *, adapter_sync: bool
+) -> None:
     """Refuses an unservable family, one with a ``weight_sync_refusal``, a stock tree whose experts or spelling no engine
     layout covers (:func:`_reject_stock_tree`), and one missing a buffer the push must carry."""
     client_cls = resolve_weight_sync_client(backend)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     _reject_unservable_model_types(config, backend, client_cls)
-    # Without live EP layers (the stock module tree) the registry's classes for the config carry the contract.
-    if ep_layers:
-        families = [(name, type(module)) for name, module in ep_layers.items()]
-    else:
-        families = [
-            (f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)
-        ]
-    _reject_refused_families(families, client_cls)
+    families = _named_families(model, ep_layers)
+    _reject_refused_families(families, client_cls, adapter_sync=adapter_sync)
     if not ep_layers:
         _reject_stock_tree(config, sorted({cls.__name__ for _where, cls in families}), client_cls)
     for where, layer in ep_layers.items():
@@ -260,11 +327,16 @@ def _reject_balancing_state(model: torch.nn.Module) -> None:
         )
 
 
-def reject_unsyncable_model(model: torch.nn.Module, backend: str) -> None:
-    """Refuses at construction; structural, so every rank raises alike."""
+def reject_unsyncable_model(
+    model: torch.nn.Module, backend: str, precision: RolloutWeightPrecision = "bf16", *, adapter_sync: bool = False
+) -> None:
+    """Refuses at construction; structural, so every rank raises alike. ``adapter_sync`` pushes no base, so a refused
+    family validated as an adapter on ``backend`` passes; :func:`pushes_base` holds it to its launch base."""
     ep_layers = dict(named_ep_layers(model))
     _reject_model_state(model, ep_layers)
-    _reject_engine_fit(model, backend, ep_layers)
+    _reject_engine_fit(model, backend, ep_layers, adapter_sync=adapter_sync)
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    _reject_unquantizable_rollout(config, backend, precision)
     _reject_balancing_state(model)
 
 
@@ -279,9 +351,11 @@ class _HubForwarder:
         ep_layers: dict[str, EPMoELayerBase],
         peft_prefix: str | None,
         guard: DeferredRankFailure,
+        fp8_plan: Fp8RolloutPlan | None = None,
     ):
         self._client = client
         self._guard = guard
+        self._fp8_plan = fp8_plan
         self._ep_layers = ep_layers
         self._peft_prefix = peft_prefix
         self._held: dict[str, torch.Tensor] = {}
@@ -308,11 +382,11 @@ class _HubForwarder:
             if name is None:
                 return
         if not self._conversions:
-            self._client.update_named_param(name, tensor)
+            self._emit(name, tensor)
             return
         renamed, claimed_by = rename_source_key(name, self._renamings, self._converters, reverse=True)
         if claimed_by is None:
-            self._client.update_named_param(renamed, tensor)
+            self._emit(renamed, tensor)
             return
         self._held[name] = tensor
         if not bounded:
@@ -333,25 +407,59 @@ class _HubForwarder:
             return
         held, self._held, self._held_bytes = self._held, {}, 0
         for hub_name, hub_tensor in revert_conversions(self._model, held, self._conversions).items():
-            self._client.update_named_param(hub_name, hub_tensor)
+            self._emit(hub_name, hub_tensor)
+
+    def _emit(self, hub_name: str, tensor: torch.Tensor) -> None:
+        """Under block-FP8 rollouts a selected weight goes out as the fp8 values and scales the server stores."""
+        if self._fp8_plan is None:
+            self._client.update_named_param(hub_name, tensor)
+            return
+        for sent_name, sent in self._fp8_plan.expand(hub_name, tensor):
+            # A tensor the plan made is nobody else's; one it passed through still aliases the live weight.
+            self._client.update_named_param(sent_name, sent, owned=sent is not tensor)
 
 
 def _send_ep_expert_weights(
     ep_layers: dict[str, EPMoELayerBase],
     forwarder: _HubForwarder | None,
     guard: DeferredRankFailure,
+    *,
+    forwarding_rank: int = FORWARDING_RANK,
 ) -> None:
-    """COLLECTIVE. The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and
-    retaining stops after a failure. The gather stays in step through a failed retained receive
+    """COLLECTIVE. Each layer is delivered to ``forwarding_rank`` alone, and layer k+1's gather is issued before layer k
+    is forwarded (``HALO_WEIGHT_SYNC_GATHER_AHEAD`` layers ahead, 0 for strictly in turn), in one order on every rank.
+    The retained assembly is the sync's largest rank-local allocation, so it runs under ``guard`` and retaining stops
+    after a failure. The gather stays in step through a failed retained receive
     (:meth:`~halo.distributed.expert_parallel.moe_layer.gather.EPGatherMixin.gather_expert_tensors`)."""
-    for layer_name, module in ep_layers.items():
+    ahead = weight_sync_gather_ahead()
+    layers = list(ep_layers.items())
+    stream = collective_side_stream() if ahead else None
+    issued: deque = deque()
+
+    def issue(index: int) -> None:
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
         # The native expert LoRA is folded here; the PEFT adapters, never on experts, fold in the dense push.
-        gather = partial(module.gather_expert_state_dict, device="cuda", merge_lora=True, retain=retain)
+        gather = partial(
+            layers[index][1].start_gather_expert_state_dict,
+            device="cuda",
+            merge_lora=True,
+            retain=retain,
+            dst=forwarding_rank,
+            stream=stream,
+        )
         # Guarded only where it retains: elsewhere a raise is a group-wide failure, not this rank's own.
-        gathered = guard.run(gather) if retain else gather()
-        if forwarder is not None and gathered:
+        issued.append(guard.run(gather) if retain else gather())
+
+    for index in range(min(ahead, len(layers))):
+        issue(index)
+    for index, (layer_name, _) in enumerate(layers):
+        if index + ahead < len(layers):
+            issue(index + ahead)
+        pending = issued.popleft()
+        gathered = guard.run(pending.finish) if forwarder is not None and pending is not None else None
+        del pending
+        if gathered:
             for param_name, param_data in gathered.items():
                 # Alive in ``gathered`` until the flush below, so a hub split's hold costs nothing here; Step-3.7's
                 # fused bank alone is 5.6 GiB per layer at its release shape.
@@ -359,7 +467,7 @@ def _send_ep_expert_weights(
             # Per layer, so a hub split of these experts never outlives the next gather.
             forwarder.flush()
             del param_data  # the loop's last binding would hold one tensor through the next gather
-        # Released before the next layer's gather, so two assemblies are never alive at once.
+        # Released before the next layer's gather finishes, so only the issued-ahead assemblies are alive beside it.
         del gathered
 
 
@@ -401,23 +509,31 @@ def _send_dense_weights(
         forwarder.flush()
 
 
-def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | None) -> None:
+def gather_and_send_weights(
+    model: torch.nn.Module,
+    sender: WeightSyncSender | None,
+    *,
+    fold_adapters: bool = True,
+    precision: RolloutWeightPrecision = "bf16",
+) -> None:
     """COLLECTIVE. A send can fail on the forwarding rank alone, so each runs under a deferred failure: a rank raising
     mid-loop would leave every peer blocked in the next gather until the watchdog fires. The caller closes the
-    update."""
+    update. ``fold_adapters=False`` sends the frozen base alone, for an engine that serves the adapters apart.
+    ``precision="fp8_block"`` quantizes the selected weights after the adapters are folded."""
     # Read the shards the optimizer steps, not the unsharded copies a forward can leave registered.
     reshard_fsdp2_modules(model)
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
     peft = is_peft_model(model)
     # Live EP layers, not has_ep_group: ep_size==1 is still EP-wrapped.
     ep_layers = dict(named_ep_layers(model))
+    fp8_plan = Fp8RolloutPlan.for_config(base_transformers_model(model).config) if precision == "fp8_block" else None
     forwarder = (
-        guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard))
+        guard.run(partial(_HubForwarder, sender, model, ep_layers, model.prefix if peft else None, guard, fp8_plan))
         if sender
         else None
     )
     # Out of place, not PEFT's merge/unmerge, whose bf16 unmerge misses the frozen base by a rounding step.
-    folds = lora_fold_targets(model)
+    folds = lora_fold_targets(model) if fold_adapters else {}
     _send_ep_expert_weights(ep_layers, forwarder, guard)
     _send_engine_loaded_buffers(ep_layers, forwarder, getattr(base_transformers_model(model), "config", None))
     _send_dense_weights(model, ep_layers, forwarder, folds)
@@ -442,7 +558,13 @@ def _reject_missing_client() -> None:
 
 
 def sync_weights_to_client(
-    model: torch.nn.Module, client: WeightSyncSender | None, is_main: bool, is_tp_main: bool
+    model: torch.nn.Module,
+    client: WeightSyncSender | None,
+    is_main: bool,
+    is_tp_main: bool,
+    *,
+    fold_adapters: bool = True,
+    precision: RolloutWeightPrecision = "bf16",
 ) -> None:
     """COLLECTIVE. Only the forwarding rank (global main, TP rank 0) sends; its missing ``client`` is refused on every
     rank at the close's verdict."""
@@ -454,7 +576,7 @@ def sync_weights_to_client(
     if sender is not None:
         sender.scope_co_load_groups(name for name, _ in model.named_modules())
     try:
-        gather_and_send_weights(model, sender)
+        gather_and_send_weights(model, sender, fold_adapters=fold_adapters, precision=precision)
     except BaseException:
         # The push opened an update mid-gather, which only the forwarding rank can close.
         if sender is not None:
@@ -466,7 +588,9 @@ def sync_weights_to_client(
     flush.reject()
 
 
-def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:
+def sync_trainer_weights(
+    trainer, client: WeightSyncSender | None, *, fold_adapters: bool = True, precision: RolloutWeightPrecision = "bf16"
+) -> None:
     """COLLECTIVE. ``client`` is the caller's handle on the main process."""
     model = unwrap_framework_wrappers(trainer.model)
     config = trainer.parallelism_config
@@ -479,7 +603,7 @@ def sync_trainer_weights(trainer, client: WeightSyncSender | None) -> None:
 
     # Every rank waits for the push to land, and a raise must not skip the barrier the peers block in.
     with barrier_on_exit(f"Weight sync at step {trainer.state.global_step}"):
-        sync_weights_to_client(model, client, is_main, is_tp_main)
+        sync_weights_to_client(model, client, is_main, is_tp_main, fold_adapters=fold_adapters, precision=precision)
 
     if log_memory:
         log_cuda_memory("weight-sync post")

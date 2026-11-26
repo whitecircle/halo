@@ -147,5 +147,43 @@ def test_nothing_a_run_meets_mid_way_compiles_a_graph(monkeypatch, small_tiles):
     assert counters["stats"]["unique_graphs"] == 2
 
 
+def test_candidate_targets_compile_one_graph_pair_of_their_own(monkeypatch, small_tiles):
+    # The (rows, m) form is a run's second scoring form: its pair compiles at its first call, and a new candidate
+    # count, row count or vocabulary then reuses it.
+    path = HEAD_PATHS["every_term"]
+
+    def candidates(rows, vocab, seed, m):
+        hidden, weight, bias, _, _ = _inputs(rows, vocab, seed)
+        generator = torch.Generator().manual_seed(seed)
+        targets = torch.randint(-1, vocab, (rows, m), generator=generator)
+        return hidden, weight, bias, targets, torch.randn(rows, m, generator=generator)
+
+    def run(compiled, inputs):
+        monkeypatch.setattr(head_logprobs, "_COMPILED_DEVICE_TYPES", frozenset({"cpu"}) if compiled else frozenset())
+        hidden, weight, bias, targets, upstream = inputs
+        leaves = [t.clone().requires_grad_(True) for t in (hidden, weight, bias)]
+        logps, _ = head_logprobs.chunked_head_logprobs(
+            *leaves[:2],
+            targets,
+            leaves[2],
+            path["temperature"],
+            logit_scale=path["logit_scale"],
+            softcap=path["softcap"],
+        )
+        (torch.where(targets >= 0, logps, 0.0) * upstream).sum().backward()
+        return logps.detach(), *(leaf.grad for leaf in leaves)
+
+    _sweep(monkeypatch, True, _inputs(ROWS, VOCAB, seed=1), **path)
+    assert counters["stats"]["unique_graphs"] == 2
+    first = candidates(ROWS, VOCAB, 2, 4)
+    _assert_same(run(True, first), run(False, first))
+    assert counters["stats"]["unique_graphs"] == 4
+    with torch._dynamo.config.patch(error_on_recompile=True):
+        for seed, (rows, vocab, m) in enumerate(((23, 2 * VOCAB_TILE, 9), (SEQ_TILE - 3, VOCAB, 2)), start=3):
+            inputs = candidates(rows, vocab, seed, m)
+            _assert_same(run(True, inputs), run(False, inputs))
+    assert counters["stats"]["unique_graphs"] == 4
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -3,9 +3,12 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 
 from halo.configs.grpo_environmental import ISRMaskConfig
+from halo.trainers.metrics.world_metrics import WorldMetrics
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""
@@ -16,13 +19,18 @@ KL_CLAMP_FRAC_KEY = "kl_clamp_frac"
 LOGRATIO_MEAN_KEY = "sampling/logratio_mean"
 """Metric key of the environmental trainer's mean :func:`compute_is_ratio` log-ratio over the corrected tokens."""
 
+IS_RATIO_EXTREME_FRAC_KEY = "sampling/is_ratio_extreme_frac"
+IS_RATIO_MEAN_KEY = "sampling/is_ratio_mean"
+IS_RATIO_MAX_KEY = "sampling/is_ratio_max"
+IS_ESS_FRAC_KEY = "sampling/is_ess_frac"
+
 UPDATE_SKIPPED_KEY = "sampling/update_skipped"
 """Metric key of the environmental trainer's trust-region breaker verdict over the mask stages: 1 when it skipped
 the round's update."""
 
 SAMPLER_CERTAIN_LOGPROB = 0.0
 """A sampling logprob of exactly 0 is a token the engine emitted with probability 1: a logits processor
-forced it (vLLM's thinking budget closing ``</think>``) or the nucleus collapsed onto it."""
+forced it (vLLM's reasoning cap closing ``</think>``) or the nucleus collapsed onto it."""
 
 
 def sampled_token_mask(completion_mask: torch.Tensor, row_has_sampling: torch.Tensor) -> torch.Tensor:
@@ -38,6 +46,25 @@ def sampler_certain_mask(
     return sampled_token_mask(completion_mask, row_has_sampling) & (sampling_logps >= SAMPLER_CERTAIN_LOGPROB)
 
 
+def engine_forced_close_mask(
+    sampling_logps: torch.Tensor,
+    completion_mask: torch.Tensor,
+    row_has_sampling: torch.Tensor,
+    completion_ids: torch.Tensor,
+    reasoning_end_ids: tuple[int, ...],
+) -> torch.Tensor:
+    """Tokens of a reasoning close the engine forced at a turn's thinking cap, from the sampling side alone."""
+    certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
+    width = len(reasoning_end_ids)
+    forced = torch.zeros_like(certain)
+    if completion_ids.shape[1] >= width:
+        end = completion_ids.new_tensor(reasoning_end_ids)
+        starts = ((completion_ids.unfold(1, width, 1) == end) & certain.unfold(1, width, 1)).all(-1)
+        for offset in range(width):
+            forced[:, offset : offset + starts.shape[1]] |= starts
+    return forced
+
+
 def zero_engine_forced_closes(
     ratio: torch.Tensor,
     sampling_logps: torch.Tensor,
@@ -48,14 +75,9 @@ def zero_engine_forced_closes(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The ratio zeroed at reasoning closes the engine forced at a turn's thinking cap. Trained with the episode's
     advantage, repeated forced closes drive down the model's own probability of ending its reasoning."""
-    certain = sampler_certain_mask(sampling_logps, completion_mask, row_has_sampling)
-    width = len(reasoning_end_ids)
-    forced = torch.zeros_like(certain)
-    if completion_ids.shape[1] >= width:
-        end = completion_ids.new_tensor(reasoning_end_ids)
-        starts = ((completion_ids.unfold(1, width, 1) == end) & certain.unfold(1, width, 1)).all(-1)
-        for offset in range(width):
-            forced[:, offset : offset + starts.shape[1]] |= starts
+    forced = engine_forced_close_mask(
+        sampling_logps, completion_mask, row_has_sampling, completion_ids, reasoning_end_ids
+    )
     return ratio.masked_fill(forced, 0.0), forced
 
 
@@ -73,6 +95,24 @@ def kl_clamp_counts(clamped: torch.Tensor, loss_mask: torch.Tensor) -> tuple[tor
     return (clamped & loss_mask).sum(), loss_mask.sum()
 
 
+def corrected_token_mask(
+    sampling_logps: torch.Tensor, completion_mask: torch.Tensor, row_has_sampling: torch.Tensor
+) -> torch.Tensor:
+    """The tokens the importance ratio corrects: sampled, and not emitted with probability 1."""
+    return sampled_token_mask(completion_mask, row_has_sampling) & ~sampler_certain_mask(
+        sampling_logps, completion_mask, row_has_sampling
+    )
+
+
+def compute_token_is_ratio(
+    logps: torch.Tensor, sampling_logps: torch.Tensor, corrected_mask: torch.Tensor, clip_max: float
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """``clamp(exp(logπ − logπ_sampling), clip_max)`` on the corrected tokens, exactly 1 elsewhere, and the masked
+    log-ratio it came from. Returns ``(ratio, logps_diff)``."""
+    logps_diff = (logps - sampling_logps) * corrected_mask
+    return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff
+
+
 def compute_is_ratio(
     recompute_logps: torch.Tensor,
     sampling_logps: torch.Tensor,
@@ -83,11 +123,31 @@ def compute_is_ratio(
     """Truncated per-token ratio ``clamp(exp(logπ_recompute − logπ_sampling), clip_max)``. Rows without sampling
     logprobs, non-policy tokens and sampler-certain tokens get exactly 1, so one bad row cannot perturb the others and
     no band or veto trips. Returns ``(ratio, logps_diff, corrected_mask)``."""
-    corrected_mask = sampled_token_mask(completion_mask, row_has_sampling) & ~sampler_certain_mask(
-        sampling_logps, completion_mask, row_has_sampling
-    )
-    logps_diff = (recompute_logps - sampling_logps) * corrected_mask
-    return torch.clamp(torch.exp(logps_diff), max=clip_max), logps_diff, corrected_mask
+    corrected_mask = corrected_token_mask(sampling_logps, completion_mask, row_has_sampling)
+    ratio, logps_diff = compute_token_is_ratio(recompute_logps, sampling_logps, corrected_mask, clip_max)
+    return ratio, logps_diff, corrected_mask
+
+
+def record_is_ratio_extreme_frac(
+    world: WorldMetrics, logps_diff: torch.Tensor, counted: torch.Tensor, clip_max: float
+) -> None:
+    """The share of ``counted`` tokens past the truncation point in either direction, on the raw log-ratio; nothing
+    when ``clip_max`` is at or below 1, as the band ``[1/clip_max, clip_max]`` is then empty."""
+    if clip_max > 1:
+        extreme = counted & (logps_diff.abs() > math.log(clip_max))
+        world.fraction(IS_RATIO_EXTREME_FRAC_KEY, extreme.sum(), counted.sum())
+
+
+def record_is_ratio_survivors(world: WorldMetrics, ratio: torch.Tensor, counted: torch.Tensor) -> torch.Tensor:
+    """Mean and max of the ratio over the ``counted`` tokens it left unmasked (masked ratios are zeros, so a raw mean
+    collapses as masking grows), and the effective sample share over all of ``counted``. Returns the survivor count."""
+    survivors = counted & (ratio > 0)
+    num_survivors = survivors.sum()
+    surviving = torch.where(survivors, ratio, 0.0)
+    world.mean(IS_RATIO_MEAN_KEY, surviving.sum() / num_survivors.clamp(min=1), num_survivors)
+    world.maximum(IS_RATIO_MAX_KEY, surviving.max())
+    world.effective_sample_frac(IS_ESS_FRAC_KEY, ratio, counted)
+    return num_survivors
 
 
 def select_mask_logratio(

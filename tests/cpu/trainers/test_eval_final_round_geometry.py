@@ -17,9 +17,9 @@ from sentence_transformers.base.sampler import NoDuplicatesBatchSampler
 from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
 from trl.trainer.utils import RepeatSampler
 
-from halo.trainers.dataloaders import dp_representative_ranks
 from halo.trainers.embedding.trainer import EmbeddingTrainer
-from halo.trainers.evaluation import (
+from halo.trainers.loop.dataloaders import dp_representative_ranks
+from halo.trainers.loop.evaluation import (
     EvaluationMixin,
     final_round_split_rows,
     split_rows_head,

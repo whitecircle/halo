@@ -6,6 +6,7 @@ import contextlib
 import logging
 import math
 from collections.abc import Iterator
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -24,6 +25,18 @@ logger = logging.getLogger(__name__)
 # The adapter GEMMs run at the activation dtype (``_expert_proj`` casts lora_A/B to ``out_dtype``), bf16 at
 # the narrowest whatever the experts are stored in, so the rank has to span the stride at bf16.
 EXPERT_LORA_RANK_MULTIPLE = GROUPED_MM_STRIDE_ALIGNMENT_BYTES // torch.bfloat16.itemsize
+
+
+@dataclass(frozen=True)
+class ExpertLoraTarget:
+    """An adaptable expert weight: its name, ``[E, K, N]`` shape, the dtype and device its adapters take, and the base
+    parameter the adapters freeze (None for a base that is no parameter)."""
+
+    name: str
+    shape: tuple[int, int, int]
+    dtype: torch.dtype
+    device: torch.device
+    base: nn.Parameter | None = None
 
 
 class EPExpertLoraMixin:
@@ -45,27 +58,28 @@ class EPExpertLoraMixin:
         self.expert_lora_dropout = nn.Dropout(spec.dropout) if spec.dropout > 0 else nn.Identity()
 
         adapted: list[str] = []
-        for name, param in self.expert_named_params():
-            if param.dim() != 3 or not spec.adapts(name):
+        for target in self._expert_lora_targets():
+            if not spec.adapts(target.name):
                 continue
             if spec.r % EXPERT_LORA_RANK_MULTIPLE:
                 raise ValueError(
-                    f"lora_r={spec.r} cannot adapt the expert weight {name!r}: the grouped GEMM contracts over the "
-                    f"adapter's rank dimension and reads it as a stride spanning a multiple of "
+                    f"lora_r={spec.r} cannot adapt the expert weight {target.name!r}: the grouped GEMM contracts over "
+                    f"the adapter's rank dimension and reads it as a stride spanning a multiple of "
                     f"{GROUPED_MM_STRIDE_ALIGNMENT_BYTES} bytes at the bf16 the adapters run in at the narrowest — "
                     f"use a multiple of {EXPERT_LORA_RANK_MULTIPLE}."
                 )
-            num_local, k, n = param.shape
-            lora_a = nn.Parameter(torch.empty(num_local, k, spec.r, dtype=param.dtype, device=param.device))
-            lora_b = nn.Parameter(torch.zeros(num_local, spec.r, n, dtype=param.dtype, device=param.device))
+            num_local, k, n = target.shape
+            lora_a = nn.Parameter(torch.empty(num_local, k, spec.r, dtype=target.dtype, device=target.device))
+            lora_b = nn.Parameter(torch.zeros(num_local, spec.r, n, dtype=target.dtype, device=target.device))
             # 1/sqrt(K) reproduces PEFT's 2-D kaiming_uniform_(a=sqrt(5)); handing torch the 3-D [E, K, r]
             # tensor would fold r into fan_in, warming expert adapters at a different scale than attention.
             bound = 1.0 / math.sqrt(k)
             nn.init.uniform_(lora_a, -bound, bound)
-            setattr(self, f"{name}_lora_A", lora_a)
-            setattr(self, f"{name}_lora_B", lora_b)
-            param.requires_grad_(False)
-            adapted.append(name)
+            setattr(self, f"{target.name}_lora_A", lora_a)
+            setattr(self, f"{target.name}_lora_B", lora_b)
+            if target.base is not None:
+                target.base.requires_grad_(False)
+            adapted.append(target.name)
 
         self._expert_lora_attrs = frozenset(adapted)
         if adapted and is_global_main_process():
@@ -74,6 +88,13 @@ class EPExpertLoraMixin:
                 f"(r={spec.r}, alpha={spec.alpha}, dropout={spec.dropout}, rslora={spec.use_rslora}, "
                 f"scaling={spec.scaling:.4g}, projections={sorted(adapted)})"
             )
+
+    def _expert_lora_targets(self) -> Iterator[ExpertLoraTarget]:
+        """The 3-D matmul-convention ``[E, K, N]`` expert weights an adapter can sit on, by default the expert
+        parameters; a layer whose frozen base is no parameter (a quantized bank) names its own."""
+        for name, param in self.expert_named_params():
+            if param.dim() == 3:
+                yield ExpertLoraTarget(name, tuple(param.shape), param.dtype, param.device, base=param)
 
     @property
     def has_expert_lora(self) -> bool:

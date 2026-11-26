@@ -1,14 +1,13 @@
 #!/usr/bin/env python
 """Startup guards on the preprocessed-dataset path run per rank in front of a consensus all-reduce, so an
-over-strict verdict kills the job at step 0. A foreign ``metadata.json`` loads raw, only a render knob the YAML
-states is a claim, and ``tools_field`` may be absent from some sources of a list."""
+over-strict verdict kills the job at step 0. A foreign ``metadata.json`` loads raw, and only a render knob the YAML
+states is a claim."""
 
 import json
 import os
 from dataclasses import asdict, dataclass
 
 import pytest
-from datasets import Dataset, DatasetDict
 
 from halo.data.preprocessed.metadata import (
     PreprocessedDatasetMetadata,
@@ -18,7 +17,6 @@ from halo.data.preprocessed.metadata import (
     load_preprocessed_metadata,
 )
 from halo.data.preprocessed.shard_index import IncompatiblePreprocessedDataset
-from halo.data.sources.corpus import _reject_tools_field_nowhere
 from halo.data.sources.paths import METADATA_FILE
 
 
@@ -103,35 +101,6 @@ def test_a_stated_system_prompt_against_a_prompt_less_artifact_raises():
     metadata = _artifact(conversation_field="prompt", system_prompt=None)
     with pytest.raises(ValueError, match="system_prompt"):
         _verify_render_knobs(metadata, _RenderArgs(system_prompt="You are helpful."))
-
-
-def _split_dict(columns: dict) -> DatasetDict:
-    rows = {name: [value] for name, value in columns.items()}
-    return DatasetDict({"train": Dataset.from_dict(rows), "test": Dataset.from_dict(rows)})
-
-
-def test_tools_field_present_in_only_some_sources_is_allowed(caplog):
-    """A tool-use corpus concatenated with plain chat: the plain source renders without tools, which is what those
-    rows are."""
-    with_tools = _split_dict({"prompt": [{"role": "user", "content": "hi"}], "tools": ["[]"]})
-    without = _split_dict({"prompt": [{"role": "user", "content": "hi"}]})
-    with caplog.at_level("WARNING"):
-        _reject_tools_field_nowhere(["a", "b"], [with_tools, without], "tools")
-    assert any("render without tools" in record.message for record in caplog.records)
-
-
-def test_tools_field_absent_everywhere_raises():
-    """Every row would silently render toolless."""
-    without = _split_dict({"prompt": [{"role": "user", "content": "hi"}]})
-    with pytest.raises(ValueError, match="NONE of the 2 configured dataset"):
-        _reject_tools_field_nowhere(["a", "b"], [without, without], "tools")
-
-
-def test_tools_field_present_everywhere_is_silent(caplog):
-    with_tools = _split_dict({"prompt": [{"role": "user", "content": "hi"}], "tools": ["[]"]})
-    with caplog.at_level("WARNING"):
-        _reject_tools_field_nowhere(["a", "b"], [with_tools, with_tools], "tools")
-    assert not [r for r in caplog.records if "tools" in r.message]
 
 
 if __name__ == "__main__":

@@ -13,8 +13,8 @@ from accelerate.data_loader import DataLoaderDispatcher, prepare_data_loader
 from accelerate.utils import DataLoaderConfiguration, gather_object
 from torch.utils.data import DataLoader, IterableDataset, SequentialSampler
 
-from halo.trainers.dataloaders import DataParallelLoaderMixin, dp_representative_ranks
-from halo.trainers.evaluation import EvaluationMixin
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin, dp_representative_ranks
+from halo.trainers.loop.evaluation import EvaluationMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD, TP = 4, 2

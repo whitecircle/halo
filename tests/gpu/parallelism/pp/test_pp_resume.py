@@ -18,7 +18,7 @@ from trl import SFTConfig
 from halo.checkpoint.reading import StreamingCheckpointReader
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.models.unwrapping import unwrap_toolkit_wrappers
+from halo.models.introspection.unwrapping import unwrap_toolkit_wrappers
 from halo.runtime.dtensor import full_cpu_tensor
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import shared_output_dir, world_all

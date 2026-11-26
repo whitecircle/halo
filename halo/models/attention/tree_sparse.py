@@ -11,9 +11,10 @@ from torch.autograd.function import once_differentiable
 
 from halo.kernels.fp32_matmul import GEMM_ALIGNMENT, bmm_fp32, wide_dtype
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
-from halo.models.config_access import text_config
+from halo.models.introspection.config_access import text_config
 
-# fp32 indexer scores one selection call holds (queries x candidate pools x indexer heads): 1 GiB.
+# fp32 scores one DSA indexer selection call holds on a tree row or a padded one (queries x candidate pools x indexer
+# heads): 1 GiB.
 INDEXER_SCORES_PER_CALL = 1 << 28
 # Latent rows one attention call gathers (queries x selected keys): 1 GiB at bf16 and kv_lora_rank 512
 # in the forward; the backward also holds two fp32 products of that shape, about 8 GiB in all.

@@ -12,7 +12,7 @@ from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from halo.distributed.pipeline_parallel.runner import PipelineRunner
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule
 from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
-from halo.models.module_tree import backbone_with_layers
+from halo.models.introspection.module_tree import backbone_with_layers
 from halo.models.segment_markers import packed_row_varlen_kwargs, segment_marker_kwargs, segment_markers_for
 from tests.common.packed_flash_varlen import SWEEP_ATTN_IMPLEMENTATION, set_attn_implementation
 from tests.common.pp_fakes import fake_runner

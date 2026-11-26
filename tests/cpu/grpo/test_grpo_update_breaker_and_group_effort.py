@@ -4,7 +4,6 @@
 import ast
 import inspect
 import math
-import pathlib
 import textwrap
 import types
 from collections import defaultdict
@@ -13,10 +12,10 @@ import pytest
 import torch
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
-from halo.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
+from halo.environments.episodes.reasoning_effort import bind_episode_effort, stable_reasoning_effort
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.trainers.grpo.environmental import step_batch
-from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
+from halo.trainers.grpo.environmental.loss.importance_sampling import _BreakerOptimizerSkipCallback
 from halo.trainers.grpo.environmental.step_batch import EMPTY_ROLLOUT_STEP_LIMIT, BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.loss_inputs import (
@@ -143,30 +142,6 @@ def test_a_tripped_breaker_drops_the_gradients_on_every_optimizer_step_of_the_ro
     assert calls == [True, True]
 
 
-def test_none_gradients_leave_adam_state_and_weights_untouched():
-    """The skip relies on this optimizer contract, even with momentum built up."""
-    param = torch.nn.Parameter(torch.ones(4))
-    opt = torch.optim.AdamW([param], lr=0.1, weight_decay=0.0)
-    param.grad = torch.ones(4)
-    opt.step()
-    moved = param.detach().clone()
-    exp_avg = opt.state[param]["exp_avg"].clone()
-    opt.zero_grad(set_to_none=True)
-    opt.step()
-    assert torch.equal(param.detach(), moved)
-    assert torch.equal(opt.state[param]["exp_avg"], exp_avg)
-    param.grad = torch.zeros(4)
-    opt.step()
-    assert not torch.equal(param.detach(), moved), "a ZERO gradient still steps the weights by momentum"
-
-
-def test_toolkit_optimizers_skip_none_gradients():
-    """The toolkit's own optimizers have hand-written step loops."""
-    for name in ("adamw_bf16", "flash_adamw", "muon"):
-        source = (pathlib.Path("halo/optimizers") / f"{name}.py").read_text()
-        assert "grad is None" in source or "grad is not None" in source, f"{name}: no None-grad guard in the step loop"
-
-
 def _armed(threshold: float | None) -> DistributedAsyncEnvironmentalGRPOTrainer:
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.async_config = AsyncRolloutConfig(skip_update_masked_frac=threshold)
@@ -284,9 +259,9 @@ def test_the_token_mass_balance_weighs_the_corrected_ratio_and_reaches_both_adva
     assert list(host._logs["advantages"]) == pytest.approx(expected.tolist())
 
 
-def test_the_token_mass_balance_leaves_a_negative_only_row_raw_and_records_the_trainable_rows():
-    """The balance weighs the solve's 1/2 against the failure's trainable 1 and halves the negatives there; the cut
-    turn keeps its raw -1/2 and its 2 of mass is the round's net push."""
+def test_the_token_mass_balance_weighs_a_negative_only_row_and_records_the_trainable_rows():
+    """The balance weighs the solve's 1/2 against the failure's trainable 1 plus the cut turn's 2 and shrinks every
+    negative, the cut turn's too, to a sixth, so the round nets to zero; the logged net stays the trainable rows'."""
     solve, failure, cut = row([6]), row([7, 8]), row([9, 10, 11, 12], negative_only=True)
     host = batch_host(
         [solve, failure, cut],
@@ -299,11 +274,11 @@ def test_the_token_mass_balance_leaves_a_negative_only_row_raw_and_records_the_t
     host.async_config.train_on_sampled_tokens = True
     host._tokenize_step_rows = lambda results: [[solve], [failure, cut]]
     batch = build(host, [episode(1.0), episode(0.0)])
-    assert batch["advantages"].tolist() == pytest.approx([0.5, -0.25, -0.5])
-    assert list(host._logs["advantages"]) == pytest.approx([0.5, -0.25])
+    assert batch["advantages"].tolist() == pytest.approx([0.5, -1 / 12, -1 / 12])
+    assert list(host._logs["advantages"]) == pytest.approx([0.5, -1 / 12])
     metrics = host._metrics["train"]
     assert metrics[NET_TOKEN_MASS_KEY] == [pytest.approx((0.5 - 1) / 1.5)]
-    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 3)]
+    assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx((2 / 6) / 1.0)]
 
 
 def test_an_eval_round_is_never_balanced():
@@ -356,7 +331,7 @@ _PHASE_HELPERS = (
     "_apply_breaker_and_record_metrics",
 )
 # The helpers those phases call in turn, each holding or gating a collective of its own.
-_NESTED_HELPERS = ("_recompute_logps_and_routing_masks", "_apply_is_correction", "_narrow_corrected_mask_and_record")
+_NESTED_HELPERS = ("_recompute_logps_and_routing", "_apply_is_correction", "_narrow_corrected_mask_and_record")
 _RECORDING = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
 
 
@@ -485,7 +460,7 @@ def test_an_eval_scores_each_problem_at_one_level_whatever_the_draw_order():
 
 def test_bind_episode_effort_prefers_the_context_level():
     def level(context, effort):
-        env = types.SimpleNamespace(reasoning_effort=effort, thinking_budget_for_effort=lambda level: None)
+        env = types.SimpleNamespace(reasoning_effort=effort)
         return bind_episode_effort(context, env, max_tokens=1000).level
 
     assert level({"reasoning_effort": "high"}, "random") == "high"

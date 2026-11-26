@@ -16,14 +16,20 @@ from halo.checkpoint.reading import has_whole_model_weight_file, read_checkpoint
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import resolve_load_dtype
-from halo.model_loading.lazy_safetensors.conversion import Concat
+from halo.model_loading.lazy_safetensors.conversion import FanIn
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
+from halo.model_loading.parallel.frozen_experts import supports_frozen_experts
 from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
 from halo.models.moe.config_fields import require_expert_count
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
-from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_fusion_map
+from halo.models.moe.family_specs import (
+    experts_container_attrs,
+    find_moe_family_spec,
+    frozen_expert_sidecar_attrs,
+    per_expert_fusion_map,
+)
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.filesystem import fs_aware_main_first
 from halo.runtime.ranks import get_global_rank
@@ -36,6 +42,10 @@ _CONTAINER_ALT = "|".join(re.escape(a) for a in experts_container_attrs())
 FUSED_EXPERT_KEY_PATTERN = re.compile(
     rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in HF_FUSED_EXPERT_KEYS)})$"
 )
+# A frozen quantized bank's per-expert sidecar (block scales, NVFP4 amax), sharded on the expert axis with its weight.
+_FROZEN_SIDECAR_KEY_PATTERN = re.compile(
+    rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in frozen_expert_sidecar_attrs())})$"
+)
 # One expert's tensor (``…mlp.experts.N.gate_proj.weight``): (1) the container attribute, (2) the expert index.
 PER_EXPERT_KEY_PATTERN = re.compile(rf"\.({_CONTAINER_ALT})\.(\d+)\.")
 # An expert index nested under an extra module (``…experts.local_experts.N.linear_fc1``), which neither
@@ -45,6 +55,14 @@ _NESTED_EXPERT_KEY_PATTERN = re.compile(rf"\.(?:{_CONTAINER_ALT})\.[A-Za-z_]\w*\
 LAZY_FAMILY_UNVERIFIED = "lazy_family_unverified"
 LAZY_QUANTIZED = "quantized_checkpoint"
 LAZY_NESTED_EXPERT_KEYS = "lazy_incompatible_expert_layout"
+
+
+def is_native_mxfp4(config: dict) -> bool:
+    """Whether a ``config.json`` describes an MXFP4 release of a family whose spec sets ``lazy_decodes_mxfp4``
+    (``openai/gpt-oss-*``)."""
+    spec = find_moe_family_spec(config.get("model_type"))
+    quantization = config.get("quantization_config") or {}
+    return spec is not None and spec.lazy_decodes_mxfp4 and quantization.get("quant_method") == "mxfp4"
 
 
 class ExpertKeyLayout(Enum):
@@ -62,10 +80,11 @@ class ExpertKeyLayout(Enum):
         return ExpertKeyLayout.FUSED
 
 
-def lazy_load_blocker(model_path: str) -> str | None:
+def lazy_load_blocker(model_path: str, *, frozen_quantized_experts: bool = False) -> str | None:
     """Why the lazy loaders cannot materialize this checkpoint, ``None`` when they can or neither config nor index
     reads. Checkpoint-native quantization counts, as its scale tensors map to nothing live and the experts would load
-    as garbage unseen."""
+    as garbage unseen, except gpt-oss's MXFP4, which the loaders decode, and a family's release layout that
+    ``frozen_quantized_experts`` gives its slots."""
     try:
         config = read_checkpoint_config(model_path, missing_ok=True) or {}
     except (OSError, ValueError):
@@ -73,7 +92,8 @@ def lazy_load_blocker(model_path: str) -> str | None:
     spec = find_moe_family_spec(config.get("model_type"))
     if spec is not None and not spec.supports_lazy_loading:
         return LAZY_FAMILY_UNVERIFIED
-    if config.get("quantization_config"):
+    frozen = frozen_quantized_experts and supports_frozen_experts(spec)
+    if config.get("quantization_config") and not is_native_mxfp4(config) and not frozen:
         return LAZY_QUANTIZED
     try:
         weight_map = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint").weight_map
@@ -82,17 +102,18 @@ def lazy_load_blocker(model_path: str) -> str | None:
     return LAZY_NESTED_EXPERT_KEYS if any(_NESTED_EXPERT_KEY_PATTERN.search(k) for k in weight_map) else None
 
 
-def is_lazy_loadable(model_path: str) -> bool:
-    return lazy_load_blocker(model_path) is None
+def is_lazy_loadable(model_path: str, *, frozen_quantized_experts: bool = False) -> bool:
+    return lazy_load_blocker(model_path, frozen_quantized_experts=frozen_quantized_experts) is None
 
 
-def agree_lazy_load(source: ModelSource) -> bool:
+def agree_lazy_load(source: ModelSource, *, frozen_quantized_experts: bool = False) -> bool:
     """COLLECTIVE: refuse an EP-sharded ``source``, then return whether every rank streams it lazily. Rank 0 decides,
     as the branches enter different collectives and a per-rank probe of a partially populated cache would split
     them."""
     reject_ep_sharded_checkpoint(source)
     return broadcast_from_rank0(
-        has_whole_model_weight_file(source.local_dir, safetensors_only=True) and is_lazy_loadable(source.local_dir)
+        has_whole_model_weight_file(source.local_dir, safetensors_only=True)
+        and is_lazy_loadable(source.local_dir, frozen_quantized_experts=frozen_quantized_experts)
     )
 
 
@@ -129,13 +150,13 @@ class WeightPlanner:
         unexpected: list[str] = []
         fanout = fanout or {}
         ignored = [re.compile(pattern) for pattern in ignore_unexpected]
-        # A fan-in's siblings are read by its first source's plan (the leading Concat), never on their own.
+        # A fan-in's siblings are read by its first source's plan, never on their own.
         consumed = {
             sibling
             for targets in fanout.values()
             for _, ops in targets
             for op in ops
-            if isinstance(op, Concat)
+            if isinstance(op, FanIn)
             for sibling in op.siblings
         }
 
@@ -197,7 +218,7 @@ class WeightPlanner:
         if self.start is None or self.end is None:
             return WeightAction.REPLICATE, 0, 0, 0
 
-        if FUSED_EXPERT_KEY_PATTERN.search(model_key):
+        if FUSED_EXPERT_KEY_PATTERN.search(model_key) or _FROZEN_SIDECAR_KEY_PATTERN.search(model_key):
             return WeightAction.EXPERT_SHARD, 0, self.start, self.end
 
         m = PER_EXPERT_KEY_PATTERN.search(model_key)
@@ -249,6 +270,13 @@ def lazy_load_prologue(
     dtype = resolve_load_dtype(dtype, config)
     if ep_config is not None and ep_config.num_experts is None:
         ep_config.finalize_expert_assignment(require_expert_count(config))
+    native_mxfp4 = is_native_mxfp4(read_checkpoint_config(model_path, missing_ok=True) or {})
+    if native_mxfp4:
+        # The experts load decoded to bf16. Dropped before the shell, so transformers builds no MXFP4 quantizer
+        # whatever its kernels allow, and the model's config, which every save writes, no longer claims MXFP4.
+        if getattr(config, "quantization_config", None) is not None:
+            del config.quantization_config
+        logger.info(f"[Rank {rank}] Native MXFP4 checkpoint: decoding its experts to bf16 while loading")
 
     checkpoint = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint")
     weight_map, shard_files = checkpoint.weight_map, list(checkpoint.shard_files)
@@ -268,7 +296,7 @@ def lazy_load_prologue(
             ) from e
 
     model_keys = set(model.state_dict().keys())
-    disk_to_model, conversion_fanout = family_key_mapping(model, list(weight_map.keys()))
+    disk_to_model, conversion_fanout = family_key_mapping(model, list(weight_map.keys()), native_mxfp4=native_mxfp4)
     plans = WeightPlanner(ep_config).build(
         weight_map,
         disk_to_model,

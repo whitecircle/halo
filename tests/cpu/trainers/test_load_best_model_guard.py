@@ -11,7 +11,7 @@ from transformers import PretrainedConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.trainers.trainer_rules import reject_unreloadable_best_model
+from halo.trainers.construction.trainer_rules import reject_unreloadable_best_model
 
 # A real PretrainedConfig: get_peft_model reads it through ``to_dict()``, and the guard reads the expert count off it.
 MOE_CONFIG = PretrainedConfig(num_local_experts=8)
@@ -89,7 +89,7 @@ def test_pure_tp_is_allowed(moe):
     _validate(tp=8, moe=moe)
 
 
-@pytest.mark.parametrize("shape", [{"ep": 8, "moe": True}, {"cp": 8}, {"tp": 8, "moe": True}])
+@pytest.mark.parametrize("shape", [{"ep": 8, "moe": True}, {"cp": 8}])
 def test_peft_runs_are_exempt_on_every_refused_shape(shape):
     """Adapters reload in place, so the shapes refused for a full fine-tune stay allowed."""
     _validate(peft=True, **shape)

@@ -66,14 +66,6 @@ _RULES = {
         "padding_free requires a varlen",
         {"attn": FA2},
     ),
-    "mrope-padding-free": (
-        TINY_DENSE_FAMILIES["qwen3_5"],
-        "padding_free",
-        FA2,
-        {},
-        "rotates by M-RoPE",
-        {"mode": "packing"},
-    ),
     "compressed-kv": (TINY_MOE_FAMILIES["deepseek_v4"], "packing", FA2, {}, "pool KV over windows", {"mode": None}),
     "segment-aware-kernels": (
         TINY_DENSE_FAMILIES["qwen3_5"],
@@ -187,8 +179,7 @@ def test_every_family_of_the_roster_is_measured(family):
 
 
 @pytest.mark.parametrize("model_type", ["bart", "opt", "biogpt", "gpt_neo", "moshi"])
-@pytest.mark.parametrize("mode", ["packing", "padding_free"])
-def test_a_family_outside_the_table_is_warned_about(model_type, mode):
+def test_a_family_outside_the_table_is_warned_about(model_type):
     with mock.patch.object(collator_rules.logger, "warning") as warning:
         collator_rules._warn_unmeasured_multi_document_family(CONFIG_MAPPING[model_type](), multi_document=True)
     assert warning.call_count == 1
@@ -245,9 +236,8 @@ def _sft_main(tmp_path, yaml_body: str, checkpoint_config, *, kernels_missing: b
             "packing=True on attn_implementation='sdpa'",
         ),
         ("packing: true\n", TINY_DENSE_FAMILIES["qwen3_5"], None, True, "causal_conv1d unavailable"),
-        ("padding_free: true\n", TINY_DENSE_FAMILIES["qwen3_5"], None, False, "rotates by M-RoPE"),
     ],
-    ids=["dense-packing", "segment-aware-kernels", "mrope-padding-free"],
+    ids=["dense-packing", "segment-aware-kernels"],
 )
 def test_the_sft_script_refuses_the_rows_before_its_distributed_init(
     tmp_path, yaml_body, family, attn_impl, kernels_missing, match

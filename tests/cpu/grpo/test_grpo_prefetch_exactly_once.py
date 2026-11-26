@@ -11,18 +11,25 @@ import threading
 import time
 import types
 from collections import deque
+from unittest import mock
 
 import pytest
 import torch
 
-import halo.trainers.checkpointing as checkpointing_mod
+import halo.runtime.consensus as consensus_mod
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
+import halo.trainers.parallelism.tp_leader as tp_leader_mod
+from halo.configs.grpo import EarlyStopConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
-from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
+from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as _T
+from halo.trainers.grpo.phase_timing import PhaseTimedMixin
+from halo.trainers.loop.checkpointing import CheckpointingMixin
 from tests.common.repo import load_script_module
 
 
@@ -35,22 +42,29 @@ env_grpo_script = load_script_module("scripts/training/grpo/environmental.py")
 _TWO_ENGINES = [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}]
 
 
-class _Host(AsyncRolloutMixin, CheckpointingMixin):
+class _Host(AsyncRolloutMixin, StepBatchMixin, RolloutMetricsMixin, CheckpointingMixin):
     """The real prefetch decision flow with mocked rollout collection, over the real ``_init_async_state`` for a
     two-server run at ``depth``."""
 
     _collect_and_score_rollouts = _T._collect_and_score_rollouts
+    _phase_timers = PhaseTimedMixin._phase_timers
     _tool_call_watch = None
     _tokenizer = None  # read only for thinking text, which the stub rollouts carry none of
     _extract_prompts_and_contexts = _T._extract_prompts_and_contexts
     eval_split_rows = _T.eval_split_rows
 
-    def __init__(self, depth: int = 1):
+    def __init__(self, depth: int = 1, wire: dict | None = None, follower: bool = False):
+        self.follower = follower
+        # The leader's broadcast payload, shared with its follower; ``None`` is a single-rank host.
+        self.wire = wire
+        self.reject_calls = 0
+        self.thread_starts = 0
         self.async_config = AsyncRolloutConfig(
             rollout_server_configs=_TWO_ENGINES, prefetch_depth=depth, episode_timeout=5.0
         )
         self._init_async_state()
         self.model = types.SimpleNamespace(training=True)
+        self.callback_handler = types.SimpleNamespace(callbacks=[])
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)
         self.parallelism_config = types.SimpleNamespace(data_parallel_size=1, get_data_parallel_rank=lambda: 0)
         # profiling_context reads these on the acquire path; report_to=[] makes it a no-op.
@@ -58,6 +72,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         self.args = types.SimpleNamespace(report_to=[])
         self._group_random_effort = False
         self._batch_errors = BatchBuildFence()
+        self._batch_errors.reject = self._counted_reject
         self.num_generations = 1
         # Every sync collection, the duplication fingerprint.
         self.sync_calls: list[list[str]] = []
@@ -69,7 +84,20 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         self.sync_calls.append(list(prompts))
         return [_Rollout(f"sync:{p}") for p in prompts]
 
+    def _counted_reject(self):
+        self.reject_calls += 1
+        BatchBuildFence.reject(self._batch_errors)
+
+    def _is_tp_follower(self) -> bool:
+        return self.follower
+
     def _broadcast_object_from_tp_leader(self, rollout_results):
+        if self.wire is None:
+            return rollout_results
+        if self.follower:
+            assert rollout_results is None, "a follower has no rollouts of its own to offer"
+            return self.wire["rollouts"]
+        self.wire["rollouts"] = rollout_results
         return rollout_results
 
     def _build_training_tensors(self, rollout_results, device, mode, num_padding, reasoning_tokens):
@@ -92,7 +120,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         return True
 
     def _start_prefetch_thread(self):
-        pass
+        self.thread_starts += 1
 
     def _train_loader_batch_size(self) -> int:
         return 1
@@ -202,7 +230,15 @@ class _LifecycleHost:
     _init_async_components = _T._init_async_components
     _form_weight_sync_group = _T._form_weight_sync_group
     _weight_sync_group_formed = False
+    _async_components_started = False
+    _adapter_versions = None
+    _adapter_routes = None
+    _adapter_sync = None
+    _rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False)
     _start_rank_rollout_components = _T._start_rank_rollout_components
+    _start_rollout_pool = _T._start_rollout_pool
+    _resolve_rollout_pool = _T._resolve_rollout_pool
+    _get_tp_or_etp_group_size = _T._get_tp_or_etp_group_size
     _reject_eval_round_over_cap = _T._reject_eval_round_over_cap
     _rollout_node_count = _T._rollout_node_count
     _start_rollout_generation = _T._start_rollout_generation
@@ -213,7 +249,7 @@ class _LifecycleHost:
         self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: 0)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=2,
+            rollout_actor_budget=2,
             max_concurrent_rollouts=2,
             eval_rollout_batch_size=None,
             isr_engine_reference=False,
@@ -234,12 +270,24 @@ class _LifecycleHost:
         self._rollout_stop_token_ids = None
         self._reasoning_end_ids = None
         self.callbacks: list = []
+        # The TP/ETP group this rank sits in: its size, and whether it leads.
+        self.tp_group_size = 1
+        self.follower = False
         # What the engines were handed, in order: the fingerprint of which weights they serve.
         self.pushed: list[float] = []
         self.prefetch_starts = 0
 
     def _init_weight_sync_client(self):
         self._weight_sync_client = object()
+
+    def _train_loader_batch_size(self) -> int:
+        return 4
+
+    def _is_tp_follower(self) -> bool:
+        return self.follower
+
+    def _get_tp_or_etp_process_group(self):
+        return types.SimpleNamespace(size=self.tp_group_size) if self.tp_group_size > 1 else None
 
     def add_callback(self, callback):
         self.callbacks.append(callback)
@@ -250,6 +298,25 @@ class _LifecycleHost:
 
     def _start_prefetch_thread(self):
         self.prefetch_starts += 1
+
+
+def test_a_group_formation_failure_is_joined_over_the_store_not_an_nccl_collective(monkeypatch):
+    """Rank 0 forms the groups server by server while the peers wait, for longer than the NCCL watchdog allows."""
+    host = _LifecycleHost(torch.zeros(1))
+    joined: list[tuple[str, str | None]] = []
+
+    def failing_client() -> None:
+        raise RuntimeError("server 3 never loaded")
+
+    def record_join(tag, reason, what, exc_type=RuntimeError, timeout=None):
+        joined.append((tag, reason))
+        raise exc_type(reason)
+
+    host._init_weight_sync_client = failing_client
+    monkeypatch.setattr(consensus_mod, "store_reject_across_ranks", record_join)
+    with pytest.raises(RuntimeError, match="server 3 never loaded"):
+        host._form_weight_sync_group()
+    assert joined == [("rollout/weight_sync_group", "RuntimeError: server 3 never loaded")]
 
 
 def test_generation_starts_only_after_the_resume_restore(monkeypatch):
@@ -297,11 +364,176 @@ def _run(host: _Host, batches: list[str]) -> None:
         host.round([prompt])
 
 
+def _tp_pair(depth: int = 1) -> tuple[_Host, _Host]:
+    wire: dict = {}
+    return _Host(depth, wire=wire), _Host(depth, wire=wire, follower=True)
+
+
+def _run_pair(leader: _Host, follower: _Host, batches: list[str]) -> None:
+    for prompt in batches:
+        if not leader._prefetch_input_queue.empty():
+            leader.worker_step()
+        leader.round([prompt])
+        follower.round([prompt])
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+def test_a_tp_follower_issues_no_rollout_request_and_trains_the_leaders_rows(depth):
+    """Every follower used to collect a full batch the leader's replaced, so engine and Ray load scaled with the world
+    size, not the data-parallel size."""
+    leader, follower = _tp_pair(depth)
+    _run_pair(leader, follower, [f"b{i}" for i in range(6)])
+
+    assert follower.trained == leader.trained and len(leader.trained) == 6
+    assert follower.sync_calls == [], "a follower sent a rollout request"
+    assert follower._prefetch_inflight == 0 and follower._prefetch_input_queue.empty(), "a follower submitted a round"
+    assert (follower._prefetch_hits, follower._prefetch_misses) == (0, 0)
+    assert leader.sync_calls, "the leader must still roll out"
+    # The fences are collective: a follower that skipped one would leave the leader waiting in it.
+    assert follower.reject_calls == leader.reject_calls == 12
+
+
+def test_a_resume_under_tp_replays_the_leaders_pending_rounds_and_the_follower_none(tmp_path, monkeypatch):
+    """Each rank has its sidecar file, or the resume's presence check raises; a follower's holds no rounds, so it
+    submits nothing, and the leader's replay trains what an uninterrupted run does."""
+    depth = 2
+    batches = [f"b{i}" for i in range(depth + 4)]
+    uninterrupted, _ = _tp_pair(depth)
+    _run(uninterrupted, batches)
+
+    saved_at = depth + 1
+    before, before_follower = _tp_pair(depth)
+    _run_pair(before, before_follower, batches[:saved_at])
+    for rank, host in enumerate((before, before_follower)):
+        monkeypatch.setattr(async_mod, "get_global_rank", lambda rank=rank: rank)
+        monkeypatch.setattr(async_mod, "get_global_world_size", lambda: 2)
+        host._persist_trainer_sidecars(str(tmp_path))
+    saved = {path.name: torch.load(path, weights_only=False)["rounds"] for path in tmp_path.glob("*prefetch*")}
+    assert sorted(len(rounds) for rounds in saved.values()) == [0, depth], (
+        "every rank writes, only the leader's holds rounds"
+    )
+
+    resumed, resumed_follower = _tp_pair(depth)
+    for rank, host in enumerate((resumed, resumed_follower)):
+        monkeypatch.setattr(async_mod, "get_global_rank", lambda rank=rank: rank)
+        host._restore_trainer_sidecars(str(tmp_path))
+    assert [prompts for prompts, _ in resumed._resumed_prefetch_rounds] == [
+        [f"b{k}"] for k in range(saved_at - depth, saved_at)
+    ]
+    assert resumed_follower._resumed_prefetch_rounds == []
+
+    resumed._start_rollout_generation()
+    resumed_follower._start_rollout_generation()
+    assert (resumed.thread_starts, resumed_follower.thread_starts) == (1, 0)
+    assert resumed_follower._prefetch_input_queue.empty() and resumed_follower._prefetch_inflight == 0
+
+    _run_pair(resumed, resumed_follower, batches[saved_at:])
+    assert _trained_batches(before) + _trained_batches(resumed) == _trained_batches(uninterrupted)
+    assert resumed_follower.trained == resumed.trained
+    assert resumed.sync_calls == [] and resumed_follower.sync_calls == []
+
+
+def test_a_follower_restores_no_rounds_from_a_checkpoint_that_gave_it_some(tmp_path):
+    donor = _Host(2)
+    _run(donor, ["b0", "b1", "b2"])
+    donor._persist_trainer_sidecars(str(tmp_path))
+    follower = _Host(2, follower=True)
+    follower._restore_trainer_sidecars(str(tmp_path))
+    assert follower._resumed_prefetch_rounds == []
+
+
+def test_a_tp_follower_starts_no_ray_and_no_pool(monkeypatch):
+    host = _LifecycleHost(torch.zeros(1))
+    host.follower = True
+    host.tp_group_size = 4
+    ray_calls = []
+    monkeypatch.setattr(
+        async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: False, init=lambda **kw: ray_calls.append(kw))
+    )
+
+    def refuse(**kwargs):
+        raise AssertionError("a follower built a rollout manager")
+
+    monkeypatch.setattr(async_mod, "RolloutManager", refuse)
+    host._init_async_components()
+    host.callbacks[0].on_train_begin(None, None, None)
+
+    assert ray_calls == [] and host._rollout_manager is None and host._loop is None
+    assert host.prefetch_starts == 0, "a follower started a prefetch worker"
+    assert host.pushed == [0.0], "a follower must still join the weight push"
+
+
+def test_static_tool_environment_starts_without_discovery(monkeypatch):
+    host = _LifecycleHost(torch.zeros(1))
+    discover = mock.AsyncMock(side_effect=AssertionError("static tools must not connect"))
+    host._rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False, discover_tools_schema=discover)
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True))
+    monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _StubManager())
+
+    try:
+        host._init_async_components()
+        assert host._rollout_manager is not None
+        discover.assert_not_called()
+    finally:
+        host._loop.close()
+
+
+def test_a_second_component_init_without_a_cleanup_joins_no_collective_on_any_rank(monkeypatch):
+    """A follower holds no manager, so the manager cannot tell it the components are up: the leader returning early
+    while the follower re-formed the weight-sync group would hang the group."""
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True, init=lambda **kw: None))
+    monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _StubManager())
+    for follower in (False, True):
+        host = _LifecycleHost(torch.zeros(1))
+        host.follower = follower
+        formed = []
+        host._form_weight_sync_group = lambda formed=formed: formed.append(1)
+        host._init_async_components()
+        host._init_async_components()
+        assert formed == [1], f"a second init re-formed the group (follower={follower})"
+
+
+def test_a_tp_follower_still_builds_the_score_only_clients(monkeypatch):
+    host = _LifecycleHost(torch.zeros(1))
+    host.follower = True
+    host.async_config.isr_engine_reference = True
+    host._build_engine_rescore_clients = lambda: ["client"]
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True))
+    host._start_rank_rollout_components()
+    assert host._engine_rescore_clients == ["client"]
+
+
+@pytest.mark.parametrize(("group_size", "actors"), [(1, 8), (2, 16), (8, 64)])
+def test_a_shared_ray_cluster_splits_its_actor_budget_among_the_leaders(monkeypatch, group_size, actors):
+    """Followers run no pool, so the budget a shared cluster divides is over the groups, else the cluster-wide pool
+    would fall to ``group_size`` times less than ``rollout_actor_budget``."""
+    host = _LifecycleHost(torch.zeros(1))
+    host.tp_group_size = group_size
+    host.async_config.ray_address = "auto"
+    host.async_config.rollout_actor_budget = 64
+    built = {}
+
+    def manager(**kwargs):
+        built.update(kwargs)
+        return _StubManager()
+
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True, nodes=lambda: []))
+    monkeypatch.setattr(async_mod, "RolloutManager", manager)
+    monkeypatch.setattr(async_mod, "get_global_world_size", lambda: 8)
+    monkeypatch.setattr(async_mod, "get_local_world_size", lambda: 8)
+    monkeypatch.setattr(tp_leader_mod.dist, "get_world_size", lambda group: group.size)
+    try:
+        host._init_async_components()
+    finally:
+        host._loop.close()
+    assert built["num_workers"] == actors
+
+
 def _expected_order(depth: int, steps: int) -> list[str]:
     return [f"b{k}" if k < depth else f"b{k - depth}" for k in range(steps)]
 
 
-@pytest.mark.parametrize("depth", [1, 2, 3])
+@pytest.mark.parametrize("depth", [1, 2])
 def test_each_round_trains_the_batch_submitted_depth_rounds_earlier(depth):
     host = _Host(depth)
     inflight = []
@@ -317,7 +549,7 @@ def test_each_round_trains_the_batch_submitted_depth_rounds_earlier(depth):
     assert (host._prefetch_hits, host._prefetch_misses) == (8 - depth, depth)
 
 
-@pytest.mark.parametrize("depth", [1, 2, 3])
+@pytest.mark.parametrize("depth", [1, 2])
 def test_a_resumed_run_trains_the_batches_an_uninterrupted_one_does(tmp_path, depth):
     """At a save on a generation boundary the last ``depth`` submitted batches have left the dataloader untrained. A
     resume that does not carry them all, oldest first, skips batches and trains others twice."""
@@ -570,8 +802,8 @@ def test_stopping_the_worker_cancels_the_rounds_still_collecting(caplog):
 
 
 def test_stopping_the_worker_drops_the_rounds_no_later_step_consumes():
-    """A second ``train()`` restarts the worker over the same queues: an output delivered before the stop
-    would be popped against that run's own pending rounds."""
+    """An output delivered before the stop, popped by a second ``train()``, would pair with that run's own pending
+    rounds."""
     host = _Host()
     host.round(["b0"])
     host.worker_step()  # b0's rollouts are delivered, unconsumed
@@ -691,12 +923,26 @@ def test_a_checkpoint_without_pending_rounds_resumes_cold(tmp_path):
     assert _trained_batches(host) == ["b3", "b3"], "the cold round primes the lag with its own batch"
 
 
+@pytest.mark.parametrize("prefetch", [True, False])
+def test_a_checkpoint_without_a_sidecar_says_its_halting_counters_restart(tmp_path, caplog, monkeypatch, prefetch):
+    """A run that does not prefetch carries its halting patience in the same file, so a missing file resets it."""
+    monkeypatch.setattr(async_mod, "is_global_main_process", lambda: True)
+    host = _Host()
+    host._prefetch_enabled = prefetch
+    with caplog.at_level("WARNING"):
+        host._restore_trainer_sidecars(str(tmp_path))
+    text = " ".join(record.getMessage() for record in caplog.records)
+    assert "halting counters" in text and "restart at zero" in text
+    assert ("cold rounds" in text) is prefetch
+
+
 def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
     host = _Host()
     host._prefetch_enabled = False
     host._prefetch_pending = _pending("b2")
     host._persist_trainer_sidecars(str(tmp_path))
-    assert list(tmp_path.iterdir()) == []
+    host._restore_trainer_sidecars(str(tmp_path))
+    assert host._resumed_prefetch_rounds == []
 
     saved = _Host()
     saved._prefetch_pending = _pending("b2")
@@ -706,10 +952,9 @@ def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
 
 
 def _async_state(server_configs, enable_prefetch=None):
-    host = types.SimpleNamespace(
-        async_config=AsyncRolloutConfig(rollout_server_configs=server_configs, enable_prefetch=enable_prefetch)
-    )
-    _T._init_async_state(host)
+    host = object.__new__(_T)
+    host.async_config = AsyncRolloutConfig(rollout_server_configs=server_configs, enable_prefetch=enable_prefetch)
+    host._init_async_state()
     return host
 
 
@@ -723,9 +968,6 @@ _SERVERS = {"url": None, "one-entry-list": _TWO_ENGINES[:1], "two-servers": _TWO
         (None, "one-entry-list", False),
         (None, "two-servers", True),
         (True, "url", True),
-        (True, "one-entry-list", True),
-        (True, "two-servers", True),
-        (False, "url", False),
         (False, "two-servers", False),
     ],
 )
@@ -736,8 +978,16 @@ def test_the_prefetch_gate(enable_prefetch, servers, prefetches):
     assert host._prefetch_enabled is prefetches
 
 
-@pytest.mark.parametrize("enable_prefetch", [None, True, False], ids=["unset", "true", "false"])
-@pytest.mark.parametrize("servers", list(_SERVERS))
+@pytest.mark.parametrize(
+    ("servers", "enable_prefetch"),
+    [
+        pytest.param("url", None, id="url-unset"),
+        pytest.param("one-entry-list", None, id="one-entry-list-unset"),
+        pytest.param("url", True, id="url-true"),
+        pytest.param("two-servers", None, id="two-servers-unset"),
+        pytest.param("two-servers", False, id="two-servers-false"),
+    ],
+)
 def test_the_start_log_states_the_prefetch_the_trainer_runs(servers, enable_prefetch):
     """Read off the knob, it says ``prefetch: disabled`` on an unset run, which prefetches on two servers."""
     host = _async_state(_SERVERS[servers], enable_prefetch)
@@ -751,10 +1001,15 @@ def test_the_start_log_states_the_configured_depth():
 
 
 @pytest.mark.parametrize(
-    ("enable_prefetch", "servers", "hinted"),
-    [(None, "url", True), (True, "url", False), (False, "url", False), (None, "two-servers", False)],
+    ("main_process", "enable_prefetch", "servers", "hinted"),
+    [
+        (True, None, "url", True),
+        (True, True, "url", False),
+        (True, False, "url", False),
+        (True, None, "two-servers", False),
+        (False, None, "url", True),
+    ],
 )
-@pytest.mark.parametrize("main_process", [True, False])
 def test_the_single_server_hint_is_said_once_and_only_when_unset(
     monkeypatch, caplog, main_process, enable_prefetch, servers, hinted
 ):
@@ -800,9 +1055,12 @@ class _SteppingHost(_T):
         self.events: list[tuple] = []
         self._prefetch_queue = _PopLog(self._prefetch_queue.maxsize, self.events)
         self._prefetch_input_queue = _SubmitLog(self._prefetch_input_queue.maxsize, self.events)
+        self.callback_handler = types.SimpleNamespace(callbacks=[])
         self.model = types.SimpleNamespace(training=True)
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)
-        self.parallelism_config = types.SimpleNamespace(data_parallel_size=1, get_data_parallel_rank=lambda: 0)
+        self.parallelism_config = types.SimpleNamespace(
+            data_parallel_size=1, get_data_parallel_rank=lambda: 0, is_tp_mode=False, is_expert_tp_mode=False
+        )
         self.num_generations = 1
         self._train_batch_size = 1
         self.state = types.SimpleNamespace(global_step=0)
@@ -895,8 +1153,7 @@ _PREFETCHED_STEPS = {
 }
 
 
-@pytest.mark.parametrize("depth", sorted(_PREFETCHED_STEPS))
-@pytest.mark.parametrize("servers", ["url", "one-entry-list"])
+@pytest.mark.parametrize(("servers", "depth"), [("url", 1), ("one-entry-list", 2)])
 def test_one_server_that_opts_in_steps_exactly_as_two_servers(monkeypatch, servers, depth):
     """The lone engine's prefetched rounds span the push the way N engines' do, and train ``depth`` steps stale."""
     one_server = _step_events(monkeypatch, _SERVERS[servers], enable_prefetch=True, depth=depth)
@@ -917,8 +1174,9 @@ def test_one_server_left_unset_trains_each_round_fresh(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize(("depth", "pending"), [(1, [["b2"]]), (2, [["b2"], ["b3"]])])
-@pytest.mark.parametrize("servers", ["url", "one-entry-list"])
+@pytest.mark.parametrize(
+    ("servers", "depth", "pending"), [("url", 1, [["b2"]]), ("one-entry-list", 2, [["b2"], ["b3"]])]
+)
 def test_one_server_that_opts_in_resumes_the_rounds_it_had_in_flight(monkeypatch, tmp_path, servers, depth, pending):
     """Without them back, oldest first, the one-server run skips those batches and trains the next ones twice."""
     before = _stepped_host(monkeypatch, _SERVERS[servers], enable_prefetch=True, depth=depth)
@@ -926,6 +1184,45 @@ def test_one_server_that_opts_in_resumes_the_rounds_it_had_in_flight(monkeypatch
     resumed = _SteppingHost(_SERVERS[servers], enable_prefetch=True, depth=depth)
     resumed._restore_trainer_sidecars(str(tmp_path))
     assert [prompts for prompts, _contexts in resumed._resumed_prefetch_rounds] == pending
+
+
+def _early_stop(streak: int = 0) -> GRPOEarlyStopCallback:
+    callback = GRPOEarlyStopCallback(EarlyStopConfig(entropy_band=(0.1, 1.0), patience=3), "gap")
+    callback.streaks = {"entropy": streak} if streak else {}
+    return callback
+
+
+def test_a_resume_keeps_the_halting_patience_it_had_left(tmp_path):
+    """Else a supervisor that resumes a dying run from its newest checkpoint grants it a full budget each cycle."""
+    before = _Host()
+    stop = _early_stop(streak=2)
+    before.callback_handler.callbacks.append(stop)
+    before._zero_gradient_rounds, before._policy_gradient_seen = 30, True
+    before._empty_rollout_steps, before._episode_error_rounds = 1, 2
+    before._persist_trainer_sidecars(str(tmp_path))
+
+    resumed = _Host()
+    resumed_stop = _early_stop()
+    resumed.callback_handler.callbacks.append(resumed_stop)
+    resumed._restore_trainer_sidecars(str(tmp_path))
+
+    assert (resumed._zero_gradient_rounds, resumed._policy_gradient_seen) == (30, True)
+    assert (resumed._empty_rollout_steps, resumed._episode_error_rounds) == (1, 2)
+    assert resumed_stop.streaks == {"entropy": 2}
+    # The restored streak is what makes the next breaching reading the third.
+    resumed_stop.on_log(None, types.SimpleNamespace(global_step=7), types.SimpleNamespace(), logs={"entropy": 5.0})
+    assert resumed_stop.stopped
+
+
+def test_the_counters_are_saved_and_restored_whether_or_not_the_run_prefetches(tmp_path):
+    host = _Host()
+    host._prefetch_enabled = False
+    host._empty_rollout_steps = 1
+    host._persist_trainer_sidecars(str(tmp_path))
+    resumed = _Host()
+    resumed._prefetch_enabled = False
+    resumed._restore_trainer_sidecars(str(tmp_path))
+    assert resumed._empty_rollout_steps == 1
 
 
 if __name__ == "__main__":

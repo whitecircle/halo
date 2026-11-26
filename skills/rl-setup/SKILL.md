@@ -31,14 +31,14 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 
 ## End-to-end wiring
 
-1. **Bring up the server.** `make build-vllm` (or `build-sglang`), or pull the public image and point
+1. **Bring up the server.** `make build-vllm` (or `build-sglang`; Inkling 2 is served from `make build-vllm-inkling2`, `make up-vllm-inkling2`), or pull the public image and point
    `VLLM_IMAGE` / `SGLANG_IMAGE` at it; then `docker-compose.vllm.yml` / `docker-compose.sglang.yml`, which
    refuse to start without `HALO_SCRATCH` (vLLM) / `SGLANG_MODEL_DIR` (SGLang): export them or set them in
    the repo-root `.env`. Server and trainer GPUs must be **disjoint** (`VLLM_CUDA_DEVICES` vs
    `TRAINER_CUDA_DEVICES`: a rank cannot broadcast to itself), both containers run `network_mode: host`,
    and **MoE needs the triton expert backend** (the compose default; the auto backends repack expert
    weights and corrupt synced updates). Use the toolkit images, not upstream: both pin the training
-   image's NCCL. Server flags, parsers per family, R3: `rollout-servers.md#vllm` / `#sglang`.
+   image's NCCL. Server flags, parsers per family, R3: `rollout-servers.md#vllm` / `#sglang`; a server on the wrong family image is refused by `#startup-preflight`.
 
 2. **Point the trainer at it.** Env GRPO reads `AsyncRolloutConfig` from YAML: `rollout_backend`
    (`vllm` default; `sglang` for the families its loaders take an update for — the trainer refuses the
@@ -60,15 +60,17 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 4. **Pick the environment** (env GRPO only) by registry name in `environment_type`; per-env knobs go in
    `environment_kwargs`; reward shaping is the `rewards:` term list; `max_turns: null` keeps the class
    default. Registry and knobs: `agent-docs/training-methods/async-grpo/environments/README.md#registry`.
-   Custom envs: pass `environment_cls` (an `EnvironmentBase` subclass) instead.
+   Custom envs: register a factory in `halo/environments/registry.py` and name it in `environment_type`; `environment_cls` is the trainer's Python argument, not a YAML field (`agent-docs/training-methods/async-grpo/environments/custom.md`).
 
 5. **Key GRPO hyperparameters** (both flavors): `num_generations` (group size), `beta` (KL to ref;
    `0.0` disables the ref model), `epsilon` (clip), `scale_rewards`, `temperature`, `loss_type`. Env GRPO
    adds rollout sampling (`rollout_temperature` / `rollout_top_p` / `rollout_max_tokens` /
-   `rollout_chat_template_kwargs`), Ray pool sizing (`num_rollout_workers`, `max_concurrent_rollouts`),
-   prefetch and `sync_weights_every_n_steps`, and the reasoning budgets: `rollout_max_thinking_tokens` is
-   enforced engine-side on vLLM only (it needs a server reasoning parser) and refused under
-   `rollout_backend: sglang`, as is `carry_reasoning`
+   `rollout_chat_template_kwargs`), Ray pool sizing (`rollout_actor_budget`, `max_concurrent_rollouts`),
+   prefetch and `sync_weights_every_n_steps`, and the reasoning cap: `rollout_max_thinking_tokens` (unset,
+   `rollout_max_tokens` less `rollout_max_answer_tokens`) is the same at every effort level and enforced engine-side
+   on vLLM only (it needs a server reasoning parser); it is refused under `rollout_backend: sglang`, as is
+   `carry_reasoning`. Each level's `reasoning_budget` and `reasoning_price` sit in
+   `environment_kwargs.reasoning_effort_profiles`, read by the reasoning terms alone
    (`agent-docs/training-methods/async-grpo/reasoning.md`).
 
 ## Parallelism note
@@ -88,8 +90,7 @@ all servers together. It is on by default with 2+ `rollout_server_configs`; a
 single server runs serial, training each round on rollouts of the current weights, unless
 `enable_prefetch: true`, which trains each round on samples one round old (IS-corrected). `prefetch_depth: N` (default 1)
 collects N rounds ahead at once, so the servers stay full at a round's tail; above
-1 it is refused where prefetch is off. On SGLang each sync aborts in-flight turns,
-so a prefetched round spanning more syncs than `max_retries` is refused.
+1 it is refused where prefetch is off.
 
 ## Sources of truth
 

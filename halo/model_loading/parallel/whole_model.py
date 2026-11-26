@@ -1,5 +1,5 @@
 """Whole-model loads onto one rank: the node-throttled ``from_pretrained`` with its run-dtype cast and
-FP32-master restore, the trainer-constructor load, and the attention warm-up every load ends in."""
+FP32-master restore, the trainer-constructor load, and the kernel warm-up every load ends in."""
 
 from __future__ import annotations
 
@@ -11,9 +11,11 @@ import torch
 from transformers import PretrainedConfig, PreTrainedModel
 
 from halo.distributed.expert_parallel.config import EPConfig
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import current_device
+from halo.kernels.lowp.frozen_bank import warm_fused_dequant_kernels
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, normalize_model_init_dtype
 from halo.model_loading.finalization import finalize_loaded_model
@@ -21,11 +23,12 @@ from halo.model_loading.model_preparation import apply_family_patches, auto_load
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from halo.models.attention.backend_setup import warm_fa4_kernels
+from halo.models.attention.inkling2_relative_flex import warm_inkling2_relative_flex_kernels
 from halo.models.attention.masked_matmul import warm_masked_matmul_kernels
 from halo.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from halo.models.attention.tree import warm_tree_kernels
 from halo.models.attention.tree_plan import FullAttentionForm
-from halo.models.config_access import set_config_field_run_scoped
+from halo.models.introspection.config_access import set_config_field_run_scoped
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_global_world_size
@@ -167,13 +170,21 @@ def _warm_then_join(*warmups: Callable[[], None]) -> None:
             warmup()
 
 
+def _warm_frozen_bank_kernels(model: torch.nn.Module) -> None:
+    """Launch the fused dequant of the model's frozen expert banks, once per format and ``K``. Rank-local."""
+    warm_fused_dequant_kernels(bank for _name, layer in named_ep_layers(model) for bank in layer.frozen_expert_banks())
+
+
 def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> None:
-    """COLLECTIVE: pre-compile FA4, FlexAttention or masked matmul kernels, joined. A failed FA4 warm-up only warns, and
-    that rank compiles at first use; any other failure reaches the join and raises on every rank."""
+    """COLLECTIVE: pre-compile FA4, FlexAttention or masked matmul kernels and the fused dequant of frozen expert
+    banks, joined. A failed FA4 warm-up only warns, and that rank compiles at first use; any other failure reaches the
+    join and raises on every rank."""
     _warm_then_join(
         partial(warm_fa4_kernels, model, dtype=dtype),
         partial(warm_flex_sliding_kernels, model, dtype=dtype),
+        partial(warm_inkling2_relative_flex_kernels, model, dtype=dtype),
         partial(warm_masked_matmul_kernels, model, dtype=dtype),
+        partial(_warm_frozen_bank_kernels, model),
     )
 
 

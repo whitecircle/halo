@@ -12,8 +12,13 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import KTOScriptArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import template_column_kwargs
 from halo.data.pipeline.map_cache_key import carry_cache_key
-from halo.data.render_columns import alias_images_column, reject_missing_render_column
+from halo.data.render_columns import (
+    alias_images_column,
+    reject_missing_render_column,
+    render_column_checks_across_ranks,
+)
 from halo.data.vlm_detection import dataset_declares_images_across_ranks, reject_unsupported_media_across_ranks
 from halo.entrypoints.data_setup import (
     apply_vision_options,
@@ -81,8 +86,11 @@ def main():
         KTOScriptArguments, KTOConfig, ModelArguments, ParallelismArguments
     )
 
-    # TRL templates and tokenizes the raw columns itself: it passes no `tools=`, and its rows have no input_ids.
-    reject_unsupported_args("KTO training", tools_field=args.tools_field, log_decoded_samples=args.log_decoded_samples)
+    # TRL templates and tokenizes the raw columns itself, reading template variables only from its own `tools` and
+    # `chat_template_kwargs` columns, and its rows have no input_ids.
+    reject_unsupported_args(
+        "KTO training", **template_column_kwargs(args), log_decoded_samples=args.log_decoded_samples
+    )
 
     context = init_training_script(
         args,
@@ -95,10 +103,11 @@ def main():
     parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
-    # name, so a declared column has to carry TRL's spelling before either verdict is taken.
-    ds = alias_images_column(ds, args.images_field, str(args.dataset))
-    _require_kto_columns(ds, args)
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
+        # name, so a declared column has to carry TRL's spelling before either verdict is taken.
+        ds = alias_images_column(ds, args.images_field, str(args.dataset))
+        _require_kto_columns(ds, args)
     # Vision routing keys on the dataset: a natively-multimodal model trains text-only data through TRL's text path.
     # Before the load, which needs the checkpoint's processor for a vision run.
     is_vlm_data = resolve_preference_vlm_run(

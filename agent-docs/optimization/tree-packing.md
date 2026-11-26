@@ -47,9 +47,8 @@ rows every epoch.
 Measured on Halo 1.2.0. The gain is the share of tokens that sit in shared prefixes: a synthetic corpus where half the
 rows share a document of about 6k tokens packed into about 1.7× fewer rows at 64k tokens per row (116 to 69 on
 gpt-oss-20b, 130 to 77 on Qwen3.5-35B-A3B). A tree step costs what a flat step costs where sliding-window layers
-dominate (gpt-oss-20b at EP8 on FA4, 4.45 s against 4.48 s). Qwen3.5-35B-A3B on FA2 (`gather`), where the layers are
-full, costs 1.41× per step (4.85 s against 3.45 s), still about 1.3× more examples per second. Peak memory holds at
-1.00× on both. Building the trees adds dataset maps on top of tokenization.
+dominate (gpt-oss-20b at EP8 on FA4, 4.45 s against 4.48 s). Qwen3.5-35B-A3B on FA2 (`gather`) costs 1.41× per step
+(4.85 s against 3.45 s), which still leaves about 1.2× more examples per second. Peak memory holds at 1.00× on both. Building the trees adds dataset maps on top of tokenization.
 
 ## Attention
 

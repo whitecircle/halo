@@ -3,6 +3,7 @@
 knob on and off, or that an unsupported knob raises."""
 
 import ast
+import contextlib
 import dataclasses
 import importlib
 import inspect
@@ -12,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+import torch
 from datasets import Dataset, DatasetDict
 from trl import SFTConfig
 
@@ -20,16 +22,19 @@ from halo.configs.grpo import RLRRConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
+from halo.data.pipeline.map_cache_key import map_cache_file_name
 from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
 from halo.entrypoints.script import distributed_trainer_kwargs
+from halo.trainers.construction.optimizer_selection import resolve_bf16_optimizer
+from halo.trainers.construction.trainer_rules import reject_stock_adamw_on_mixed_params
+from halo.trainers.distillation.divergences import generalized_jsd_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from halo.trainers.optimizer_selection import resolve_bf16_optimizer
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from halo.trainers.sft import DistributedSFTTrainer
-from halo.trainers.trainer_rules import reject_stock_adamw_on_mixed_params
 from tests.common.repo import REPO_ROOT, load_script_module
 
 
@@ -222,29 +227,33 @@ def test_each_trl_dataset_prep_refusal_names_its_own_way_out():
 
 
 def _rejected_knobs(script_path: str) -> set[str]:
-    """Knob names passed to ``reject_unsupported_args`` with a value read off a parsed config. The guard filters on
-    truthiness, so a literal (``assistant_only_loss=None``) keeps the keyword and makes it unfirable."""
+    """Knob names passed to ``reject_unsupported_args`` with a value read off a parsed config, a
+    ``**template_column_kwargs(args)`` splat read as ``TEMPLATE_COLUMN_KNOBS``. The guard filters on truthiness, so a
+    literal (``assistant_only_loss=None``) keeps the keyword and makes it unfirable."""
     tree = ast.parse((REPO_ROOT / script_path).read_text())
     rejected: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "reject_unsupported_args":
-            rejected.update(
-                kw.arg
-                for kw in node.keywords
-                if kw.arg and any(isinstance(sub, ast.Attribute) for sub in ast.walk(kw.value))
-            )
+            for kw in node.keywords:
+                if kw.arg is None and ast.unparse(kw.value) == "template_column_kwargs(args)":
+                    rejected.update(TEMPLATE_COLUMN_KNOBS)
+                elif kw.arg and any(isinstance(sub, ast.Attribute) for sub in ast.walk(kw.value)):
+                    rejected.add(kw.arg)
     return rejected
 
 
-@pytest.mark.parametrize(
-    ("script", "fields"),
-    [
-        ("scripts/training/preference/kto.py", {"tools_field", "log_decoded_samples"}),
-        ("scripts/training/reward/reward_model.py", {"log_decoded_samples", "text_only_model", "tools_field"}),
-        ("scripts/training/preference/dpo.py", {"tools_field"}),
-        ("scripts/training/preference/smpo.py", {"tools_field"}),
+def test_script_rejects_knobs_it_cannot_honor(subtests):
+    """These knobs parse on the listed script but nothing consumes them."""
+    rows = [
+        ("scripts/training/preference/kto.py", {*TEMPLATE_COLUMN_KNOBS, "log_decoded_samples"}),
+        (
+            "scripts/training/reward/reward_model.py",
+            {"log_decoded_samples", "text_only_model", "tools_field", "reasoning_effort_field"},
+        ),
+        ("scripts/training/preference/dpo.py", set(TEMPLATE_COLUMN_KNOBS)),
+        ("scripts/training/preference/smpo.py", set(TEMPLATE_COLUMN_KNOBS)),
         ("scripts/training/classification.py", {"text_only_model"}),
-        ("scripts/training/grpo/environmental.py", {"tools_field", "text_only_model"}),
+        ("scripts/training/grpo/environmental.py", {*TEMPLATE_COLUMN_KNOBS, "text_only_model"}),
         ("scripts/training/grpo/online.py", {"text_only_model"}),
         (
             "scripts/training/embedding.py",
@@ -252,30 +261,33 @@ def _rejected_knobs(script_path: str) -> set[str]:
                 "pad_token",
                 "chat_template",
                 "freeze_layers_patterns",
-                "tools_field",
+                *TEMPLATE_COLUMN_KNOBS,
                 "log_decoded_samples",
                 "text_only_model",
             },
         ),
-    ],
-)
-def test_script_rejects_knobs_it_cannot_honor(script, fields):
-    """These knobs parse on the listed script but nothing consumes them."""
-    assert fields <= _rejected_knobs(script), f"{script} no longer rejects {sorted(fields - _rejected_knobs(script))}"
+    ]
+    for script, fields in rows:
+        with subtests.test(script):
+            assert fields <= _rejected_knobs(script), (
+                f"{script} no longer rejects {sorted(fields - _rejected_knobs(script))}"
+            )
 
 
-def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
-    """Drive ``scripts/training/<script>:main()`` from a minimal YAML, with nothing past the parse stubbed."""
+def _run_script_main(script: str, config_body: str, tmp_path: Path, **stubs) -> None:
+    """Drive ``scripts/training/<script>:main()`` from a minimal YAML; each stub replaces that name in the script's
+    namespace, and nothing else past the parse is stubbed."""
     module = load_script_module(f"scripts/training/{script}", "halo_test_knob_wiring_" + script.replace("/", "_"))
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: stub/qwen3-4b\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
         f"bf16: false\nuse_cpu: true\n{config_body}"
     )
-    with (
-        mock.patch("halo.entrypoints.script.install_log_tee"),
-        mock.patch.object(sys, "argv", ["prog", str(config)]),
-    ):
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch("halo.entrypoints.script.install_log_tee"))
+        stack.enter_context(mock.patch.object(sys, "argv", ["prog", str(config)]))
+        for name, stub in stubs.items():
+            stack.enter_context(mock.patch.object(module, name, stub))
         module.main()
 
 
@@ -309,6 +321,15 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
         ("distillation/self_distill.py", "confidence_weight_opd: false\n", "confidence_weight_opd"),
         # SentenceTransformer tokenizes, so another text→ids backend would be read by nothing.
         ("embedding.py", "tokenizer_backend: gigatoken\n", "tokenizer_backend"),
+        # Each templates its rows elsewhere (TRL, SentenceTransformer, the environment), so a level would never render.
+        ("preference/kto.py", "reasoning_effort_field: effort\n", "reasoning_effort_field"),
+        ("reward/reward_model.py", "reasoning_effort_field: effort\n", "reasoning_effort_field"),
+        ("embedding.py", "reasoning_effort_field: effort\n", "reasoning_effort_field"),
+        (
+            "grpo/environmental.py",
+            "reasoning_effort_field: effort\nenvironment_type: react_math\n",
+            "reasoning_effort_field",
+        ),
     ],
 )
 def test_script_main_refuses_the_knob_before_any_load(script, config_body, knob, tmp_path):
@@ -485,7 +506,8 @@ def test_rlrr_rejects_an_inverted_clip_band_from_the_script_args():
 # trainer would have used.
 _SDPG_TUNABLES = {
     "sdpg_hint_template": "the answer is {answer}",
-    "sdpg_loss": "forward_kl",
+    "sdpg_loss": "jensen_shannon",
+    "sdpg_jsd_beta": 0.3,
     "sdpg_temperature": 0.5,
     "sdpg_beta_base": 0.25,
     "sdpg_beta_warmup_steps": 7,
@@ -538,6 +560,85 @@ def test_rlvr_script_args_thread_every_sdpg_tunable_into_the_trainer_kwargs():
     )
 
 
+class _LevelEchoTokenizer:
+    """Renders ``effort=<level>`` ahead of the prompt, the level being what the chat template received."""
+
+    bos_token = None
+    bos_token_id = None
+
+    def __call__(self, text, add_special_tokens=True, **_kwargs):
+        ids = list(range(len(text.split())))
+        return {"input_ids": ids, "attention_mask": [1] * len(ids)}
+
+    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, reasoning_effort=None, **_):
+        return f"effort={reasoning_effort} " + " ".join(message["content"] for message in messages)
+
+
+@pytest.mark.parametrize(
+    ("knobs", "rendered"),
+    [
+        ({"reasoning_effort_field": "effort"}, "effort=high q"),
+        ({"reasoning_effort": "low"}, "effort=low q"),
+        ({}, "effort=None q"),
+    ],
+    ids=["per-row", "run-wide", "neither"],
+)
+def test_rlvr_prompts_render_the_level_the_config_names(knobs, rendered):
+    row_fn = load_script_module(
+        "scripts/training/grpo/online.py", "halo_test_knob_wiring_rlvr_level"
+    ).build_rlvr_row_fn
+    args = OnlineGRPOScriptArguments(dataset="org/rlvr", **knobs)
+    row = {"prompt": [{"role": "user", "content": "q"}], "answer": "1", "effort": "high"}
+    assert row_fn(args, _LevelEchoTokenizer())(row)["prompt"] == rendered
+
+
+def test_rlvr_refuses_a_run_wide_level_beside_a_per_row_one():
+    """A prompt renders one level, and silently preferring either would train other than the config states."""
+    with pytest.raises(
+        ValueError, match="Drop reasoning_effort to render each row's level, or drop reasoning_effort_"
+    ):
+        OnlineGRPOScriptArguments(reasoning_effort="random", reasoning_effort_field="effort")
+
+
+class _PromptMapReached(Exception):
+    """Raised by the stand-in RLVR prompt map, carrying the cache file it would read."""
+
+
+def _rlvr_prompt_cache_name(tmp_path: Path, config_body: str) -> str:
+    """The cache file RLVR main()'s prompt map reads for a run configured by ``config_body``."""
+    rows = DatasetDict({"train": Dataset.from_dict({"prompt": ["q"], "answer": ["1"], "effort": ["high"]})})
+    tokenizer = _LevelEchoTokenizer()
+
+    def reach(dataset, function, **kwargs):
+        raise _PromptMapReached(
+            map_cache_file_name("map", function, dataset, kwargs["desc"], {}, kwargs["cache_key_extras"])
+        )
+
+    with pytest.raises(_PromptMapReached) as reached:
+        _run_script_main(
+            "grpo/online.py",
+            config_body,
+            tmp_path,
+            init_training_script=lambda *a, **k: SimpleNamespace(parallelism_config=SimpleNamespace()),
+            probe_checkpoint=lambda *a, **k: (None, False),
+            load_script_datasets=lambda *a, **k: (rows, False),
+            load_model_and_tokenizer=lambda *a, **k: (SimpleNamespace(), tokenizer),
+            apply_prompt_completion_window=lambda *a, **k: (tokenizer, None),
+            configure_adapter_training=lambda *a, **k: None,
+            log_model_info=lambda *a, **k: None,
+            coordinated_map_and_filter=reach,
+        )
+    return reached.value.args[0]
+
+
+def test_the_rlvr_prompt_cache_key_changes_with_each_template_column(tmp_path):
+    """The prompt map's closure holds the parsed args, a dataclass the cache fingerprint skips, so a template column
+    its ``cache_key_extras`` leave out would reuse prompts rendered under another."""
+    bodies = ["", *(f"{knob}: column\n" for knob in TEMPLATE_COLUMN_KNOBS)]
+    names = {_rlvr_prompt_cache_name(tmp_path, body) for body in bodies}
+    assert len(names) == len(bodies), names
+
+
 def test_sdpg_kwargs_are_empty_while_the_gate_is_off():
     """The RLVR script splats the result unconditionally, so an off run must contribute no trainer kwargs."""
     assert OnlineGRPOScriptArguments(**_SDPG_TUNABLES).build_sdpg_kwargs() == {}
@@ -582,6 +683,7 @@ _SELF_DISTILL_TRAINER_KNOBS = {
     "reference_kl_loss": "unnormalized_kl",
     "confidence_weight_opd": True,
     "opd_exclude_eos": True,
+    "use_chunked_distillation_loss": False,
 }
 
 
@@ -597,6 +699,7 @@ def _construct_self_distill_shell(**kwargs) -> tuple[DistributedSelfDistillation
     with (
         mock.patch.object(DistributedSFTTrainer, "__init__", parent_init),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", lambda self: None),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_warn_if_full_logits_large", lambda self: None),
     ):
         return DistributedSelfDistillationTrainer(**_SELF_DISTILL_TRAINER_KNOBS, **kwargs), leaked
 
@@ -685,6 +788,18 @@ def test_self_distill_requires_the_solution_column_only_where_the_template_names
     # A slot the template does not name demands no column: a solution-only hint takes no answer column.
     solution_only = _dataset_with({"prompt": [[{"role": "user", "content": "q"}]], "solution": ["6 * 7"]})
     module._require_privileged_columns(solution_only, _answer_column_args(sdpg_hint_template="worked: {solution}"))
+
+
+@pytest.mark.parametrize(
+    "construct", [_construct_sdpg_shell, _construct_self_distill_shell], ids=["sdpg", "self_distill"]
+)
+def test_sdpg_trainers_score_the_opd_term_at_the_configured_jsd_beta(construct):
+    """The β set in the config is the β the OPD loss runs at, not the dataclass default."""
+    student, teacher = torch.randn(2, 2, 3, 16, generator=torch.Generator().manual_seed(0))
+    trainer, _ = construct(sdpg_loss="jensen_shannon", sdpg_jsd_beta=0.3)
+    assert torch.equal(
+        trainer.sdpg_loss_fn(student, teacher, 1.0), generalized_jsd_loss(student, teacher, 1.0, jsd_beta=0.3)
+    )
 
 
 def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():

@@ -43,13 +43,14 @@ The base trainer logs loss, learning rate and grad norm every `logging_steps`
 | Config field | Adds |
 | --- | --- |
 | `enable_efficiency_metrics` | step time, tokens/s per GPU and cluster-wide, allocated and peak GPU memory |
-| `report_mfu_diagnostics` | MFU and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models |
+| `report_mfu_diagnostics` | model FLOPs utilization (MFU) and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models ([MFU](../agent-docs/reference/gpu-training-theory.md#mfu) ↗) |
 | `enable_moe_metrics` | expert load balance averaged over MoE layers (`moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …); under `bias_update` the balancing callback logs the `moe/*` keys instead |
 | `generate_eval_examples` (SFT, DPO, SMPO, offline GRPO) | a table of sample generations at each evaluation; skipped under TP, CP and PP |
 | `save_completions` (online and async GRPO) | each logged step's rollouts as parquet under `<output_dir>/completions/`, and a W&B `completions` table when `report_to` includes `wandb` |
 | `log_completions` (online and async GRPO) | also prints the per-sample table to the console |
 
-Defaults and the exact keys:
+`enable_moe_metrics` and `save_completions` are on by default. `generate_eval_examples` is on by default for
+DPO, SMPO and offline GRPO and off for SFT. The other fields are off until set. Every default and the exact keys:
 [CommonScriptArguments](../agent-docs/reference/configuration-reference.md#commonscriptarguments) ↗.
 
 ## RL health
@@ -59,9 +60,9 @@ panel. A steady negative drift means one of two things:
 
 - the weight sync to the rollout server is broken;
 - a KL-free run is drifting, if `advantage/net_token_mass` stays negative and
-  `entropy` climbs after it. `balance_token_mass` and the
+  `entropy` climbs after it. The
   [early stop](../agent-docs/training-methods/async-grpo/monitoring.md#early-stop) ↗
-  address this.
+  guards against it; `balance_token_mass` cancels the net push, whose measured entropy effect is small.
 
 Online GRPO logs TRL's unsigned gap `sampling/sampling_logp_difference/mean`
 instead, with the importance-sampling correction on. Every callback and metric:

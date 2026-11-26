@@ -11,7 +11,7 @@ from transformers.trainer_utils import seed_worker
 
 from halo.runtime.consensus import rank_min
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
-from halo.trainers.dataloaders import resolve_data_seed
+from halo.trainers.loop.dataloaders import resolve_data_seed
 
 logger = logging.getLogger(__name__)
 

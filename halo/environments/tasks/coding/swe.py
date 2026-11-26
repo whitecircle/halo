@@ -8,9 +8,9 @@ from contextvars import ContextVar
 from typing import Any
 
 from halo.config_validation import present, require_callable, require_finite
-from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.messages import Trajectory
+from halo.environments.episodes.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from halo.environments.sandbox.factory import build_sandbox, warn_if_unisolated
@@ -54,11 +54,14 @@ Tips:
         sandbox: SandboxExecutor | None = None,
         sandbox_backend: str | None = None,
         sandbox_url: str | None = None,
+        sandbox_options: dict | None = None,
         **kwargs,
     ):
         require_callable(type(self).__name__, **present(test_function=test_function))
         require_finite(type(self).__name__, gt=0, code_timeout=code_timeout)
-        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
+        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url, **(sandbox_options or {}))
+        # An executor passed in may serve other environments; one built here is closed with this one.
+        self._owns_sandbox = sandbox is None
         warn_if_unisolated(self.sandbox, type(self).__name__)
         self._sessions: dict[int, SandboxSession] = {}
 
@@ -114,6 +117,8 @@ Tips:
         for session in self._sessions.values():
             session.close()
         self._sessions.clear()
+        if self._owns_sandbox:
+            self.sandbox.close()
         super().close()
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:

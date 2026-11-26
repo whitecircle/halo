@@ -2,16 +2,19 @@
 """A GRPO step that fails on one rank between two collectives must raise on every rank. A lone raise leaves the peers
 at the collective until the watchdog. Run on a real 2-rank gloo group with Ray, the actors and the engine stubbed."""
 
+import asyncio
 import datetime
 import os
 import time
 import types
 
 import pytest
+import torch.distributed as dist
 
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -60,16 +63,17 @@ def _scorer_cls(fail: bool):
     return _Scorer
 
 
-class _Host(AsyncRolloutMixin):
+class _Host(AsyncRolloutMixin, TPLeaderBroadcastMixin):
     """The real component start and fenced sync over stubbed Ray, actors and engine."""
 
-    def __init__(self, rank: int, fail_client: bool = False):
+    def __init__(self, rank: int, fail_client: bool = False, tp_group: dist.ProcessGroup | None = None):
         self._fail_client = fail_client
+        self._tp_group = tp_group
         self.accelerator = types.SimpleNamespace(is_main_process=rank == 0, num_processes=WORLD_SIZE)
         self.parallelism_config = types.SimpleNamespace(get_data_parallel_rank=lambda: rank)
         self.async_config = types.SimpleNamespace(
             ray_address=None,
-            num_rollout_workers=1,
+            rollout_actor_budget=1,
             max_concurrent_rollouts=4,
             eval_rollout_batch_size=None,
             isr_engine_reference=True,
@@ -80,6 +84,7 @@ class _Host(AsyncRolloutMixin):
         )
         self.state = types.SimpleNamespace(global_step=5)
         self._environment_spec, self._env_config_dict = "env", {}
+        self._rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False)
         self._rollout_manager = None
         self._engine_rescore_clients = None
         self._rollout_start_callback = None
@@ -92,8 +97,14 @@ class _Host(AsyncRolloutMixin):
         if self._fail_client and self.accelerator.is_main_process:
             raise ConnectionError("the NCCL group to the engine did not form")
 
+    def _get_tp_or_etp_process_group(self) -> dist.ProcessGroup | None:
+        return self._tp_group
+
     def _train_loader_batch_size(self) -> int:
         return 8
+
+    def _get_tp_group_src_rank(self) -> int:
+        return 0
 
     def add_callback(self, callback):
         self.callbacks.append(callback)
@@ -118,6 +129,46 @@ def _start_worker(rank: int, tmp_dir: str, failure: str, failing_rank: int) -> N
     )
     async_mod.resolve_weight_sync_client = lambda backend: _scorer_cls(failing and failure == "rescore_client")
     _record(tmp_dir, rank, _Host(rank, fail_client=failing and failure == "sync_client")._init_async_components)
+
+
+def _tool_discovery_worker(rank: int, tmp_dir: str, fail_discovery: bool) -> None:
+    async_mod.ray = types.SimpleNamespace(is_initialized=lambda: True)
+    async_mod.RolloutManager = lambda **kwargs: _Manager(fail_start=False)
+    host = _Host(rank, tp_group=dist.group.WORLD)
+    host.async_config.isr_engine_reference = False
+    schema = [{"type": "function", "function": {"name": "tool"}}]
+    discovery_loops = []
+    attempted_broadcasts = []
+
+    async def discover():
+        discovery_loops.append(asyncio.get_running_loop())
+        if fail_discovery:
+            raise ConnectionError("MCP tool discovery failed")
+        return schema
+
+    def unexpected_broadcast(value):
+        attempted_broadcasts.append(value)
+        raise AssertionError("schema broadcast entered despite failed discovery")
+
+    host._rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=True, discover_tools_schema=discover)
+    if fail_discovery:
+        host._broadcast_object_from_tp_leader = unexpected_broadcast
+
+    try:
+        _record(tmp_dir, rank, host._init_async_components)
+        if rank == 0:
+            assert host._loop is not None
+            assert discovery_loops == [host._loop]
+        else:
+            assert host._loop is None
+            assert discovery_loops == []
+        assert attempted_broadcasts == []
+        if not fail_discovery:
+            assert host._tools_schema == schema
+    finally:
+        if host._loop is not None:
+            host._loop.close()
+            asyncio.set_event_loop(None)
 
 
 def _sync_worker(rank: int, tmp_dir: str) -> None:
@@ -196,6 +247,16 @@ def test_a_rank_local_component_start_failure_raises_on_every_rank(tmp_path, fai
     the formation's verdict right after it carries."""
     run_gloo_ranks(_start_worker, WORLD_SIZE, str(tmp_path), failure, failing_rank, pg_timeout=PG_TIMEOUT)
     _assert_raised_everywhere(_results(tmp_path), cause, failing_rank)
+
+
+@pytest.mark.parametrize("fail_discovery", [False, True], ids=["broadcast", "fenced-failure"])
+def test_tool_discovery_at_tp_startup(tmp_path, fail_discovery):
+    """Only the leader discovers tools. Its schema reaches a loopless follower, or both ranks reject the failure."""
+    run_gloo_ranks(_tool_discovery_worker, WORLD_SIZE, str(tmp_path), fail_discovery, pg_timeout=PG_TIMEOUT)
+    if fail_discovery:
+        _assert_raised_everywhere(_results(tmp_path), "MCP tool discovery failed", failing_rank=0)
+    else:
+        assert _results(tmp_path) == {0: "NO RAISE", 1: "NO RAISE"}
 
 
 def test_the_rescore_clients_are_built_at_component_start(monkeypatch):

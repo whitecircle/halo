@@ -13,6 +13,7 @@ import torch.nn as nn
 from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
+from halo.cli import BENCHMARK_HARNESS_ROOT
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.repo import REPO_ROOT
@@ -57,7 +58,8 @@ TERMINAL_LOADERS = (
     ("halo/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
-# Includes every halo module a CLI outside scripts/training imports, so a driver moved to another module stays swept.
+# Includes every halo module a tool CLI imports, so a driver moved to another module stays swept. The benchmark
+# harnesses are left out with scripts/training: Halo's own one runs a trainer, whose loaders are no tool's.
 TOOL_DRIVER_ROOTS = (
     "scripts",
     *imported_module_files(
@@ -65,6 +67,7 @@ TOOL_DRIVER_ROOTS = (
             path.relative_to(REPO_ROOT).as_posix()
             for path in (REPO_ROOT / "scripts").rglob("*.py")
             if not path.is_relative_to(REPO_ROOT / "scripts" / "training")
+            and not path.is_relative_to(REPO_ROOT / BENCHMARK_HARNESS_ROOT)
         ),
         "halo",
     ),
@@ -90,8 +93,8 @@ _FORWARD_MARKERS = (".generate(", ".logits", "last_hidden_state")
 # A load passing a family's own ``trust_remote_code`` is roster-generic, so it takes the families whose
 # ``_init_weights`` repairs no buffer.
 TEST_ROOT = "tests"
-# Loads every Ulysses family, Bailing among them, by its own flag.
-CP_RESUME_ORACLE = ("tests/gpu/trainers/grpo/test_offline_grpo_cp_resume.py", "_eager_oracle")
+# The offline-GRPO CP suite loads every Ulysses family through it, Bailing among them, by its own flag.
+ROSTER_ORACLE = ("tests/common/offline_grpo.py", "eager_oracle")
 
 
 def _rotary_with_reference(theta: float = 1_000_000.0) -> tuple[Qwen3RotaryEmbedding, torch.Tensor]:
@@ -222,14 +225,16 @@ def test_every_dispatched_load_path_reaches_the_seam():
     )
 
 
-@pytest.mark.parametrize("rel,function", TERMINAL_LOADERS, ids=[fn for _, fn in TERMINAL_LOADERS])
-def test_every_terminal_loader_calls_the_seam_directly(rel, function):
+def test_every_terminal_loader_calls_the_seam_directly(subtests):
+    assert TERMINAL_LOADERS, "no terminal loader is pinned"
     graph = _call_graph()
-    assert (rel, function) in graph, f"{function} no longer exists in {rel} — update TERMINAL_LOADERS"
-    assert SEAM in graph[(rel, function)], (
-        f"{rel}:{function} materializes weights but does not call {SEAM} itself. Every terminal "
-        f"loader finalizes directly — reachability through a sibling branch is not coverage."
-    )
+    for rel, function in TERMINAL_LOADERS:
+        with subtests.test(function):
+            assert (rel, function) in graph, f"{function} no longer exists in {rel} — update TERMINAL_LOADERS"
+            assert SEAM in graph[(rel, function)], (
+                f"{rel}:{function} materializes weights but does not call {SEAM} itself. Every terminal "
+                f"loader finalizes directly — reachability through a sibling branch is not coverage."
+            )
 
 
 @functools.cache
@@ -258,15 +263,17 @@ def test_the_tool_roots_hold_every_halo_module_they_import():
     assert not missing, f"the tool roots import {missing} without sweeping them"
 
 
-@pytest.mark.parametrize("rel,function", INFERENCE_TOOL_LOADERS, ids=[fn for _, fn in INFERENCE_TOOL_LOADERS])
-def test_every_inference_tool_loader_finalizes(rel, function):
+def test_every_inference_tool_loader_finalizes(subtests):
     """A bare load returns garbage: a dead RoPE on zeroed pages, NaN on reused ones."""
+    assert INFERENCE_TOOL_LOADERS, "no inference tool loader is pinned"
     loaders = _tool_loaders()
-    assert (rel, function) in loaders, f"{function} no longer loads a model in {rel} — update the pinned sets"
-    assert SEAM in loaders[(rel, function)], (
-        f"{rel}:{function} hands a bare-loaded model to a forward without calling {SEAM}: its rotary "
-        f"inv_freq and any family decay table are uninitialized memory."
-    )
+    for rel, function in INFERENCE_TOOL_LOADERS:
+        with subtests.test(function):
+            assert (rel, function) in loaders, f"{function} no longer loads a model in {rel} — update the pinned sets"
+            assert SEAM in loaders[(rel, function)], (
+                f"{rel}:{function} hands a bare-loaded model to a forward without calling {SEAM}: its rotary "
+                f"inv_freq and any family decay table are uninitialized memory."
+            )
 
 
 def _runs_a_forward(rel: str) -> bool:
@@ -296,7 +303,7 @@ def _test_oracle_loaders() -> dict[tuple[str, str], frozenset[str]]:
 
 def test_the_test_oracle_sweep_sees_the_roster_oracle():
     """Anti-vacuity: a predicate or forward marker that stopped matching would pass every oracle."""
-    assert CP_RESUME_ORACLE in _test_oracle_loaders(), f"the sweep found {sorted(_test_oracle_loaders())}"
+    assert ROSTER_ORACLE in _test_oracle_loaders(), f"the sweep found {sorted(_test_oracle_loaders())}"
 
 
 def test_every_test_side_oracle_finalizes():

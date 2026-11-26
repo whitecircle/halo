@@ -1,9 +1,9 @@
 # Training Methods
 
-Each method is one script under `scripts/training/` and one name you pass to `halo launch`. Every
-method reads a YAML config, takes a HuggingFace checkpoint and a dataset, and writes a HuggingFace
-checkpoint. If you are still deciding, [Choosing a Method](../choosing-a-method.md) maps the data you
-have to the trainer that reads it.
+Each method runs a script under `scripts/training/` that `halo launch` finds by name; pre-training
+runs the SFT script and online SDPG the online GRPO one. Every method reads a YAML config, takes a
+HuggingFace checkpoint and a dataset, and writes a HuggingFace checkpoint. If you are still deciding,
+[Choosing a Method](../choosing-a-method.md) maps the data you have to the trainer that reads it.
 
 | Method | Trains on | `halo launch` | Page |
 | --- | --- | --- | --- |
@@ -22,10 +22,15 @@ have to the trainer that reads it.
 | Online SDPG | prompts with an answer, generated live | `grpo/online --use_sdpg=true` | [Distillation](distillation.md#online-sdpg) |
 | Embedding | text pairs, triplets or scored pairs | `embedding` | [Embedding](embedding.md) |
 
+Online and Async GRPO score completions with the same reward terms, and `halo run score-offline-grpo` uses them to
+write an offline GRPO dataset's rewards. [GRPO Rewards](rewards.md) explains how to choose a rule, an LLM judge, a
+reward model or White Circle policies, and how to set each up.
+
 ## What every method shares
 
-- **Config.** A config is a flat YAML file of trainer fields, any of which can be
-  overridden on the command line after the config path ([Writing a config](../configuration.md)).
+- **Config.** A config is a flat YAML file of trainer fields, most of which can be
+  overridden on the command line after the config path; `dataset`, `rewards` and a few other
+  structured fields stay in the YAML ([Writing a config](../configuration.md#overriding-on-the-command-line)).
 - **Data.** Datasets come from the Hub, a local path or `s3://` through the same `dataset:`
   field, and a list mixes them ([Datasets](../data.md)). The columns each method reads differ.
 - **Parallelism.** Expert, tensor and expert-tensor parallelism work on every trainer;
@@ -34,8 +39,10 @@ have to the trainer that reads it.
 - **Checkpoints.** They load with `from_pretrained` and upload to the Hub
   without their training state ([Uploading](../checkpoints.md#uploading-to-the-huggingface-hub)).
   Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
-  writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save
-  time instead (`merge_expert_lora_on_save: true`). See [Checkpoints & Export](../checkpoints.md).
+  writes an adapter you merge with one command, expert LoRA under EP included;
+  `merge_expert_lora_on_save: true` folds it into the weights at save time instead. An Inkling 2 adapter
+  on the quantized release's experts does not merge, and `halo run export-engine-adapter` writes it for
+  vLLM to serve. See [Checkpoints & Export](../checkpoints.md).
 
 Every hyperparameter and refusal per method is in the
 [training-methods reference](../../agent-docs/training-methods/README.md) ↗.

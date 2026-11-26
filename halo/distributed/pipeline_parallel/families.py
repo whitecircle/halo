@@ -13,9 +13,9 @@ from transformers.cache_utils import Cache, DynamicCache
 from transformers.masking_utils import create_recurrent_attention_mask, create_sliding_window_causal_mask
 from transformers.modeling_outputs import BaseModelOutputWithPast, MoeModelOutputWithPast
 
-from halo.models.config_access import text_config
-from halo.models.module_tree import find_attr_name
-from halo.models.qwen4_exp.forwards import document_forwards_installed, document_padding_mask
+from halo.models.families.qwen4_exp.forwards import document_forwards_installed, document_padding_mask
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import find_attr_name
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def deepseek_v4_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``DeepseekV4Model.forward`` (transformers ~5.20) minus the embedding widen."""
+    """``DeepseekV4Model.forward`` (transformers ~5.23) minus the embedding widen."""
     hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
         self, inputs_embeds, position_ids, past_key_values, use_cache
     )
@@ -136,7 +136,7 @@ def glm5_next_stream_forward(
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``Glm5NextTextModel.forward`` (transformers ~5.20) minus the embedding widen. Each layer's mask is keyed by its
+    """``Glm5NextTextModel.forward`` (transformers ~5.23) minus the embedding widen. Each layer's mask is keyed by its
     own ``block_type``, since ``config.layer_types[i]`` at loop position ``i`` re-bases on a sliced list."""
     hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
         self, inputs_embeds, position_ids, past_key_values, use_cache
@@ -188,7 +188,7 @@ def qwen4_exp_stream_forward(
     ple_input_ids: torch.LongTensor | None = None,
     **kwargs,
 ) -> BaseModelOutputWithPast:
-    """``Qwen4ExpTextModel.forward`` (transformers ~5.20) under the toolkit's document forward, minus the embedding
+    """``Qwen4ExpTextModel.forward`` (transformers ~5.23) under the toolkit's document forward, minus the embedding
     widen; ``ple_input_ids`` feed the per-layer embeddings. Uncached rows only."""
     config = self.config
     if past_key_values is not None or use_cache:
@@ -294,6 +294,14 @@ ZAYA_PP = PPFamilySpec(
         "does not carry; the loop also selects layer_types and rotary embeddings by list position."
     ),
 )
+INKLING2_PP = PPFamilySpec(
+    hf_module_names=("Inkling2TextModel",),
+    refusal=(
+        "Inkling 2's attention residuals feed each decoder layer a learned mix of every completed residual block "
+        "before it, a block_states stack the loop grows layer by layer, which a single-activation stage boundary "
+        "does not carry."
+    ),
+)
 # Nothing in the loop indexes by list position (masks are loop-invariant, per-layer state hangs off
 # each module's own layer_idx), so any split offset is exact.
 DEEPSEEK_V4_PP = PPFamilySpec(
@@ -343,7 +351,16 @@ NEMOTRON_H_PP = PPFamilySpec(
     layer_types_rebase_safe=True,
     validated=True,
 )
-PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, GEMMA4_PP, GLM5_NEXT_PP, NEMOTRON_H_PP, QWEN4_EXP_PP)
+PP_FAMILY_SPECS = (
+    STOCK_FORWARD_PP,
+    ZAYA_PP,
+    DEEPSEEK_V4_PP,
+    GEMMA4_PP,
+    GLM5_NEXT_PP,
+    INKLING2_PP,
+    NEMOTRON_H_PP,
+    QWEN4_EXP_PP,
+)
 
 
 def build_pp_spec_map(specs: tuple[PPFamilySpec, ...]) -> dict[str, PPFamilySpec]:

@@ -10,10 +10,10 @@ from unittest.mock import patch
 import pytest
 from datasets import Dataset
 
-from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.reward.classification import ClassificationTrainer
 
@@ -97,12 +97,12 @@ def _equalize_with_forced_min(dataset, forced_min: int, split: str, forced_max: 
     ``forced_min`` and ``forced_max`` rows."""
     with (
         patch(
-            "halo.trainers.dataloaders.rank_max",
+            "halo.trainers.loop.dataloaders.rank_max",
             lambda values: [max(forced_max, values[0]), max(-forced_min, values[1])],
         ),
         # The shared multi-rank probe reads the real torch.distributed, which no CPU test initializes.
-        patch("halo.trainers.dataloaders.is_multi_rank_run", return_value=True),
-        patch("halo.trainers.dataloaders.is_global_main_process", return_value=True),
+        patch("halo.trainers.loop.dataloaders.is_multi_rank_run", return_value=True),
+        patch("halo.trainers.loop.dataloaders.is_global_main_process", return_value=True),
     ):
         return DataParallelLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 
@@ -138,7 +138,7 @@ def test_rank_zero_warns_of_another_ranks_drop_when_it_holds_the_minimum(caplog)
     """Rank 0 truncating nothing still reports the drop the fullest rank takes; shard sizes differ by one row even
     when num_shards is a multiple of data_parallel_size."""
     ds = Dataset.from_dict({"x": list(range(5))})
-    with caplog.at_level(logging.WARNING, logger="halo.trainers.dataloaders"):
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.loop.dataloaders"):
         out = _equalize_with_forced_min(ds, forced_min=5, forced_max=7, split="train")
 
     assert len(out) == 5
@@ -149,7 +149,7 @@ def test_rank_zero_warns_of_another_ranks_drop_when_it_holds_the_minimum(caplog)
 
 def test_equal_ranks_warn_of_nothing(caplog):
     ds = Dataset.from_dict({"x": list(range(4))})
-    with caplog.at_level(logging.WARNING, logger="halo.trainers.dataloaders"):
+    with caplog.at_level(logging.WARNING, logger="halo.trainers.loop.dataloaders"):
         out = _equalize_with_forced_min(ds, forced_min=4, forced_max=4, split="train")
     assert len(out) == 4
     assert _data_loss_warnings(caplog) == []

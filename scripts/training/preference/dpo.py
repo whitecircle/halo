@@ -12,6 +12,7 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import DPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import template_column_kwargs
 from halo.data.render_columns import alias_images_column
 from halo.data.vlm_detection import reject_unsupported_media_across_ranks
 from halo.entrypoints.data_setup import (
@@ -60,9 +61,9 @@ def main():
         args, model_config, ds, text_only_model=args.text_only_model, method="DPO", trl_renders_rows=True
     )
     if is_vlm_data:
-        # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
-        # tools column would survive the signature filter and render toolless.
-        reject_unsupported_args("DPO VLM mode", tools_field=args.tools_field)
+        # TRL's DataCollatorForVisionPreference reads template variables only from its own `chat_template_kwargs`
+        # column, so a declared template column would survive the signature filter and never render.
+        reject_unsupported_args("DPO VLM mode", **template_column_kwargs(args))
         reject_unsupported_media_across_ranks(ds, ("prompt", "chosen", "rejected"), "DPO")
 
     models = load_preference_models(context, dpo_config, model_config, args, vlm_run=is_vlm_data, method="DPO")

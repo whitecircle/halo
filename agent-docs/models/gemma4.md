@@ -53,7 +53,7 @@ ETP only shards the expert FFN weights (gate/up/down), leaving attention untouch
 
 ## Export
 
-An exported `config.json` states the full-attention layers' geometry as transformers 5.20's
+An exported `config.json` states the full-attention layers' geometry as transformers 5.23's
 `per_layer_config` rather than the hub's flat `global_head_dim` / `num_global_key_value_heads`; both
 pinned engines read it ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)).
 
@@ -95,9 +95,19 @@ On CUDA the model is then built with the attention implementation `sdpa_flex_sli
 
 End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing runs 14,980 cluster tok/s at 2,048 tokens and 16,204 at 16,384 in the [framework comparison](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison). Plain SDPA, measured in a separate run set, runs 11,152 and 4,124 (1.34× and 3.93× across the two sets), at 237.6 against 225.0 GiB peak at 16,384.
 
-The KV-repeat override is not what makes the global layers legal — transformers 5.20 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+The KV-repeat override is not what makes the global layers legal — transformers 5.23 disables GQA above head_dim 256 itself. It stays because the patch pins mem-efficient as the *only* enabled backend process-wide, where native `enable_gqa` for the 256-dim sliding layers is unverified; the manual repeat is the one measured path. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 Gemma 4 never reaches a varlen kernel, so `select_data_collator` rejects **`padding_free`** for it — the gate is the resolved `_attn_implementation`, and only `flash_attention_2/_3/_4` qualify. `packing: true` (what the example config uses) still isolates documents through per-document `position_ids`, at the cost of a dense mask over the flattened batch (side up to `per_device_train_batch_size * max_length`) instead of `cu_seqlens` ([Collators](../data/collators.md)).
+
+## Tool-call rows
+
+Gemma 4's `generation_config.json` lists `<|tool_response>` beside `<eos>` and `<turn|>`, so a served turn
+stops right after a call, and training ends a call's span there: a row ending on a call trains
+`<|tool_call>…<tool_call|><|tool_response>` with no `<eos>` after it. Both the hub template and
+`gemma4-reasoning-effort.jinja` write the tool's reply inside the same model turn and the answer after it
+with no new `<|turn>model`, so the span restarts after `<tool_response|>`: a tool round trains the call and
+its stop, then the answer and `<turn|>`, never the reply
+([Collators](../data/collators.md#eos-pad-and-the-response-template)).
 
 ## RL chat template
 
@@ -105,8 +115,8 @@ The async GRPO recipes pin `jinja-templates/gemma4/gemma4-reasoning-effort.jinja
 and the servers run the same file (`VLLM_CHAT_TEMPLATE` / `SGLANG_CHAT_TEMPLATE` in the compose files). It
 is the hub template reduced to text-only tool use — the `<|think|>` marker opens every system turn, an
 assistant turn renders whatever reasoning it carries, the media placeholders and the Gemma-native
-`tool_responses` branch dropped — plus a system-turn line stating the episode's `reasoning_effort` and
-`reasoning_budget`, which the hub template has no variable for. The hub template keys thinking on an
+`tool_responses` branch dropped — plus a system-turn line stating the episode's `reasoning_effort`, which the
+hub template has no variable for. The hub template keys thinking on an
 `enable_thinking` variable that the vLLM server sets from `reasoning_effort` and the trainer's renders do
 not, so the pinned template is also what keeps the two prompts identical
-([Reasoning budget](../training-methods/async-grpo/reasoning.md#reasoning-budget)).
+([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)).

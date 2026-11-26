@@ -32,7 +32,7 @@ from halo.distributed.pipeline_parallel.partition import (
 )
 from halo.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from halo.model_loading.parallel.pp import _load_stage_lazy
-from halo.models.nemotron_h import apply_nemotron_h_patches
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import NEMOTRON_H_RELEASE_BLOCKS, NEMOTRON_H_RELEASE_LAYOUT, NEMOTRON_H_RELEASE_TEXT_CONFIG
@@ -188,12 +188,6 @@ def test_the_release_splits_by_its_head_cost_with_a_mixer_of_every_kind_on_each_
     assert partition[0][0] == 0 and partition[-1][1] == len(NEMOTRON_H_RELEASE_LAYOUT)
     for lo, hi in partition:
         assert set(NEMOTRON_H_RELEASE_LAYOUT[lo:hi]) == set(NEMOTRON_H_RELEASE_BLOCKS)
-
-
-def test_the_spec_registers_a_rebase_safe_family():
-    assert PP_SPEC_MAP["NemotronHModel"] is NEMOTRON_H_PP
-    assert NEMOTRON_H_PP.validated and NEMOTRON_H_PP.layer_types_rebase_safe
-    assert NEMOTRON_H_PP.final_norm_attrs == ("norm_f",)
 
 
 def test_the_default_norm_probes_find_no_final_norm(model, monkeypatch):

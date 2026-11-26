@@ -18,7 +18,10 @@ from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.callbacks.factory import build_run_callbacks, reorder_integration_callbacks_last
 from halo.callbacks.gradient_checkpointing_plan import build_gradient_checkpointing_plan_callback
 from halo.config_validation import differs_from_default
-from halo.configs.parallelism_arguments import parallelism_config_from_args
+from halo.configs.parallelism_arguments import (
+    parallelism_config_from_args,
+    reject_frozen_experts_without_peft_adapters,
+)
 from halo.configs.parser import HaloArgumentParser, expand_strftime_directives
 from halo.data.pipeline.coordinated_map import datasets_cache_dir
 from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
@@ -30,7 +33,8 @@ from halo.env import nccl_timeout
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.models.attention.selection import effective_attn_implementation, enable_flash_attention_deterministic
-from halo.models.unwrapping import base_transformers_model
+from halo.models.introspection.unwrapping import base_transformers_model
+from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import run_on_rank0_raising_everywhere
 from halo.runtime.filesystem import verify_input_filesystem_sharing, verify_output_filesystem_sharing
@@ -130,10 +134,13 @@ def init_training_script(
     trainer_cls: type,
     split_expert_lora: bool = True,
     supports_init_from_scratch: bool = False,
+    row_sources: tuple = (),
 ) -> ScriptContext:
     """The pre-model phase, in the order every script depends on: device bind, ``ParallelismConfig``, run setup and
     resume resolution. ``trainer_cls`` supplies the CP/PP/low-precision gates, so a refused mode fails before any load.
-    ``split_expert_lora`` peels MoE expert targets out of ``lora_target_modules`` into native EP grouped LoRA."""
+    ``split_expert_lora`` peels MoE expert targets out of ``lora_target_modules`` into native EP grouped LoRA.
+    ``row_sources`` are the objects beside ``training_config`` that bound a forward row (``max_prompt_length``,
+    ``max_train_row_tokens``)."""
     local_rank = get_local_rank()
     if torch.cuda.is_available():  # CUDA-less interpreters (config-parse checks, CPU boxes) stay usable
         torch.cuda.set_device(local_rank)
@@ -143,6 +150,7 @@ def init_training_script(
     # here) and after the device bind (the gather runs over NCCL).
     agree_rank_uniform_env()
 
+    reject_frozen_experts_without_peft_adapters(dist_args, model_config)
     # Peeled first: __post_init__ validates expert_lora (PP rejects it) and ep_config caches its EPConfig, so a later
     # assignment would not reach the layers.
     parallelism_config = parallelism_config_from_args(
@@ -151,6 +159,7 @@ def init_training_script(
         trainer_cls=trainer_cls,
         expert_lora=split_expert_lora_targets(model_config) if split_expert_lora else None,
         supports_init_from_scratch=supports_init_from_scratch,
+        row_sources=row_sources,
     )
 
     # Before the resume resolves, the run reads its weights from the base.
@@ -184,6 +193,18 @@ def distributed_trainer_kwargs(args, parallelism_config: ParallelismConfig, *, d
     }
 
 
+def warn_bias_update_against_teacher_copy(mode: str) -> None:
+    """For a frozen teacher on the student's own checkpoint. The bias update moves only the student's router, so the
+    student's routing drifts from the teacher's whatever the loss does."""
+    if mode in BIAS_UPDATE_MODES and is_global_main_process():
+        logger.warning(
+            f"moe_balancing resolved to {mode} while teacher_model is the student's own checkpoint. The bias update "
+            "moves the student's router biases after every optimizer step, even at learning rate 0, and the frozen "
+            "teacher's never move, so the student's routing drifts from the teacher's and distillation_loss counts "
+            "that drift on top of the quantization gap. Set moe_balancing: none to distill against an unchanged copy."
+        )
+
+
 def configure_balancing_and_build_callbacks(
     args,
     training_config,
@@ -194,9 +215,11 @@ def configure_balancing_and_build_callbacks(
     max_seq_len: int | None = None,
     packed_rows: bool = False,
     multimodal_rows: bool = False,
+    teacher_is_student_checkpoint: bool = False,
 ) -> list:
     """COLLECTIVE. Configure MoE balancing for ``context.trainer_cls``'s loss and weight-sync capabilities, then build
-    the callback roster, the checkpointing plan last. ``packed_rows`` and ``multimodal_rows`` describe the collator."""
+    the callback roster, the checkpointing plan last. ``packed_rows`` and ``multimodal_rows`` describe the collator.
+    ``teacher_is_student_checkpoint`` warns on a resolved bias update, ``auto`` included."""
     balancing_mode = configure_moe_balancing(
         args,
         model,
@@ -204,6 +227,8 @@ def configure_balancing_and_build_callbacks(
         policy_gradient_loss=context.trainer_cls.POLICY_GRADIENT_LOSS,
         syncs_to_external_generator=context.trainer_cls.SYNCS_TO_EXTERNAL_GENERATOR,
     )
+    if teacher_is_student_checkpoint:
+        warn_bias_update_against_teacher_copy(balancing_mode)
     callbacks = build_run_callbacks(
         args,
         training_config,

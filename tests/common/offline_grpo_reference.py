@@ -3,6 +3,7 @@ run."""
 
 import math
 import os
+from functools import partial
 from types import SimpleNamespace
 from typing import NamedTuple
 from unittest.mock import patch
@@ -24,9 +25,12 @@ from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import shared_output_dir
 from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
+    agree_kl_rows,
     build_offline_grpo_trainer,
     doubled_head_kl_verdict,
+    eager_oracle,
     full_logits_kl,
+    kl_oracle_training_set,
     offline_grpo_config,
     offline_grpo_dataset,
     pure_kl_batch,
@@ -151,7 +155,9 @@ def _uninterrupted_run(ctx, parallelism, label, dirs, train, evaluation, expecte
         swept_reference_error(trainer.train_dataset[REF_PER_TOKEN_LOGPS_COLUMN], expected) < TOL.logprob_atol
     )
     references = {split: storage.values.clone() for split, storage in trainer._reference_storage_by_split.items()}
-    batch = pure_kl_batch(trainer)
+    rows = agree_kl_rows(partial(eager_oracle, dirs.base, ctx.device), trainer.train_dataset)
+    checks["kl_rows_clear_routing_noise"] = rows.clear
+    batch = pure_kl_batch(trainer, rows.rows)
     checks["independent_kl_oracle_is_nonzero"], checks["kl_matches_independent_full_logits"] = doubled_head_kl_verdict(
         trainer, batch, lambda model: full_logits_kl(model, batch, _KL_BETA), f"{label} KL"
     )
@@ -241,7 +247,7 @@ def run_reference_lifecycle(
     if ctx.rank == 0:
         save_base(dirs.base, _SEED)
     dist.barrier()
-    train, evaluation = offline_grpo_dataset(16), offline_grpo_dataset(8, 3)
+    train, evaluation = kl_oracle_training_set(16, _SEED), offline_grpo_dataset(8, 3)
     expected = reference_oracle_rows(
         _lifecycle_trainer(ctx, parallelism, dirs.base, os.path.join(shared, "oracle"), train, beta=0.0)
     )

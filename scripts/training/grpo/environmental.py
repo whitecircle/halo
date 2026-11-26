@@ -35,6 +35,7 @@ See agent-docs/training-methods/async-grpo/README.md for the objective, the envi
 the rollout-server contract.
 """
 
+import asyncio
 import logging
 
 from trl import GRPOConfig
@@ -44,15 +45,19 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRP
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
 from halo.data.chat_render import render_generation_prompt
-from halo.data.conversation import as_conversation
+from halo.data.conversation import as_conversation, template_column_kwargs
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
-from halo.data.render_columns import missing_render_column_splits, reject_missing_render_column
+from halo.data.render_columns import (
+    missing_render_column_splits,
+    reject_missing_render_column,
+    render_column_checks_across_ranks,
+)
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_tokenizer_window,
-    default_padded_attn_implementation,
+    grpo_row_attn_implementation,
     load_export_processor,
     load_model_and_tokenizer,
     log_model_info,
@@ -66,29 +71,39 @@ from halo.entrypoints.script import (
     verify_backend_on_rank0,
     with_distributed_teardown,
 )
-from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_budget
+from halo.environments.episodes.episode_keys import ANSWER_KEY
+from halo.environments.episodes.reasoning_effort import bind_episode_effort, efforts_by_level, has_thinking_cap
 from halo.environments.registry import build_environment
-from halo.environments.rollout_config import VLLM_BACKEND
-from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
+from halo.environments.rollout_config import VLLM_BACKEND, verify_template_closes_thinking
+from halo.model_loading.parallel.frozen_models import (
+    load_reference_model_for_on_policy_grpo,
+    reject_unfit_on_policy_reference,
+)
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.context_window import resolve_model_context_window
+from halo.models.introspection.config_access import config_model_types
+from halo.models.introspection.context_window import resolve_model_context_window
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.collectives import barrier
+from halo.runtime.consensus import rank0_verdict
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.grpo.environmental.environmental_rules import reject_prefetch_past_retry_budget
+from halo.trainers.grpo.environmental.environmental_rules import (
+    reject_unsupported_score_centering,
+    reject_whole_trajectory_render_of_rewritten_view,
+)
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from halo.trainers.grpo.rollout.engine_preflight import (
     ServerRequirements,
     verify_context_window,
     verify_engine_prompt_logprobs,
+    verify_group_servers,
     verify_sampler_logprob_reference,
     verify_server_chat_template,
     verify_server_flags,
+    verify_turn_deadline,
 )
-from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
+from halo.trainers.grpo.rollout.weight_push import pushes_base, reject_unsyncable_config
 from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
@@ -97,17 +112,17 @@ logger = logging.getLogger(__name__)
 def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -> int:
     """Token count of the environment's preamble (system prompt + tool schema), which the startup context-window check
     must include or it validates a prompt smaller than any the model sees. Rendered under ``template_kwargs``, as the
-    preamble depends on them. A template that cannot render it raises, since rollouts render the same preamble. An MCP
-    environment's tools appear only at its first reset, so the overhead under-counts, with a warning."""
+    preamble depends on them. A template that cannot render it raises, since rollouts render the same preamble.
+    COLLECTIVE for environments whose tools need discovery."""
     messages = ([{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []) + [
         {"role": "user", "content": ""}
     ]
-    tools = environment.get_tools_schema()
-    if environment.TOOLS_ARRIVE_ON_RESET and not tools and is_global_main_process():
-        logger.warning(
-            "An MCP server's tools arrive when its first reset connects, so the context-window check omits "
-            "their schema from the prompt overhead."
+    if environment.TOOLS_ARRIVE_ON_RESET:
+        tools = rank0_verdict(
+            lambda: asyncio.run(environment.discover_tools_schema()), "Environment prompt overhead tool discovery"
         )
+    else:
+        tools = environment.get_tools_schema()
     rendered = tokenizer.apply_chat_template(
         messages, tools=tools, tokenize=False, add_generation_prompt=True, **template_kwargs
     )
@@ -118,8 +133,8 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
 
 
 def probe_template_kwargs(async_config: AsyncRolloutConfig, environment) -> dict:
-    """The kwargs a rollout request carries: the run's template variables plus the level and thinking budget an episode
-    binds under the run's bounds (a ``'random'`` setting draws one level), as an episode's requests state them."""
+    """The kwargs a rollout request carries: the run's template variables plus the level an episode binds under the
+    run's bounds (a ``'random'`` setting draws one level), as an episode's requests state it."""
     effort = bind_episode_effort(
         None,
         environment,
@@ -128,9 +143,7 @@ def probe_template_kwargs(async_config: AsyncRolloutConfig, environment) -> dict
         max_episode_tokens=async_config.rollout_max_episode_tokens,
         max_answer_tokens=async_config.rollout_max_answer_tokens,
     )
-    return rollout_template_kwargs(
-        async_config.rollout_chat_template_kwargs, effort.level, effort.thinking_budget, effort.budget_soft
-    )
+    return rollout_template_kwargs(async_config.rollout_chat_template_kwargs, effort.level)
 
 
 def server_requirements(async_config: AsyncRolloutConfig, environment, model) -> ServerRequirements:
@@ -142,19 +155,26 @@ def server_requirements(async_config: AsyncRolloutConfig, environment, model) ->
         max_answer_tokens=async_config.rollout_max_answer_tokens,
         max_episode_tokens=async_config.rollout_max_episode_tokens,
     )
-    budgeted = async_config.rollout_backend == VLLM_BACKEND and has_thinking_budget(efforts)
+    capped = async_config.rollout_backend == VLLM_BACKEND and has_thinking_cap(efforts)
+    prices_reasoning = any(environment.reasoning_terms_for_effort(level)[1] > 0 for level in efforts)
     consumers = (
-        ("reasoning_price", async_config.reasoning_price is not None),
+        ("reasoning_price", prices_reasoning),
         ("reasoning_floor", async_config.reasoning_floor > 0),
         ("carry_reasoning", environment.carry_reasoning),
-        ("a thinking budget", budgeted),
+        ("a thinking cap", capped),
     )
+    required_patches = resolve_weight_sync_client(async_config.rollout_backend).REQUIRED_PATCHES
     return ServerRequirements(
         is_moe=has_routed_experts(model.config),
         sends_tools=bool(environment.get_tools_schema()) or environment.TOOLS_ARRIVE_ON_RESET,
         captures_routing=async_config.routing_replay == "rollout",
         reasoning_consumers=tuple(name for name, on in consumers if on),
         sampled_token_ids=async_config.train_on_sampled_tokens,
+        weight_precision=async_config.rollout_weight_precision,
+        candidate_logprobs=async_config.score_centering_top_k or 0,
+        pushes_base=pushes_base(model, adapter_sync=async_config.rollout_adapter_sync),
+        model_types=config_model_types(model.config),
+        patches=frozenset(required_patches[t] for t in config_model_types(model.config) if t in required_patches),
     )
 
 
@@ -174,12 +194,7 @@ def verify_served_template(async_config: AsyncRolloutConfig, environment, tokeni
     messages = [*system, {"role": "user", "content": "Probe."}]
 
     def trainer_prompt_ids(effort) -> list[int]:
-        kwargs = rollout_template_kwargs(
-            async_config.rollout_chat_template_kwargs,
-            effort.level if effort else None,
-            effort.thinking_budget if effort else None,
-            effort.budget_soft if effort else False,
-        )
+        kwargs = rollout_template_kwargs(async_config.rollout_chat_template_kwargs, effort.level if effort else None)
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, **kwargs)
         return tokenizer(text, add_special_tokens=False)["input_ids"]
 
@@ -213,7 +228,7 @@ def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> l
     return [
         *(f"{key}: {value}" for key, value in env_settings.items()),
         f"rollout_backend: {async_config.rollout_backend}",
-        f"rollout_workers: {async_config.num_rollout_workers}",
+        f"rollout_actor_budget: {async_config.rollout_actor_budget}",
         f"max_concurrent: {async_config.max_concurrent_rollouts or 'auto'}",
         *servers,
         f"weight_sync: every {async_config.sync_weights_every_n_steps} steps",
@@ -222,23 +237,24 @@ def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> l
     ]
 
 
-def reject_missing_carried_columns(args: EnvironmentalGRPOScriptArguments, ds) -> None:
-    """A renamed answer_field resolving to no column is a typo, yielding a full RL run with no ground truth. The default
-    spelling is not checked: the trainer gates on the environment's requires_answer. prompt_field is the loader's
-    conversation_field, already guarded."""
-    if args.answer_field:
-        if args.answer_field != DEFAULT_ANSWER_FIELD:
-            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
-        elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
-            logger.warning(
-                f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
-                f"environment that grades against one refuses this dataset at trainer construction; "
-                f"one that grades against an answer only where a row has one pays every episode for "
-                f"completing the task instead."
-            )
-    for column in args.context_fields or []:
-        if column:
-            reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
+def reject_missing_carried_columns(args: EnvironmentalGRPOScriptArguments, ds, *, sharded: bool) -> None:
+    """COLLECTIVE when ``sharded`` (:func:`render_column_checks_across_ranks`). A renamed answer_field resolving to no
+    column is a typo, yielding a full RL run with no ground truth. The default spelling is not checked: the trainer
+    gates on the environment's requires_answer. prompt_field is the loader's conversation_field, already guarded."""
+    with render_column_checks_across_ranks(str(args.dataset), sharded=sharded):
+        if args.answer_field:
+            if args.answer_field != DEFAULT_ANSWER_FIELD:
+                reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+            elif missing_render_column_splits(ds, args.answer_field) and is_global_main_process():
+                logger.warning(
+                    f"No '{args.answer_field}' column in {args.dataset}: rows carry no answer. An "
+                    f"environment that grades against one refuses this dataset at trainer construction; "
+                    f"one that grades against an answer only where a row has one pays every episode for "
+                    f"completing the task instead."
+                )
+        for column in args.context_fields or []:
+            if column:
+                reject_missing_render_column(ds, str(args.dataset), "context_fields", column)
 
 
 def process_dataset(args: EnvironmentalGRPOScriptArguments, tokenizer, ds):
@@ -297,10 +313,14 @@ def main():
         ParallelismArguments,
     )
 
-    # The environment's registry supplies the schema, so a dataset tool column never reaches the template. The weight
-    # sync forwards names verbatim, and the text-only sibling's model.layers.* would miss the multimodal server's
-    # model.language_model.layers.* on first sync.
-    reject_unsupported_args("Environmental GRPO", tools_field=args.tools_field, text_only_model=args.text_only_model)
+    reject_unsupported_args(
+        "Environmental GRPO (the environment renders every episode with its own tools; a row's own level reaches it "
+        "as a reasoning_effort column named in context_fields)",
+        **template_column_kwargs(args),
+    )
+    # The weight sync forwards names verbatim: a text-only sibling's model.layers.* would miss a multimodal server's
+    # model.language_model.layers.*.
+    reject_unsupported_args("Environmental GRPO", text_only_model=args.text_only_model)
     # The script pins max_completion_length to rollout_max_tokens below, so any other value is discarded.
     if grpo_config.max_completion_length not in (GRPOConfig.max_completion_length, async_config.rollout_max_tokens):
         raise ValueError(
@@ -309,15 +329,17 @@ def main():
             f"the script also writes into max_completion_length. Set rollout_max_tokens instead and remove "
             f"max_completion_length."
         )
-    # The trainer refuses the same config at construction; checked here, before the model load.
-    reject_prefetch_past_retry_budget(
-        resolve_weight_sync_client(async_config.rollout_backend), async_config, grpo_config
-    )
+    # The trainer refuses the same configs at construction; checked here, before the model load and the server
+    # preflights.
+    reject_unsupported_score_centering(async_config)
 
     # A throwaway env for the startup checks, built before any load so an unknown environment_type or a refused
     # environment_kwargs fails here.
     env_settings = env_config.to_env_config()
     probe_env = build_environment(env_config.environment_type, env_settings)
+    if not async_config.rollout_thinking:
+        probe_env.reject_settings_without_thinking()
+    reject_whole_trajectory_render_of_rewritten_view(probe_env, async_config.train_on_sampled_tokens)
 
     context = init_training_script(
         args,
@@ -326,6 +348,7 @@ def main():
         dist_args,
         script_prefix=f"env-grpo-{env_config.environment_type}",
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
+        row_sources=(async_config,),
     )
     parallelism_config = context.parallelism_config
 
@@ -335,7 +358,12 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    reject_unsyncable_config(checkpoint_config, async_config.rollout_backend)
+    reject_unsyncable_config(
+        checkpoint_config,
+        async_config.rollout_backend,
+        async_config.rollout_weight_precision,
+        adapter_sync=async_config.rollout_adapter_sync,
+    )
 
     # The trainer gets dataset_presharded so it does not re-shard a per-rank load.
     ds, dataset_presharded = load_script_datasets(
@@ -345,11 +373,19 @@ def main():
         conversation_knob="prompt_field",
     )
     # process_dataset prunes to prompt/answer/context_fields, so an image column would vanish and train on text alone.
-    reject_image_columns(ds, "Environmental GRPO")
-    reject_missing_carried_columns(args, ds)
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "Environmental GRPO")
+    reject_missing_carried_columns(args, ds, sharded=dataset_presharded)
 
     # Trajectories are collated into padded batches.
-    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
+    requested_attn = grpo_row_attn_implementation(
+        model_config,
+        grpo_config,
+        packed_microbatches=async_config.packed_microbatch_tokens is not None,
+        sinks_reset=args.reset_sinks,
+        checkpoint_config=checkpoint_config,
+    )
+    reject_unfit_on_policy_reference(model_config, grpo_config, parallelism_config)
     model, tokenizer = load_model_and_tokenizer(context, grpo_config, model_config, args, attn_default=requested_attn)
 
     # A trajectory is bounded by the context window, not max_completion_length: TRL reads it as the dr_grpo
@@ -375,6 +411,8 @@ def main():
     # has to fit; the multi-turn worst case is advisory.
     max_turns = probe_env.max_turns
     template_kwargs = probe_template_kwargs(async_config, probe_env)
+    if not async_config.rollout_thinking:
+        verify_template_closes_thinking(tokenizer, template_kwargs)
     prompt_budget = (args.max_prompt_length or 0) + measure_env_prompt_overhead(probe_env, tokenizer, template_kwargs)
     full_trajectory_tokens = prompt_budget + worst_case_generation(async_config, max_turns)
     verify_context_window(
@@ -384,12 +422,25 @@ def main():
         backend=async_config.rollout_backend,
         connection_timeout=async_config.rollout_connection_timeout,
     )
+    verify_turn_deadline(
+        async_config.get_server_urls(),
+        async_config.rollout_max_tokens,
+        async_config.request_timeout,
+        backend=async_config.rollout_backend,
+        connection_timeout=async_config.rollout_connection_timeout,
+    )
     verify_server_flags(
         async_config.get_server_urls(),
         server_requirements(async_config, probe_env, model),
         backend=async_config.rollout_backend,
         connection_timeout=async_config.rollout_connection_timeout,
     )
+    if async_config.rollout_sync_topology == "single_group":
+        verify_group_servers(
+            async_config.get_server_urls(),
+            backend=async_config.rollout_backend,
+            connection_timeout=async_config.rollout_connection_timeout,
+        )
     verify_served_template(async_config, probe_env, tokenizer)
     # The IS ratio divides by the engine's logprobs: they must be the sampling distribution's.
     verify_sampler_logprob_reference(

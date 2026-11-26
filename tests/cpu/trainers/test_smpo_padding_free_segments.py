@@ -136,18 +136,12 @@ def _smpo_trainer(model, tmp_path, *, padding_free: bool) -> SMPOTrainer:
 
 
 @pytest.mark.parametrize("family", ["qwen3_5", "qwen3_5_moe_text"])
-def test_padding_free_is_refused_on_an_m_rope_decoder(monkeypatch, tmp_path, family):
-    """A flattened M-RoPE row faults the flash varlen kernels, so the trainer refuses it as the SFT collator does;
-    padded rows on the same model build."""
+def test_padding_free_builds_on_an_m_rope_decoder(monkeypatch, tmp_path, family):
+    """The M-RoPE decoders clear every padding_free gate on a varlen backend, as the other GatedDeltaNet decoders do."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla", lambda: True),))
     model = tiny_family_model({**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}[family])
     model.config._attn_implementation = "flash_attention_2"
-    with pytest.raises(ValueError, match="padding_free is refused .* rotates by M-RoPE") as excinfo:
-        _smpo_trainer(model, tmp_path, padding_free=True)
-    # The remedy must be one SMPOConfig accepts, and it has no packing field.
-    assert "packing" not in SMPOConfig.__dataclass_fields__
-    assert "padding_free: false" in str(excinfo.value)
-    _smpo_trainer(model, tmp_path, padding_free=False)
+    assert _smpo_trainer(model, tmp_path, padding_free=True).args.padding_free
 
 
 def test_padding_free_builds_on_a_gated_delta_net_decoder_without_m_rope(monkeypatch, tmp_path):

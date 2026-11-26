@@ -5,6 +5,7 @@ import functools
 from collections.abc import Callable
 from contextvars import ContextVar
 
+from halo.env import env_flag
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.inprocess import calculate_sandboxed, run_python_sandboxed
@@ -70,11 +71,11 @@ def build_code_tools(
     tool_name: str | None = None,
 ) -> NativeToolRegistry:
     """A single-language code tool. ``sandbox`` runs it as a subprocess with imports and the stdlib (confined on
-    ``bubblewrap`` / ``remote``); ``None`` keeps the in-process Python REPL, and a non-Python language takes the
-    default backend."""
+    ``bubblewrap`` / ``remote`` / ``modal``); ``None`` keeps the in-process Python REPL unless ``HALO_SANDBOX_REPL``
+    is on, and a non-Python language takes the default backend."""
     spec = require_language(language)
 
-    if spec.name == "python" and sandbox is None:
+    if spec.name == "python" and sandbox is None and not env_flag("HALO_SANDBOX_REPL"):
         handler = functools.partial(run_python_sandboxed, timeout=timeout)
         # The math names are the in-process REPL's injected builtins; in a real interpreter they are
         # not bare names, so this wording belongs to that handler, not to the language.
@@ -120,9 +121,9 @@ def build_python_tools(
 
 
 def build_search_tools(backend: str | None = None) -> NativeToolRegistry:
-    """``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, then keyless DuckDuckGo); ``mock``
-    also needs ``HALO_ALLOW_MOCK_SEARCH=1``. Validated here, so an environment never runs every episode on a backend it
-    cannot select."""
+    """``backend=None`` auto-selects by available API key (Serper, Brave, Tavily, Keenable, then keyless DuckDuckGo);
+    ``mock`` also needs ``HALO_ALLOW_MOCK_SEARCH=1``. Validated here, so an environment never runs every episode on a
+    backend it cannot select."""
     validate_search_backend(backend)
     registry = NativeToolRegistry()
     registry.register(

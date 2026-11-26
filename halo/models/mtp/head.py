@@ -15,9 +15,9 @@ import torch.nn.functional as F
 from accelerate import init_empty_weights
 
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, logit_chunk_rows
-from halo.models.config_access import text_config
 from halo.models.head_transform import resolve_head_transform
-from halo.models.module_tree import (
+from halo.models.introspection.config_access import text_config
+from halo.models.introspection.module_tree import (
     backbone_with_layers,
     decoder_layers,
     decoder_layers_attr,

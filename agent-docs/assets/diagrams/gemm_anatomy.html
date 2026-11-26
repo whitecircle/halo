@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM anatomy</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  /* The weight keeps the blue it has in the step's memory bars, and what grows with the tokens is violet. */
+  :root {
+    --grows: var(--halo-violet);
+    --fixed: var(--halo-blue);
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .figure { position: relative; }
+
+  .stage { position: relative; }
+
+  .stage > * { position: absolute; }
+
+  /* A matrix is a stack of rows (one per token) or one solid block (the weight). */
+  .matrix {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .matrix i {
+    flex: 1;
+    border-radius: 9px;
+    background: color-mix(in oklab, var(--surface), var(--hue) 34%);
+  }
+
+  .tag {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    pointer-events: none;
+  }
+
+  .tag b {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 54px;
+    line-height: 1;
+    color: var(--text);
+  }
+
+  .tag span {
+    margin-top: 12px;
+    font-size: 25px;
+    color: var(--text);
+  }
+
+  .op {
+    font-size: 54px;
+    line-height: 1;
+    color: var(--secondary);
+    transform: translate(-50%, -50%);
+  }
+
+  .dim {
+    font-size: 25px;
+    line-height: 1;
+    color: var(--body);
+    transform: translate(-50%, -50%);
+  }
+
+  .dim.m { color: var(--grows); }
+
+  .caption { text-align: center; transform: translateX(-50%); }
+
+  .caption .name {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 27px;
+    color: var(--text);
+  }
+
+  .caption .name i {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--hue);
+  }
+
+  .caption p {
+    margin-top: 8px;
+    font-size: 25px;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .caption p.bytes { color: var(--body); }
+
+  /* The whole product's FLOPs, under a bracket that spans the three matrices' captions. */
+  .flops {
+    font-size: 27px;
+    line-height: 1.3;
+    color: var(--text);
+    white-space: nowrap;
+    transform: translateX(-50%);
+  }
+
+  .cases-head {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-top: var(--group-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .cases-head span {
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--secondary);
+  }
+
+  /* Two cases side by side, each its matrices drawn to one scale and what the weight is of the bytes. */
+  .cases {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 72px;
+    align-items: center;
+    margin-top: var(--heading-gap);
+  }
+
+  .case {
+    display: flex;
+    align-items: center;
+    gap: 44px;
+  }
+
+  /* The three matrices and the two operators in one row, each matrix's letter under it. */
+  .case .blocks {
+    display: grid;
+    grid-template-columns: repeat(5, auto);
+    align-items: center;
+    justify-items: center;
+    column-gap: 22px;
+    row-gap: 12px;
+  }
+
+  .case .blocks b {
+    font-weight: 400;
+    font-size: 23px;
+    line-height: 1;
+    color: var(--body);
+  }
+
+  .case .blocks i {
+    display: block;
+    background: color-mix(in oklab, var(--surface), var(--hue) 34%);
+  }
+
+  .case .blocks span {
+    font-size: 30px;
+    line-height: 1;
+    color: var(--secondary);
+  }
+
+  .case .name {
+    font-size: 27px;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .case p {
+    margin-top: 8px;
+    font-size: 25px;
+    color: var(--body);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .case p + p { color: var(--secondary); }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>The tokens set M, the model sets K and N</h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="stage" id="stage"><svg class="wires" id="wires"></svg></div>
+    <div class="cases-head">The same W at two values of M<span id="cases-note"></span></div>
+    <div class="cases" id="cases"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">M is the tokens of the batch for a dense layer, or the tokens routed to one expert in an MoE layer.</span>
+      <span class="s">W is read whole from HBM at any M, so a small M wastes that load.</span>
+      <span class="s">Bytes are for bf16, {bf16} bytes per value.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Side lengths in px, drawn to one scale so X, W and Y share their edges.
+  const SIDE = { M: 410, K: 264, N: 342 };
+  const ROWS = 8;
+  const GROWS = "var(--grows)";
+  const FIXED = "var(--fixed)";
+  const MATRICES = [
+    { id: "X", rows: "M", cols: "K", hue: GROWS, stacked: true, name: "Input activations", line: "Grows with the tokens" },
+    { id: "W", rows: "K", cols: "N", hue: FIXED, stacked: false, name: "Weight", line: "Fixed by the model" },
+    { id: "Y", rows: "M", cols: "N", hue: GROWS, stacked: true, name: "Output", line: "Grows with the tokens" },
+  ];
+  /** Bytes per bf16 value. */
+  const BF16_BYTES = 2;
+  /** The two worked cases: one weight shape (a gpt-oss expert's), a small and a large M. Everything printed is computed. */
+  const CASES = { K: 2880, N: 2880, M: [128, 8192] };
+  /** Side of the weight in the worked cases, in px. The cases' X and Y are drawn to the same scale. */
+  const CASE_SIDE = 84;
+  const OPS = ["@", "="];
+  /** Space for a vertical dimension line beside a matrix. */
+  const DIM_SIDE = 64;
+  /** Space between a matrix and the next operator column. */
+  const OP_GAP = 80;
+  /** Height of the band above the matrices for the horizontal dimension lines: the line 30px up, half its letter. */
+  const DIM_TOP = 43;
+  /** Clear space between a dimension letter and the line segment on each side of it. */
+  const DIM_GAP = 10;
+  const CAPTION_GAP = 48;
+
+  const stage = document.getElementById("stage");
+  const wires = document.getElementById("wires");
+  const width = stage.getBoundingClientRect().width;
+  const color = (token) => getComputedStyle(document.documentElement).getPropertyValue(token.slice(4, -1)).trim();
+
+  /** A small arrowhead at (x, y) pointing along `angle`. */
+  function head(x, y, angle, hue) {
+    const len = 8;
+    const half = 5;
+    const bx = x - len * Math.cos(angle);
+    const by = y - len * Math.sin(angle);
+    const px = half * Math.sin(angle);
+    const py = -half * Math.cos(angle);
+    wires.append(svgEl("polyline", { points: `${bx + px},${by + py} ${x},${y} ${bx - px},${by - py}`, fill: "none", stroke: hue, "stroke-width": 2, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+  }
+
+  /** A dimension line with a head at both ends, drawn as two segments around its letter in the middle. */
+  function dim(x1, y1, x2, y2, letter, isM) {
+    const hue = isM ? color(GROWS) : color("var(--secondary)");
+    const angle = Math.atan2(y2 - y1, x2 - x1);
+    const [ux, uy] = [Math.cos(angle), Math.sin(angle)];
+    const [mx, my] = [(x1 + x2) / 2, (y1 + y2) / 2];
+    const label = el("div", isM ? "dim m" : "dim", letter);
+    label.style.left = `${mx}px`;
+    label.style.top = `${my}px`;
+    stage.append(label);
+    const box = label.getBoundingClientRect();
+    const half = (Math.abs(ux) * box.width + Math.abs(uy) * box.height) / 2 + DIM_GAP;
+    wires.append(
+      svgEl("line", { x1, y1, x2: mx - half * ux, y2: my - half * uy, stroke: hue, "stroke-width": 2 }),
+      svgEl("line", { x1: mx + half * ux, y1: my + half * uy, x2, y2, stroke: hue, "stroke-width": 2 }),
+    );
+    head(x2, y2, angle, hue);
+    head(x1, y1, angle + Math.PI, hue);
+  }
+
+  // Lay the row out left to right, then centre it in the content width.
+  const widths = MATRICES.map((m) => SIDE[m.cols]);
+  const total = DIM_SIDE + widths[0] + 2 * OP_GAP + DIM_SIDE + widths[1] + 2 * OP_GAP + widths[2] + DIM_SIDE;
+  let x = (width - total) / 2 + DIM_SIDE;
+  const midY = DIM_TOP + SIDE.M / 2;
+  const boxes = [];
+
+  MATRICES.forEach((m, i) => {
+    const w = SIDE[m.cols];
+    const h = SIDE[m.rows];
+    const top = midY - h / 2;
+    const node = el("div", "matrix");
+    node.style.cssText = `left:${x}px; top:${top}px; width:${w}px; height:${h}px; --hue:${m.hue}`;
+
+    for (let r = 0; r < (m.stacked ? ROWS : 1); r += 1) {
+      node.append(el("i"));
+    }
+
+    const tag = el("div", "tag");
+    tag.style.cssText = `left:${x}px; top:${top}px; width:${w}px; height:${h}px`;
+    tag.append(el("b", undefined, m.id), el("span", undefined, `${m.rows} × ${m.cols}`));
+    stage.append(node, tag);
+    boxes.push({ l: x, r: x + w, t: top, b: top + h, m });
+
+    if (i < OPS.length) {
+      const op = el("div", "op", OPS[i]);
+      op.style.left = `${x + w + OP_GAP}px`;
+      op.style.top = `${midY}px`;
+      stage.append(op);
+      x += w + 2 * OP_GAP + (i === 0 ? DIM_SIDE : 0);
+    }
+  });
+
+  const [X, W, Y] = boxes;
+  const above = (b) => Math.min(b.t, X.t) - 30;
+  dim(X.l - 34, X.t, X.l - 34, X.b, "M", true);
+  dim(Y.r + 34, Y.t, Y.r + 34, Y.b, "M", true);
+  dim(X.l, above(X), X.r, above(X), "K", false);
+  dim(W.l - 34, W.t, W.l - 34, W.b, "K", false);
+  dim(W.l, W.t - 30, W.r, W.t - 30, "N", false);
+  dim(Y.l, above(Y), Y.r, above(Y), "N", false);
+
+  for (const b of boxes) {
+    const caption = el("div", "caption");
+    const name = el("div", "name");
+    const dot = el("i");
+    dot.style.setProperty("--hue", b.m.hue);
+    name.append(dot, b.m.name);
+    caption.append(name, el("p", undefined, b.m.line), el("p", "bytes", `${BF16_BYTES} × ${b.m.rows} × ${b.m.cols} bytes`));
+    caption.style.left = `${(b.l + b.r) / 2}px`;
+    caption.style.top = `${X.b + CAPTION_GAP}px`;
+    stage.append(caption);
+  }
+
+  const captionBottom = Math.max(...[...stage.querySelectorAll(".caption")].map((c) => c.getBoundingClientRect().bottom))
+    - stage.getBoundingClientRect().top;
+
+  // The product's FLOPs under a bracket spanning the three matrices.
+  const grey = color("var(--secondary)");
+  const bracketY = captionBottom + 36;
+  wires.append(svgEl("line", { x1: X.l, y1: bracketY, x2: Y.r, y2: bracketY, stroke: grey, "stroke-width": 2 }));
+
+  for (const x of [X.l + 1, Y.r - 1]) {
+    wires.append(svgEl("line", { x1: x, y1: bracketY - 9, x2: x, y2: bracketY + 9, stroke: grey, "stroke-width": 2 }));
+  }
+
+  const flops = el("div", "flops", "2 × M × K × N FLOPs");
+  flops.style.left = `${(X.l + Y.r) / 2}px`;
+  flops.style.top = `${bracketY + 18}px`;
+  stage.append(flops);
+  stage.style.height = `${flops.getBoundingClientRect().bottom - stage.getBoundingClientRect().top}px`;
+
+  // The worked cases: the weight's bytes do not change with M, the activations' and the output's do.
+  const megabytes = (bytes) => (bytes / 1e6).toFixed(2);
+  const fmt = (v) => v.toLocaleString("en-US");
+  const scale = CASE_SIDE / CASES.K;
+  const block = (rows, cols, hue) => {
+    const node = el("i");
+    const height = rows * scale;
+    node.style.cssText = `width:${cols * scale}px; height:${height}px; border-radius:${Math.min(6, height / 2)}px; --hue:${hue}`;
+
+    return node;
+  };
+
+  for (const m of CASES.M) {
+    const weight = BF16_BYTES * CASES.K * CASES.N;
+    const all = weight + BF16_BYTES * m * (CASES.K + CASES.N);
+    const node = el("div", "case");
+    const blocks = el("div", "blocks");
+    blocks.append(
+      block(m, CASES.K, GROWS), el("span", undefined, "@"), block(CASES.K, CASES.N, FIXED), el("span", undefined, "="), block(m, CASES.N, GROWS),
+      el("b", undefined, "X"), el("b"), el("b", undefined, "W"), el("b"), el("b", undefined, "Y"),
+    );
+    const text = el("div");
+    text.append(
+      el("div", "name", `M = ${fmt(m)}`),
+      el("p", undefined, `W is ${Math.round((100 * weight) / all)}% of the bytes`),
+      el("p", undefined, `${megabytes(weight)} of ${megabytes(all)} MB`),
+    );
+    node.append(blocks, text);
+    document.getElementById("cases").append(node);
+  }
+
+  document.getElementById("cases-note").textContent = `K = N = ${CASES.K}, drawn to one scale`;
+  fillValues({ bf16: BF16_BYTES });
+</script>
+</body>
+</html>

@@ -21,6 +21,7 @@ from halo.runtime import consensus
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
+from halo.weight_sync.staging import PackedChunkStager
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import RecordingSender
 
@@ -113,6 +114,7 @@ class _EngineClient(RecordingSender):
     """What ``_init_weight_sync_client`` builds on the main process, with no server behind it."""
 
     BACKEND_NAME = "vLLM"
+    CHUNK_STAGER = PackedChunkStager
     BUILT: list["_EngineClient"] = []
     FAIL = False
 
@@ -126,6 +128,9 @@ class _EngineClient(RecordingSender):
     def init_communicator(self, device) -> None:
         self.sync_device = device
 
+    def share_stager(self, stager) -> None:
+        """The recording client stages nothing."""
+
     buffer_param = RecordingSender.update_named_param
 
     def finish_weight_update(self) -> None:
@@ -136,16 +141,23 @@ class _EngineClient(RecordingSender):
 
 
 def _counted_verdicts(what: str) -> list[str]:
-    """The rank-uniform verdicts named ``what`` this rank joins from here on."""
+    """The rank-uniform verdicts named ``what`` this rank joins from here on, over a collective or the store."""
     joined = []
     real_reject = consensus.reject_across_ranks
+    real_store_reject = consensus.store_reject_across_ranks
 
     def counting_reject(reason, name, exc_type=RuntimeError):
         if name == what:
             joined.append(name)
         return real_reject(reason, name, exc_type=exc_type)
 
+    def counting_store_reject(tag, reason, name, exc_type=RuntimeError, timeout=None):
+        if name == what:
+            joined.append(name)
+        return real_store_reject(tag, reason, name, exc_type=exc_type, timeout=timeout)
+
     consensus.reject_across_ranks = counting_reject
+    consensus.store_reject_across_ranks = counting_store_reject
     return joined
 
 
@@ -159,6 +171,7 @@ def _trainer_outside_train(rank: int):
     trainer.args = SimpleNamespace(report_to=[])
     trainer.async_config = SimpleNamespace(
         rollout_group_port=51216,
+        rollout_sync_topology="per_server",
         sync_weights_every_n_steps=1,
         rollout_backend="vllm",
         rollout_server_url="http://engine:8000",
@@ -167,6 +180,7 @@ def _trainer_outside_train(rank: int):
     )
     trainer._weight_sync_client = trainer._rollout_manager = trainer._loop = None
     trainer._prefetch_thread = trainer._engine_rescore_clients = None
+    trainer.first_push_verified = True
     return trainer
 
 

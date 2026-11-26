@@ -5,7 +5,7 @@ A manual runbook for multi-node EP on RunPod pods with InfiniBand; the repo ship
 | Topology | `--ep_scope` | Inter-node traffic | Use |
 |----------|--------------|--------------------|-----|
 | Node-local EP | `node` | Gradients only (NCCL AllReduce over IB) | Default — EP stays on NVLink |
-| Cross-node EP | `global` | Expert all-to-all (RDMA) + gradients | Maximum expert distribution for large MoE; higher comm overhead |
+| Cross-node EP | `global` | Expert all-to-all (RDMA) + FSDP2 weight all-gathers and gradient reduce-scatters | Maximum expert distribution for large MoE; higher communication overhead |
 
 With only EP active, `data_parallel_size = world_size` — EP is orthogonal to DP
 ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)). Theory:
@@ -33,7 +33,7 @@ hostname -I | awk '{print $1}'        # IB-routable IP
 ibstat                                # expect State: Active
 ib_write_bw -d mlx5_0                 # server on Node 0
 ib_write_bw -d mlx5_0 <NODE0_IP>      # client on Node 1 — expect close to the port's line rate
-                                      # (HDR 200 Gb/s ≈ 24 GB/s); an order of magnitude below it
+                                      # (HDR 200 Gb/s = 25 GB/s); an order of magnitude below it
                                       # means the fabric is not what the pod advertises
 ```
 
@@ -58,17 +58,19 @@ A bare `NCCL_TIMEOUT` does nothing — PyTorch does not read it.
 ```bash
 cd /workspace
 git clone https://github.com/whitecircle/halo.git code && cd code
+export PYTHONPATH=/workspace/code   # the volume hides the image's own copy at /workspace
 hf auth login --token $HF_TOKEN
 wandb login $WANDB_API_KEY  # optional
 
 python -c "import torch; print(torch.__version__, torch.version.cuda)"
 python -c "import deep_ep; print('DeepEP OK')"
+python -c "import halo; print(halo.__file__)"   # /workspace/code/halo/__init__.py
 python -c "from flash_attn_interface import flash_attn_func; print('FA3 OK')"
 
 # Optional: pre-fetch the model on every pod (with DIST_SHARED_FILESYSTEM=0 each pod's local rank 0
 # fetches it at load otherwise)
 export HF_HOME=/workspace/hf_cache
-python -c "from huggingface_hub import snapshot_download; snapshot_download('unsloth/gpt-oss-20b-BF16')"
+python -c "from huggingface_hub import snapshot_download; snapshot_download('openai/gpt-oss-20b', ignore_patterns=['*/*'])"
 ```
 
 ## EP topologies (2 nodes × 8 GPUs)
@@ -99,6 +101,7 @@ set -e
 export DIST_NCCL_TIMEOUT_MINUTES=30
 export HF_HOME=/workspace/hf_cache
 export DIST_SHARED_FILESYSTEM=0       # RunPod pods have independent storage
+export PYTHONPATH=/workspace/code
 
 NODE_RANK=${1:?Usage: bash launch.sh <node_rank> <master_ip>}
 MASTER_ADDR=${2:?Usage: bash launch.sh <node_rank> <master_ip>}
@@ -131,7 +134,8 @@ Formats, save modes, and resume mechanics are owned by
   on the rank-0 pod).
 
     No single pod holds a mergeable checkpoint, and `scripts/after_training/merge_ep_shards.py` takes one
-    input dir. Where it does run (single node, or a shared FS) it buys write bandwidth, since every rank
+    input dir. Where it does run (one EP group spanning every rank, without expert TP or CP, on one node
+    or a shared FS) it buys write bandwidth, since every rank
     writes its own slice. The price is a checkpoint that must be merged before resume or serving, and it
     saves no host memory.
 
@@ -150,19 +154,22 @@ Formats, save modes, and resume mechanics are owned by
 ## Monitoring
 
 ```bash
-nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv -l 5
+nvidia-smi --query-gpu=utilization.gpu,power.draw,clocks.current.sm,memory.used,memory.total,temperature.gpu --format=csv -l 5
 watch -n 2 "perfquery -x | grep -E 'XmtData|RcvData'"   # IB throughput counters
 ```
 
-Only rank 0 prints training output. For comm issues set `NCCL_DEBUG=INFO` and `NCCL_DEBUG_SUBSYS=ALL`, then
+Utilization alone reads 100% on a rank hung in a collective; read it with board power and the SM clock
+([GPU Training Theory → Power and utilization](../reference/gpu-training-theory.md#power-and-utilization)).
+
+Only rank 0 prints training output. For communication issues set `NCCL_DEBUG=INFO` and `NCCL_DEBUG_SUBSYS=ALL`, then
 look for `NCCL INFO NET/IB` (connection up) and `NCCL WARN` (fallbacks/timeouts).
 
 ## Troubleshooting
 
 Pods that never rendezvous, InfiniBand down, a resume that finds no checkpoint on one pod, and the
-rest: [Troubleshooting](../reference/troubleshooting.md). Cross-node dispatch is per-operation
-latency-bound, so a slow cross-node EP run is a case for node-local EP or a larger batch
-([DeepEP](deepep.md#expert-parallelism-over-aws-efa)).
+rest: [Troubleshooting](../reference/troubleshooting.md). Over AWS EFA, cross-node dispatch is bound by
+per-operation latency, and any cross-node dispatch is capped at 8,192 tokens per rank by default, so a slow
+cross-node EP run is a case for node-local EP ([DeepEP](deepep.md#expert-parallelism-over-aws-efa)).
 
 ## Related pages
 

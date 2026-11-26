@@ -10,7 +10,7 @@ import torch.nn as nn
 from transformers import TrainerState
 
 import halo.checkpoint.parallel.save as save_mod
-import halo.trainers.checkpointing as checkpointing_mod
+import halo.trainers.loop.checkpointing as checkpointing_mod
 from halo.runtime.consensus import DeferredRankFailure
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave

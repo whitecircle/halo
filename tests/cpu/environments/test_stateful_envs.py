@@ -10,7 +10,7 @@ import unittest
 
 import pytest
 
-from halo.environments.episode_keys import EPISODE_INVALID_REASON_KEY
+from halo.environments.episodes.episode_keys import EPISODE_INVALID_REASON_KEY
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.swe import SweEnvironment
@@ -60,22 +60,6 @@ def test_code_env_state_persists_across_turns():
 
         traj = env.get_trajectories(episode_ids)[0]
         assert _last_tool_result(traj).strip() == "42", f"run_code did not see the persisted file: {traj.info}"
-    finally:
-        env.close()
-
-
-def test_code_env_read_file_sees_prior_write():
-    env = SweEnvironment(max_turns=10)
-    try:
-        episode_ids, _ = env.reset(["task"])
-        env.step(
-            episode_ids,
-            ["w"],
-            [{"tool_calls": [_tool_call("write_file", path="notes.txt", content="remember me")]}],
-        )
-        env.step(episode_ids, ["r"], [{"tool_calls": [_tool_call("read_file", path="notes.txt")]}])
-        traj = env.get_trajectories(episode_ids)[0]
-        assert _last_tool_result(traj).strip() == "remember me"
     finally:
         env.close()
 

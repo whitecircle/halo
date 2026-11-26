@@ -7,11 +7,17 @@ import torch
 from torch.distributed.tensor import DTensor
 
 from halo.env import env_positive_int
+from halo.kernels.lowp.block_fp8 import SCALE_SUFFIX
 from halo.weight_sync.transport.packed_broadcast import PACKED_BUFFER_BYTES
 
 # Read once at import. The forwarding rank holds this plus the largest tensor, which is a chunk of its own; each
 # chunk costs one engine round trip, so a larger budget trades memory for fewer.
 WEIGHT_SYNC_CHUNK_BYTES = env_positive_int("HALO_WEIGHT_SYNC_CHUNK_MB", PACKED_BUFFER_BYTES >> 20) << 20
+
+# A block-FP8 weight and its scale are one co-load group of two, found by dtype and name, as the engine re-derives a
+# layer's kernel tensors only once both have landed.
+_FP8_PAIR_GROUP = -1
+_FP8_PAIR_SIZE = 2
 
 
 def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], list[str], list[list[int]]]:
@@ -22,8 +28,13 @@ def describe_chunk(chunk: list[tuple[str, torch.Tensor]]) -> tuple[list[str], li
     return names, dtypes, shapes
 
 
-def _co_load_key(name: str, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
-    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``."""
+def _co_load_key(name: str, tensor: torch.Tensor, groups: tuple[tuple[str, ...], ...]) -> tuple[int, str] | None:
+    """``(group index, module prefix)`` of a parameter one of ``groups`` claims, else ``None``; a block-FP8 weight and
+    its ``_scale_inv`` share the group :data:`_FP8_PAIR_GROUP` keyed by the weight's name."""
+    if tensor.dtype == torch.float8_e4m3fn:
+        return _FP8_PAIR_GROUP, name
+    if name.endswith(".weight" + SCALE_SUFFIX):
+        return _FP8_PAIR_GROUP, name.removesuffix(SCALE_SUFFIX)
     for index, suffixes in enumerate(groups):
         for suffix in suffixes:
             if name == suffix or name.endswith("." + suffix):
@@ -35,14 +46,15 @@ def split_co_loaded(
     chunk: list[tuple[str, torch.Tensor]], groups: tuple[tuple[str, ...], ...]
 ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
     """``(sendable, held)``, order kept: a co-load group not yet complete in ``chunk`` waits for its partners."""
-    keys = [_co_load_key(name, groups) for name, _ in chunk]
+    keys = [_co_load_key(name, tensor, groups) for name, tensor in chunk]
     members: dict[tuple[int, str], set[str]] = {}
     for (name, _), key in zip(chunk, keys, strict=True):
         if key is not None:
             members.setdefault(key, set()).add(name)
     sendable, held = [], []
     for item, key in zip(chunk, keys, strict=True):
-        complete = key is None or len(members[key]) == len(groups[key[0]])
+        size = None if key is None else _FP8_PAIR_SIZE if key[0] == _FP8_PAIR_GROUP else len(groups[key[0]])
+        complete = key is None or len(members[key]) == size
         (sendable if complete else held).append(item)
     return sendable, held
 
@@ -76,10 +88,12 @@ def snapshot_to_sync_device(
     buffered_bytes: int,
     budget: int,
     flush: Callable[[], None],
+    owned: bool = False,
 ) -> torch.Tensor:
     """A contiguous copy of ``weights`` on ``device`` (the source's when ``None``), after ``flush`` sent the pending
     chunk if ``weights`` would pass ``budget``. An alias would let the next optimizer step rewrite a buffered weight.
-    Async, completed by the flush. A param no broadcast can carry raises first, before it can quiesce an engine."""
+    ``owned`` says the caller made ``weights`` for this push and keeps no other reference, so a contiguous one already
+    on ``device`` is its own snapshot. Async, completed by the flush. A param no broadcast can carry raises first, before it can quiesce an engine."""
     if isinstance(weights, DTensor):
         raise TypeError(
             f"Parameter {name!r} is a DTensor: the weight-sync client broadcasts raw local storage but "
@@ -94,6 +108,8 @@ def snapshot_to_sync_device(
         )
     if buffered_bytes > 0 and buffered_bytes + weights.nbytes > budget:
         flush()
+    if owned and weights.is_contiguous() and (device is None or weights.device == device):
+        return weights
     snapshot = torch.empty_like(weights, memory_format=torch.contiguous_format, device=device)
     snapshot.copy_(weights.detach(), non_blocking=True)
     return snapshot

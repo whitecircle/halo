@@ -23,7 +23,7 @@ PAIRS = (
     ([11, 4], [7, 19, 33], [50, 2, 44, 21, 6]),
     ([25, 38, 14, 60], [13, 27], [9, 45, 31]),
 )
-# GatedDeltaNet runs through Qwen3-Next: the Qwen3.5/3.6 decoders rotate by M-RoPE, which refuses padding_free.
+# GatedDeltaNet runs through Qwen3-Next.
 FAMILIES = {
     "lfm2": TINY_MOE_FAMILIES["lfm2_moe"],
     "qwen3_next": TINY_MOE_FAMILIES["qwen3_next"],

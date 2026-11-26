@@ -36,7 +36,7 @@ The value is memory, and it scales with model size — tens of GB at 70B+ params
 
 Optimizer micro-benchmark on B300, Halo 1.1.0 or earlier (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`, synthetic FFN): FlashAdamW peak memory is **−8.6%** vs `torch.optim.AdamW(fused=True)` over the same bf16 parameters (bf16 states), at a ~5 ms optimizer-step overhead from state quant/dequant. For the AdamW / AdamWBF16 / Muon comparison at the same shape, see [Muon](muon-optimizer.md#benchmark).
 
-That overhead amortizes against fwd+bwd on most models, but it is not free — on an attention-bound long-context step the per-step cost can outweigh the memory saving (GLM-4.7-Flash EP8 32k, Halo 1.1.0 or earlier: ~50 s/step vs ~34 s/step on the default `optim`, which `bf16: true` resolves to AdamWBF16).
+One long-context run took about 50 s per step on FlashAdamW against about 34 s on the default `optim`, which `bf16: true` resolves to AdamWBF16 (GLM-4.7-Flash `ep8`, 32k-token rows, Halo 1.1.0 or earlier). What makes up the difference was not measured.
 
 A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qwen3.5-2B). Correctness is covered by `tests/gpu/optimizers/test_flash_adamw.py` — creation, loss descent, decay filtering, memory savings, and a bit-exact state-dict round-trip.
 
@@ -51,7 +51,7 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 ## Compatibility
 
-`optim: flash_adamw` routes through `create_optimizer` (`build_optimizer`, `halo/trainers/optimizer_selection.py`) for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 8`.
+`optim: flash_adamw` routes through `create_optimizer` (`build_optimizer`, `halo/trainers/construction/optimizer_selection.py`) for every distributed trainer, the same path as Muon and AdamWBF16, and composes with gradient checkpointing and FSDP2. `flashoptim` steps per parameter and unwraps DTensors to their local shard before the kernel runs, so a weight-decay group mixing FSDP2/TP DTensors with the plain rank-local tensors EP and `fp32_non_ep_params` produce is handled, not rejected — `examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml` ships this combination at `expert_parallel_size: 8`.
 
 Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`, `halo/trainers/parallelism/pipeline_rules.py`): no PP run validates it. The other guard is the shared `reject_conflicting_optimizer_choice`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage: `test_flash_adamw.py` on one GPU, and `test_flash_adamw_parallel.py` on two through the trainer (EP2 with a mixed DTensor/plain group, FSDP2, and the uneven-shard save refusal).
 

@@ -1,10 +1,11 @@
-"""The ``FUSED_SPLIT_PER_EXPERT`` layout the EP gather writes for GLM4-Lite and LFM2. A swapped split has identical
+"""The ``FUSED_SPLIT_PER_EXPERT`` layout the EP gather writes for GLM4-Lite, GLM-5 Next and LFM2. A swapped split has identical
 shapes and corrupts the served policy, so tensors match a reference fusion."""
 
 import pytest
 import torch
 
 from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from tests.common.ep_stubs import bare_ep_layer
@@ -31,6 +32,18 @@ def _gather(layer_cls, gate_up_flinear, down_flinear):
 def test_glm4_unfuses_to_per_expert_hub_names():
     gate, up, down, gate_up = _fused_reference()
     state = _gather(EPGlm4MoELayer, gate_up, down)
+    assert list(state) == [
+        f"experts.{i}.{proj}.weight" for i in range(E) for proj in ("gate_proj", "up_proj", "down_proj")
+    ]
+    for i in range(E):
+        assert torch.equal(state[f"experts.{i}.gate_proj.weight"], gate[i])
+        assert torch.equal(state[f"experts.{i}.up_proj.weight"], up[i])
+        assert torch.equal(state[f"experts.{i}.down_proj.weight"], down[i])
+
+
+def test_glm5_next_unfuses_to_per_expert_hub_names():
+    gate, up, down, gate_up = _fused_reference()
+    state = _gather(EPGlm5NextMoELayer, gate_up, down)
     assert list(state) == [
         f"experts.{i}.{proj}.weight" for i in range(E) for proj in ("gate_proj", "up_proj", "down_proj")
     ]

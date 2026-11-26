@@ -12,8 +12,8 @@ from transformers import Trainer
 from trl import SFTConfig
 
 from halo.configs.parser import _TOOLKIT_KEY_DEFAULTS, HaloArgumentParser
-from halo.trainers.accelerator import build_plain_accelerator
-from halo.trainers.dataloaders import DataParallelLoaderMixin
+from halo.trainers.construction.accelerator import build_plain_accelerator
+from halo.trainers.loop.dataloaders import DataParallelLoaderMixin
 
 _ROWS = [{"x": torch.zeros(2)} for _ in range(4)]
 
@@ -47,8 +47,13 @@ def test_a_pinned_loader_copies_without_blocking_by_default(tmp_path, prepare):
     assert prepare(config)._non_blocking is True
 
 
-@pytest.mark.parametrize("prepare", [_toolkit_loader, _base_trainer_loader], ids=["toolkit", "base_trainer"])
-@pytest.mark.parametrize("unpinned", ["dataloader_pin_memory: false\n", "use_cpu: true\n"], ids=["unpinned", "cpu"])
+@pytest.mark.parametrize(
+    ("prepare", "unpinned"),
+    [
+        pytest.param(_toolkit_loader, "dataloader_pin_memory: false\n", id="unpinned-toolkit"),
+        pytest.param(_base_trainer_loader, "use_cpu: true\n", id="cpu-base_trainer"),
+    ],
+)
 def test_an_unpinned_loader_keeps_blocking_copies(tmp_path, prepare, unpinned):
     """A non-blocking copy from pageable memory is staged and synchronous anyway."""
     config = _config(tmp_path, unpinned)

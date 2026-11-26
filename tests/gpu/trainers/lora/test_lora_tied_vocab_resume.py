@@ -23,7 +23,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
-from halo.models.unwrapping import plain_adapter_key
+from halo.models.introspection.unwrapping import plain_adapter_key
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.adapters import load_peft_model, unwrap

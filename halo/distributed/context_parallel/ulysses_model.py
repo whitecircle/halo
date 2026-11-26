@@ -15,7 +15,7 @@ import torch.nn as nn
 from accelerate.utils import is_peft_model
 
 from halo.distributed.context_parallel.config import CPConfig, CPConfigError
-from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, ULYSSES_GATED_DELTA_MAP
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
 from halo.distributed.context_parallel.sequence_chunks import cp_local_targets, split_sequence_for_cp
 from halo.distributed.expert_parallel.deepep.capacity import bump_forward_generation
@@ -24,10 +24,14 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX, chunked_token_sum, cross_e
 from halo.log import warn_once
 from halo.model_loading.liger.cross_entropy import FusedHeadLossUnavailable, fused_head_loss
 from halo.model_loading.liger.dispatch import LIGER_CP_FUSED_LOSS_ATTR
-from halo.models.config_access import config_sources, get_config_field
 from halo.models.forward_capture import capturing_forward_outputs
+from halo.models.introspection.config_access import config_sources, get_config_field
+from halo.models.introspection.unwrapping import (
+    base_transformers_model,
+    strip_cp_attention_level,
+    unwrap_framework_wrappers,
+)
 from halo.models.moe.config_fields import require_router_aux_loss_coef
-from halo.models.unwrapping import base_transformers_model, strip_cp_attention_level, unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
 from halo.subclass_registry import swap_registered_modules
 
@@ -49,7 +53,7 @@ class UlyssesModel(nn.Module):
     """A transformers model under Ulysses CP. ``forward`` splits the inputs along the sequence axis and computes the
     loss itself, so the boundary token between chunks is scored. Attention ignores the mask: trailing pads only."""
 
-    # Toolkit unwrap protocol (halo.models.unwrapping.unwrap_toolkit_wrappers).
+    # Toolkit unwrap protocol (halo.models.introspection.unwrapping.unwrap_toolkit_wrappers).
     _toolkit_inner_model_attr = "model"
 
     def __init__(self, model: nn.Module, cp_config: CPConfig):
@@ -317,7 +321,9 @@ def apply_ulysses_attention(model: nn.Module, cp_group: dist.ProcessGroup, cp_si
         logger.debug(f"Patched {path} ({type(attention).__name__}) -> {wrapper_cls.__name__}: {wrapper.extra_repr()}")
         return wrapper
 
-    patched = len(swap_registered_modules(model, ULYSSES_ATTENTION_MAP, build, descend_into_match=True))
+    patched = len(
+        swap_registered_modules(model, ULYSSES_ATTENTION_MAP | ULYSSES_GATED_DELTA_MAP, build, descend_into_match=True)
+    )
 
     if patched == 0:
         raise CPConfigError(

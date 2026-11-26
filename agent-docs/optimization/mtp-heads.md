@@ -10,7 +10,7 @@
 | GLM-4 MoE Lite | decoder list entry at `num_hidden_layers` | `eh_proj`, `enorm`, `hnorm`, `shared_head.norm` beside the layer's own children; the release's `embed_tokens` and `shared_head.head` copies are the trunk's in training |
 | Nemotron-H: Lightning, and Super VL on its text and composite routes | `mtp.*` beside the output embedding it shares, so `language_model.mtp.*` on the composite | `layers.0`, an attention block with `eh_proj`, `enorm` and `hnorm`; `layers.1`, a MoE block with `final_layernorm` |
 
-Every other tail is refused by name (`MTP_REFUSALS`, `halo/models/mtp/spec.py`): Flash-Next's draft layer reads hyper-connection streams, GLM-5.3's tail lacks layers its class builds and is stored in fp8, Step-3.7 owns a head per draft layer, Inkling needs renames, DeepSeek-V4 stores vendor names and quantized experts. A family with no tail gets a plain refusal. `tests/cpu/models/test_mtp_head_spec.py` holds every class declaring a tail to a spec or a refusal.
+Every other tail is refused by name (`MTP_REFUSALS`, `halo/models/mtp/spec.py`): Flash-Next's draft layer reads hyper-connection streams, GLM-5.3's tail lacks layers its class builds and is stored in fp8, Step-3.7 owns a head per draft layer, Inkling needs renames, Inkling 2 ships a five-layer draft head of its own configuration that transformers' class does not build, DeepSeek-V4 stores vendor names and quantized experts. A family with no tail gets a plain refusal. `tests/cpu/models/test_mtp_head_spec.py` holds every class declaring a tail to a spec or a refusal.
 
 Ling-3.0-flash's remote forward runs its own head; see [Bailing](../models/bailing.md#mtp-tail).
 
@@ -53,7 +53,7 @@ What `hard` does depends on the rate: from a stale start it climbs then falls at
 
 On first-turn rows through `--release`, Nemotron-H's own head reads 0.8124 on Lightning and 0.8876 on Super VL before any fit. A `soft` fit at 1e-5 falls and the gate stops it (0.8076 and 0.8854). At 1e-6 Lightning holds at 0.8126 and the gate passes. Super VL did not run at that rate.
 
-The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4, and at EP2 at 0.8185 on FA2 and 0.8189 on FA4. On the trunk's own samples at temperature 1, an own start reads 0.8704, 0.8877, 0.8919, 0.8916, 0.8902, 0.8901. Under `detached` at 5e-6, acceptance follows the moving trunk over 200 steps: 0.8187 to 0.8158 `soft`, 0.8187 to 0.8136 `hard`.
+The same stale `soft` row ends at 0.8253 on Liger's fused linear cross-entropy and 0.8256 on FA4, and at EP2 at 0.8185 on FA2 and 0.8189 on FA4. On the trunk's own samples at temperature 1, an own start reads 0.8704, 0.8877, 0.8919, 0.8916, 0.8902, 0.8901. Under `detached` at 5e-6, acceptance follows the moving trunk over 200 steps: 0.8187 to 0.8158 `soft`, 0.8187 to 0.8136 `hard`.
 
 ## Parallel axes
 
@@ -61,7 +61,7 @@ The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4, 
 |---|---|
 | FSDP2 | Its own shard group on either placement, cut as a decoder layer's is, with a router of another dtype split off and unsharded with it. `head_only` leaves the frozen trunk out of the wrap, so no trunk parameter gathers and a step reduces the head's group alone. Every GPU then holds that trunk whole, and at `ep_group_size: 1` that takes in the expert banks a sharded wrap would split: about 244 GB at bf16 on Qwen3.5-122B, by its parameter count. |
 | EP, ETP, EP+ETP | The head's MoE block takes the family's EP layer, and each rank streams its slice of the tail. It dispatches the tokens the first MoE layer sized for, so it adds no capacity all-reduce, and a row with no target still walks its ops on every rank. |
-| Long rows | The term runs Liger's fused kernel where the family's fused loss is on, else fp32 logits in checkpointed chunks, so no `[T, V]` plane stays held through backward. |
+| Long rows | The term runs Liger's fused linear cross-entropy where the family's fused loss is on, else fp32 logits in checkpointed chunks, so no `[T, V]` plane stays held through backward. |
 | Gradient checkpointing | Follows the run. `detached` passes the head grad-requiring leaves, so a reentrant checkpoint around a list head keeps its gradient. |
 | Several nodes | EP groups replicate each other, with the head's experts in the deferred sweep as the trunk's are, and plain FSDP2 spans the nodes. A save writes the head on every node's disk under per-node output storage. Node-local EP and plain FSDP2 ran on two machines at 2 and at 4 GPUs each, each on its own disk. |
 
@@ -69,7 +69,7 @@ The same stale `soft` row ends at 0.8253 on the fused kernel and 0.8256 on FA4, 
 
 `joint` and `detached` add the head's forward and backward and a second cross-entropy to a step. `head_only` drops the trunk's graph and its gradient checkpointing, and still runs the next-token cross-entropy for the metric; `soft` takes a gradient through it, so `soft` costs more than `hard` there and not where the trunk already trains on that loss. MFU's attention term walks the decoder list, so it counts a GLM-4 head's layer and not a `mtp.*` head's.
 
-`test_sft_mtp_head_cost.py`, Qwen3.6-35B at EP8 on FA2: packed random tokens, 32,992 per rank per step, weight 0.3, gradient checkpointing except on `head_only`, the median of 50 steps.
+`test_sft_mtp_head_cost.py`, Qwen3.6-35B at EP8 on FA2: packed random tokens, 32,992 per rank per step, weight 0.3, gradient checkpointing except on `head_only`, the median of 49 steps.
 
 | Arm | Seconds per step (quartiles) | Against no head | Tokens/s per rank | Peak allocated | Peak reserved |
 |---|---|---|---|---|---|
@@ -172,7 +172,7 @@ Neither render shows a served gain. Each recipe's rows are ultrachat replies, no
 | `test_sft_mtp_head.py` | Per family and shard layout: the head's gradient against a plain model at the run's dtype, one dispatch and one capacity generation per forward, equal first loss hard and soft, accumulated forwards, packed rows on flash, a rank with no head token |
 | `test_sft_mtp_head_checkpoint.py` | Exact resume, fp32 masters included, export, shard merge, a scope change and the gate; two EP groups as replicas of a head that moved, on two simulated domains or two machines |
 | `test_sft_mtp_head_real.py` | Qwen3.6-35B at EP8: acceptance hard and soft from a stale and from its own head, at the safe learning rate; the fit on the trunk's own samples; the gate on an oversized rate and an off-by-one target; a `detached` trunk against a run with no head. `--release` runs an own-head row on a Nemotron-H release through its knob, recording only |
-| `test_sft_mtp_head_cost.py` | Seconds per step and peak memory of each scope, hard and soft, against no head at 33,000 tokens; `--arms` picks a subset, which leaves out the bars needing every arm |
+| `test_sft_mtp_head_cost.py` | Seconds per step and peak memory of each scope, hard and soft, against no head at 32,992 tokens per rank; `--arms` picks a subset, which leaves out the bars needing every arm |
 | `test_sft_mtp_head_serving.py` | The acceptance a live engine reads off a checkpoint's head, against a control head on the same prompts, and on vLLM that greedy output parts from a server with no draft only within 1.0 logprob. `--release` reads a Nemotron-H server's tokenizer through that release's knob |
 
 ## Refusals

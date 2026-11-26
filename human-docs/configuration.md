@@ -42,7 +42,7 @@ router-balancing mode exports.
 | Logging | `report_to`, `project_name`, `run_name`, `logging_steps` |
 | Online RL (both trainers) | `num_generations`, `rewards` |
 | Online GRPO | `vllm_server_host`, `vllm_server_port` |
-| Async GRPO with environments | `rollout_server_url`, `environment_type`, `num_rollout_workers` |
+| Async GRPO with environments | `rollout_server_url`, `environment_type`, `rollout_actor_budget` |
 
 Notes on the ones that cause trouble:
 
@@ -132,9 +132,10 @@ Batch size is per device. The global batch is
 `per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size`,
 so the same file trains a different global batch on 1 GPU and on 8.
 
-`gradient_checkpointing: true` adds about 20–30% to step time and saves a lot of
-activation memory. It is usually the first thing to turn on when a run doesn't
-fit.
+`gradient_checkpointing: true` adds 22 to 32% to step time on Halo's GPT-OSS 20B
+benchmark rows on 8 B300s and saves a lot of activation memory
+([Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch) ↗).
+It is usually the first thing to turn on when a run doesn't fit.
 
 Each [training method](training-methods/README.md) page lists its own keys, and
 [Environment variables](environment-variables.md) covers what the YAML does not.

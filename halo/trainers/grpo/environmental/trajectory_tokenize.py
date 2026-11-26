@@ -8,17 +8,22 @@ from typing import NamedTuple
 
 import torch
 
-from halo.environments.episode import RolloutResult
-from halo.environments.episode_keys import CONTEXT_OVERFLOW_KEY, EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
-from halo.environments.messages import engine_view
-from halo.environments.registry import build_environment
-from halo.environments.rollout_config import (
-    REASONING_BUDGET_SOFT_TEMPLATE_VAR,
-    REASONING_BUDGET_TEMPLATE_VAR,
-    VLLM_BACKEND,
+from halo.data.chat_render import resolve_template_conversation
+from halo.environments.episodes.candidate_logprobs import CandidateLogprobs
+from halo.environments.episodes.episode_keys import (
+    CONTEXT_OVERFLOW_KEY,
+    EPISODE_INVALID_KEY,
+    EPISODE_INVALID_REASON_KEY,
 )
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import VLLM_BACKEND
+from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.log import warn_once
-from halo.models.context_window import UNSET_MODEL_MAX_LENGTH, is_bounded_length, resolve_model_context_window
+from halo.models.introspection.context_window import (
+    UNSET_MODEL_MAX_LENGTH,
+    is_bounded_length,
+    resolve_model_context_window,
+)
 from halo.trainers.grpo.environmental.trajectory_spans import TemplateSpanError, locate_assistant_spans
 
 logger = logging.getLogger(__name__)
@@ -42,24 +47,19 @@ class TurnRow(NamedTuple):
     sampling_logps: torch.Tensor | None
     turn_routing: TurnRouting | None
     negative_only: bool = False
+    candidates: CandidateLogprobs | None = None
 
 
 def single_trajectory_row(tokenized: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> list[TurnRow]:
     return [TurnRow(*tokenized, None, None)]
 
 
-def rollout_template_kwargs(
-    rollout_kwargs: dict, reasoning_effort: str | None, reasoning_budget: int | None = None, budget_soft: bool = False
-) -> dict:
-    """The run's template variables plus the episode's ``reasoning_effort`` and per-turn budget (flagged soft where the
-    engine did not enforce it), so a trainer-side render reproduces the engine's."""
+def rollout_template_kwargs(rollout_kwargs: dict, reasoning_effort: str | None) -> dict:
+    """The run's template variables plus the episode's ``reasoning_effort``, so a trainer-side render reproduces the
+    engine's effort line."""
     kwargs = dict(rollout_kwargs)
     if reasoning_effort is not None:
         kwargs["reasoning_effort"] = reasoning_effort
-    if reasoning_budget is not None:
-        kwargs[REASONING_BUDGET_TEMPLATE_VAR] = reasoning_budget
-        if budget_soft:
-            kwargs[REASONING_BUDGET_SOFT_TEMPLATE_VAR] = True
     return kwargs
 
 
@@ -103,7 +103,7 @@ class TrajectoryTokenizeMixin:
             "no_reasoning_captured",
             "No assistant turn in this step carried reasoning, and the run reads it (%s): the rollout server is most "
             "likely running without a reasoning parser (or the model emits none). The reasoning floor then "
-            "scores every episode as maximal under-use, the reasoning price charges nothing, and a carried "
+            "scores every episode it charges as maximal under-use, the reasoning price charges nothing, and a carried "
             "thought is never sent. Serve with the family's reasoning parser, or turn off what reads it.",
             " and ".join(consumers),
         )
@@ -138,15 +138,16 @@ class TrajectoryTokenizeMixin:
         return per_trajectory
 
     def _tokenize_trajectory_turns(self, result: RolloutResult) -> list[TurnRow]:
-        """Falls back to the re-tokenized row when ids are missing and to one masked row when no turn yields a row. Per
-        turn since a template may drop prior-turn CoT, and a spliced later turn would be scored under a context it
-        never saw."""
+        """Falls back to the re-tokenized row when ids are missing (drops the episode where the view rewrites earlier
+        turns) and to one masked row when no turn yields a row. Per turn since a template may drop prior-turn CoT, and
+        a spliced later turn would be scored under a context it never saw."""
         traj = result.trajectory
         if not traj or not any(m.role == "assistant" for m in traj.messages):
             return single_trajectory_row(self._tokenize_trajectory(result))
         messages = traj.messages
         # One always-trained turn without captured ids falls the whole trajectory back rather than silently
-        # dropping it (an empty capture is a zero-token turn, not a missing one).
+        # dropping it (an empty capture is a zero-token turn, not a missing one), unless the view rewrites earlier
+        # turns, where no whole-trajectory render is what the engine saw.
         if any(m.token_ids is None for m in messages if m.role == "assistant" and not m.untrainable):
             remedy = (
                 "Run the vLLM server with --return-tokens-as-token-ids (docker-compose.vllm.yml passes it)."
@@ -154,6 +155,13 @@ class TrajectoryTokenizeMixin:
                 else "SGLang needs no server flag for this — the ids are requested per call, so a "
                 "rollout that returned none usually means the engine errored or was killed mid-turn."
             )
+            if self._rollout_env.rewrites_history_in_view:
+                self._invalidate_unrenderable_episode(
+                    result,
+                    "a turn came back without sampled token ids, and the environment's view rewrites earlier turns, "
+                    f"so no render of the whole trajectory matches what the engine saw. {remedy}",
+                )
+                return single_trajectory_row(self._masked_trajectory_tensors())
             warn_once(
                 logger,
                 self._warned_once,
@@ -177,7 +185,7 @@ class TrajectoryTokenizeMixin:
                 # A template that rejects this prefix fails on one rank only: the episode is dropped, never raised.
                 try:
                     prompt_ids = self._render_messages_to_ids(
-                        engine_view(messages[:idx], self._carry_reasoning), True, template_kwargs
+                        self._rollout_env.observation_view(messages[:idx]), True, template_kwargs
                     )
                 except Exception as e:
                     if m.untrainable:  # its row only ever adds a penalty; losing it costs no other turn
@@ -222,6 +230,7 @@ class TrajectoryTokenizeMixin:
             ),
             turn_routing=turn_routing,
             negative_only=message.untrainable,
+            candidates=message.candidates,
         )
 
     def _tokenize_trajectory(self, result: RolloutResult) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -276,12 +285,7 @@ class TrajectoryTokenizeMixin:
         )
 
     def _template_kwargs(self, trajectory) -> dict:
-        return rollout_template_kwargs(
-            self.async_config.rollout_chat_template_kwargs,
-            trajectory.reasoning_effort,
-            trajectory.reasoning_budget,
-            trajectory.reasoning_budget_soft,
-        )
+        return rollout_template_kwargs(self.async_config.rollout_chat_template_kwargs, trajectory.reasoning_effort)
 
     def _render_messages_to_ids(
         self,
@@ -290,9 +294,13 @@ class TrajectoryTokenizeMixin:
         template_kwargs: dict,
         include_thinking: bool = True,
     ) -> list[int]:
-        """``include_thinking=False`` emits no reasoning, the probe for a template that hides prior-turn CoT."""
+        """``include_thinking=False`` emits no reasoning, the probe for a template that hides prior-turn CoT. A stored
+        call's wire-form arguments reach a template that renders the mapping parsed, as the engine hands them over."""
+        conversation = [m.to_dict(include_thinking=include_thinking) for m in msgs]
         text = self.processing_class.apply_chat_template(
-            [m.to_dict(include_thinking=include_thinking) for m in msgs],
+            resolve_template_conversation(
+                self.processing_class, conversation, with_tools=self._tools_schema is not None
+            ),
             tools=self._tools_schema,
             tokenize=False,
             add_generation_prompt=add_generation_prompt,
@@ -304,6 +312,8 @@ class TrajectoryTokenizeMixin:
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
         """The OpenAI tool schema the rollout passes the engine, rendered into the trainer's prompts too."""
+        if self._rollout_env.TOOLS_ARRIVE_ON_RESET:
+            raise RuntimeError("Dynamic tool schema has not been discovered at rollout startup")
         return self._rollout_env.get_tools_schema()
 
     def _admit_row(self, row: str, prompt_len: int, completion_label: str, completion_len: int, suspect: str) -> bool:

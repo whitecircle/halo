@@ -7,6 +7,7 @@ import glob
 import json
 import math
 import os
+import re
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from functools import cached_property
 from typing import Any
 
 import torch
+from huggingface_hub import try_to_load_from_cache
 from safetensors import SafetensorError, safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from transformers.utils import CONFIG_NAME
@@ -42,6 +44,8 @@ PER_NODE_PLACEMENT_REMEDY = (
     "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
     "anything else merge every node's directory with scripts/after_training/merge_pp_stages.py first."
 )
+# The cache layout a hub repo's snapshot takes: models--<org>--<name>/snapshots/<commit>.
+_HF_SNAPSHOT_PATH = re.compile(r"(?:^|/)models--(?P<repo>[^/]+)/snapshots/(?P<commit>[^/]+)(?:/|$)")
 
 
 @dataclass(frozen=True)
@@ -208,6 +212,22 @@ def read_checkpoint_config(
         return None
     with open(path, encoding="utf-8") as handle:
         return json.load(handle)
+
+
+def find_hub_snapshot(path: str) -> tuple[str, str] | None:
+    """The (repo id, commit) a hub-cache snapshot directory names, or ``None`` for any other path."""
+    found = _HF_SNAPSHOT_PATH.search(path)
+    return None if found is None else (found["repo"].replace("--", "/"), found["commit"])
+
+
+def find_checkpoint_config(path: str) -> dict | None:
+    """The JSON config of the checkpoint another host names by ``path``, as this host reads it: the directory's own,
+    else the same hub snapshot from this host's cache; ``None`` where neither is here."""
+    if (config := read_checkpoint_config(path, missing_ok=True)) is not None:
+        return config
+    snapshot = find_hub_snapshot(path)
+    cached = None if snapshot is None else try_to_load_from_cache(snapshot[0], CONFIG_NAME, revision=snapshot[1])
+    return read_checkpoint_config(os.path.dirname(cached)) if isinstance(cached, str) else None
 
 
 def load_full_state_dict(checkpoint_dir: str, device: str = "cpu") -> dict[str, torch.Tensor] | None:

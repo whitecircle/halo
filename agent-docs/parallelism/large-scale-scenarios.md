@@ -6,7 +6,7 @@ is enforced in code and named by its symbol; the memory columns are arithmetic f
 so treat them as a plan, not a measurement. Mechanism pages:
 [Multi-Node](multi-node.md), [Expert Parallelism](expert-parallelism.md),
 [Launch Recipes](launch-recipes.md), [Qwen3.5](../models/qwen3_5.md),
-[GPU Training Theory](../reference/gpu-training-theory.md#why-n-gpus-is-not-n-throughput).
+[GPU Training Theory → Why N GPUs are not N times faster](../reference/gpu-training-theory.md#why-n-gpus-are-not-n-times-faster).
 
 Two facts set every cell and pull against each other. `nvlink_domain_size` decides whether EP's
 per-layer all-to-all crosses the slow fabric. The routed experts are 386.5 B of the 396.8 B total,
@@ -25,7 +25,7 @@ decision off topology alone: `EPConfig.spans_domains = num_domains > 1 and not n
 (`halo/distributed/expert_parallel/config.py`), on which the elastic backend sets `EP_DISABLE_GIN=0`, Gin on.
 
 `num_domains` counts NVLink **domains**, not OS nodes, so a group inside one NVL72 rack stays on NVLink
-even though it spans ~18 hosts.
+even though it spans up to 18 hosts.
 
 What EP at `ep_scope=global` across domains puts on that fabric per microbatch, at this model's 60
 MoE layers, is **240** all-to-alls over the EP group: forward dispatch + combine per MoE layer, and
@@ -37,8 +37,9 @@ Gradient checkpointing does not multiply the count — recompute replays cached 
 re-issuing the collective, and that cache is a memory term of its own
 ([GC replay cache](#per-rank-memory-model)).
 
-The cost is worse than the count suggests: cross-domain dispatch is **latency**-bound, so its fixed
-per-collective cost does not amortize as the message grows
+The cost is worse than the count suggests: over EFA, cross-domain dispatch is **latency**-bound,
+since its layout exchange round-trips through a CPU proxy, so its cost grows with the number of
+cross-node operations rather than with the bytes
 ([DeepEP → AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).
 
 **The fork:**
@@ -150,15 +151,16 @@ elastic backend and the hidden itself on legacy (both 4096 here). Under EP+ETP `
 (`_reject_fsdp_settings`) — every layout on this page is EP, so
 `fsdp_reshard_after_forward: false` is mandatory, not a choice.
 
-**Budget.** A B300 reports 288 GB (275,040 MiB), and reserved memory is what counts against it. Reserved
+**Budget.** A B300's driver reports 287.4 GB (267.7 GiB; NVIDIA lists 288 GB), and reserved memory is what counts against it. Reserved
 runs above allocated: [Nemotron-H's 32,000-token recipe](../models/nemotron-h.md#memory) allocates 227–235 GB and
-reserves 268–283 GB, 99.4% of the device on its top rank. These plans count allocated memory, so cells are ⚠ between
+reserves 268–283 GB, 98.5% of the 287.4 GB on its top rank (computed). These plans count allocated memory, so cells are ⚠ between
 230 and 260 GB, ✗ above.
 
 **The DeepEP arena is a separate term**, paid once for the model rather than once per layer. It is
 receive-side and linear in the dispatch-group width: at this model's `hidden=4096`, `top_k=10` an
 `ep64` group at 8192 tokens per rank costs **4.06 GiB** on top of the columns below. Formula and
-growth law: [DeepEP → Buffer sizing](../infrastructure/deepep.md#buffer-sizing).
+growth law: [DeepEP → Buffer sizing](../infrastructure/deepep.md#buffer-sizing). A build or grow takes
+1.5x the capacity needed, so the arena can sit up to 1.5x above that figure.
 
 It does not shape the choice of `ep_size` at any cell here; a wide dispatch group keeps its
 expert-memory saving instead of spending it back. The one exception is `HALO_EP_CAPACITY_DEDUP=0`,
@@ -185,7 +187,7 @@ The EP lazy loader slices by **`ep_size`, not `X`** — ETP partners share `disp
 the same experts at full intermediate width. The intermediate dim is split later, at EP patching
 (`_init_fused_glu_params` / `_store_separate_glu_params`,
 `halo/distributed/expert_parallel/moe_layer/compute.py`), which also holds one layer's transposed full-width
-copy alongside the new shard. So `ep2 + etp8` has the same steady state as `ep16` and a **407 GB**
+copy alongside the new shard. So `ep2 + etp8` holds `ep16`'s expert and non-expert shares and a **407 GB**
 load peak.
 
 ## Scenario matrix
@@ -207,15 +209,15 @@ NVLink.
 | **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **263** | 383 | 69 | ✗ the replay cache takes full fine-tuning past the budget; frozen layers or `s4096` (244, ⚠) fit |
 | 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **288** | 407 | 69 | ✗ TP collapses `F` to 2 |
 | 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 240 | 291 | **407** | ✗ load peak |
-| 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
+| 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386–1,544 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | 2 | `pp2` × `ep8` node | 8 per stage | 8 | 206 | 27 | 268 | 373 | 66 | ✗ stage 0 holds 32 of the 60 layers and two microbatches' replay caches ([PP cells](#pipeline-parallel-cells)) |
 | **3** (24) | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load ([The 3-node case](#the-3-node-case)) |
-| 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
+| 3 | `ep2/4/8` node | ≤8 | 24 | 386–1,544 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
 | 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 29 | 178 | 240 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
 | 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_reject_ep_group`) |
 | 3 | `pp3` × `ep8` node | 8 per stage | 8 | 155 | 22 | 216 | 334 | 51 | ✓ at 8k, the one legal 3-node layout, at the [PP costs](#pipeline-parallel-cells); ✗ at 32k |
 | **4** (32) | **`ep32` global** | 32 | 32 | 97 | 28 | **169** | 303 | 45 | ✓ |
-| 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 149 | 221 | **214** | ⚠ load peak, experimental axis |
+| 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 149 | 221 | 214 | ✓ experimental axis |
 | 4 | `ep32` global + `tp8` | 32 | 4 | 97 | 39 | 180 | 314 | 45 | ✓ but strictly worse than `ep32` |
 | 4 | `ep16` global × 2 replicas | 16 | 32 | 193 | 31 | 263 | 383 | 69 | ✗ as `ep16` at 2 nodes; both groups still span all 4 domains (4 contiguous ranks per domain — column-block layout), so dispatch stays on RDMA. The win is the narrower 16-rank dispatch group, not domain locality |
 | 4 | `pp4` × `ep8` node | 8 per stage | 8 | 103 | 16 | 154 | 258 | 36 | ✓ EP on NVLink and no 8192 tokens/rank cap, at the [PP costs](#pipeline-parallel-cells); ⚠ at 32k |
@@ -363,9 +365,9 @@ because `_reject_expert_tp` forces exactly one ETP group per NVLink domain
 (`expert_tp_size == members_per_domain`, `ep_size == num_domains`). EP+ETP is an experimental axis —
 its expert-TP reduce runs in token space outside the DeepEP dispatch→combine span.
 
-On InfiniBand with IBGDA the latency wall does not exist; use plain `ep64` — but size the microbatch against the arena
-term above, which `ep8 + etp8` does not pay (its dispatch group is 8 wide, so its arena is an eighth
-of `ep64`'s at the same tokens/rank).
+On InfiniBand, Gin can be device-initiated (IBGDA), with no CPU proxy in each operation. Before choosing plain `ep64` there, measure it
+against `ep8 + etp8`, and size its microbatch against the arena term above. The dispatch group of `ep8 + etp8` is 8 wide, so its arena is an eighth
+of `ep64`'s at the same tokens/rank.
 
 ## Launch recipes
 
@@ -414,7 +416,7 @@ Values that differ from it or are load-bearing at 397B:
 |---|---|---|
 | `expert_parallel_size` / `ep_scope` | per the table above / `global` | node-scope EP caps `X` at 8 and cannot hold `P_e` |
 | `attn_implementation` | `flash_attention_2` | unset, these packed rows load FA2 on Blackwell too (unpacked rows take FA4, [Qwen3.5 → Configs](../models/qwen3_5.md#configs)) and Hopper picks FA3; the pin keeps Hopper on FA2 as well. An explicit FA2 is kept as-is |
-| `packing` / `padding_free` | `true` / `false` | fixed-length only — the M-RoPE varlen path crashes FA2 |
+| `packing` / `padding_free` | `true` / `false` | fixed-length rows, as the shipped recipe |
 | `fsdp_reshard_after_forward` | `false` | ZeRO-3 is rejected under EP |
 | `gradient_checkpointing` | `true` | the activation column assumes it |
 | `bf16` + `optim` | as shipped | AdamWBF16 auto-enables whenever `bf16: true` and `optim` is `adamw_torch_fused`/`adamw_torch` outside accelerate-managed DDP — both are already the defaults, so neither key has to be written to get the 8 B/param cost. `optim: muon` or `flash_adamw` opts out |
@@ -422,9 +424,9 @@ Values that differ from it or are load-bearing at 397B:
 | `text_only_model` | `true` | loads `Qwen3_5MoeForCausalLM`, which drops the vision tower and MTP tail from the build and the export ([Qwen3.5 → EP layer](../models/qwen3_5.md#ep-layer)). `aux_loss` trains on either class |
 | `moe_balancing` | `aux_loss` | trains and exports by construction. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the 122B recipe's mode) | refused under an explicit `aux_loss` or `none`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
-| `fp32_router` | `true` | +1 GB per rank (the 0.13 B router weights at 16 B/param, not in the matrix columns), and 512 experts at top-10 is where bf16 routing logits start to tie |
-| `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost outside PP, where it doubles the held stage gradient |
-| `use_grouped_gemm` / `use_liger_kernel` | `true` / `true` (the defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100 |
+| `fp32_router` | `true` | +1 GB per rank (the 0.13 B router weights at 16 B/param, not in the matrix columns) |
+| `fp32_grad_reduce` | `true` | a bf16 reduce's error grows with world size (fp32 is about 2.2× tighter on 8 GPUs, [BF16 optimizer](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)); no storage cost outside PP, where it doubles the held stage gradient |
+| `use_grouped_gemm` / `use_liger_kernel` | `true` / `true` (the defaults) | one grouped launch replaces a matmul per local expert ([Grouped GEMM](../optimization/grouped-gemm.md)) |
 | `liger_kernel_config.fused_linear_cross_entropy` | `true` | opt-in: this family defaults to Liger's plain cross-entropy. The fused loss never materializes `[b, S, 248320]` — 4 GB per copy at `S=8192` |
 | `max_concurrent_loading` | leave unset | node-local wave gate; unset adapts to the node (`min(4, max(1, local_world_size // 2))` — 4 on an 8-GPU node, 2 on a 4-GPU tray), and any explicit value is used verbatim. The lazy EP path bypasses it, so at load it bounds only the EP fallback; a resume's optimizer-shard reads take it too |
 | `save_sharded_ep` | `true` on the pure-EP cells (`ep16`/`ep32`/`ep64`) | every rank writes its own shard instead of funneling 794 GB through one. Requires a single EP group spanning all ranks (`ep_group_size == world_size` — exactly these cells) and a shared output filesystem; **rejected under ETP**, so the `ep8+etp8` cell takes the layer-streaming gathered save instead. Merge before serving ([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)) |
@@ -448,7 +450,7 @@ a measurement, except the three GLM-5.3-Flash rows marked measured ([rates](../m
 | **GLM-5.3-Flash** (321B; 42 MoE layers × 288 × `M=2048, H=4096`) | 304 B | 2 × 8, `ep16 --ep_scope=global` | 19.0 B → 152 GB | Measured, GC on: 68.8 GiB after load, 212.7–214.1 GiB peak, 1,504 tok/s/GPU | the 8192 tokens/rank cross-node dispatch ceiling. Needs the bf16 conversion (~650 GB) |
 | GLM-5.3-Flash | 304 B | 2 × 8, `pp2 × ep8` | 19.0 B → 152 GB | Measured, GC on: 57.1 / 54.0 GiB after load, 218.0–218.7 / 197.5–197.9 GiB peak, 2,423 tok/s/GPU | padded rows only, as packing is refused; 1.61× `ep16` |
 | GLM-5.3-Flash | 304 B | 2 × 8, `ep8` with DP | 38.0 B → 304 GB | Measured: out of memory in the first optimizer step, 243–250 GiB allocated of 267.7 | optimizer state on 40.2B trainable per rank: weights and gradients fit, AdamWBF16's moments do not |
-| GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | ~200 GB by arithmetic | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
+| GLM-5.3-Flash on EFA | 304 B | 2 × 8, `ep2 --expert_tensor_parallel_size=8 --ep_scope=global` | same `X=16` | ~200 GB steady by arithmetic; the ~338 GB load peak (`2·(P_ne + P_e/ep_size)`) is over the device | one cross-node dispatch partner per rank instead of 8 (one ETP group per domain, [EP+ETP](expert-tensor-parallelism.md#process-groups-epetp-combo)); experimental axis |
 | **Step-3.7-Flash** (198B; 42 MoE layers × 288 × `M=1280, H=4096`) | 190 B | 1 × 8, `ep8` | 23.8 B → 190 GB | ~213 GB (+15 GB gathered non-expert, +6 GB shards) | ~75 GB left on the 288 GB device for activations and the allocator's reserve at `max_length: 8192` with checkpointing — marginal, unmeasured |
 | Step-3.7-Flash | 190 B | 2 × 8, `ep16 --ep_scope=global` | 11.9 B → 95 GB | ~115 GB | the 8192 tokens/rank dispatch ceiling |
 | **DeepSeek-V4-Flash** (284B; 43 MoE layers × 256 × `M=2048, H=4096`, 3 of them hash-routed) | 277 B | 2 × 8, `ep16 --ep_scope=global` | 17.3 B → 138 GB | ~155 GB | the 8192 tokens/rank dispatch ceiling. Needs the bf16 conversion (~580 GB output) |
@@ -470,7 +472,8 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 
     Rotation deletes the previous checkpoint only after the new one completes, so
     `save_total_limit: 1` still transiently holds **both**: budget ~1.6 TB free per save, ~4.8 TB with
-    optimizer shards. Confirm the volume with `findmnt`/`df -h` before pointing `HF_HOME`,
+    optimizer shards. The trainer checks the peak against `output_dir`'s volume at construction
+    ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)). Confirm the volume with `findmnt`/`df -h` before pointing `HF_HOME`,
     `HF_DATASETS_CACHE`, `TMPDIR` and `HALO_DATA_ROOT` at it.
 
     On the `save_sharded_ep` cells budget for the merge too: `merge_ep_shards.py` streams (peak host
@@ -528,6 +531,6 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 | `moe/*` metrics present and non-zero | `MoEMetricsCallback` logs them under `aux_loss` (`BalancingBiasCallback` under a bias-update mode) | this checkpoint keeps its expert fields on `text_config`, and `resolve_expert_count` / `resolve_router_topk` resolve the text config before reading them. Silent zeros mean the model is not being seen as MoE and `moe_balancing` has resolved to `none` — the router is training unbalanced |
 | Packing took the varlen path | no dense-mask warning from `select_data_collator` | a non-varlen `_attn_implementation` pays a dense mask over the flattened batch, and on some families it also stops isolating documents ([Document isolation](../data/collators.md#document-isolation-under-packing)). Pin `flash_attention_2` |
 | Expert balance (`MoEMetricsCallback`, or `BalancingBiasCallback` under a bias-update mode) | no expert at 0 tokens across a step | raise `router_aux_loss_coef` under `aux_loss`; under `bias_update_transient` raise `router_balancing_rate` — but see the 512-expert scale caveat in [Callbacks](../training-methods/callbacks.md#balancingbiascallback) before doubling it |
-| Achieved TFLOPS | compare against the [MFU registry](../optimization/throughput-benchmarks.md) at 35B-A3B. Its rows are EP-only; tok/s/GPU on an `ep8 + etp8` cell reads lower by construction (eight ETP partners share one batch), so compare TFLOPS, which counts each rank's own compute | a 2×+ shortfall on EFA is the proxy-Gin latency wall: narrow the dispatch group (`ep8 + etp8`) |
+| Achieved TFLOPS | compare this model's own cells at the same `X` (`ep64` against `ep8 + etp8`, which hold the same parameters per rank); achieved TFLOPS compares only layouts with equal parameters per rank ([Metrics](../optimization/throughput-benchmarks.md#metrics)). tok/s/GPU on an `ep8 + etp8` cell reads lower by construction (eight ETP partners share one batch), so compare TFLOPS, which counts each rank's own compute | a 2×+ shortfall on EFA is the proxy-Gin per-operation latency: narrow the dispatch group (`ep8 + etp8`) |
 | Step time variance | stable after 3 warmup steps | a slow rank is usually a degraded NVLink lane or a straggler NIC |
 | First checkpoint | written, and re-loadable with `from_pretrained` — on the `save_sharded_ep` cells only **after** `merge_ep_shards.py`; the artifact itself is per-rank (`format: "ep_sharded"`) and every loader refuses it unmerged. The gathered `ep8+etp8` row loads directly | raise `DIST_NCCL_TIMEOUT_MINUTES` before blaming the fabric |

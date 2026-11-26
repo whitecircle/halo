@@ -15,7 +15,6 @@
     python tests/cpu/grpo/test_env_grpo_script_contracts.py
 """
 
-import logging
 import re
 import sys
 import types
@@ -26,6 +25,8 @@ import yaml
 from datasets import Dataset, DatasetDict
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRPOScriptArguments
+from halo.environments.registry import build_environment
+from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from tests.common.repo import REPO_ROOT, load_script_module
 
 
@@ -61,6 +62,38 @@ def test_unknown_environment_type_fails_before_any_load(env_grpo_module, tmp_pat
         mock.patch.object(sys, "argv", ["prog", str(config)]),
         mock.patch.object(env_grpo_module, "init_training_script", side_effect=AssertionError("reached the load")),
         pytest.raises(ValueError, match=r"Unknown environment type: 'no_such_env'.*code_contests"),
+    ):
+        env_grpo_module.main()
+
+
+def test_a_thinking_off_run_refuses_an_environment_that_reads_reasoning_before_any_load(env_grpo_module, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\n"
+        "bf16: false\nuse_cpu: true\nenvironment_type: native_math\nrollout_thinking: false\n"
+        "environment_kwargs:\n  carry_reasoning: true\n"
+    )
+    with (
+        mock.patch("halo.entrypoints.script.install_log_tee"),
+        mock.patch.object(sys, "argv", ["prog", str(config)]),
+        mock.patch.object(env_grpo_module, "init_training_script", side_effect=AssertionError("reached the load")),
+        pytest.raises(ValueError, match="carry_reasoning: true with rollout_thinking: false"),
+    ):
+        env_grpo_module.main()
+
+
+def test_a_history_rewriting_environment_without_sampled_tokens_is_refused_before_any_load(env_grpo_module, tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"model_name_or_path: dummy/model\noutput_dir: {tmp_path / 'out'}\n"
+        "bf16: false\nuse_cpu: true\nenvironment_type: code_contests\ntrain_on_sampled_tokens: false\n"
+        "environment_kwargs:\n  notes: {}\n"
+    )
+    with (
+        mock.patch("halo.entrypoints.script.install_log_tee"),
+        mock.patch.object(sys, "argv", ["prog", str(config)]),
+        mock.patch.object(env_grpo_module, "init_training_script", side_effect=AssertionError("reached the load")),
+        pytest.raises(ValueError, match="rewrites earlier turns.*train_on_sampled_tokens: true"),
     ):
         env_grpo_module.main()
 
@@ -102,67 +135,41 @@ def test_overhead_renders_under_the_rollout_template_kwargs(env_grpo_module):
     assert steered == bare + len("preserve_thinking=True") + len("reasoning_effort=high")
 
 
-def test_the_probe_states_the_budget_an_episode_binds(env_grpo_module):
-    """The budget variable the rollout requests carry is the episode's bound per-turn cap: the level's 36000 clamped
-    to the run's 18000, the level's own 12000 where the run sets no cap."""
-    env = types.SimpleNamespace(
-        reasoning_effort="high",
-        thinking_budget_for_effort=lambda level: 36000,
-        thinking_budget_enforced=lambda level: True,
+def test_the_probe_states_the_level_an_episode_binds_and_no_token_count(env_grpo_module):
+    """The probe renders the template variables the rollout requests carry: the run's own and the level an
+    episode binds, which a ``random`` setting draws as an episode does. A level's episode budget and price
+    reach the reward alone, never the template."""
+    profiles = {level: {"reasoning_budget": 60000, "reasoning_price": 0.004} for level in VALID_REASONING_EFFORTS}
+    run = AsyncRolloutConfig(
+        rollout_max_tokens=30000,
+        rollout_max_answer_tokens=8192,
+        rollout_chat_template_kwargs={"preserve_thinking": True},
     )
-    clamped = env_grpo_module.probe_template_kwargs(
-        AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=18000), env
-    )
-    assert clamped == {"reasoning_effort": "high", "reasoning_budget": 18000}
-    level = types.SimpleNamespace(
-        reasoning_effort="high",
-        thinking_budget_for_effort=lambda level: 12000,
-        thinking_budget_enforced=lambda level: True,
-    )
-    assert env_grpo_module.probe_template_kwargs(AsyncRolloutConfig(rollout_max_tokens=30000), level) == {
-        "reasoning_effort": "high",
-        "reasoning_budget": 12000,
-    }
-    # A soft budget renders flagged, as its requests carry it.
-    soft = types.SimpleNamespace(
-        reasoning_effort="high",
-        thinking_budget_for_effort=lambda level: 12000,
-        thinking_budget_enforced=lambda level: False,
-    )
-    assert env_grpo_module.probe_template_kwargs(
-        AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_thinking_tokens=21800), soft
-    ) == {"reasoning_effort": "high", "reasoning_budget": 12000, "reasoning_budget_soft": True}
-    # The probe binds under the run's own bounds, so a soft budget past the ceiling an answer bound leaves is refused
-    # before the servers are up, as every episode would be.
-    assert env_grpo_module.probe_template_kwargs(
-        AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=8192), soft
-    )["reasoning_budget_soft"]
-    with pytest.raises(ValueError, match="must sit below its ceiling"):
-        env_grpo_module.probe_template_kwargs(
-            AsyncRolloutConfig(rollout_max_tokens=30000, rollout_max_answer_tokens=20000), soft
-        )
-    # A level whose budget fills the turn binds no episode, and the probe says so before the servers are up.
-    with pytest.raises(ValueError, match="must sit below rollout_max_tokens"):
-        env_grpo_module.probe_template_kwargs(AsyncRolloutConfig(rollout_max_tokens=30000), env)
+    fixed = build_environment("native_math", {"reasoning_effort": "high", "reasoning_effort_profiles": profiles})
+    assert env_grpo_module.probe_template_kwargs(run, fixed) == {"preserve_thinking": True, "reasoning_effort": "high"}
+    drawn = build_environment("native_math", {"reasoning_effort": "random", "reasoning_effort_profiles": profiles})
+    kwargs = env_grpo_module.probe_template_kwargs(run, drawn)
+    assert set(kwargs) == {"preserve_thinking", "reasoning_effort"}
+    assert kwargs["reasoning_effort"] in VALID_REASONING_EFFORTS
+    assert env_grpo_module.probe_template_kwargs(AsyncRolloutConfig(), build_environment("native_math", {})) == {}
 
 
 def test_overhead_without_env_system_prompt_still_measures(env_grpo_module):
     assert env_grpo_module.measure_env_prompt_overhead(_env(system_prompt=None), _Tokenizer(), {}) == 0
 
 
-def test_tools_discovered_on_reset_are_warned_as_missing(env_grpo_module, caplog):
-    """An MCP environment learns its tools at its first reset and the probe env is never reset, so the overhead omits
-    their schema."""
+def test_prompt_overhead_counts_the_discovered_schema(env_grpo_module):
+    tools = [{"name": "dynamic_tool"}]
+    dynamic = _env(tools=[], tools_arrive_on_reset=True)
+    dynamic.discover_tools_schema = mock.AsyncMock(return_value=tools)
+    static = _env(tools=tools)
+    static.discover_tools_schema = mock.AsyncMock(side_effect=AssertionError("static tools must not connect"))
+    measure = env_grpo_module.measure_env_prompt_overhead
+    tokenizer = _Tokenizer()
 
-    def warned():
-        return [r for r in caplog.records if "tools arrive when its first reset" in r.getMessage()]
-
-    with caplog.at_level(logging.WARNING, logger=env_grpo_module.logger.name):
-        for declared in (None, []):
-            env_grpo_module.measure_env_prompt_overhead(_env(tools=declared), _Tokenizer(), {})
-        assert not warned()
-        env_grpo_module.measure_env_prompt_overhead(_env(tools=[], tools_arrive_on_reset=True), _Tokenizer(), {})
-    assert warned()
+    assert measure(dynamic, tokenizer, {}) == measure(static, tokenizer, {}) > measure(_env(), tokenizer, {})
+    dynamic.discover_tools_schema.assert_awaited_once_with()
+    static.discover_tools_schema.assert_not_called()
 
 
 def test_overhead_raises_when_the_template_cannot_render_the_preamble(env_grpo_module):
@@ -231,7 +238,7 @@ def test_the_default_answer_field_does_not_demand_the_column(env_grpo_module, _i
 def test_a_renamed_answer_field_must_still_name_a_real_column(env_grpo_module):
     """Resolving to no column is a typo, and the run would train with no ground truth."""
     with pytest.raises(ValueError, match="answer_field='solution'"):
-        env_grpo_module.reject_missing_carried_columns(_script_args(answer_field="solution"), _raw())
+        env_grpo_module.reject_missing_carried_columns(_script_args(answer_field="solution"), _raw(), sharded=False)
 
 
 def test_a_renamed_answer_field_is_carried_into_the_answer_column(env_grpo_module, _isolated_datasets_cache):

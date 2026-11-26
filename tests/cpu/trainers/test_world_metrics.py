@@ -15,8 +15,8 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from halo.trainers import world_metrics
-from halo.trainers.world_metrics import WorldMetrics
+from halo.trainers.metrics import world_metrics
+from halo.trainers.metrics.world_metrics import WorldMetrics
 from tests.common.gloo import new_groups, run_gloo_ranks
 from tests.common.world_metrics import fake_world, pooled_states, rank_states
 

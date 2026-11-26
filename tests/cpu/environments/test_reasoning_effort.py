@@ -1,5 +1,5 @@
-"""Reasoning-effort resolution (incl. random) and the per-level CoT budget: the base facility, the eval's stable
-per-task draw, and the CodeContestsEnvironment override."""
+"""Reasoning-effort resolution (incl. random) and the per-level reasoning terms: the base facility, the eval's stable
+per-task draw, and the CodeContestsEnvironment reading each level's budget and price off its profile."""
 
 import json
 import os
@@ -9,8 +9,8 @@ import sys
 import pytest
 
 from halo.environments.environment_base import EnvironmentBase
-from halo.environments.episode_scoring import EpisodeGrade
-from halo.environments.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
+from halo.environments.episodes.episode_scoring import EpisodeGrade
+from halo.environments.episodes.reasoning_effort import resolve_reasoning_effort, stable_reasoning_effort
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from tests.common.repo import REPO_ROOT
@@ -18,7 +18,7 @@ from tests.common.repo import REPO_ROOT
 _DRAWN_PROBLEMS = [f"problem {i}" for i in range(24)]
 # Prints the stable draw of each of ``_DRAWN_PROBLEMS`` as JSON, for a fresh interpreter under a chosen hash seed.
 _STABLE_DRAW_PROBE = (
-    "import json; from halo.environments.reasoning_effort import stable_reasoning_effort; "
+    "import json; from halo.environments.episodes.reasoning_effort import stable_reasoning_effort; "
     f"print(json.dumps([stable_reasoning_effort(p) for p in {_DRAWN_PROBLEMS!r}]))"
 )
 
@@ -73,19 +73,24 @@ def test_base_validates_effort():
         _MinimalEnv(reasoning_effort="extreme")
 
 
-def test_base_budget_hook_is_none_by_default():
-    # No per-level budget → the rollout falls back to the global one.
+def test_base_reasoning_terms_are_unset_by_default():
+    # No profile → no level is budgeted or priced, and an episode with no level reads the same.
     env = _MinimalEnv(reasoning_effort="high")
-    assert env.thinking_budget_for_effort("high") is None
+    for level in (*VALID_REASONING_EFFORTS, None):
+        assert env.reasoning_terms_for_effort(level) == (None, 0.0), level
 
 
-def test_codeforces_binds_level_to_budget():
-    env = CodeContestsEnvironment(language="python", reasoning_effort="random")
+def test_codeforces_reads_each_levels_reasoning_terms_off_its_profiles():
+    profiles = {
+        "low": {"reasoning_budget": 40000, "reasoning_price": 0.008},
+        "high": {"reasoning_budget": 60000, "reasoning_price": 0.004},
+    }
+    env = CodeContestsEnvironment(language="python", reasoning_effort="random", reasoning_effort_profiles=profiles)
     assert env.reasoning_effort == "random"
-    assert env.thinking_budget_for_effort("low") == 4096
-    assert env.thinking_budget_for_effort("medium") == 8192
-    assert env.thinking_budget_for_effort("high") == 16384
-    assert env.thinking_budget_for_effort("nonexistent") is None
+    assert env.reasoning_terms_for_effort("low") == (40000, 0.008)
+    assert env.reasoning_terms_for_effort("high") == (60000, 0.004)
+    assert env.reasoning_terms_for_effort("medium") == (None, 0.0), "a level the profiles leave out is unbudgeted"
+    assert env.reasoning_terms_for_effort("nonexistent") == (None, 0.0)
 
 
 if __name__ == "__main__":

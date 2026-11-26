@@ -22,7 +22,9 @@ def _row(prompt: list[int], loss_mask: list[int]) -> TurnRow:
 
 
 def test_step_masks_attend_trained_rows_whole_and_hide_masked_ones(monkeypatch):
-    host = types.SimpleNamespace(pad_token_id=0, _is_correction=False)
+    host = types.SimpleNamespace(
+        pad_token_id=0, _is_correction=False, async_config=types.SimpleNamespace(score_centering_top_k=None)
+    )
     rows = [_row([1, 2], [1, 0, 1]), _row([3], [0, 0]), _row([4, 5, 6], [0, 1, 0, 0, 1])]
     reads = []
     real_bool = torch.Tensor.__bool__

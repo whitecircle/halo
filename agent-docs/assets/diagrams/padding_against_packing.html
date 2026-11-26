@@ -1,0 +1,353 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Padding against packing</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 380px;
+    --bar-h: 40px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* One row per case: its name, then one stacked bar per column. A group's heading spans the row. */
+  .rows {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--columns), 1fr);
+    column-gap: 40px;
+    row-gap: 22px;
+    align-items: center;
+  }
+
+  .rows .group {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: calc(var(--heading-gap) - 22px);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .rows .group.later { margin-top: calc(var(--group-gap) - 22px); }
+
+  .rows .group span {
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--secondary);
+  }
+
+  .rows .head .name {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  .rows .head .of {
+    margin-top: 2px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+  }
+
+  .label .case {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .label .sub {
+    margin-top: 1px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  .track .seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    background: var(--hue);
+    font-size: 20px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: #000;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .track .total {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 21px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .track .total.none {
+    font-weight: 400;
+    color: var(--danger);
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 36px;
+    margin-top: 40px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .legend span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .legend i {
+    width: 30px;
+    height: 20px;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+
+  .rows .head { margin-bottom: calc(var(--heading-gap) - 22px + 6px); }
+
+  .legend .of {
+    min-width: 150px;
+    color: var(--secondary);
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="rows" id="rows"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Qwen3-4B in bf16 on one B300: a full step on the same {documents} documents of {length} tokens, with Flash Attention, median of 7 steps.</span>
+      <span class="s">Attention skips the padding in both layouts and does not cross documents, so the loss is the same.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_training_step.py --experiment padding --gc on off:
+  // Qwen/Qwen3-4B-Instruct-2507 in bf16, a full step with AdamWBF16 on the same 16 documents of 1,024 tokens, padded as 16
+  // rows of 4,096 or packed four to a row of 4,096. The loss without gradients is the same for both layouts
+  // (no_grad_loss_by_layout), so packed attention does not cross documents.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_training_step.py --experiment padding --gc on off --output
+  //     step-padding-4b.json
+  // step-padding-4b.json, rows[] by layout and gradient_checkpointing: real_tokens, gemm_tokens (the
+  // positions every projection and MLP runs on), seconds_summary.forward / .backward / .optimizer .median and
+  // step_seconds_summary.median in ms (7 steps), real_tokens_per_s_step, peak_allocated_bytes in GiB, or
+  // outOfMemory where the row holds "oom".
+  const RUNS = [
+    { layout: "padded", checkpointing: "on", realTokens: 16384, positions: 65536, forward: 779.4, backward: 2164, optimizer: 9.117, step: 2954, tokensPerSecond: 5546.68, peak: 164.8 },
+    { layout: "packed", checkpointing: "on", realTokens: 16384, positions: 16384, forward: 220.5, backward: 611.3, optimizer: 9.211, step: 840.9, tokensPerSecond: 19483.5, peak: 58.09 },
+    { layout: "padded", checkpointing: "off", realTokens: 16384, positions: 65536, outOfMemory: true },
+    { layout: "packed", checkpointing: "off", realTokens: 16384, positions: 16384, forward: 232.8, backward: 409.7, optimizer: 9.281, step: 651.6, tokensPerSecond: 25144, peak: 151.1 },
+  ];
+  /** The documents every layout holds, and the row width they are padded or packed to. */
+  const DOCUMENTS = { count: 16, tokens: 1024, rowWidth: 4096 };
+  const LAYOUTS = { padded: "Padded", packed: "Packed" };
+  const CHECKPOINTING = { on: "With gradient checkpointing", off: "Without gradient checkpointing" };
+  const POSITIONS = [
+    { id: "real", name: "Real tokens", hue: "var(--body)" },
+    { id: "padding", name: "Padding", hue: "var(--tertiary)" },
+  ];
+  const PHASES = [
+    { id: "forward", name: "Forward", hue: "var(--halo-blue)" },
+    { id: "backward", name: "Backward", hue: "var(--halo-violet)" },
+    { id: "optimizer", name: "Optimizer", hue: "var(--halo-indigo)" },
+  ];
+
+  /** Space between two segments of a bar, and from a bar's end to its total, in px. */
+  const SEGMENT_GAP = 3;
+  const TOTAL_GAP = 12;
+
+  /**
+   * Builds the rows into `root`: per group a heading, per row a label and one stacked bar per column. Every
+   * column has its own scale from zero, the longest bar ending where its total still fits in the column. A row's
+   * bar for a column is { segments: [{ value, hue, text }], total } or { none: "why there is no bar" }. A column
+   * with a name is headed by it and its unit.
+   */
+  function drawRows(root, { columns, groups }) {
+    root.style.setProperty("--columns", columns.length);
+    const tracks = [];
+
+    // Columns that carry a name get a row of headings above the first row.
+    if (columns.some((column) => column.name !== undefined)) {
+      root.append(el("div"));
+
+      for (const column of columns) {
+        const head = el("div", "head");
+        head.append(el("div", "name", column.name), el("div", "of", column.of));
+        root.append(head);
+      }
+    }
+
+    groups.forEach((group, g) => {
+      if (group.heading !== undefined) {
+        const heading = el("div", g === 0 ? "group" : "group later", group.heading);
+
+        if (group.note !== undefined) {
+          heading.append(el("span", undefined, group.note));
+        }
+
+        root.append(heading);
+      }
+
+      for (const row of group.rows) {
+        const label = el("div", "label");
+        label.append(el("div", "case", row.name), el("div", "sub", row.sub));
+        root.append(label);
+
+        for (const column of columns) {
+          const track = el("div", "track");
+          root.append(track);
+          tracks.push({ track, column, bar: row.bars[column.id] });
+        }
+      }
+    });
+
+    for (const column of columns) {
+      const mine = tracks.filter((t) => t.column === column && t.bar.none === undefined);
+      const sum = (bar) => bar.segments.reduce((total, s) => total + s.value, 0);
+      const totals = mine.map(({ track, bar }) => {
+        const node = el("div", "total", bar.total);
+        track.append(node);
+
+        return node;
+      });
+      const width = mine[0].track.getBoundingClientRect().width;
+      // The scale that lets the longest bar and its total end at the column's right edge.
+      const scale = Math.min(...mine.map(({ bar }, i) => (width - TOTAL_GAP - totals[i].getBoundingClientRect().width - SEGMENT_GAP * (bar.segments.length - 1)) / sum(bar)));
+
+      mine.forEach(({ track, bar }, i) => {
+        let x = 0;
+
+        for (const segment of bar.segments) {
+          const node = el("div", "seg");
+          const length = segment.value * scale;
+          node.style.cssText = `left:${x}px; width:${length}px; --hue:${segment.hue}`;
+          track.append(node);
+
+          // A segment prints its value where it is wide enough to hold it. A bar of one segment has its total.
+          if (segment.text !== undefined && bar.segments.length > 1) {
+            const text = el("span", undefined, segment.text);
+            node.append(text);
+
+            if (text.getBoundingClientRect().width + 16 > length) {
+              text.remove();
+            }
+          }
+
+          x += length + SEGMENT_GAP;
+        }
+
+        totals[i].style.left = `${x - SEGMENT_GAP + TOTAL_GAP}px`;
+      });
+    }
+
+    for (const { track, bar } of tracks.filter((t) => t.bar.none !== undefined)) {
+      const node = el("div", "total none", bar.none);
+      node.style.left = "0";
+      track.append(node);
+    }
+  }
+
+  /** Fills the legend under the rows: one swatch and name per segment kind. */
+  function drawLegend(root, items) {
+    for (const [hue, text] of items) {
+      const item = el("span");
+      const dot = el("i");
+      dot.style.setProperty("--hue", hue);
+      item.append(dot, text);
+      root.append(item);
+    }
+  }
+
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const perSecond = (run) => run.tokensPerSecond;
+
+  if (RUNS.some((run) => run.realTokens !== DOCUMENTS.count * DOCUMENTS.tokens || run.positions % DOCUMENTS.rowWidth !== 0)) {
+    throw new Error("A run does not hold the stated documents in rows of the stated width.");
+  }
+
+  // The title compares the two layouts where both ran.
+  const pair = Object.keys(CHECKPOINTING).map((mode) => RUNS.filter((run) => run.checkpointing === mode)).find((runs) => runs.every((run) => !run.outOfMemory));
+  const [padded, packed] = ["padded", "packed"].map((layout) => pair.find((run) => run.layout === layout));
+  document.getElementById("title").textContent =
+    `The same ${fmt(packed.realTokens)} tokens train ${(perSecond(packed) / perSecond(padded)).toFixed(1)} times faster packed than padded`;
+  fillValues({ documents: DOCUMENTS.count, length: fmt(DOCUMENTS.tokens) });
+
+  drawRows(document.getElementById("rows"), {
+    columns: [
+      { id: "positions", name: "Positions in the step", of: "Tokens every GEMM runs on" },
+      { id: "time", name: "Step time", of: "Milliseconds" },
+      { id: "rate", name: "Real tokens per second", of: "Of the whole step" },
+    ],
+    groups: [{
+      rows: RUNS.map((run) => {
+        const positions = { real: run.realTokens, padding: run.positions - run.realTokens };
+        const failed = { none: "Out of memory" };
+
+        return {
+          name: `${LAYOUTS[run.layout]}: ${run.positions / DOCUMENTS.rowWidth} rows of ${fmt(DOCUMENTS.rowWidth)}`,
+          sub: CHECKPOINTING[run.checkpointing],
+          bars: {
+            positions: {
+              segments: POSITIONS.filter((part) => positions[part.id] > 0).map((part) => ({ value: positions[part.id], hue: part.hue, text: fmt(positions[part.id]) })),
+              total: fmt(run.positions),
+            },
+            time: run.outOfMemory ? failed : { segments: PHASES.map((phase) => ({ value: run[phase.id], hue: phase.hue, text: fmt(run[phase.id]) })), total: fmt(run.step) },
+            rate: run.outOfMemory ? failed : { segments: [{ value: perSecond(run), hue: "var(--text)" }], total: fmt(perSecond(run)) },
+          },
+        };
+      }),
+    }],
+  });
+
+  // One legend line per stacked column, each opened by the column's name.
+  const legend = document.getElementById("legend");
+  const second = el("div", "legend");
+  second.style.marginTop = "12px";
+  legend.after(second);
+  legend.append(el("span", "of", "Positions"));
+  second.append(el("span", "of", "Step time"));
+  drawLegend(legend, POSITIONS.map((part) => [part.hue, part.name]));
+  drawLegend(second, PHASES.map((phase) => [phase.hue, phase.name]));
+</script>
+</body>
+</html>
