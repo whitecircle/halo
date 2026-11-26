@@ -24,7 +24,7 @@ _PATCHED_ATTR = "_halo_hc_kernels"
 
 
 def _hyper_connection_forward(self, hidden_streams):
-    """``*HyperConnection.forward`` (transformers ~5.23) with its projection, Sinkhorn loop and collapse on the kernels."""
+    """``*HyperConnection.forward`` (transformers ~5.24) with its projection, Sinkhorn loop and collapse on the kernels."""
     hc = self.hc_mult
     projected = project_streams(hidden_streams, self.fn, self.input_norm.eps)
     pre_w, post_w, comb_w = projected.split([hc, hc, hc * hc], dim=-1)
@@ -47,20 +47,20 @@ def _glm5_next_layer_forward(
     hidden_states,
     attention_mask=None,
     position_ids=None,
-    past_key_values=None,
+    cache=None,
     use_cache=False,
     position_embeddings=None,
     prev_topk_indices=None,
     **kwargs,
 ):
-    """``Glm5NextTextDecoderLayer.forward`` (transformers ~5.23) with its mixes on the kernel."""
+    """``Glm5NextTextDecoderLayer.forward`` (transformers ~5.24) with its mixes on the kernel."""
     post, comb, collapsed = self.attn_hc(hidden_states)
     collapsed = self.input_layernorm(collapsed)
     topk_indices = None
     if self.block_type == "linear_attention":
         block = self.self_attn(
             hidden_states=collapsed,
-            cache_params=past_key_values,
+            cache=cache,
             attention_mask=attention_mask,
             **kwargs,
         )
@@ -69,7 +69,7 @@ def _glm5_next_layer_forward(
             hidden_states=collapsed,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            cache=cache,
             use_cache=use_cache,
             position_embeddings=position_embeddings,
             prev_topk_indices=prev_topk_indices,
@@ -82,7 +82,7 @@ def _glm5_next_layer_forward(
 
 
 def _deepseek_v4_layer_forward(self, hidden_states, input_ids=None, **kwargs):
-    """``DeepseekV4DecoderLayer.forward`` (transformers ~5.23) with its mixes on the kernel."""
+    """``DeepseekV4DecoderLayer.forward`` (transformers ~5.24) with its mixes on the kernel."""
     post, comb, collapsed = self.attn_hc(hidden_states)
     block, _ = self.self_attn(self.input_layernorm(collapsed), **kwargs)
     hidden_states = _mixed(block, hidden_states, post, comb)
@@ -92,7 +92,7 @@ def _deepseek_v4_layer_forward(self, hidden_states, input_ids=None, **kwargs):
 
 
 def _deepseek_v4_head_forward(self, x):
-    """``DeepseekV4HyperHead.forward`` (transformers ~5.23) with its projection and collapse on the kernels. Outside any
+    """``DeepseekV4HyperHead.forward`` (transformers ~5.24) with its projection and collapse on the kernels. Outside any
     decoder layer, so its fp32 copies of the streams would outlast per-layer checkpointing to the backward."""
     mixes = project_streams(x, self.hc_fn, self.input_norm.eps)
     return collapse_streams(x, torch.sigmoid(mixes * self.hc_scale.float() + self.hc_base.float()) + self.eps)

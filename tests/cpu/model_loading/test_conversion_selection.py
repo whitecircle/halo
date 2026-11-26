@@ -33,6 +33,7 @@ from halo.model_loading.lazy_safetensors.conversion import (
     Deinterleave,
     PermuteRope,
     TakeChunk,
+    TakeRows,
     lazy_key_mapping,
     translate_converter,
 )
@@ -381,6 +382,19 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
     )
 
     disk_to_model, fanout = family_key_mapping(model, keys)
+    # Inkling 2's lm_head keeps only its unpadded vocab rows (transformers 5.24's Inkling2UnpadVocab). A checkpoint
+    # written at the live shape already has exactly those rows, so the slice is an identity and may stay planned.
+    live = model.state_dict()
+    fanout = {
+        key: targets
+        for key, targets in fanout.items()
+        if not (
+            len(targets) == 1
+            and targets[0][0] == key
+            and targets[0][1]
+            and all(isinstance(op, TakeRows) and op.rows == live[key].shape[0] for op in targets[0][1])
+        )
+    }
 
     assert not fanout, (
         f"{model_type}: {len(fanout)} canonical checkpoint key(s) still convert on a resume. First few: "

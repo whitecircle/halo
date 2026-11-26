@@ -255,22 +255,24 @@ def test_the_vision_norm_loads_from_the_release_spelling(tmp_path):
     assert torch.all(getattr(model, VISION_NORM).weight == 2.5) and torch.all(getattr(model, VISION_NORM).bias == 0.25)
 
 
-def test_without_the_rename_the_norm_silently_keeps_its_identity(tmp_path):
-    """The control: upstream declares the norm absent, so the load reports nothing and the tower runs an identity."""
+def test_without_the_rename_the_norm_is_reported_missing(tmp_path):
+    """The control: the rename is what loads the norm, and without it the load names the norm missing (transformers
+    5.23's class declared it absent, so the tower ran an identity with nothing reported)."""
     write_tiny_hub_checkpoint(tmp_path, norm_weight=2.5, norm_bias=0.25)
     with restored_conversion_mapping():
         override = next(entry for entry in CONVERSION_OVERRIDES if entry.key == "NemotronH_Omni_Reasoning_V3")
         entries = [
             entry
             for entry in get_checkpoint_conversion_mapping(override.key)
-            if (tuple(entry.source_patterns), tuple(entry.target_patterns)) in override.upstream
+            if VISION_NORM not in "".join(entry.target_patterns)
         ]
+        assert len(entries) == len(override.upstream) - 1, "the control drops exactly the vision-norm rename"
         register_checkpoint_conversion_mapping(override.key, entries, overwrite=True)
         model, info = AutoModelForImageTextToText.from_pretrained(
             tmp_path, dtype=torch.float32, output_loading_info=True
         )
     assert torch.all(getattr(model, VISION_NORM).weight == 1.0) and torch.all(getattr(model, VISION_NORM).bias == 0.0)
-    assert not info["missing_keys"], "the load reports nothing, so no gate can catch it"
+    assert set(info["missing_keys"]) == {f"{VISION_NORM}.weight", f"{VISION_NORM}.bias"}
 
 
 def test_a_loaded_composite_exports_the_release_spelling(tmp_path):

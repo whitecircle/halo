@@ -19,7 +19,7 @@ from halo.models.upstream.upstream_guard import verify_upstream_parameters
 # ``Inkling2TopKRouter``'s renormalization floor.
 _TOPK_WEIGHT_NORM_EPS = 1e-20
 # Kept for the parity tests: this module is the only one that replaces them.
-UPSTREAM_RELATIVE_LOGITS_FORWARD = inkling2_modeling.Inkling2RelativeLogits.forward
+UPSTREAM_RELATIVE_POSITION_BIAS_FORWARD = inkling2_modeling.Inkling2RelativePositionBias.forward
 UPSTREAM_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2ShortConvolution.forward
 UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2DynamicShortConvolution.forward
 UPSTREAM_BLOCK_ATTENTION_RESIDUAL_FORWARD = inkling2_modeling.Inkling2BlockAttentionResidual.forward
@@ -45,9 +45,10 @@ def _router_forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, to
 
 
 def _block_attention_residual_forward(self, block_states, partial_block_states):
-    """Each position's queries attend over its block states. Upstream hands that to SDPA with every position an fp32
-    head of the hidden width, which selects the memory-efficient kernel, whose backward holds a gradient tile of a
-    whole query block per position: three times the peak of these two matmuls at Inkling-2-Small's width."""
+    """Each position's queries attend over its block states, as two matmuls and a softmax over the blocks. transformers
+    5.23 handed that to SDPA, whose memory-efficient backward held a gradient tile of a whole query block per position
+    (three times this peak at Inkling-2-Small's width); 5.24 routes it through the attention interface, which for this
+    family runs the eager attention, the same two matmuls."""
     stacked_states = torch.cat([block_states, partial_block_states.unsqueeze(-2)], dim=-2).float()
     stacked_states = self.norm(stacked_states)
     hidden_size = stacked_states.shape[-1]
@@ -57,12 +58,15 @@ def _block_attention_residual_forward(self, block_states, partial_block_states):
     return (weights.transpose(-1, -2) @ stacked_states).unbind(-2)
 
 
-def _relative_logits_forward(self, relative_states, query_positions, key_positions):
+def _relative_position_bias_forward(self, hidden_states, relative_distance, position_ids):
     """Under ``inkling2_relative_flex``, the ``[batch, heads, q_len, rel_extent]`` logits in place of the dense
     ``[batch, heads, q_len, kv_len]`` bias the eager path adds."""
     # A KV-cache decode step has fewer queries than keys and runs the eager attention.
-    if not getattr(self, "emits_compact_logits", False) or query_positions.shape != key_positions.shape:
-        return UPSTREAM_RELATIVE_LOGITS_FORWARD(self, relative_states, query_positions, key_positions)
+    q_len, kv_len = relative_distance.shape[-2:]
+    if not getattr(self, "emits_compact_logits", False) or q_len != kv_len:
+        return UPSTREAM_RELATIVE_POSITION_BIAS_FORWARD(self, hidden_states, relative_distance, position_ids)
+    relative_states = self.linear(hidden_states).view(*hidden_states.shape[:-1], self.num_heads, -1)
+    relative_states = self.norm(relative_states, position_ids)
     # relative_states: [batch, q_len, num_heads, d_rel] -> [batch, num_heads, q_len, rel_extent]
     return (relative_states @ self.proj).transpose(1, 2)
 
@@ -75,13 +79,13 @@ def _decoder_layer_forward(upstream):
     @functools.wraps(upstream)
     def forward(self, *args, **kwargs):
         attention = self.self_attn
-        attention.rel_logits_proj.emits_compact_logits = (
+        attention.relative_position_bias.emits_compact_logits = (
             attention.config._attn_implementation == INKLING2_RELATIVE_FLEX
         )
-        positions = kwargs.get("position_ids") if kwargs.get("past_key_values") is None else None
+        positions = kwargs.get("position_ids") if kwargs.get("cache") is None else None
         convolutions = (
-            attention.k_sconv,
-            attention.v_sconv,
+            attention.k_proj.sconv,
+            attention.v_proj.sconv,
             self.post_attention_convolution,
             self.post_mlp_convolution,
         )
@@ -143,13 +147,15 @@ def _layer_crossing_taps(convolution, hidden_states: torch.Tensor) -> tuple[tupl
     return taps
 
 
-def _short_convolution_forward(self, hidden_states, past_key_values=None, conv_mask=None, **kwargs):
+def _short_convolution_forward(
+    self, hidden_states, dynamic_input=None, cache=None, conv_mask=None, cache_offset=0, **kwargs
+):
     """On a packed row, the upstream convolution less the taps that reach into the previous document; a row holding
     one document runs the upstream forward."""
-    taps = () if past_key_values is not None else _layer_crossing_taps(self, hidden_states)
+    taps = () if cache is not None else _layer_crossing_taps(self, hidden_states)
     if not taps:
         return UPSTREAM_SHORT_CONVOLUTION_FORWARD(
-            self, hidden_states, past_key_values=past_key_values, conv_mask=conv_mask, **kwargs
+            self, hidden_states, dynamic_input, cache=cache, conv_mask=conv_mask, cache_offset=cache_offset, **kwargs
         )
     input_dtype = hidden_states.dtype
     residual = hidden_states.float()
@@ -165,14 +171,14 @@ def _short_convolution_forward(self, hidden_states, past_key_values=None, conv_m
 
 
 def _dynamic_short_convolution_forward(
-    self, hidden_states, dynamic_input, past_key_values=None, conv_mask=None, **kwargs
+    self, hidden_states, dynamic_input, cache=None, conv_mask=None, cache_offset=0, **kwargs
 ):
     """On a packed row, the upstream convolution with each tap's weight zeroed where it reaches into the previous
     document; a row holding one document runs the upstream forward."""
-    taps = () if past_key_values is not None else _layer_crossing_taps(self, hidden_states)
+    taps = () if cache is not None else _layer_crossing_taps(self, hidden_states)
     if not taps:
         return UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD(
-            self, hidden_states, dynamic_input, past_key_values=past_key_values, conv_mask=conv_mask, **kwargs
+            self, hidden_states, dynamic_input, cache=cache, conv_mask=conv_mask, cache_offset=cache_offset, **kwargs
         )
     kernel_size = self.conv_kernel_size
     input_dtype = hidden_states.dtype
@@ -200,19 +206,16 @@ def apply_inkling2_patches() -> None:
         return
     verify_upstream_parameters(router.forward, ("self", "hidden_states"), "_router_forward")
     verify_upstream_parameters(
-        UPSTREAM_RELATIVE_LOGITS_FORWARD,
-        ("self", "relative_states", "query_positions", "key_positions"),
-        "_relative_logits_forward",
+        UPSTREAM_RELATIVE_POSITION_BIAS_FORWARD,
+        ("self", "hidden_states", "relative_distance", "position_ids"),
+        "_relative_position_bias_forward",
+    )
+    convolution_parameters = ("self", "hidden_states", "dynamic_input", "cache", "conv_mask", "cache_offset", "kwargs")
+    verify_upstream_parameters(
+        UPSTREAM_SHORT_CONVOLUTION_FORWARD, convolution_parameters, "_short_convolution_forward"
     )
     verify_upstream_parameters(
-        UPSTREAM_SHORT_CONVOLUTION_FORWARD,
-        ("self", "hidden_states", "past_key_values", "conv_mask", "kwargs"),
-        "_short_convolution_forward",
-    )
-    verify_upstream_parameters(
-        UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD,
-        ("self", "hidden_states", "dynamic_input", "past_key_values", "conv_mask", "kwargs"),
-        "_dynamic_short_convolution_forward",
+        UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD, convolution_parameters, "_dynamic_short_convolution_forward"
     )
     verify_upstream_parameters(
         UPSTREAM_BLOCK_ATTENTION_RESIDUAL_FORWARD,
@@ -221,7 +224,7 @@ def apply_inkling2_patches() -> None:
     )
     patch_layer_forward(router, _router_forward)
     patch_layer_forward(inkling2_modeling.Inkling2BlockAttentionResidual, _block_attention_residual_forward)
-    patch_layer_forward(inkling2_modeling.Inkling2RelativeLogits, _relative_logits_forward)
+    patch_layer_forward(inkling2_modeling.Inkling2RelativePositionBias, _relative_position_bias_forward)
     patch_layer_forward(inkling2_modeling.Inkling2ShortConvolution, _short_convolution_forward)
     patch_layer_forward(inkling2_modeling.Inkling2DynamicShortConvolution, _dynamic_short_convolution_forward)
     for cls in _DECODER_LAYER_CLASSES:

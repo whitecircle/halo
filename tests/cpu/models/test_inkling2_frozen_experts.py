@@ -247,7 +247,12 @@ _EXPERTS_ALONE = "frozen_quantized_experts needs a LoRA target outside the route
         (True, False, None, "frozen_quantized_experts needs use_peft: true"),
         (True, True, ["o_proj"], None),
         (True, True, ["o_proj", "gate_up_proj", "down_proj"], None),
-        (True, True, r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)", None),
+        (
+            True,
+            True,
+            r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|relative_position_bias|o_proj)\.linear",
+            None,
+        ),
         (True, True, ["gate_up_proj", "down_proj"], _EXPERTS_ALONE),
         (True, True, ["experts"], _EXPERTS_ALONE),
         (True, True, "down_proj", _EXPERTS_ALONE),

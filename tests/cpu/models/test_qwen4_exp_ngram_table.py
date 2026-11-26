@@ -137,11 +137,11 @@ def test_the_host_lookup_equals_the_stock_rows_and_logits(checkpoint):
         expected = stock(input_ids=ids, use_cache=False).logits
         assert torch.equal(model(input_ids=ids, use_cache=False).logits, expected)
         # The n-gram history rides the cache as upstream's does.
-        stock_cache = stock(input_ids=ids[:, :-1], use_cache=True).past_key_values
-        host_cache = model(input_ids=ids[:, :-1], use_cache=True).past_key_values
+        stock_cache = stock(input_ids=ids[:, :-1], use_cache=True).cache
+        host_cache = model(input_ids=ids[:, :-1], use_cache=True).cache
         step = ids[:, -1:]
-        expected_step = stock(input_ids=step, past_key_values=stock_cache, use_cache=True).logits
-        actual_step = model(input_ids=step, past_key_values=host_cache, use_cache=True).logits
+        expected_step = stock(input_ids=step, cache=stock_cache, use_cache=True).logits
+        actual_step = model(input_ids=step, cache=host_cache, use_cache=True).logits
     assert torch.equal(actual_step, expected_step)
 
 

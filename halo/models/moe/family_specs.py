@@ -267,6 +267,15 @@ INKLING2 = MoEFamilySpec(
     # Attention LoRA over the release's frozen experts, the adapters loaded by vLLM beside its launch base.
     adapter_sync_backends=("vllm",),
 )
+# Inkling 2's attention linears, each inside a projection module of its own (transformers 5.24), so LoRA targets the
+# ``linear`` under it: a recipe's attention targets and what vLLM serves.
+INKLING2_ATTENTION_LINEARS = (
+    "q_proj.linear",
+    "k_proj.linear",
+    "v_proj.linear",
+    "relative_position_bias.linear",
+    "o_proj.linear",
+)
 # GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(
     model_types=("laguna",),

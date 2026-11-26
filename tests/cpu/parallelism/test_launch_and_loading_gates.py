@@ -251,8 +251,8 @@ def tp_materialized_model(sharding_model):
 
 @pytest.fixture(scope="module")
 def planless_model():
-    """``base_model_tp_plan`` is None on both levels, so ``tp_plan="auto"`` resolves to the wrapper's head entry
-    alone and transformers only warns."""
+    """Qwen3-VL's plan names only the vocabulary ends: the wrapper's head entry and, from transformers 5.24, the text
+    backbone's ``embed_tokens``. ``tp_plan="auto"`` shards no decoder layer and transformers only warns."""
     config = Qwen3VLConfig(
         text_config={
             "vocab_size": 64,
@@ -277,13 +277,12 @@ def test_the_plan_is_what_separates_a_sharding_architecture_from_a_planless_one(
     assert sharded, "premise: qwen3 ships a base_model_tp_plan covering q/k/v/o and the MLP"
     assert any("q_proj" in name for name in sharded) and any("down_proj" in name for name in sharded)
 
-    head = planless_model.get_output_embeddings().weight
-    assert set(planless_model._tp_plan or {}) <= {"lm_head"}, "premise: qwen3-vl ships no base_model_tp_plan"
+    vocab_ends = {id(planless_model.get_output_embeddings().weight), id(planless_model.get_input_embeddings().weight)}
     assert not [
         name
         for name, param in planless_model.named_parameters()
-        if param is not head and plan_shards_param(name, planless_model._tp_plan or {})
-    ]
+        if id(param) not in vocab_ends and plan_shards_param(name, planless_model._tp_plan or {})
+    ], "premise: qwen3-vl's plan shards no decoder layer"
 
 
 def test_tp_load_refuses_an_architecture_whose_plan_shards_nothing(planless_model):

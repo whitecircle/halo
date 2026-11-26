@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from transformers import Gemma3Config, GemmaConfig, GemmaForCausalLM, PaliGemmaForConditionalGeneration
+from transformers import (
+    Gemma3Config,
+    Gemma3TextConfig,
+    GemmaConfig,
+    GemmaForCausalLM,
+    PaliGemmaForConditionalGeneration,
+)
 
 from halo.model_loading.model_preparation import apply_run_model_policies
 from halo.models.attention import selection as attention_mod
@@ -192,9 +198,13 @@ def test_the_flash_demotion_names_the_prefix_lm():
     assert any("prefix-LM" in call.args[0] for call in warn.call_args_list)
 
 
-def test_a_multimodal_gemma_that_is_no_prefix_lm_keeps_flash():
-    with _on("hopper"), patch.object(attention_mod.logger, "warning"):
-        assert _resolve(Gemma3Config(), None) in _FLASH
+def test_a_multimodal_gemma_that_is_no_prefix_lm_is_not_demoted_as_one():
+    """Gemma 3's composite keeps its text tower's flash pick, and only its class (transformers 5.24 declares no flash,
+    as flash drops its bidirectional image-token mask) moves it to SDPA, never the prefix-LM demotion."""
+    with _on("hopper"), patch.object(attention_mod.logger, "warning") as warn:
+        assert _resolve(Gemma3TextConfig(), None) in _FLASH
+        assert _resolve(Gemma3Config(), None) == SDPA
+    assert not any("prefix-LM" in call.args[0] for call in warn.call_args_list)
 
 
 if __name__ == "__main__":

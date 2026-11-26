@@ -212,18 +212,18 @@ def is_input_embedding_tp_sharded(model: nn.Module) -> bool:
 
 def finish_hf_tp_load(model: nn.Module, device_mesh: DeviceMesh, tp_size: int) -> None:
     """Check a ``tp_plan="auto"`` load, stamp ``device_mesh``, run planned linears on local shards and move norm
-    all-reduces to the step-time SUM. A plan sharding no backbone parameter (Qwen3-VL ships no ``base_model_tp_plan``,
-    and transformers only warns) is refused by name."""
+    all-reduces to the step-time SUM. A plan sharding no decoder parameter is refused by name: Qwen3-VL's shards only
+    the vocabulary ends (``embed_tokens`` from transformers 5.24, the head before), and transformers only warns."""
     applied_plan = getattr(model, "_tp_plan", None) or {}
-    head = model.get_output_embeddings()
-    head_ids = {id(param) for param in head.parameters()} if head is not None else set()
+    vocab_ends = (model.get_output_embeddings(), model.get_input_embeddings())
+    vocab_ids = {id(param) for module in vocab_ends if module is not None for param in module.parameters()}
     if tp_size > 1 and not any(
-        plan_shards_param(name, applied_plan) for name, param in model.named_parameters() if id(param) not in head_ids
+        plan_shards_param(name, applied_plan) for name, param in model.named_parameters() if id(param) not in vocab_ids
     ):
         raise ValueError(
-            f"tensor_parallel_size={tp_size} sharded ZERO parameters: this architecture ships no "
-            f"base_model_tp_plan, so TP would run {tp_size} full replicas at 1/{tp_size} throughput. "
-            f"Drop tensor_parallel_size for this model."
+            f"tensor_parallel_size={tp_size} sharded ZERO parameters: this architecture's base_model_tp_plan "
+            f"shards no decoder layer (at most its embedding and head), so TP would run {tp_size} full replicas "
+            f"at 1/{tp_size} throughput. Drop tensor_parallel_size for this model."
         )
     if tp_size > 1:
         reject_plan_sharded_plain_params(model, applied_plan)

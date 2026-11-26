@@ -243,8 +243,14 @@ def pinned_checkpoints(roster_checkpoints) -> dict[str, str]:
 
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_the_frozen_loader_scores_in_the_run_dtype(pinned_checkpoints, family):
+    """At SDPA, since the resolver picks a flash kernel for some families (GLM-4 MoE Lite, Nemotron-H) that CPU lacks."""
     model = load_frozen_auxiliary_model(
-        pinned_checkpoints[family], dtype=torch.bfloat16, device_map="cpu", trust_remote_code=False, download_tag=None
+        pinned_checkpoints[family],
+        dtype=torch.bfloat16,
+        device_map="cpu",
+        trust_remote_code=False,
+        download_tag=None,
+        attn_implementation="sdpa",
     )
 
     assert params_off_dtype(model, torch.bfloat16) == []

@@ -11,7 +11,7 @@ import requests
 import torch
 
 from halo.env import parse_flag
-from halo.models.moe.family_specs import INKLING2
+from halo.models.moe.family_specs import INKLING2, INKLING2_ATTENTION_LINEARS
 from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
@@ -100,8 +100,18 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         ". At a tensor-parallel size above 1, restart the server before the next load, which its workers would "
         "answer with this refusal"
     )
-    # The adapted names the engine's packed LoRA layers take; Inkling 2 packs q/k/v/r into qkvr itself.
-    ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    # The adapted names the engine's packed LoRA layers take. Inkling 2's attention projections are the linears of its
+    # projection modules (transformers 5.24), and the engine packs q/k/v/r into qkvr itself.
+    ADAPTER_SERVABLE_MODULES = (
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj",
+        *INKLING2_ATTENTION_LINEARS,
+    )
     # Inkling 2's quantized experts take an adapter with Halo's source patch (docker/vllm/patches/patch_vllm_inkling2.py).
     ADAPTER_EXPERT_MODEL_TYPES = frozenset(INKLING2.model_types)
     UNSERVABLE_MODEL_TYPES = {

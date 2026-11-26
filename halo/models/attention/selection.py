@@ -360,8 +360,9 @@ def verify_live_sinks_carried(model) -> None:
 
 
 def _attention_class_table(model_config) -> dict | None:
-    """A legacy modeling file's per-backend attention classes (GPT-J, GPT-Neo, Falcon, Bark), on which a label it does
-    not list fails the build with a bare ``KeyError``. ``None`` for every other class."""
+    """A legacy modeling file's per-backend attention classes (GPT-Neo, Falcon, Bark, and GPT-J before transformers 5.24
+    moved it to the attention interface), on which a label it does not list fails the build with a bare ``KeyError``.
+    ``None`` for every other class."""
     model_class = declared_model_class(model_config)
     if model_class is None:
         return None

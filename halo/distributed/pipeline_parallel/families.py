@@ -67,18 +67,18 @@ def _stacked_stream_shape(config) -> tuple[int, int]:
 
 
 def _stream_prologue(
-    backbone, inputs_embeds, position_ids, past_key_values, use_cache
+    backbone, inputs_embeds, position_ids, cache, use_cache
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Cache | None]:
     """``(stream, one-stream [B, S, D] view, position_ids, cache)``. The mask and rotary constructors read only batch,
     sequence, dtype and device, so the view stands in for ``inputs_embeds``."""
     hidden_states = _boundary_stream(backbone, inputs_embeds, _stacked_stream_shape(backbone.config))
     embeds_ref = hidden_states[:, :, 0]
-    if use_cache and past_key_values is None:
-        past_key_values = DynamicCache(config=backbone.config)
+    if use_cache and cache is None:
+        cache = DynamicCache(config=backbone.config)
     if position_ids is None:
-        past_seen = past_key_values.get_seq_length() if past_key_values is not None else 0
+        past_seen = cache.get_seq_length() if cache is not None else 0
         position_ids = (torch.arange(embeds_ref.shape[1], device=embeds_ref.device) + past_seen).unsqueeze(0)
-    return hidden_states, embeds_ref, position_ids, past_key_values
+    return hidden_states, embeds_ref, position_ids, cache
 
 
 def deepseek_v4_stream_forward(
@@ -86,14 +86,14 @@ def deepseek_v4_stream_forward(
     input_ids: torch.LongTensor | None = None,
     attention_mask: torch.Tensor | None = None,
     position_ids: torch.LongTensor | None = None,
-    past_key_values: Cache | None = None,
+    cache: Cache | None = None,
     inputs_embeds: torch.FloatTensor | None = None,
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``DeepseekV4Model.forward`` (transformers ~5.23) minus the embedding widen."""
-    hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
-        self, inputs_embeds, position_ids, past_key_values, use_cache
+    """``DeepseekV4Model.forward`` (transformers ~5.24) minus the embedding widen."""
+    hidden_states, embeds_ref, position_ids, cache = _stream_prologue(
+        self, inputs_embeds, position_ids, cache, use_cache
     )
     if isinstance(attention_mask, dict):
         causal_mask = next(iter(attention_mask.values()))
@@ -102,7 +102,7 @@ def deepseek_v4_stream_forward(
             config=self.config,
             inputs_embeds=embeds_ref,
             attention_mask=attention_mask,
-            past_key_values=past_key_values,
+            cache=cache,
             position_ids=position_ids,
         )
     position_embeddings = {
@@ -118,12 +118,12 @@ def deepseek_v4_stream_forward(
             position_ids=position_ids,
             attention_mask=causal_mask,
             input_ids=input_ids,
-            past_key_values=past_key_values,
+            cache=cache,
             **kwargs,
         )
 
     hidden_states = self.norm(self.hc_head(hidden_states))
-    return MoeModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+    return MoeModelOutputWithPast(last_hidden_state=hidden_states, cache=cache)
 
 
 def glm5_next_stream_forward(
@@ -131,22 +131,22 @@ def glm5_next_stream_forward(
     input_ids: torch.LongTensor | None = None,
     attention_mask: torch.Tensor | None = None,
     position_ids: torch.LongTensor | None = None,
-    past_key_values: Cache | None = None,
+    cache: Cache | None = None,
     inputs_embeds: torch.FloatTensor | None = None,
     use_cache: bool | None = None,
     **kwargs,
 ) -> MoeModelOutputWithPast:
-    """``Glm5NextTextModel.forward`` (transformers ~5.23) minus the embedding widen. Each layer's mask is keyed by its
+    """``Glm5NextTextModel.forward`` (transformers ~5.24) minus the embedding widen. Each layer's mask is keyed by its
     own ``block_type``, since ``config.layer_types[i]`` at loop position ``i`` re-bases on a sliced list."""
-    hidden_states, embeds_ref, position_ids, past_key_values = _stream_prologue(
-        self, inputs_embeds, position_ids, past_key_values, use_cache
+    hidden_states, embeds_ref, position_ids, cache = _stream_prologue(
+        self, inputs_embeds, position_ids, cache, use_cache
     )
     if not isinstance(causal_mask_mapping := attention_mask, dict):
         attention_mask = create_recurrent_attention_mask(
             config=self.config,
             inputs_embeds=embeds_ref,
             attention_mask=attention_mask,
-            past_key_values=past_key_values,
+            cache=cache,
         )
         # The indexer needs a mask even when none was passed (mirrors the upstream forward).
         if attention_mask is None:
@@ -168,13 +168,13 @@ def glm5_next_stream_forward(
             position_ids=position_ids,
             position_embeddings=None,  # NoPE, as upstream
             input_ids=input_ids,
-            past_key_values=past_key_values,
+            cache=cache,
             prev_topk_indices=topk_indices,
             **kwargs,
         )
 
     hidden_states = self.norm(self.hc_head(hidden_states))
-    return MoeModelOutputWithPast(last_hidden_state=hidden_states, past_key_values=past_key_values)
+    return MoeModelOutputWithPast(last_hidden_state=hidden_states, cache=cache)
 
 
 def qwen4_exp_stream_forward(
@@ -182,19 +182,19 @@ def qwen4_exp_stream_forward(
     input_ids: torch.LongTensor | None = None,
     attention_mask: torch.Tensor | None = None,
     position_ids: torch.LongTensor | None = None,
-    past_key_values: Cache | None = None,
+    cache: Cache | None = None,
     inputs_embeds: torch.FloatTensor | None = None,
     use_cache: bool | None = None,
     ple_input_ids: torch.LongTensor | None = None,
     **kwargs,
 ) -> BaseModelOutputWithPast:
-    """``Qwen4ExpTextModel.forward`` (transformers ~5.23) under the toolkit's document forward, minus the embedding
+    """``Qwen4ExpTextModel.forward`` (transformers ~5.24) under the toolkit's document forward, minus the embedding
     widen; ``ple_input_ids`` feed the per-layer embeddings. Uncached rows only."""
     config = self.config
-    if past_key_values is not None or use_cache:
+    if cache is not None or use_cache:
         raise RuntimeError(
             f"{type(self).__name__} runs as a non-first pipeline stage on uncached training rows only; it was "
-            f"called with a cache (past_key_values={type(past_key_values).__name__}, use_cache={use_cache})."
+            f"called with a cache (cache={type(cache).__name__}, use_cache={use_cache})."
         )
     if not document_forwards_installed():
         raise RuntimeError(
@@ -231,7 +231,7 @@ def qwen4_exp_stream_forward(
             position_embeddings=position_embeddings,
             attention_mask=padding,
             conv_mask=padding,
-            past_key_values=None,
+            cache=None,
             ple_input_ids=ple_input_ids,
             **kwargs,
         )

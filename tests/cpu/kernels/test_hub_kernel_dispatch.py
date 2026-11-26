@@ -1,4 +1,4 @@
-"""Device-aware kernel dispatch: transformers 5.23's fallback captures the CUDA-only package, so without the shim
+"""Device-aware kernel dispatch: transformers 5.24's fallback captures the CUDA-only package, so without the shim
 every CPU forward of a conv/linear-attention family raises ``Expected x.is_cuda()``."""
 
 import os

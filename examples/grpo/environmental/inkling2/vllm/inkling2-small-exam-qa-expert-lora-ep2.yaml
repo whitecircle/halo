@@ -28,7 +28,7 @@ use_peft: true
 lora_r: 8
 lora_alpha: 16
 lora_dropout: 0.0
-lora_target_modules: [o_proj, gate_up_proj, down_proj]
+lora_target_modules: [o_proj.linear, gate_up_proj, down_proj]
 
 # --- Environment ---
 environment_type: exam_qa

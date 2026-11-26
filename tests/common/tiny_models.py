@@ -172,7 +172,7 @@ VOCAB_PAD_MULTIPLE = 128
 TINY_SHARD_SIZE = "4MB"
 DSV4_TID2EID_SEED = 1234
 # Families whose transformers class pins parameters (not only buffers) in fp32 via ``_keep_in_fp32_modules_strict``.
-PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text", "inkling2_text")
+PINNED_FP32_FAMILIES = ("deepseek_v4", "glm4_moe_lite", "glm5_next", "inkling_text", "inkling2_text", "nemotron_h")
 # A release's router bias: far from zero with a small spread, where bf16's spacing erases its differences. A bias near
 # zero survives the cast, so a lost fp32 pin would pass.
 RELEASE_BIAS_CENTER = 42.0
@@ -465,13 +465,14 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "inkling2_text": TinyFamily(
         _tiny_inkling2,
         text_overrides={"max_position_embeddings": 512},
-        # Its index spells the hub's ``attn_sink_proj``, not the module tree's ``sink_proj``.
-        attention_targets=("q_proj", "k_proj", "v_proj", "o_proj"),
+        # Its index spells the hub's ``attn_sink_proj``, not the module tree's ``sink_proj``, and each projection's
+        # linear sits inside a projection module.
+        attention_targets=("q_proj.linear", "k_proj.linear", "v_proj.linear", "o_proj.linear"),
     ),
     # Neither attention is one the Ulysses wrapper implements.
     "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG)),
     "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG)),
-    # No AutoModelForCausalLM entry for mistral4 in transformers 5.23.
+    # No AutoModelForCausalLM entry for mistral4 in transformers 5.24.
     "mistral4": TinyFamily(
         _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG),
         load_class=Mistral4ForCausalLM,

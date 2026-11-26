@@ -134,7 +134,7 @@ on the text sub-config, which is the config Liger is applied to, so the fused lo
 
 A prefix LM (PaliGemma, PaliGemma 2) resolves upstream's own `paligemma` applier, whose fused loss replaces
 `PaliGemmaForConditionalGeneration.forward` with one that calls the decoder directly, so the prefix-LM mask
-transformers builds from `token_type_ids` is never built (against transformers 5.23 the replacement raises at its
+transformers builds from `token_type_ids` is never built (measured against transformers 5.23, the replacement raises at its
 first forward). `liger_prefix_lm_overrides` forces `fused_linear_cross_entropy` off there at both application
 sites, warning on a request, and `cross_entropy` serves the loss.
 

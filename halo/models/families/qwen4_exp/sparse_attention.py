@@ -377,13 +377,13 @@ def qsa_attention_forward(
     hidden_states: torch.Tensor,
     position_embeddings: tuple[torch.Tensor, torch.Tensor],
     attention_mask: torch.Tensor | None = None,
-    past_key_values=None,
+    cache=None,
     seq_idx: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, None]:
     """``attention_mask`` is the 2-D padding mask or ``None`` and ``seq_idx`` marks the documents."""
-    if past_key_values is not None:
-        raise ValueError("QSA serves uncached rows; a call with past_key_values takes the stock forward.")
+    if cache is not None:
+        raise ValueError("QSA serves uncached rows; a call with cache takes the stock forward.")
     if module.training and module.attention_dropout:
         raise ValueError(f"QSA applies no attention dropout, got attention_dropout={module.attention_dropout}")
     if attention_mask is not None and attention_mask.ndim != 2:

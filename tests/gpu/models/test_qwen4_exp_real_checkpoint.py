@@ -138,7 +138,7 @@ def _qsa_checks(model, device) -> tuple[dict[str, bool], dict[str, float]]:
         config=config,
         inputs_embeds=hidden,
         attention_mask=None,
-        past_key_values=None,
+        cache=None,
         position_ids=positions,
         allow_is_causal_skip=False,
     )

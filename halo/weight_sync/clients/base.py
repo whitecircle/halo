@@ -179,7 +179,7 @@ class WeightSyncClientBase(UpdateStream, ABC):
     ADAPTER_SYNC_REFUSAL: str | None
     # Text in an engine's failure of a chunk -> the launch fact that causes it, appended to the raised error.
     CHUNK_FAILURE_REMEDIES: Mapping[str, str] = {}
-    # The adapted module names the engine validates and serves.
+    # The adapted module names the engine validates and serves, each a dotted suffix of the module's path.
     ADAPTER_SERVABLE_MODULES: tuple[str, ...] = ()
     # Whether the engine loads an adapter only from a directory it reads (rollout_adapter_dir).
     ADAPTER_NEEDS_DIRECTORY = False

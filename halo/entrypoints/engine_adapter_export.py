@@ -76,7 +76,7 @@ def _remedy(rollout_backend: str, base, adapter: _SavedAdapter, engine_reasons: 
     if adapter.shape == "expert" and not engine_reasons and len(held) == 1:
         return (
             "Train with an attention target beside the experts (lora_target_modules: [o_proj, gate_up_proj, "
-            "down_proj]): this engine serves the expert adapters of this base beside it."
+            "down_proj], with o_proj.linear on Inkling 2): this engine serves the expert adapters of this base beside it."
         )
     merged = "merge_peft_adapters.py folds it into its base"
     if adapter.shape is not None:

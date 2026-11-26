@@ -48,7 +48,8 @@ def _parse(tmp_path, argv: list[str], yaml_body: str | None = None) -> ModelArgu
 
 
 def _named(model: torch.nn.Module, leaf: str) -> set[str]:
-    return {name for name, _ in model.named_modules() if name.rsplit(".", 1)[-1] == leaf}
+    """Modules a PEFT target names, matched as PEFT does: a dotted suffix of the path (Inkling 2's q_proj.linear)."""
+    return {name for name, _ in model.named_modules() if name == leaf or name.endswith(f".{leaf}")}
 
 
 def _adapted(model: torch.nn.Module, model_config: ModelArguments) -> set[str]:

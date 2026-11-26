@@ -49,9 +49,14 @@ from tests.common.tiny_models import (
 _RANK = EXPERT_LORA_RANK_MULTIPLE
 _SPEC = ExpertLoraSpec(r=_RANK, alpha=2 * _RANK)
 # The shipped Inkling 2 examples' PEFT targets: the text tower's attention, and o_proj beside the experts.
-_ATTENTION = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)"
+_ATTENTION = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|relative_position_bias|o_proj)\.linear"
 _NO_PARALLELISM = SimpleNamespace(is_tp_mode=False, is_pp_mode=False, is_cp_mode=False)
 _INKLING2 = TINY_MOE_VLM_FAMILIES["inkling2"]
+
+
+def _output_projection(model: torch.nn.Module) -> str:
+    """``o_proj``, or on Inkling 2 the linear inside its output projection module."""
+    return "o_proj.linear" if any(name.endswith("o_proj.linear") for name, _ in model.named_modules()) else "o_proj"
 
 
 def _trained(base_dir: Path, *, experts: ExpertLoraSpec | None, family: TinyFamily = _INKLING2, targets=_ATTENTION):
@@ -63,7 +68,7 @@ def _trained(base_dir: Path, *, experts: ExpertLoraSpec | None, family: TinyFami
     model.name_or_path = str(base_dir)
     if experts is not None:
         model = apply_ep_layers(model, single_process_ep_config(expert_lora=experts))
-        targets = ["o_proj"]
+        targets = [_output_projection(model)]
     # Adapter sync serves bf16 adapters only, the dtype the engine stores.
     peft_model = get_peft_model(model, LoraConfig(r=_RANK, lora_alpha=2 * _RANK, target_modules=targets))
     peft_model = peft_model.to(torch.bfloat16)
@@ -156,7 +161,7 @@ def _saved_mixed(tmp_path: Path, family: TinyFamily = _INKLING2) -> Path:
             "another rank or scaling than the",
         ),
         (_INKLING2, "vllm", {"use_dora": True}, "DoRA: the engine refuses it"),
-        (_INKLING2, "vllm", {"rank_pattern": {"o_proj": 4}}, "rank_pattern: the engine reads one rank"),
+        (_INKLING2, "vllm", {"rank_pattern": {"o_proj.linear": 4}}, "rank_pattern: the engine reads one rank"),
     ],
     ids=["sglang-experts", "sglang-experts-the-base-fuses", "expert-scaling", "expert-rank", "dora", "rank-pattern"],
 )
@@ -183,7 +188,8 @@ def test_what_the_engine_cannot_serve_is_refused_with_its_reason_before_any_writ
 def test_a_family_adapter_sync_refuses_on_the_engine_is_refused(tmp_path, family, reason):
     """SGLang's client refuses no adapter of its own; the family's spec and the client's unservable model types do,
     as they refuse the run that would sync these adapters."""
-    peft_model = _trained(tmp_path / "base", experts=None, family=family, targets=["o_proj"])
+    targets = [_output_projection(tiny_family_model(family))]
+    peft_model = _trained(tmp_path / "base", experts=None, family=family, targets=targets)
     _save(peft_model, tmp_path / "saved", None)
 
     with pytest.raises(ValueError, match=reason):
@@ -229,7 +235,7 @@ def test_whole_tensors_beside_the_adapters_are_refused(tmp_path):
     assert not (tmp_path / "exported").exists()
 
 
-_ATTENTION_TARGET_REMEDY = "lora_target_modules: [o_proj, gate_up_proj, down_proj]"
+_ATTENTION_TARGET_REMEDY = "lora_target_modules: [o_proj, gate_up_proj, down_proj], with o_proj.linear on Inkling 2"
 _MERGE_REMEDY = "merge_peft_adapters.py folds it into its base"
 
 

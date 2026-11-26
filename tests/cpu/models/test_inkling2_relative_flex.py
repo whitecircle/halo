@@ -282,7 +282,7 @@ def test_generation_decodes_on_the_eager_attention():
 def _train_only_output_projections(model) -> None:
     """The first layer's attention inputs then require no gradient while grad mode is on."""
     for name, parameter in model.named_parameters():
-        parameter.requires_grad_(name.endswith("o_proj.weight"))
+        parameter.requires_grad_(name.endswith("o_proj.linear.weight"))
 
 
 @pytest.mark.usefixtures("fresh_dynamo")

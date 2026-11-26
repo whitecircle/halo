@@ -31,6 +31,7 @@ from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
 from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import INKLING2_ATTENTION_LINEARS
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
     AdapterSync,
@@ -1348,7 +1349,12 @@ def test_the_gpu_e2e_builds_its_sync_with_the_class_signature():
     assert isinstance(sync, AdapterSync)
 
 
-_INKLING2_ATTENTION = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj")
+_INKLING2_ATTENTION = INKLING2_ATTENTION_LINEARS
+
+
+def _attention_targets(family: str, projections: tuple[str, ...]) -> tuple[str, ...]:
+    """Inkling 2 adapts the linear inside each attention projection module."""
+    return tuple(f"{name}.linear" for name in projections) if family.startswith("inkling2") else projections
 
 
 def _inkling2_peft(family: str, targets: tuple[str, ...]) -> torch.nn.Module:
@@ -1403,7 +1409,7 @@ class _ExpertLoraLayer:
 def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, client_cls, scaling, reason, monkeypatch):
     """vLLM's Inkling 2 experts take an adapter (with Halo's source patch); one config carries every module's rank. A
     refusal names the server the model needs, as the module refusal does."""
-    model = _inkling2_peft(family, ("q_proj", "o_proj"))
+    model = _inkling2_peft(family, _attention_targets(family, ("q_proj", "o_proj")))
     monkeypatch.setattr(adapter_sync, "expert_lora_layers", lambda _: [("mlp", _ExpertLoraLayer(scaling))])
     reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
     if reason is None:
@@ -1424,7 +1430,7 @@ def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, cli
 def test_an_unservable_adapted_module_names_the_server_the_model_needs(family, client_cls, server, monkeypatch):
     """vLLM serves Inkling 2 from its own tag, so the refusal names that tag, not the release every other family
     runs on."""
-    model = _inkling2_peft(family, ("q_proj",))
+    model = _inkling2_peft(family, _attention_targets(family, ("q_proj",)))
     monkeypatch.setattr(adapter_sync, "_adapted_modules", lambda _: {"layers.0.mlp.gate": torch.nn.Linear(2, 2)})
     reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
     assert any(f"is not one {server} serves" in each for each in reasons), reasons

@@ -239,7 +239,12 @@ def unservable_adapter_reasons(
         if config.get(flag):
             reasons.append(why)
     unservable = next(
-        (name for name in module_names if name.rsplit(".", 1)[-1] not in client_cls.ADAPTER_SERVABLE_MODULES), None
+        (
+            name
+            for name in module_names
+            if not any(f".{name}".endswith(f".{servable}") for servable in client_cls.ADAPTER_SERVABLE_MODULES)
+        ),
+        None,
     )
     if unservable is not None:
         reasons.append(_unservable_module_reason(unservable, model, client_cls))
