@@ -4,6 +4,7 @@ hold anyio cancel scopes, which one task must enter and exit; a failed or cancel
 drives disconnect; and ``episode_scratch`` gives each episode a server over its own directory."""
 
 import asyncio
+import base64
 import importlib
 import logging
 import os
@@ -11,6 +12,7 @@ import types
 from datetime import timedelta
 
 import pytest
+from mcp import types as mcp_types
 
 import halo.environments.protocols.mcp as mcp_module
 from halo.environments.protocols.mcp import NativeMCPClientEnvironment, build_mcp_environment
@@ -691,6 +693,229 @@ def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
     env_file._transport_context("/scratch")
     assert captured[2].args == [], "a scratch file goes through the environment, not the arguments"
     assert captured[2].env == {"PATH": "/usr/bin", "HOME": "/root", "MEMORY_FILE_PATH": "/scratch/memory.jsonl"}
+
+
+async def test_call_tool_uses_structured_content_when_content_empty():
+    env = _StubMCPEnv()
+    results = [
+        mcp_types.CallToolResult(
+            content=[],
+            structuredContent={"account_id": "ACCT-1", "balance": 42.5},
+            isError=False,
+        ),
+        mcp_types.CallToolResult(
+            content=[],
+            structuredContent={"city": "Hà Nội", "currency": "€"},
+            isError=False,
+        ),
+        mcp_types.CallToolResult(
+            content=[],
+            structuredContent={},
+            isError=False,
+        ),
+    ]
+    idx = 0
+
+    async def call_tool(name, arguments):
+        nonlocal idx
+        res = results[idx]
+        idx += 1
+        return res
+
+    env.stub_session.call_tool = call_tool
+    ids, _ = await env.reset_async(["task"])
+    calls = [
+        {"id": "c1", "function": {"name": "stub_tool", "arguments": "{}"}},
+        {"id": "c2", "function": {"name": "stub_tool", "arguments": "{}"}},
+        {"id": "c3", "function": {"name": "stub_tool", "arguments": "{}"}},
+    ]
+    await env.step_async(ids, ["calling"], [{"finish_reason": "tool_calls", "tool_calls": calls}])
+    await env.disconnect()
+
+    replies = [m.content for m in env.get_trajectories(ids)[0].messages if m.role == "tool"]
+    assert replies == [
+        '{"account_id": "ACCT-1", "balance": 42.5}',
+        '{"city": "Hà Nội", "currency": "€"}',
+        "{}",
+    ]
+
+
+async def test_call_tool_preserves_structured_content_on_error():
+    env = _StubMCPEnv()
+    results = iter(
+        [
+            mcp_types.CallToolResult(
+                content=[],
+                structuredContent={"code": "E_POLICY", "written": 0},
+                isError=True,
+            ),
+            mcp_types.CallToolResult(
+                content=[],
+                structuredContent={},
+                isError=True,
+            ),
+        ]
+    )
+
+    async def call_tool(name, arguments):
+        return next(results)
+
+    env.stub_session.call_tool = call_tool
+    await env.connect()
+    try:
+        with pytest.raises(RuntimeError, match=r'"code": "E_POLICY"'):
+            await env._call_mcp_tool("stub_tool", {})
+        with pytest.raises(RuntimeError, match=r"^\{\}$"):
+            await env._call_mcp_tool("stub_tool", {})
+    finally:
+        await env.disconnect()
+
+
+async def test_call_tool_does_not_duplicate_structured_content_when_text_present():
+    env = _StubMCPEnv()
+    results = iter(
+        [
+            mcp_types.CallToolResult(
+                content=[mcp_types.TextContent(type="text", text="ok summary")],
+                structuredContent={"status": "ok"},
+                isError=False,
+            ),
+            mcp_types.CallToolResult(
+                content=[
+                    mcp_types.EmbeddedResource(
+                        type="resource",
+                        resource=mcp_types.TextResourceContents(uri="file:///n.txt", text="file body"),
+                    )
+                ],
+                structuredContent={"path": "/n.txt"},
+                isError=False,
+            ),
+        ]
+    )
+
+    async def call_tool(name, arguments):
+        return next(results)
+
+    env.stub_session.call_tool = call_tool
+    await env.connect()
+    try:
+        assert await env._call_mcp_tool("stub_tool", {}) == "ok summary"
+        assert await env._call_mcp_tool("stub_tool", {}) == 'file body\n{"path": "/n.txt"}'
+    finally:
+        await env.disconnect()
+
+
+async def test_call_tool_falls_back_to_structured_content_without_text_block():
+    env = _StubMCPEnv()
+    image_b64 = base64.b64encode(b"\x00" * 100).decode("ascii")
+    results = iter(
+        [
+            mcp_types.CallToolResult(
+                content=[mcp_types.ImageContent(type="image", data=image_b64, mimeType="image/png")],
+                structuredContent={"answer": 42},
+                isError=False,
+            ),
+            mcp_types.CallToolResult(
+                content=[mcp_types.TextContent(type="text", text="")],
+                structuredContent={"answer": 42},
+                isError=False,
+            ),
+            mcp_types.CallToolResult(
+                content=[mcp_types.ImageContent(type="image", data=image_b64, mimeType="image/png")],
+                structuredContent={"code": "E_IMG"},
+                isError=True,
+            ),
+        ]
+    )
+
+    async def call_tool(name, arguments):
+        return next(results)
+
+    env.stub_session.call_tool = call_tool
+    await env.connect()
+    try:
+        assert await env._call_mcp_tool("stub_tool", {}) == '[Binary data: 100 bytes]\n{"answer": 42}'
+        assert await env._call_mcp_tool("stub_tool", {}) == '{"answer": 42}'
+        with pytest.raises(RuntimeError, match=r'\[Binary data: 100 bytes\]\n\{"code": "E_IMG"\}'):
+            await env._call_mcp_tool("stub_tool", {})
+    finally:
+        await env.disconnect()
+
+
+async def test_call_tool_formats_embedded_resource_resource_link_and_binary_sizes():
+    env = _StubMCPEnv()
+    blob_b64 = base64.b64encode(b"\x01\x02\x03\x04").decode("ascii")
+    image_b64 = base64.b64encode(b"\x00" * 100).decode("ascii")
+    audio_b64 = base64.b64encode(b"\xff" * 16).decode("ascii")
+
+    async def call_tool(name, arguments):
+        return mcp_types.CallToolResult(
+            content=[
+                mcp_types.EmbeddedResource(
+                    type="resource",
+                    resource=mcp_types.TextResourceContents(uri="file:///note.txt", text="embedded line"),
+                ),
+                mcp_types.EmbeddedResource(
+                    type="resource",
+                    resource=mcp_types.BlobResourceContents(uri="file:///bin.dat", blob=blob_b64),
+                ),
+                mcp_types.ImageContent(type="image", data=image_b64, mimeType="image/png"),
+                mcp_types.AudioContent(type="audio", data=audio_b64, mimeType="audio/wav"),
+                mcp_types.ResourceLink(
+                    type="resource_link",
+                    name="report.pdf",
+                    uri="file:///report.pdf",
+                    description="Q4 summary",
+                ),
+                mcp_types.ResourceLink(
+                    type="resource_link",
+                    name="index",
+                    uri="https://example.com/index",
+                ),
+            ],
+            isError=False,
+        )
+
+    env.stub_session.call_tool = call_tool
+    await env.connect()
+    try:
+        out = await env._call_mcp_tool("stub_tool", {})
+        assert out == (
+            "embedded line\n"
+            "[Binary data: 4 bytes]\n"
+            "[Binary data: 100 bytes]\n"
+            "[Binary data: 16 bytes]\n"
+            "[Resource: report.pdf (file:///report.pdf)] Q4 summary\n"
+            "[Resource: index (https://example.com/index)]"
+        )
+    finally:
+        await env.disconnect()
+
+
+async def test_call_tool_formats_wrapped_and_undecodable_base64():
+    env = _StubMCPEnv()
+    wrapped_image_b64 = base64.encodebytes(b"\x00" * 100).decode("ascii")
+
+    async def call_tool(name, arguments):
+        return mcp_types.CallToolResult(
+            content=[
+                mcp_types.ImageContent(type="image", data=wrapped_image_b64, mimeType="image/png"),
+                mcp_types.ImageContent(type="image", data="abc", mimeType="image/png"),
+                mcp_types.EmbeddedResource(
+                    type="resource",
+                    resource=mcp_types.BlobResourceContents(uri="file:///bad.dat", blob="not-base64-pad"),
+                ),
+            ],
+            isError=False,
+        )
+
+    env.stub_session.call_tool = call_tool
+    await env.connect()
+    try:
+        out = await env._call_mcp_tool("stub_tool", {})
+        assert out == ("[Binary data: 100 bytes]\n[Binary data: 3 base64 chars]\n[Binary data: 14 base64 chars]")
+    finally:
+        await env.disconnect()
 
 
 if __name__ == "__main__":
