@@ -295,7 +295,7 @@ def run_dataset_preparation(args: PrepareDatasetArguments, config: Preprocessing
         )
 
     # Output-side classification: a bare "org/name" stays local; only an explicit hf:// uploads.
-    output_type, _, output_key = parse_dataset_destination(args.output)
+    output_type, output_bucket, output_key = parse_dataset_destination(args.output)
 
     if args.allow_cross_document_linear_attention and not config.pack_sequences:
         raise ValueError("--allow_cross_document_linear_attention needs --pack_sequences: only packed rows cross.")
@@ -323,8 +323,14 @@ def run_dataset_preparation(args: PrepareDatasetArguments, config: Preprocessing
         logger.info("DRY RUN - no changes will be made")
         return
 
-    # output_key, not args.output: the destination parser strips a file:// prefix.
-    destination = os.path.abspath(output_key) if output_type == "local" else args.output
+    # The parsed key, not args.output: the parser strips a file:// prefix and an S3 key's trailing slashes, so every
+    # spelling of one output takes one lock.
+    if output_type == "local":
+        destination = os.path.abspath(output_key)
+    elif output_type == "s3":
+        destination = f"s3://{output_bucket}/{output_key}"
+    else:
+        destination = args.output
     scratch = bake_scratch_path(destination)
     try:
         held = FileLock(f"{scratch}.lock").acquire(timeout=0)

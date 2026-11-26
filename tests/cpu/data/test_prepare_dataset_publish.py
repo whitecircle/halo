@@ -335,6 +335,16 @@ def test_a_second_bake_of_one_output_exits_while_the_first_holds_it(tmp_path, mo
     assert not dest.exists()
 
 
+def test_a_trailing_slash_spelling_of_an_s3_output_takes_the_same_lock(tmp_path, monkeypatch):
+    """Both spellings name one prefix, so two bakes under two locks would push their shards over each other."""
+    _stub_main(monkeypatch, tmp_path, "s3://bucket/ds/", lambda **kwargs: pytest.fail("the second bake ran"))
+    monkeypatch.setattr(prepare_dataset_tool, "S3Client", _fake_s3()[0])
+    scratch = prepare_dataset_tool.bake_scratch_path("s3://bucket/ds")
+
+    with FileLock(f"{scratch}.lock"), pytest.raises(SystemExit, match="Another prepare_dataset.py is baking"):
+        prepare_dataset.main()
+
+
 def _parse(argv_extra):
     argv = ["prepare_dataset.py", "--input", "in", "--output", "out", "--model_name_or_path", "model", *argv_extra]
     old = sys.argv
