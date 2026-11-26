@@ -245,7 +245,7 @@ CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `tests/gpu/trainers/grpo/test_online_g
 
 ## What to watch
 
-Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 when trainer and engine agree), `completions/clipped_ratio`, `entropy`, and each external term's (`judge`, `reward_model`) `<source>/<name>/scored`. Toolkit additions:
+Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 when trainer and engine agree), `completions/clipped_ratio`, `entropy`, and each external term's (`judge`, `reward_model`, `whitecircle`) `<source>/<name>/scored`. Toolkit additions:
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.

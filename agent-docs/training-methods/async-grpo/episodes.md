@@ -41,10 +41,12 @@ environment's system prompt and tool schema as the chat template renders them, a
 that preamble fails the run at startup.
 
 An episode that grows past the served window closes on what it earned, as in an [eval](evaluation.md), so the longest
-failures keep their row and reward; `episode/context_overflow` counts them. SGLang refuses any request whose prompt plus
-`max_tokens` passes the window where vLLM clamps `max_tokens`, so there such an episode ends up to `rollout_max_tokens`
-earlier. Under `train_on_sampled_tokens: false` its whole render can pass the window, ending on a tool result no engine
-served, and the episode then leaves the batch instead of raising.
+failures keep their row and reward; `episode/context_overflow` counts them. Such an episode is never sent to an
+external reward term: each prices 0 for it, and the episode keeps its place in the group
+([Settlement](../grpo/rewards/README.md#settlement)). SGLang refuses any request whose prompt plus `max_tokens` passes
+the window where vLLM clamps `max_tokens`, so there such an episode ends up to `rollout_max_tokens` earlier. Under
+`train_on_sampled_tokens: false` its whole render can pass the window, ending on a tool result no engine served, and
+the episode then leaves the batch instead of raising.
 
 `max_completion_length` is no knob here: the script pins it to `rollout_max_tokens` (TRL reads it only as the
 `dr_grpo` normalizer) and raises on another explicit value.
@@ -140,9 +142,10 @@ with thinking on, an unanswered probe is skipped with a warning. A trainer templ
 it with a warning.
 
 A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
-it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
-([Training rows](objective.md#training-rows)) then score log-probs against a prompt the policy never generated under;
-per-turn rows take the engine's ids and cannot drift.
+it, and no `--chat-template` on the server, the two sides diverge: the probe above warns on the no-tool render (and
+refuses with thinking off), and a difference in how the tool schema renders passes unchecked. The re-tokenization
+paths ([Training rows](objective.md#training-rows)) then score log-probs against a prompt the policy never generated
+under; per-turn rows take the engine's ids and cannot drift.
 
 `rollout_chat_template_kwargs` applies template variables to every request **and** the trainer's own renders. It
 refuses `reasoning_effort`, which is per episode ([Effort templates](reasoning.md#effort-templates)), and

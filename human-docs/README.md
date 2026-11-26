@@ -40,6 +40,9 @@ mechanism.
   generates and verifiable rewards score it.
 - [Async GRPO with Environments](training-methods/async-grpo-environments.md):
   multi-turn, tool-using RL with Ray actors and overlapped rollouts.
+- [GRPO rewards](training-methods/rewards.md): choosing and setting up the reward
+  terms the GRPO methods share, from rules to LLM judges, reward models and
+  White Circle policies.
 
 ## Configure
 

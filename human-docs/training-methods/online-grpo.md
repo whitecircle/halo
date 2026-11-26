@@ -25,25 +25,28 @@ longer than `max_prompt_length` is dropped, not truncated.
 
 The reward is a list of terms, each scoring a completion in `[0, 1]` and logged as
 `rewards/<name>/mean`. The default is one `accuracy` term: 1.0 when the last `\boxed{...}` equals
-`answer`. `format`, `judge`, `reward_model` and `whitecircle` terms add a regex check, a generative
-judge graded against your rubric, a served scorer, and a check against your White Circle policies:
+`answer`. A `format` term checks the completion against `pattern`
+([GRPO Rewards](rewards.md#accuracy-and-format)):
 
 ```yaml
 rewards:
   - source: accuracy
   - source: format
     weight: 0.5
+    pattern: '\\boxed\{.+\}'
 ```
 
-One line trains against your White Circle policies once the recipe names your environment
-([White Circle](../../agent-docs/training-methods/grpo/rewards/whitecircle.md) ↗):
+A `judge`, `reward_model` or `whitecircle` term adds a rubric graded by a chat model, a served classifier
+or a check against your White Circle policies. [GRPO Rewards](rewards.md) covers how to choose and set
+one up, what each sends off your machine, and what an outage does to the run and which metric shows it.
+
+Once a vLLM server serves the model ([Run](#run)) and the recipe names your White Circle environment, one line
+trains against its policies. The [White Circle cookbook](../cookbooks/halo-whitecircle-cookbook.md)
+creates the policies with `halo run create-whitecircle-policies`.
 
 ```bash
 WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
 ```
-
-Every judge, reward model and White Circle term is probed at launch, so a bad URL, key or model name fails the launch, not
-every step ([Reward Terms](../../agent-docs/training-methods/grpo/rewards/README.md) ↗).
 
 ## Run
 
@@ -70,7 +73,9 @@ off. Serve MoE models with the compose default `--moe-backend triton`
 
 ## What to watch
 
-- `rewards/accuracy/mean` is progress. `frac_reward_zero_std` is the share of groups that gave no signal.
+- `rewards/accuracy/mean` is progress. `frac_reward_zero_std` is the share of groups that gave no signal
+  under `scale_rewards: group`. Under `batch` it reads 1 only when the whole step tied, so set
+  `drop_degenerate_groups: true` and read `sampling/degenerate_group_frac`.
 - `sampling/importance_sampling_ratio/mean` near 1 means trainer and engine agree on the policy. A drift
   away from 1 means they disagree about the template, the sinks or dropout.
 - Every logged step's rollouts land in `<output_dir>/completions/` as parquet. Read them when the

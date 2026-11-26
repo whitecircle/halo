@@ -318,6 +318,7 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 | `human-docs/cookbooks/*.md` | the family's `examples/` recipes; its `agent-docs/models/` page |
 | `human-docs/installation.md`, `human-docs/quickstart.md` | `Dockerfile*`, the image tags, `examples/`; `agent-docs/infrastructure/docker.md`, `agent-docs/parallelism/launch-recipes.md` |
 | `human-docs/choosing-a-method.md`, `human-docs/training-methods/*.md` | `halo/trainers/`, `scripts/training/**`; the method's `agent-docs/training-methods/` page |
+| `human-docs/training-methods/rewards.md` | `halo/rewards/`, `scripts/before_training/{create_whitecircle_policies,score_offline_grpo}.py`; `agent-docs/training-methods/grpo/rewards/` |
 | `human-docs/ai-tooling.md` | `skills/` |
 | `human-docs/contributing.md` | `CONTRIBUTING.md`, `agent-docs/contributing/` |
 

@@ -22,7 +22,7 @@ counts. Partial credit would pay a brute force that times out on the large tests
 | `reward/resubmission` | `resubmission_penalty` | `0` | `−resubmission_penalty` per admitted `submit_solution` call after the first |
 | `reward/tool_shaping` | `no_tool_use_penalty` / `turn_overflow_penalty` | `0` | zero tool calls / ending truncated: `max_turns` or the output budget spent, or a cut it could not recover |
 | `reward/tool_shaping` | `length_cutoff_penalty` | `0` | per engine-cut or empty turn the episode recovers from |
-| `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call; this env zeroes the protocol's 0.05 / 0.1 |
+| `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per successful call / per failed or [refused](tools.md#refused-calls) call; this env zeroes the protocol's 0.05 / 0.1 |
 
 - Keep each shaping rung small next to the objective's weight: rungs bootstrap a base that never submits and
   cancel out within a group once every completion reaches them.
@@ -85,7 +85,7 @@ on a problem nobody solves still costs more than an honest failure. `wasted_run`
 vetoed: a veto there would teach a policy to submit untested. `untested_submission` prices failed episodes only: the policy tests when
 it is unsure, so within a group an outcome-only reward charges testing, and pricing the untested failure is what pays for testing
 beyond the samples. `false_record` is only logged: independent verdicts agree on too few of its flags for a veto, which
-would erase real solves at random. Prices add when several checks fire. A call the environment refused unrun is marked so in the judge's view: it ran nothing and spent no submission or run, but a closing-tag refusal is priced as a tool error (`tool_error_penalty`).
+would erase real solves at random. Prices add when several checks fire. A call the environment refused unrun is marked so in the judge's view: it ran nothing and spent no submission or run, and it pays `tool_error_penalty` like any [refused call](tools.md#refused-calls).
 The view also marks where the hidden scratchpad budget ran out, from the environment's own count: a scratchpad call
 refused for it, as `refused for the spent scratchpad budget before any reply had said so` (every such call of the first
 refusal's turn) or `sent after a reply had said the scratchpad budget was spent`, and every submission whose turn began
@@ -99,6 +99,9 @@ The recipes' [`on_error: invalid`](../../../../grpo/rewards/README.md#common-opt
 could not score from its group's baseline and the loss, so an outage (an expired key, a provider failure) trains
 nothing rather than every episode unjudged. `judge/audit/scored` and `sampling/invalid_episode_frac` show it, and a
 second step in a row with no valid episode stops the run ([Batch construction](../../../objective.md#batch-construction)).
+The launch probe checks the key on rank 0 alone, while the judge reads `OPENROUTER_API_KEY` on every node that runs
+rollout actors ([Probe and retries](../../../../grpo/rewards/README.md#probe-and-retries)); drop the term to run
+without a judge.
 
 ### Cap context
 
