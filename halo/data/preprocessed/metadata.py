@@ -75,6 +75,9 @@ _UNCOMPARED_FIELDS = frozenset(
 # Render knobs a stamp may not record: a stamp lacking one was baked at its default.
 _DEFAULTED_WHEN_UNRECORDED = ("reasoning_effort_field",)
 
+# What a text bake writes into its ids beside the text: --append_eos the EOS, the tokenizer its own BOS.
+_TEXT_BAKED_KNOBS = ("eos_token", "bos_token")
+
 _PreprocessingMode = Literal["chat", "text"]
 _PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
 _DEFAULT_PACKING_STRATEGY = "bfd"
@@ -395,14 +398,17 @@ def _render_knob_differences(
 
 def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any) -> None:
     """Raise when a knob the run STATES differs from the baked value; knobs the metadata predates, ``render_args``
-    lacks or the run leaves at default are reported instead, since the prepared value is what trained either way."""
+    lacks or the run leaves at default are reported instead, since the prepared value is what trained either way. A
+    text bake renders no chat template, so only the special tokens it bakes are compared."""
     recorded = metadata.config or {}
     if recorded.get("mode") == "text":
-        # Raw-text artifacts render no chat template, so no knob was baked.
-        return
-    recorded = {**{name: getattr(PreprocessingConfig, name) for name in _DEFAULTED_WHEN_UNRECORDED}, **recorded}
+        checked = _TEXT_BAKED_KNOBS
+        recorded = {name: recorded[name] for name in checked if name in recorded}
+    else:
+        checked = _RENDER_CHECKED_FIELDS
+        recorded = {**{name: getattr(PreprocessingConfig, name) for name in _DEFAULTED_WHEN_UNRECORDED}, **recorded}
 
-    unrecorded = [name for name in _RENDER_CHECKED_FIELDS if name not in recorded and hasattr(render_args, name)]
+    unrecorded = [name for name in checked if name not in recorded and hasattr(render_args, name)]
     if unrecorded:
         logger.warning(
             f"Preprocessed dataset metadata predates recording of {unrecorded}; cannot verify these "
@@ -540,10 +546,11 @@ def verify_preprocessed_dataset(
     run_processing_class: Any | None = None,
     required_eos_token_ids: frozenset[int] | None = None,
 ) -> None:
-    """Raise on a max_length, baked-label or render-knob mismatch, on an exported chat template other than the rows
-    were rendered with, on turn terminators other than ``required_eos_token_ids``, the set the run resolves, and, given
-    both, on a token other than the run's closing a row's open last assistant turn; warn on a model mismatch and on
-    ``required_packing`` against an unpacked artifact."""
+    """Raise on a max_length, baked-label or render-knob mismatch, on a ``run_processing_class`` vocabulary of another
+    size than the bake's or an exported chat template other than the rows were rendered with, on turn terminators other
+    than ``required_eos_token_ids``, the set the run resolves, and, given both, on a token other than the run's closing
+    a row's open last assistant turn; warn on a model mismatch and on ``required_packing`` against an unpacked
+    artifact."""
     if metadata.max_length < required_max_length:
         raise ValueError(
             f"Preprocessed dataset max_length ({metadata.max_length}) is less than "
@@ -584,6 +591,16 @@ def verify_preprocessed_dataset(
     if render_args is not None:
         _verify_render_knobs(metadata, render_args)
     if run_processing_class is not None:
+        run_vocab_size = len(resolve_tokenizer(run_processing_class))
+        if run_vocab_size != metadata.tokenizer_vocab_size:
+            raise ValueError(
+                f"The preprocessed rows were tokenized with a {metadata.tokenizer_vocab_size}-token vocabulary "
+                f"({metadata.model_name}), but this run's tokenizer has {run_vocab_size} tokens: the baked ids would "
+                f"mean other text to this model. Train with the tokenizer the rows were baked with, or re-preprocess "
+                f"with this run's (scripts/before_training/prepare_dataset.py). A run adding tokens "
+                f"(added_special_tokens) needs a bake that holds them: grow the vocabulary first "
+                f"(scripts/before_training/patch_vocab.py), then bake and train from that checkpoint."
+            )
         _verify_exported_chat_template(metadata, run_processing_class.chat_template, required_model)
     if required_eos_token_ids is not None:
         _verify_turn_terminators(metadata, required_eos_token_ids)

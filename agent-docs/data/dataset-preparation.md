@@ -4,7 +4,8 @@
 
 Only SFT (text and VLM) supports offline pre-processing. DPO, SMPO, GRPO, and Classification use
 different data formats and tokenize during training. The script is **single-process** — run it with
-plain `python`, not `torchrun`; `--num_proc` sets HF `map` workers, not ranks. Its flags are the
+plain `python`; a `torchrun` or `accelerate` launch of several processes exits before the input loads.
+`--num_proc` sets HF `map` workers, not ranks. Its flags are the
 `PreprocessingConfig` fields (`halo/data/preprocessed/metadata.py`) plus the tool's own
 `PrepareDatasetArguments`, spelled like the training YAML keys; a YAML file of them works as the first
 argument, with `--key=value` overrides after it.
@@ -57,10 +58,13 @@ run closes one otherwise (GLM's `<|user|>` and `<|observation|>`). Re-run `prepa
 
 The checked set is every `PreprocessingConfig` field outside `_UNCOMPARED_FIELDS`, so a new knob is
 compared by default, and a knob the metadata does not record warns instead. `--mode text`
-artifacts render no template and skip the render check entirely. A training config setting
+artifacts render no template, so only `--eos_token` and `--bos_token`, which the tokenizer writes into
+their ids, are checked. A training config setting
 `packing: true` against an unpacked artifact warns — preprocessed rows are never packed at runtime.
-A `model_name_or_path` other than the prep `--model_name_or_path` only warns, unless the template the run
-exports differs from the rows' (which raises, see above), so train with the tokenizer the rows were baked with.
+A `model_name_or_path` other than the prep `--model_name_or_path` only warns, but a run tokenizer whose
+length differs from the recorded `tokenizer_vocab_size` raises, in either mode: the baked ids would mean
+other text. A run that adds tokens (`added_special_tokens`) therefore bakes from a checkpoint already
+holding them (`patch_vocab.py`).
 
 `--mode` is validated on the config, not only by the CLI's choices: an unvalidated typo like `txt`
 falls through every `mode == "text"` branch and chat-templates a raw pretraining corpus. A knob belonging
@@ -187,7 +191,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |
 | `--num_proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. With neither set, every CPU the process may use but two, since the tool runs alone ([`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables)) |
 | `--tokenizer_backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |
-| `--test_size` | `None` | Test split fraction (e.g. `0.01`), cut from `train`. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num_shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
+| `--test_size` | `None` | Test split fraction (e.g. `0.01`), cut from `train` at a fixed seed; the split's index files go to `HF_DATASETS_CACHE`, so a read-only input works. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num_shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
 | `--pad_token` / `--eos_token` / `--bos_token` | `None` | Override pad / EOS / BOS token. Recorded in `metadata.json` and re-checked at training time |
 | `--chat_template` | `None` | Override chat template (Jinja2 string, or a path to a `.jinja`/`.jinja2`/`.j2` file), applied whatever template the tokenizer ships. The resolved text is recorded and re-checked; training applies it over a shipped template only with `force_chat_template: true` |
 | `--overwrite` | `False` | Replace an existing output. Only the local writer keeps the previous dataset intact through a failed publish (see below) |
@@ -252,13 +256,21 @@ legitimate.
 `metadata.json` is also the **completion marker** — `is_preprocessed_dataset` keys on it — so it is
 written last and a publish never leaves it beside an incomplete payload. A local output is baked once,
 straight into a sibling of the destination (`<output>.halo-staging`, on its filesystem), and swapped in
-by rename, leaving the previous dataset intact if the bake fails; an existing output without
-`--overwrite` is refused before the bake. An S3 or Hub output is baked into a `TMPDIR` temp directory
-and uploaded from it.
+by rename, leaving the previous dataset intact if the bake fails.
+
+An S3 or Hub output is baked beside the scratch directory below (`prepare-dataset-<md5>.halo-staging` under `HF_DATASETS_CACHE`) and uploaded from it; a
+failed upload keeps it and names it until the next run to that output, and `s3.py push <dir> <uri> --overwrite`
+finishes an S3 publish with the same marker-last order. Every destination is checked before the input loads: an
+existing one without `--overwrite` is refused, and the probe of an S3 one also catches a missing bucket and
+credentials that may not read it; credentials that may read but not write fail at the upload.
+
+A second run to an output exits before the input loads while another bakes it with the same `HF_DATASETS_CACHE`
+(the lock sits beside the scratch directory). Bakes of one output from hosts with different caches are not
+serialized.
 
 Each tokenize, filter, label and pack step writes a full copy of the corpus. The tool writes them to a
 scratch directory under `HF_DATASETS_CACHE`, removed when the bake ends, so peak disk there is those
-copies and nothing stays behind. The directory is named after `--output`, so a rerun to the same
+copies, plus the baked dataset for an S3 or Hub output. The directory is named after `--output`, so a rerun to the same
 output first removes the copies a killed bake left there. Completion-only labels are stored at the integer
 width of `input_ids` (`int32`).
 
@@ -273,13 +285,16 @@ holds `input_ids` and `seq_lengths` alone, about 4 bytes per token.
 
 Hub and S3 `--overwrite` both delete the marker first and re-upload it after the payload, so an
 interrupted upload reads as *raw* (a loud failure) rather than as a silently truncated preprocessed
-dataset. The S3 writer never clears the prefix up front: it overwrites objects in place and sweeps
-the ones the new tree does not carry only after the upload completed.
+dataset. Neither clears the destination up front. The S3 writer overwrites objects in place and sweeps
+the ones the new tree does not carry after the payload and before the marker; the Hub upload deletes the old
+bake's `dataset_dict.json`, `train/` and `test/` files it does not replace, keeping the dataset card.
 
 Training does not read a Hub-published dataset in place: `load_dataset` on a saved tree returns its
 sidecar files as rows, so a preprocessed dataset named by its Hub id (`org/name`) is refused at startup.
-Download it first (`hf download org/name --repo-type dataset --local-dir <dir>`) and point `dataset:`
-at the directory.
+Download it first, into an empty directory (`hf download org/name --repo-type dataset --local-dir <dir>`), and
+point `dataset:` at it. A copy over an earlier bake (that download, `rsync` without `--delete`) can leave one bake's
+shard index beside another's rows; training refuses a dataset whose shard index disagrees with its stamp's
+`num_shards`.
 
 ## Sharded loading
 

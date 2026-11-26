@@ -59,7 +59,7 @@ How it works:
 
 - **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache. A stale tree that cannot be renamed aside (a permission error, say) raises and discards the fresh download, rather than serving the stale rows.
 
-- **One copy on disk**: the tree downloads straight into that temp dir through the client's parallel transfer (`download_dataset_tree`), so no second copy waits under `TMPDIR` for the process to exit. A tree missing its load gates (a torn promote) raises there and its partial download is removed, so it is never published.
+- **One copy on disk**: the tree downloads straight into that temp dir through the client's parallel transfer (`download_dataset_tree`), so no second copy waits under `TMPDIR` for the process to exit. A tree larger than the cache volume's free space is refused before the first byte. A tree missing its load gates (a torn promote) raises there and its partial download is removed, so it is never published.
 
 - **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
 
@@ -130,12 +130,13 @@ client = S3Client(
 ```
 
 `S3Client` carries the transport surface: `exists` / `object_exists`, `list_objects`, `delete`, and the
-folder transfers:
+folder transfers. A batched delete raises naming the first key S3 refused, since `DeleteObjects` answers a
+refusal with success and an error list:
 
 | Method | Purpose |
 |--------|---------|
-| `push_folder(local_path, key, subfolder=None, overwrite=True, show_progress=False)` | Upload a local folder. Overwrites **in place** (no prefix delete): a top-level `metadata.json` is removed first and re-uploaded last, and objects the new tree lacks are swept only after the upload succeeds |
-| `download_folder(key, local_path, subfolder=None, overwrite=True, show_progress=False)` | Download a folder |
+| `push_folder(local_path, key, subfolder=None, overwrite=True, show_progress=False)` | Upload a local folder. Overwrites **in place** (no prefix delete): a top-level `metadata.json` is removed first and re-uploaded last, and objects the new tree lacks are swept after the rest of the upload, before the marker |
+| `download_folder(key, local_path, subfolder=None, overwrite=True, show_progress=False)` | Download a folder. An existing `local_path` is removed first under `overwrite`, refused otherwise; a folder larger than the free space at `local_path` is refused before the transfer |
 
 Both transfer files concurrently (a many-shard dataset or checkpoint moves in parallel, not
 file-by-file); `HALO_S3_MAX_FOLDER_CONCURRENCY` sets the files-in-flight bound (default 16).
@@ -162,7 +163,7 @@ key (or `list`'s prefix) given as a full `s3://bucket/key` URI names its own buc
 
 | Flag | Commands | Notes |
 |---|---|---|
-| `--no_overwrite` | push, download | |
+| `--overwrite` | push, download | Replace an existing destination, refused without it: `push` then deletes the objects the folder lacks, `download` removes the local path before the transfer |
 | `--quiet/-q` | push, download | Suppresses the transfer progress bar |
 | `--recursive/-r` | list, delete | Opt-in on `delete`: removes every object under the prefix. The Python `delete()` above defaults the other way (`recursive=True`) |
 | `--yes/-y` | delete | Skips the confirmation |

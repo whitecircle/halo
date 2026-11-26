@@ -15,7 +15,6 @@ from halo.data.preprocessed.tokenization import resolve_label_eos_token_ids, tok
 from halo.data.sources.paths import METADATA_FILE, eval_split_name
 from halo.data.vlm_detection import carried_image_columns
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.runtime.ranks import is_local_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +60,7 @@ def shard_dataset(
 
         start_idx = end_idx
 
-        if is_local_main_process() and (shard_id + 1) % 10 == 0:
+        if (shard_id + 1) % 10 == 0:
             logger.info(f"  Created {shard_id + 1}/{num_shards} shards")
 
     logger.info(f"Created {len(shards)} shards for {split_name}")

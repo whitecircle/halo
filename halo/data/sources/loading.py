@@ -1,14 +1,15 @@
 """Dataset loading from S3, the Hub or local disk into the train/test ``DatasetDict`` a trainer reads."""
 
 import hashlib
+import os
 import pickle
 from collections.abc import Mapping
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
-from halo.data.pipeline.coordinated_map import run_load_rank_first
+from halo.data.pipeline.coordinated_map import datasets_cache_dir, run_load_rank_first
 from halo.data.pipeline.map_cache_key import stamp_cache_key
-from halo.data.preprocessed.metadata import is_preprocessed_dataset
+from halo.data.preprocessed.metadata import is_preprocessed_dataset, load_preprocessed_metadata
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE
 from halo.data.render_columns import (
     drop_empty_conversation_rows,
@@ -47,7 +48,7 @@ from halo.runtime.ranks import get_node_rank, is_global_main_process
 # INFO: this module's lines are the run's only record of what data actually loaded.
 logger = info_logger(__name__)
 
-# Fixed so every rank derives the same train/test split independently of the caller's data seed.
+# Fixed so every rank and every re-run cuts the same train/test split, whatever the caller's data seed.
 _TRAIN_TEST_SPLIT_SEED = 42
 
 _DEFAULT_DATA_SEED = 42
@@ -125,6 +126,18 @@ def load_dataset_split(source: str, *, split: str, config: str | None = None) ->
     return loaded[split]
 
 
+def split_train_test(dataset: Dataset, test_size: float) -> DatasetDict:
+    """``train_test_split`` at the fixed seed, its index files under the datasets cache: ``datasets`` would write them
+    beside the source's Arrow files, which fails on a read-only input and litters a shared one."""
+    name = os.path.join(datasets_cache_dir(), f"split-{dataset._fingerprint}-{test_size}-{_TRAIN_TEST_SPLIT_SEED}")
+    return dataset.train_test_split(
+        test_size,
+        seed=_TRAIN_TEST_SPLIT_SEED,
+        train_indices_cache_file_name=f"{name}-train.arrow",
+        test_indices_cache_file_name=f"{name}-test.arrow",
+    )
+
+
 def _warn_test_size_ignored(path: str, test_size: float | None, kind: str) -> None:
     """``test_size`` cannot re-split a sharded or pre-processed dataset, whose split was fixed at preparation."""
     if test_size is None:
@@ -142,7 +155,7 @@ def _load_whole_dataset(path: str, test_size: float | None, *, placeholder_test:
 
     if isinstance(dataset, Dataset):
         if test_size is not None:
-            return dataset.train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
+            return split_train_test(dataset, test_size)
         if placeholder_test:
             return placeholder_test_split(dataset, path)
         return DatasetDict({"train": dataset})
@@ -162,14 +175,14 @@ def _load_whole_dataset(path: str, test_size: float | None, *, placeholder_test:
         dataset["test"] = dataset.pop(held_out)
     if "test" not in dataset:
         if test_size is not None:
-            return dataset["train"].train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
+            return split_train_test(dataset["train"], test_size)
         if placeholder_test:
             return placeholder_test_split(dataset["train"], path)
     elif test_size is not None:
         combined = concatenate_datasets([dataset["train"], dataset["test"]])
         if is_global_main_process():
             logger.info(f"Re-split dataset {path} with test_size={test_size}")
-        return combined.train_test_split(test_size, seed=_TRAIN_TEST_SPLIT_SEED)
+        return split_train_test(combined, test_size)
     return dataset
 
 
@@ -416,7 +429,18 @@ def load_preprocessed_dataset(
             f"and point dataset at <dir>."
         )
 
-    if is_sharded_dataset_across_ranks(path):
+    sharded = is_sharded_dataset_across_ranks(path)
+    recorded_shards = load_preprocessed_metadata(path).num_shards
+    # A copy that adds files without removing the old ones (hf download --local-dir, rsync without --delete, an upload
+    # over an earlier bake) leaves one bake's shard index beside another's rows and stamp; the index decides the load.
+    if not rank_consensus((recorded_shards > 1) == sharded).all_ok:
+        raise ValueError(
+            f"The pre-processed dataset at {path} {'has' if sharded else 'has no readable'} {SHARD_INDEX_FILE} while its "
+            f"{METADATA_FILE} records num_shards={recorded_shards} (on at least one rank): the directory mixes two "
+            f"bakes, and loading it would train the other bake's rows. Fetch the dataset into an empty directory, or "
+            f"re-publish it with prepare_dataset.py --overwrite."
+        )
+    if sharded:
         ds, loader = _load_sharded(path, data_parallel_rank, data_parallel_size)
         # The shard index gives every rank the same global verdict; per-rank emptiness is the trainer's.
         totals = {split: loader.total_examples(split) for split in TRAIN_TEST_SPLITS if split in ds}

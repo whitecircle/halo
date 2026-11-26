@@ -241,7 +241,8 @@ export TMPDIR=/local/tmp
 
 `HF_DATASETS_CACHE` grows without bound across config sweeps: every distinct
 (function, tokenizer, knobs, dataset, library-version) tuple leaves a permanent `cache-*.arrow` set,
-plus `packed_*.arrow` per packing shape and a `transform-*` directory per TRL preparation, and
+plus `packed_*.arrow` per packing shape, a `split-*.arrow` pair per `test_size` split (never written into the
+source dataset, so a read-only one loads) and a `transform-*` directory per TRL preparation, and
 `hf cache prune` reclaims only the hub cache, not these. Reclaim by deleting the directory — every cache name is deterministic, so the next run
 rebuilds exactly what it needs.
 

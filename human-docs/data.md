@@ -83,7 +83,7 @@ halo run prepare-dataset -- --help
 ```
 
 The tool tokenizes, optionally packs (`--pack_sequences`), and shards the
-corpus, and can push the result to the Hub or S3. Four rules decide whether the
+corpus, and can push the result to the Hub or S3. Five rules decide whether the
 output trains:
 
 - `--max_length` is stored with the data and must equal the training config's
@@ -95,6 +95,9 @@ output trains:
 - The training run must end with the template the rows were rendered with, since
   the checkpoint exports the run's: after a `--chat_template` bake, set the same
   `chat_template` plus `force_chat_template: true`, or the load raises.
+- The training tokenizer must have as many tokens as the one that baked the rows,
+  or the load raises: with another vocabulary the ids mean other text. A run that
+  adds tokens bakes from a checkpoint that already holds them (`patch_vocab.py`).
 
 `--tokenizer_backend gigatoken` swaps in a faster Rust encoder whose IDs are
 checked against the HF tokenizer at startup; training configs take the same

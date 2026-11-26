@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """``prepare_dataset.py`` publishing and defaults. ``metadata.json`` is the completion marker, so the local path
-bakes into a sibling and swaps it in, and the Hub path clears it first and uploads it last. CLI defaults match
+bakes into a sibling and swaps it in, and the Hub path clears it first and uploads it last. A remote output is checked
+before the input loads and outlives a failed upload; one output takes one bake at a time. CLI defaults match
 training's, and tokenizer overrides reach ``PreprocessingConfig``."""
 
 import os
+import re
 import sys
 import types
 
 import pytest
-from datasets import DatasetDict
+from datasets import Dataset, DatasetDict
+from filelock import FileLock
+from huggingface_hub.utils import filter_repo_objects
 
 from halo import hardware
 from halo.checkpoint import atomic
@@ -52,12 +56,12 @@ def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
     assert not list(tmp_path.glob(f"*{atomic.DISPLACED_SUFFIX}")), "replaced directory leaked"
 
 
-def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
-    """``main()`` on a local ``output`` with everything but the bake's placement and the publish stubbed."""
+def _stub_main(monkeypatch, tmp_path, output: str, preprocess, overwrite: bool = True) -> None:
+    """``main()`` on ``output`` with everything but the bake's placement and the publish stubbed."""
     args = types.SimpleNamespace(
         input="in",
         output=output,
-        overwrite=True,
+        overwrite=overwrite,
         verbose=False,
         dry_run=False,
         private=False,
@@ -67,8 +71,8 @@ def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
         pack_sequences=False, is_vlm=False, model_name_or_path="model", max_length=8, num_shards=1
     )
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
-    monkeypatch.setattr(prepare_dataset, "parse_args", lambda: (args, config))
     monkeypatch.setattr(prepare_dataset_tool, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
+    monkeypatch.setattr(prepare_dataset, "parse_args", lambda: (args, config))
     monkeypatch.setattr(prepare_dataset_tool, "load_tokenizer", lambda config: object())
     monkeypatch.setattr(prepare_dataset_tool, "load_input_dataset", lambda args: DatasetDict())
     monkeypatch.setattr(prepare_dataset_tool, "require_declared_columns", lambda *a: None)
@@ -206,13 +210,15 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
         def upload_file(self, path_or_fileobj=None, path_in_repo=None, repo_id=None, repo_type=None):
             calls.append(("upload_metadata", path_in_repo))
 
-    def _fake_upload_folder(folder_path=None, repo_id=None, repo_type=None, ignore_patterns=None):
+    def _fake_upload_folder(
+        folder_path=None, repo_id=None, repo_type=None, ignore_patterns=None, delete_patterns=None
+    ):
         calls.append(("upload_folder", tuple(ignore_patterns or ())))
 
     monkeypatch.setattr(prepare_dataset_tool, "HfApi", _FakeApi)
     monkeypatch.setattr(prepare_dataset_tool, "upload_folder", _fake_upload_folder)
 
-    prepare_dataset_tool.save_to_hf_hub(str(_staged(tmp_path)), "org/name", overwrite=True)
+    prepare_dataset_tool.save_to_hf_hub(str(_staged(tmp_path)), "org/name")
 
     ordered = [c[0] for c in calls]
     assert ordered.index("delete_metadata") < ordered.index("upload_folder") < ordered.index("upload_metadata"), calls
@@ -220,6 +226,113 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
     assert prepare_dataset_tool.METADATA_FILE in folder_call[1], (
         "the payload upload must exclude the completion marker"
     )
+
+
+def test_a_hub_overwrite_removes_the_old_bakes_files_and_keeps_the_card(tmp_path, monkeypatch):
+    """upload_folder adds and replaces but deletes nothing: a sharded bake overwritten by an unsharded one would keep
+    its shard index, which the loader reads first."""
+    deleted = []
+
+    class _FakeApi:
+        def create_repo(self, *args, **kwargs):
+            pass
+
+        def delete_file(self, *args, **kwargs):
+            pass
+
+        def upload_file(self, *args, **kwargs):
+            pass
+
+    def _fake_upload_folder(delete_patterns=None, **kwargs):
+        old_tree = ["README.md", ".gitattributes", "dataset_dict.json", "train/shard_index.json"]
+        old_tree += ["train/shard_0000/data-00000-of-00001.arrow", "test/shard_0000/state.json"]
+        deleted.extend(filter_repo_objects(old_tree, allow_patterns=delete_patterns) if delete_patterns else [])
+
+    monkeypatch.setattr(prepare_dataset_tool, "HfApi", _FakeApi)
+    monkeypatch.setattr(prepare_dataset_tool, "upload_folder", _fake_upload_folder)
+    prepare_dataset_tool.save_to_hf_hub(str(_staged(tmp_path)), "org/name")
+
+    assert sorted(deleted) == [
+        "dataset_dict.json",
+        "test/shard_0000/state.json",
+        "train/shard_0000/data-00000-of-00001.arrow",
+        "train/shard_index.json",
+    ]
+
+
+def _fake_s3(existing: bool = False, push_error: Exception | None = None):
+    """An S3 client class whose ``exists`` answers ``existing`` and whose push raises ``push_error`` if set, and the
+    list of the folders it pushed."""
+    pushed = []
+
+    class _Client:
+        def __init__(self, bucket):
+            pass
+
+        def exists(self, key):
+            return existing
+
+        def push_folder(self, local_path, key, **kwargs):
+            if push_error is not None:
+                raise push_error
+            pushed.append(local_path)
+
+    return _Client, pushed
+
+
+def _bake_into(output_dir, **kwargs):
+    _fill(output_dir)
+    return {
+        "metadata": types.SimpleNamespace(total_train_examples=1, total_test_examples=0, num_shards=1, packed=False)
+    }
+
+
+def test_an_existing_remote_output_is_refused_before_the_input_loads(tmp_path, monkeypatch):
+    """Checked after the bake, the refusal would cost the whole bake and remove it."""
+    _stub_main(monkeypatch, tmp_path, "s3://bucket/ds", _bake_into, overwrite=False)
+    monkeypatch.setattr(prepare_dataset_tool, "S3Client", _fake_s3(existing=True)[0])
+    monkeypatch.setattr(prepare_dataset_tool, "load_input_dataset", lambda args: pytest.fail("the input loaded"))
+    with pytest.raises(FileExistsError, match="s3://bucket/ds.*--overwrite"):
+        prepare_dataset.main()
+
+
+def test_a_failed_upload_keeps_the_bake_and_names_it(tmp_path, monkeypatch):
+    """Only the upload is left to redo, so the bake must outlive it, on the scratch's volume."""
+    _stub_main(monkeypatch, tmp_path, "s3://bucket/ds", _bake_into)
+    monkeypatch.setattr(prepare_dataset_tool, "S3Client", _fake_s3(push_error=ConnectionError("unreachable"))[0])
+    with pytest.raises(RuntimeError, match=r"kept at \S+ until the next run.*s3\.py push") as excinfo:
+        prepare_dataset.main()
+
+    staged = re.search(r"kept at (\S+) until", str(excinfo.value)).group(1)
+    assert staged.startswith(str(tmp_path / "datasets_cache"))
+    with open(os.path.join(staged, "shard_0000", "data.arrow")) as f:
+        assert f.read() == "new-payload"
+
+
+def test_a_published_remote_bake_leaves_no_staging(tmp_path, monkeypatch):
+    _stub_main(monkeypatch, tmp_path, "s3://bucket/ds", _bake_into)
+    client, pushed = _fake_s3()
+    monkeypatch.setattr(prepare_dataset_tool, "S3Client", client)
+    prepare_dataset.main()
+
+    (staged,) = pushed
+    assert not os.path.exists(staged)
+
+
+def test_a_second_bake_of_one_output_exits_while_the_first_holds_it(tmp_path, monkeypatch):
+    """Both bakes name their scratch and staging after the output, so a second would remove the first's and both
+    would die."""
+    dest = tmp_path / "out"
+    _stub_main(monkeypatch, tmp_path, str(dest), lambda **kwargs: pytest.fail("the second bake ran"))
+    scratch = prepare_dataset_tool.bake_scratch_path(str(dest))
+    os.makedirs(scratch)
+    with open(os.path.join(scratch, "cache-first-bake.arrow"), "w"):
+        pass
+
+    with FileLock(f"{scratch}.lock"), pytest.raises(SystemExit, match="Another prepare_dataset.py is baking"):
+        prepare_dataset.main()
+    assert os.listdir(scratch) == ["cache-first-bake.arrow"], "the second bake removed the first's scratch"
+    assert not dest.exists()
 
 
 def _parse(argv_extra):
@@ -230,6 +343,20 @@ def _parse(argv_extra):
         return prepare_dataset.parse_args()[1]
     finally:
         sys.argv = old
+
+
+def test_test_size_writes_nothing_into_the_input_directory(tmp_path, monkeypatch):
+    """``datasets`` writes a split's index files beside the source's Arrow files, which fails on a read-only input."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
+    source = tmp_path / "input"
+    Dataset.from_dict({"text": [f"doc {i}" for i in range(20)]}).save_to_disk(source)
+    before = sorted(os.listdir(source))
+    args = types.SimpleNamespace(input=str(source), test_size=0.25)
+
+    split = prepare_dataset_tool.load_input_dataset(args)
+
+    assert (len(split["train"]), len(split["test"])) == (15, 5)
+    assert sorted(os.listdir(source)) == before
 
 
 def test_a_token_is_refused_on_the_command_line(capsys):
