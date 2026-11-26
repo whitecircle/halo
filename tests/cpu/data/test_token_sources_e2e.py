@@ -58,7 +58,8 @@ def _write_folder(path: Path, tokens: int, rng, *, high: int | None = None) -> P
 
 def _sources_yaml(key: str, folders: dict[str, Path]) -> str:
     entries = [
-        f"  - {{name: {name}, path: {path}" + ("}" if name in HELD_OUT else f", weight: {TRAINED[name][1]}}}")
+        f"  - {{name: {name}, path: {json.dumps(str(path))}"
+        + ("}" if name in HELD_OUT else f", weight: {TRAINED[name][1]}}}")
         for name, path in folders.items()
     ]
     return f"{key}:\n" + "\n".join(entries) + "\n"

@@ -211,8 +211,9 @@ class TokenShards(Dataset):
         return 2 * min(len(self.files), _MAX_OPEN_FILES)
 
     def content_digest(self) -> str:
-        """A digest of evenly spaced windows: two folders whose files match in name and size but hold other tokens
-        (re-tokenized, or reshuffled by DocumentTokenizer's unseeded shuffle) differ in it."""
+        """A digest of ``SAMPLED_WINDOWS`` evenly spaced windows, not of every token: folders whose files match in
+        name and size differ in it only where a sampled window differs, as a whole folder re-tokenized or reshuffled
+        does, while one file rewritten alone can pass."""
         hasher = hashlib.blake2b(digest_size=8)
         for index in self._sampled_windows():
             row = self[index]

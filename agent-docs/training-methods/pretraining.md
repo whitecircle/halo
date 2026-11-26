@@ -96,7 +96,7 @@ LocalPipelineExecutor(
 ```
 
 - `eos_token` ends every document with that token. Without it, a tokenizer whose template adds nothing (Qwen3's) writes documents back to back. Halo takes document boundaries from each file's `.ds.index` either way, never from a separator.
-- `seed` fixes the order in which `DocumentTokenizer` shuffles each task's documents. Unseeded, a re-run writes another order, and a resume onto it is refused as a changed mix.
+- `seed` fixes the order in which `DocumentTokenizer` shuffles each task's documents. Unseeded, a re-run writes another order: a resume onto a whole re-run is refused as a changed mix, but a re-run of some tasks can keep every window the fingerprint samples and pass.
 - `DocumentTokenizerMerger` (one task) merges the per-task files into fewer, larger ones. Either output trains.
 
 ```yaml
@@ -138,6 +138,7 @@ gradient_accumulation_steps: 8
 - `max_steps` unset, a sampler other than `sequential`, `packing` off, a `packing_strategy` or `eval_packing` off its default, `padding_free`;
 - `ignore_data_skip: true`, which would train the resumed steps' rows again, and `auto_find_batch_size: true`, since a halved batch reads fewer than `G` rows a step and the resume skip miscounts;
 - `dispatch_batches` or `split_batches` on under `accelerator_config`, which changes the rows a step reads or the resume skips, and `even_batches` off, which hangs the evaluation of a held-out folder that does not split evenly over the ranks;
+- `dataloader_in_order: false` with loader workers, since a batch returned out of turn trains at another step than the resume skips;
 - evaluation without `eval_token_sources`, the MTP acceptance gate with more than one, and a `metric_for_best_model` other than a held-out folder's `eval_<name>_loss`: a token run logs no `eval_loss`, which `load_best_model_at_end` reads unless told otherwise;
 - `train_on_completions_only: true`, and `dataset`, `dataset_ratio`, `test_size` or a rendering field (`conversation_field`, `images_field`, `system_prompt`, `tools_field`, `reasoning_effort_field`, `tree_packing`, …) beside `token_sources`;
 - context parallelism, which refuses packed rows, before any folder is read;

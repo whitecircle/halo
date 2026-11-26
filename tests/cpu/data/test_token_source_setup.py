@@ -8,6 +8,7 @@ and a run without token_sources refused a token run's checkpoint."""
 import contextlib
 import datetime
 import hashlib
+import json
 import logging
 import os
 import re
@@ -195,6 +196,18 @@ def test_each_loader_knob_that_breaks_the_mix_is_refused_alone(tmp_path, subtest
     for knob in ({"dispatch_batches": True}, {"split_batches": True}, {"even_batches": False}):
         with subtests.test(str(knob)), pytest.raises(ValueError, match=requirement):
             reject_unsupported_token_source_options(token_run, _training(tmp_path, accelerator_config=knob), _dist())
+
+
+def test_loader_workers_must_hand_their_batches_over_in_order(tmp_path, subtests):
+    """Out of order, step t trains the rows of another step, and a resume skips the first t batches of the sampler
+    whichever ones were trained."""
+    token_run = _args(token_sources=[{"name": "a", "path": "/a"}])
+    with subtests.test("workers, out of order"), pytest.raises(ValueError, match="dataloader_in_order on with loader"):
+        unordered = _training(tmp_path, dataloader_num_workers=2, dataloader_in_order=False)
+        reject_unsupported_token_source_options(token_run, unordered, _dist())
+    for knobs in ({"dataloader_num_workers": 2}, {"dataloader_in_order": False}):
+        with subtests.test(str(knobs)):
+            reject_unsupported_token_source_options(token_run, _training(tmp_path, **knobs), _dist())
 
 
 def test_the_best_model_metric_must_be_a_held_out_folder_loss(tmp_path, subtests):
@@ -544,7 +557,7 @@ def _run_sft_main(tmp_path, yaml_body: str, *, resume_checkpoint=None, **stubs) 
 
 def test_the_script_reaches_the_model_load_with_a_text_run_of_packed_rows(tmp_path):
     folder = _folder(tmp_path / "a")
-    loads = _run_sft_main(tmp_path, f"max_steps: 4\ntoken_sources:\n- {{name: a, path: {folder}}}\n")
+    loads = _run_sft_main(tmp_path, f"max_steps: 4\ntoken_sources:\n- {{name: a, path: {json.dumps(str(folder))}}}\n")
     assert [load["vlm_run"] for load in loads] == [False]
 
 
@@ -577,7 +590,7 @@ def test_a_resume_onto_a_changed_mix_fails_before_the_model_load(tmp_path):
     with pytest.raises(ValueError, match="max_length 16 → 8"):
         _run_sft_main(
             tmp_path,
-            f"max_steps: 4\ntoken_sources:\n- {{name: a, path: {folder}}}\n",
+            f"max_steps: 4\ntoken_sources:\n- {{name: a, path: {json.dumps(str(folder))}}}\n",
             resume_checkpoint=checkpoint,
         )
 

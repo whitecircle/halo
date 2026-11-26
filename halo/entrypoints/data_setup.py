@@ -399,6 +399,10 @@ def reject_unsupported_token_source_options(args, sft_config, dist_args) -> None
         "folder that does not split evenly over the ranks hangs the evaluation)": (
             not loader.dispatch_batches and not loader.split_batches and loader.even_batches
         ),
+        "dataloader_in_order on with loader workers (a batch a worker returns out of turn trains at another step than "
+        "the one the resume skip counts it at)": (
+            sft_config.dataloader_in_order or sft_config.dataloader_num_workers == 0
+        ),
         "context_parallel_size: 1 (a window is a packed row, which context parallelism refuses)": (
             dist_args.context_parallel_size == 1
         ),
