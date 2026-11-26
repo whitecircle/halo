@@ -51,7 +51,9 @@ iterable dataset) slices rank 0's batches by global rank whatever size/rank it i
 siblings would draw different rows. An iterable dataset is sharded by DP rank instead (online and
 async GRPO refuse one here, since their prompt-group sampler needs a length), and an explicit
 `accelerator_config.dispatch_batches: true` raises, as does `train_sampling_strategy: batch_rebalance`,
-whose HF sampler shards over every process rather than over the DP replicas.
+whose HF sampler shards over every process rather than over the DP replicas. An iterable dataset has no
+length, so a resume skips the batches of `global_step` optimizer steps from the stream's start. A run resumed after the
+stream's first pass reads the current pass again from its first row.
 
 On the base flow (DDP, plain FSDP2 data parallel, pure EP) `train_sampling_strategy: batch_rebalance`
 runs HF's `BatchRebalanceSampler`. It draws each optimizer step's rows from its own shuffle, seeded 42

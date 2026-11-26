@@ -38,7 +38,7 @@ from halo.data.tree_layout import (
 from halo.data.turn_markers import tokenize_response_template
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.log import info_logger
-from halo.runtime.consensus import agree_probe_across_ranks
+from halo.runtime.consensus import agree_probe_across_ranks, rank_min
 from halo.runtime.ranks import is_global_main_process
 
 logger = info_logger(__name__)
@@ -221,11 +221,14 @@ def prepare_tree_dataset(
     num_proc: int,
     **processor_kwargs,
 ) -> DatasetDict:
-    """Raw conversations to packed-ready tree rows, every split: key, order, build trees, drop and report overlong."""
+    """COLLECTIVE: raw conversations to packed-ready tree rows, every split: key, order, build trees, drop and report
+    overlong."""
     for split in dataset:
         # A map over no rows returns its input untouched, so the tree columns would not exist below.
         if agree_probe_across_ranks(len(dataset[split]) == 0, f"the {split} split", "empty split"):
             raise ValueError(f"tree packing got an empty {split} split on at least one data-parallel rank.")
+    # A worker boundary cuts a run into two trees: per-node load ranks must build with one count, held in the key.
+    num_proc = rank_min([num_proc])[0]
     processed = coordinated_map(
         _order_by_share_key(dataset, conversation_field, share_markers, share_requires, num_proc),
         build_tree_row_processor(
@@ -238,6 +241,7 @@ def prepare_tree_dataset(
         ),
         desc="Processing tree rows",
         num_proc=num_proc,
+        cache_key_extras={"num_proc": num_proc},
         batched=True,
         remove_columns=dataset["train"].column_names,
         features=TREE_ROW_FEATURES,

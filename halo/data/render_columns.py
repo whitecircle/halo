@@ -6,7 +6,7 @@ from contextlib import AbstractContextManager, nullcontext
 from datasets import Dataset, DatasetDict
 
 from halo.data.pipeline.coordinated_map import coordinated_filter
-from halo.data.pipeline.map_cache_key import carry_cache_key
+from halo.data.pipeline.map_cache_key import carry_cache_key, stamp_cache_key
 from halo.data.sources.paths import TRAIN_TEST_SPLITS, eval_split_name
 from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
 from halo.runtime.consensus import barrier_on_exit
@@ -63,6 +63,8 @@ def filter_empty_conversations(dataset: Dataset, conversation_field: str, split_
     def has_valid_conversation(example):
         return example[conversation_field] is not None and len(example[conversation_field]) > 0
 
+    # Unstamped, the cache name reads the file paths and row count, which an in-place re-save keeps.
+    stamp_cache_key(dataset, dataset._fingerprint)
     # num_proc=None avoids spawning processes during the distributed loading phase.
     return coordinated_filter(
         dataset,

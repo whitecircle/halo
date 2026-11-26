@@ -91,7 +91,14 @@ For MoE pre-training, router balancing matters from step 0: [`BalancingBiasCallb
 
 ## Large corpora
 
-There is no streaming path: `datasets` loads at `keep_in_memory=False`, so a corpus is memory-mapped from Arrow — disk bounds it, not RAM, but the whole dataset must land on disk. Split a multi-terabyte corpus at the source, tokenize each batch to its own prefix with the command above, and train the phases in sequence, each resuming the previous checkpoint.
+There is no streaming path: `datasets` loads at `keep_in_memory=False`, so a corpus is memory-mapped from Arrow — disk bounds it, not RAM, but the whole dataset must land on disk. Split a multi-terabyte corpus at the source, tokenize each batch to its own prefix with `prepare_dataset.py`, and train the phases in sequence. A `token_sources` run refuses `ignore_data_skip` and a mix that changed on resume, so its next phase is a new run from the last checkpoint's weights.
+
+Every phase, the first included, runs a schedule that does not read `max_steps`, such as `constant_with_warmup` with `warmup_steps` as a step count. The scheduler is rebuilt over each phase's `max_steps`, so a decaying one ends a phase near zero and jumps back up in the next. Each phase after the first resumes the previous phase's last checkpoint with two settings, because a resume counts the steps already trained against the new prefix:
+
+- `ignore_data_skip: true`, or the resume skips the new prefix's first batches as if the earlier steps had read them.
+- `max_steps` set to the steps trained so far plus this phase's, or the earlier steps count toward this phase's length.
+
+A resume inside a phase starts a new pass over its prefix, since `ignore_data_skip` skips no batch, so raise that phase's `max_steps` by the steps it had trained.
 
 Keep `--max_length` and `--model_name_or_path` identical across batches so shards stay interchangeable, and point `TMPDIR` / `HF_DATASETS_CACHE` at the large volume. A `dataset:` **list** is not the way to mix prepared prefixes: only a single string path is probed for the pre-processed stamp, and list entries load whole, with no per-rank sharding. `dataset_ratio` (a keep fraction, broadcast or one per entry) applies to raw sources, single or mixed.
 
