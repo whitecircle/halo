@@ -35,8 +35,9 @@ _STACK_DUMP_S = 0.5
 STORE_TIMEOUT = datetime.timedelta(seconds=420)
 # Set by a rank on reaching a step every rank must reach before any goes past it.
 _STEP_KEY = "run_gloo_ranks/{step}/{rank}"
-# What torchrun exports when a launch sets none. Without it accelerate sizes a gloo rank's pool past one thread, and on
-# a loaded xdist host two identical forwards in one rank can disagree.
+# What torchrun exports for several ranks when a launch sets none, exported here for one rank too. Without it accelerate
+# sizes a gloo rank's pool past one thread: on a loaded xdist host two identical forwards in one rank can disagree, and
+# several one-rank spawns of an 8-CPU container each start a pool the size of the host.
 TORCHRUN_OMP_NUM_THREADS = "1"
 
 
@@ -149,7 +150,7 @@ def run_gloo_ranks(
     # Hosted here so the store outlives every rank: a rank may exit while a peer still has store traffic to send.
     store = dist.TCPStore("127.0.0.1", free_port(), is_master=True, timeout=STORE_TIMEOUT, wait_for_workers=False)
     # By key rather than patch.dict, which rewrites the whole environment under the store's live thread.
-    exports_omp = nprocs > 1 and "OMP_NUM_THREADS" not in os.environ
+    exports_omp = "OMP_NUM_THREADS" not in os.environ
     if exports_omp:
         os.environ["OMP_NUM_THREADS"] = TORCHRUN_OMP_NUM_THREADS
     try:

@@ -62,17 +62,19 @@ def _thread_counts(rank: int, tmp_dir: str) -> None:
     Path(tmp_dir, f"rank{rank}.json").write_text(json.dumps(record))
 
 
+@pytest.mark.parametrize("world_size", [1, WORLD_SIZE], ids=["one_rank", "two_ranks"])
 @pytest.mark.parametrize(("exported", "threads"), [(None, 1), ("3", 3)], ids=["torchrun_default", "caller_export"])
 def test_each_rank_starts_with_torchrun_omp_threads_and_partial_state_keeps_them(
-    tmp_path, monkeypatch, exported, threads
+    tmp_path, monkeypatch, exported, threads, world_size
 ):
+    """One rank too: several one-rank spawns under xdist would each start a pool the size of the host."""
     if exported is None:
         monkeypatch.delenv("OMP_NUM_THREADS", raising=False)
     else:
         monkeypatch.setenv("OMP_NUM_THREADS", exported)
-    run_gloo_ranks(_thread_counts, WORLD_SIZE, str(tmp_path))
-    records = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(WORLD_SIZE)]
-    assert records == [{"before": threads, "after": threads, "omp": str(threads)}] * WORLD_SIZE, records
+    run_gloo_ranks(_thread_counts, world_size, str(tmp_path))
+    records = [json.loads((tmp_path / f"rank{rank}.json").read_text()) for rank in range(world_size)]
+    assert records == [{"before": threads, "after": threads, "omp": str(threads)}] * world_size, records
     assert os.environ.get("OMP_NUM_THREADS") == exported, "the spawn's export leaked into the calling process"
 
 
