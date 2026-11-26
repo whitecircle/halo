@@ -135,9 +135,10 @@ def test_a_starved_rank_still_working_runs_until_the_ceiling(peer):
     assert reason.startswith(f"still running at the {gloo.GLOO_RUN_CEILING_S}s ceiling")
 
 
-def _recv_from_a_peer_that_polls_without_end(rank: int) -> None:
+def _recv_from_a_peer_that_polls_without_end(rank: int, tmp_dir: str) -> None:
     """Rank 0 waits in a collective on rank 1, which polls for an event no one sets at about half a percent of a core:
     under the working floor, yet a CPU tick every two or three seconds."""
+    (Path(tmp_dir) / f"pid_{rank}").write_text(str(os.getpid()))
     if rank == 0:
         dist.recv(torch.zeros(1), src=1)
         return
@@ -148,12 +149,20 @@ def _recv_from_a_peer_that_polls_without_end(rank: int) -> None:
             pass
 
 
-def test_ranks_waiting_on_a_peer_that_polls_without_end_are_killed_at_the_stall_bound(monkeypatch, capfd):
+def test_ranks_waiting_on_a_peer_that_polls_without_end_are_killed_at_the_stall_bound(monkeypatch, capfd, tmp_path):
     """The poller ticks more often than the bound, so a rule counting any CPU at all never sees the run stop and the
     collective times out instead. The kill prints where each rank stood."""
     monkeypatch.setattr(gloo, "GLOO_STALL_TIMEOUT_S", 4.0)
     with pytest.raises(TimeoutError, match=r"rank\(s\) \[0, 1\] of 2 used under 1% of a core for 4.0s"):
-        run_gloo_ranks(_recv_from_a_peer_that_polls_without_end, WORLD_SIZE, pg_timeout=datetime.timedelta(seconds=30))
+        run_gloo_ranks(
+            _recv_from_a_peer_that_polls_without_end,
+            WORLD_SIZE,
+            str(tmp_path),
+            pg_timeout=datetime.timedelta(seconds=30),
+        )
+    for rank in range(WORLD_SIZE):
+        with pytest.raises(ProcessLookupError):
+            os.kill(int((tmp_path / f"pid_{rank}").read_text()), 0)
     assert capfd.readouterr().err.count("in _recv_from_a_peer_that_polls_without_end") == WORLD_SIZE, (
         "one stack per rank"
     )
