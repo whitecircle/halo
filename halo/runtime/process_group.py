@@ -84,6 +84,15 @@ def init_distributed(backend: str = "nccl") -> bool:
         _apply_default_pg_timeout(timeout)
         resolve_shared_filesystem_consensus()
         return False
+    rank = launcher_global_rank()
+    if rank >= world:
+        # Read as a lone process, each such task would train by itself on the one output_dir.
+        raise RuntimeError(
+            f"The launcher gives this process rank {rank} in a world of {world}, so the world size did not reach it. "
+            f"A container started inside an srun task must be passed SLURM_STEP_NUM_TASKS and "
+            f"SLURM_STEP_TASKS_PER_NODE beside SLURM_PROCID, and another launcher must export WORLD_SIZE beside "
+            f"RANK."
+        )
     if "RANK" not in os.environ and world <= 1:
         return False
     if world > 1:

@@ -9,7 +9,16 @@ import torch
 
 from halo.runtime import ranks
 
-_RANK_ENV_VARS = ("LOCAL_RANK", "SLURM_LOCALID", "LOCAL_WORLD_SIZE", "SLURM_NTASKS_PER_NODE", "RANK", "WORLD_SIZE")
+_RANK_ENV_VARS = (
+    "LOCAL_RANK",
+    "SLURM_LOCALID",
+    "SLURM_PROCID",
+    "LOCAL_WORLD_SIZE",
+    "SLURM_STEP_TASKS_PER_NODE",
+    "SLURM_STEP_NUM_TASKS",
+    "RANK",
+    "WORLD_SIZE",
+)
 
 
 @pytest.fixture()
@@ -48,13 +57,32 @@ def test_explicit_launcher_vars_win_over_derivation(pre_init, monkeypatch):
     assert ranks.get_local_rank() == 2
 
 
-def test_slurm_ntasks_per_node_sizes_the_node(pre_init, monkeypatch):
+def test_the_step_tasks_per_node_size_the_node(pre_init, monkeypatch):
     """SLURM's compact form ("8(x2)") sizes the node."""
-    monkeypatch.setenv("RANK", "9")
-    monkeypatch.setenv("WORLD_SIZE", "16")
-    monkeypatch.setenv("SLURM_NTASKS_PER_NODE", "8(x2)")
+    monkeypatch.setenv("SLURM_PROCID", "9")
+    monkeypatch.setenv("SLURM_STEP_NUM_TASKS", "16")
+    monkeypatch.setenv("SLURM_STEP_TASKS_PER_NODE", "8(x2)")
     assert ranks.get_local_world_size() == 8
     assert ranks.get_local_rank() == 1
+
+
+def test_an_uneven_step_is_refused(pre_init, monkeypatch):
+    """Its leading count is one node's, and would size the other nodes with it."""
+    monkeypatch.setenv("SLURM_PROCID", "5")
+    monkeypatch.setenv("SLURM_STEP_NUM_TASKS", "6")
+    monkeypatch.setenv("SLURM_STEP_TASKS_PER_NODE", "4,2")
+    with pytest.raises(ValueError, match="SLURM_STEP_TASKS_PER_NODE=4,2"):
+        ranks.get_local_world_size()
+
+
+def test_ranks_another_launcher_forked_inside_a_step_are_not_sized_by_it(pre_init, monkeypatch):
+    """The step counts the launcher's parent, one task on the node, while eight ranks share the node's devices."""
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+    monkeypatch.setenv("SLURM_STEP_TASKS_PER_NODE", "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
+    assert ranks.get_local_world_size() == 8
 
 
 def test_pre_init_last_resort_warns(pre_init, monkeypatch, caplog):
