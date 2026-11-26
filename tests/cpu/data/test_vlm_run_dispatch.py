@@ -213,7 +213,7 @@ def test_sft_refuses_an_image_run_under_context_parallelism_before_the_load(tmp_
         f"model_name_or_path: stub/model\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
         f"bf16: false\nuse_cpu: true\nmax_length: 512\nimages_field: images\n"
     )
-    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=True))
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=True), resume_checkpoint=None)
     monkeypatch.setattr(module, "probe_checkpoint", lambda *a, **k: (CONFIG_MAPPING["qwen3_vl"](), True))
     monkeypatch.setattr(module, "plan_row_attention", lambda *a, **k: SimpleNamespace(attn_default=None))
     monkeypatch.setattr(module, "init_training_script", lambda *a, **k: runtime)

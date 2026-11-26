@@ -80,7 +80,8 @@ Only the highlights are here. Each release's full notes, with its breaking chang
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
     faster LoRA steps at EP8 on 8× B300), and its weights sync to vLLM and SGLang for RL.
   - **Also:** rollouts without reasoning, MaxRL advantages, chunked distillation losses, fused MXFP4 and NVFP4
-    fake-quantization kernels, native MXFP4 gpt-oss loading and Transformers 5.23.
+    fake-quantization kernels, native MXFP4 gpt-oss loading, pre-training on datatrove token folders and
+    Transformers 5.23.
 - **2026-11-24 — Halo Competition.** Dec 1–10, with $200k in cash prizes and $1.5M in compute and API credits.
   Apply by Nov 30 ([Halo Competition](#halo-competition)).
 - **2026-11-07 — Halo 1.3.0rc1.** Faster RL at scale: a synchronous GRPO step on Qwen3.5-35B-A3B over two 8× B300

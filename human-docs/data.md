@@ -104,6 +104,35 @@ checked against the HF tokenizer at startup; training configs take the same
 choice through `tokenizer_backend`. Every flag and the packing strategies:
 [Pre-Processing](../agent-docs/data/dataset-preparation.md#parameters) ↗.
 
+## Train on datatrove token folders
+
+If you tokenize with datatrove, you can train on its output folders directly
+and mix them by weight, with no preprocessing step:
+
+```yaml
+token_sources:
+  - {name: web, path: s3://my-bucket/tok/fineweb-edu, weight: 7}
+  - {name: code, path: /mnt/data/tok/code, weight: 3}
+max_steps: 50000
+packing: true
+train_sampling_strategy: sequential
+train_on_completions_only: false
+```
+
+Halo reads the files and never runs datatrove, so you tokenize in your own
+environment with `DocumentTokenizer`. Use the model's tokenizer for every
+folder, and pass `DocumentTokenizer` an `eos_token` and a `seed`. Without the
+seed, a second tokenizer run writes the documents in another order, and a
+resume onto that folder stops as a changed mix.
+
+Every 4,096 samples hold the weights exactly, and a single step stays within
+about two samples of them. A source weighted past its size is read again in a
+new order. Every token after a document's first trains, the end-of-document
+token included. Each checkpoint records the mix and the rows per step, so a
+resume with other sources, weights, files, `max_length`, seed or global batch
+stops and names what changed. The recipe, the rules and what is refused:
+[Pre-training](../agent-docs/training-methods/pretraining.md#training-from-datatrove-token-folders) ↗.
+
 ## Data for the RL environments
 
 The code-contests environment reads a prepared pool, not a plain dataset. You

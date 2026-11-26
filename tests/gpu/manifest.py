@@ -454,6 +454,10 @@ MANIFEST: dict[str, TestSpec] = {
     "data/test_packing_batch_gt1.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=1800),
     "data/test_sft_caching_e2e.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "data/test_sharded_distributed_load.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
+    # Two rows: DP ranks split each step's rows, TP siblings read the same ones.
+    "data/test_token_mix_resume.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), args_matrix=("--mode fsdp", "--mode tp"), timeout=1800
+    ),
     # Two `halo launch sft` runs plus the CPU row-count probe, with room for the FA4 split-form warm-up.
     "data/test_tree_packing_e2e.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=1200, launcher="python"

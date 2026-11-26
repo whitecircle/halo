@@ -173,6 +173,8 @@ _EXPECTED = {
         "tree_packing": "False",
         "tree_share_markers": "factory:[]",
         "tree_share_requires": "None",
+        "token_sources": "None",
+        "eval_token_sources": "None",
     },
     "SMPOScriptArguments": {
         "freeze_vision_tower": "False",

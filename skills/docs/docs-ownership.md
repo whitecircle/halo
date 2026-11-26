@@ -153,6 +153,7 @@ changes.
 | `halo/data/` | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
 | `halo/data/sources/s3_client.py`, `halo/data/sources/s3_dataset_store.py`, `halo/data/sources/dataset_cache.py`, `halo/data/sources/paths.py`, `halo/data/sources/s3_commands.py`, `scripts/before_training/s3.py` | `agent-docs/data/s3-utilities.md` |
 | `halo/data/preprocessed/`, `scripts/before_training/prepare_dataset.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
+| `halo/data/sources/{token_shards,token_mix}.py`, `halo/callbacks/token_mix_checkpoint.py`, the `token_sources` path of `scripts/training/sft.py` and `halo/entrypoints/data_setup.py` | `agent-docs/training-methods/pretraining.md`, `agent-docs/data/dataset-formats.md` (the folder layout), `agent-docs/reference/configuration-reference.md`, `human-docs/data.md` |
 | `halo/data/chat_render.py`, `halo/model_loading/tokenizer_backend.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md`; the final-turn close also `agent-docs/data/collators.md` |
 | `halo/data/render_columns.py` | `agent-docs/data/dataset-formats.md` |
 | `halo/data/pipeline/vlm_rows.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
@@ -268,6 +269,7 @@ changes.
 | `.github/workflows/**`, `.github/scripts/**`, `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` |
 | `scripts/docs/**` | `agent-docs/infrastructure/ci.md`, `skills/docs/SKILL.md` |
 | `agent-docs/assets/**/*.html` figure pages, `skills/visuals/kit/**` | the page embedding the figure (every embedding page, for a kit change); re-render in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
+| `tests/common/datatrove_shards.{py,json}`, `tests/common/goldens/token_mix_stream.py` | `agent-docs/contributing/README.md` (Goldens) |
 | `tests/baselines/bench/**`, `tests/gpu/profiling/benchmark_sft_{dense,ep}.py` | `agent-docs/contributing/README.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `tests/gpu/profiling/{measurement,benchmark_roofline,benchmark_memory_hierarchy,benchmark_attention_scaling,benchmark_loss_head,benchmark_training_step,benchmark_matmul_precision,benchmark_first_call,benchmark_collectives}.py` | `agent-docs/reference/gpu-training-theory.md` (Reproduce the numbers), `agent-docs/reference/scripts-reference.md` |
 | `tests/gpu/profiling/{benchmark_lowp_kernels,benchmark_grouped_mm}.py` | `agent-docs/reference/gpu-training-theory.md` (Reproduce the numbers), `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/grouped-gemm.md` (`benchmark_grouped_mm`) |
