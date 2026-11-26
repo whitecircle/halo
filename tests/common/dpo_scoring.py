@@ -37,6 +37,8 @@ from tests.common.tolerances import TOL
 FP32_GRAD_REL_L2 = 5e-4
 BF16_DENSE_GRAD_REL_L2 = 2.2e-2
 BF16_MOE_GRAD_REL_L2 = 1.9e-2
+# The unrounded FP32-head control measures expected BF16 drift; it is not the acceptance gate.
+BF16_UNROUNDED_CONTROL_REL_L2 = {"dense": 2.1e-2, "qwen3_moe": 2.35e-2}
 ZERO_GRAD_ATOL = 1e-12
 STEPS = 2
 LEARNING_RATE = 0.05
@@ -57,9 +59,11 @@ def resolve_dpo_gradient_tolerance(*, family: str, bf16: bool) -> float:
     return BF16_DENSE_GRAD_REL_L2 if family == "dense" else BF16_MOE_GRAD_REL_L2
 
 
-def assert_dpo_gradients_match(actual: dict, expected: dict, *, bf16: bool, family: str = "dense") -> float:
+def assert_dpo_gradients_match(
+    actual: dict, expected: dict, *, bf16: bool, family: str = "dense", tolerance: float | None = None
+) -> float:
     """Each local gradient shard must match; all ranks together cover every parameter."""
-    tolerance = resolve_dpo_gradient_tolerance(family=family, bf16=bf16)
+    tolerance = resolve_dpo_gradient_tolerance(family=family, bf16=bf16) if tolerance is None else tolerance
     if not expected or actual.keys() != expected.keys():
         raise AssertionError("DPO gradient snapshots do not cover the same nonempty parameter set")
     worst = 0.0
@@ -184,13 +188,41 @@ def _parity_loss(logps, batch, *, beta, weight):
     return -F.logsigmoid(beta * delta).mean() * weight
 
 
-def _fp32_head(module, hidden):
+def _fp32_head_logits(module, hidden, *, backward_dtype=None):
     with torch.autocast(hidden.device.type, enabled=False):
-        return F.linear(
-            hidden.float(),
-            module.weight.to(hidden.dtype).float(),
-            None if module.bias is None else module.bias.float(),
-        )
+        rounded_weight = module.weight.to(hidden.dtype).float()
+        weight = rounded_weight
+        if backward_dtype is not None:
+            # The kernel reads rounded values but returns its accumulated gradient in master precision.
+            master = module.weight.float()
+            weight = master + (rounded_weight - master).detach()
+        logits = F.linear(hidden.float(), weight, None if module.bias is None else module.bias.float())
+        if backward_dtype is not None and logits.requires_grad:
+            logits.register_hook(lambda gradient: gradient.to(backward_dtype).float())
+        return logits
+
+
+def _fp32_head(module, hidden):
+    return _fp32_head_logits(module, hidden)
+
+
+def _native_backward_fp32_head(module, hidden):
+    dtype = hidden.dtype if hidden.is_cuda and hidden.dtype == torch.bfloat16 else None
+    return _fp32_head_logits(module, hidden, backward_dtype=dtype)
+
+
+@contextmanager
+def _matched_oracle_head(trainer, *, bf16):
+    if not bf16:
+        yield
+        return
+    head = base_transformers_model(trainer.model).get_output_embeddings()
+    original = head.forward
+    head.forward = MethodType(_native_backward_fp32_head, head)
+    try:
+        yield
+    finally:
+        head.forward = original
 
 
 def _local_snapshot(trainer, *, gradients: bool, host: bool = True) -> dict[str, torch.Tensor]:
@@ -255,7 +287,42 @@ def _batch(rank: int, device):
         {"prompt_ids": [2, 4 + rank], "chosen_ids": [6, 7, 8, 9, 1], "rejected_ids": [10, 1]},
         {"prompt_ids": [2, 5, 6], "chosen_ids": [], "rejected_ids": [11, 12, 13, 1]},
     ]
-    return {key: value.to(device) for key, value in DataCollatorForPreference(pad_token_id=1)(rows).items()}
+    batch = DataCollatorForPreference(pad_token_id=1)(rows)
+    _assert_fixture_tokens(batch)
+    return {key: value.to(device) for key, value in batch.items()}
+
+
+def _assert_fixture_tokens(batch):
+    """Pin the scored IDs and both masks; parity alone cannot detect an extra EOS in both paths."""
+    completion = torch.tensor(
+        [
+            [0, 0, 1, 1, 1, 1, 1],
+            [0, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 1, 0, 0, 0],
+            [0, 0, 0, 1, 1, 1, 1],
+        ],
+        dtype=torch.bool,
+        device=batch["completion_mask"].device,
+    )
+    attention = torch.tensor(
+        [
+            [1, 1, 1, 1, 1, 1, 1],
+            [1, 1, 1, 0, 0, 0, 0],
+            [1, 1, 1, 1, 0, 0, 0],
+            [1, 1, 1, 1, 1, 1, 1],
+        ],
+        dtype=torch.bool,
+        device=batch["attention_mask"].device,
+    )
+    if not torch.equal(batch["completion_mask"].bool(), completion):
+        raise AssertionError("DPO fixture completion mask changed")
+    if not torch.equal(batch["attention_mask"].bool(), attention):
+        raise AssertionError("DPO fixture attention mask changed")
+    expected = ([6, 7, 8, 9, 1], [], [10, 1], [11, 12, 13, 1])
+    for row, wanted in enumerate(expected):
+        actual = batch["input_ids"][row][completion[row] & attention[row]].tolist()
+        if actual != wanted:
+            raise AssertionError(f"DPO fixture scored IDs changed on row {row}: {actual} != {wanted}")
 
 
 def _full_scores(trainer, batch):
@@ -354,7 +421,7 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
         with same_state_dpo_oracle(full, bounded):
             replay = routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext([])
             print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="same-state oracle forward")), flush=True)
-            with replay as routes, full.compute_loss_context_manager():
+            with replay as routes, _matched_oracle_head(full, bf16=bf16), full.compute_loss_context_manager():
                 want_loss = full.compute_loss(full.model, batch)
             with barrier_on_exit("DPO same-state loss and routing checks"):
                 assert_dpo_loss_matches(got_loss, want_loss)
@@ -372,7 +439,7 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
             want_norm = full._get_grad_norm(full.model)
             with barrier_on_exit("DPO same-state gradients, norm and expert-activity checks"):
                 expected_gradients = _local_snapshot(full, gradients=True)
-                if diagnosis:
+                if diagnosis and not bf16:
                     report = diagnosis.report(gradients, expected_gradients)
                     report.update(
                         rank=bounded.accelerator.process_index,
@@ -383,12 +450,14 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
                         "__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report),
                         flush=True,
                     )
-                worst = assert_dpo_gradients_match(gradients, expected_gradients, bf16=bf16, family=family)
+                worst = assert_dpo_gradients_match(
+                    gradients, expected_gradients, bf16=bf16, family=family, tolerance=FP32_GRAD_REL_L2
+                )
                 torch.testing.assert_close(
                     torch.as_tensor(got_norm),
                     torch.as_tensor(want_norm),
                     atol=1e-8,
-                    rtol=resolve_dpo_gradient_tolerance(family=family, bf16=bf16),
+                    rtol=FP32_GRAD_REL_L2,
                 )
                 if ep:
                     expert_ids = bounded._get_sharded_expert_param_ids()
@@ -398,6 +467,34 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
                     assert names and any(gradients[name].count_nonzero() for name in names), (
                         "no local expert gradient was exercised"
                     )
+        if bf16:
+            with same_state_dpo_oracle(full, bounded):
+                replay = (
+                    routing_pinned(full.model, [torch.cat(chunks) for chunks in picks]) if picks else nullcontext()
+                )
+                with replay, full.compute_loss_context_manager():
+                    unrounded_loss = full.compute_loss(full.model, batch)
+                with barrier_on_exit("DPO unrounded BF16 loss control"):
+                    assert_dpo_loss_matches(got_loss, unrounded_loss)
+                full.accelerator.backward(unrounded_loss)
+                full._finish_fsdp2_backward(full.model)
+                with barrier_on_exit("DPO unrounded BF16 gradient control"):
+                    unrounded_gradients = _local_snapshot(full, gradients=True)
+                    assert_dpo_gradients_match(
+                        gradients,
+                        unrounded_gradients,
+                        bf16=True,
+                        family=family,
+                        tolerance=BF16_UNROUNDED_CONTROL_REL_L2[family],
+                    )
+                    if diagnosis:
+                        report = diagnosis.report(gradients, unrounded_gradients)
+                        report.update(
+                            rank=bounded.accelerator.process_index,
+                            bounded_loss=float(got_loss.detach()),
+                            full_loss=float(unrounded_loss.detach()),
+                        )
+                        print("__DPO_HEAD_GRADIENT_DIAGNOSTIC__ " + json.dumps(report), flush=True)
     print("__DPO_SCORING_PHASE__ " + json.dumps(dict(phase, phase="independent full forward")), flush=True)
     with full.compute_loss_context_manager():
         independent_loss = full.compute_loss(full.model, batch)
@@ -412,13 +509,10 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
 
 
 def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
-    """COLLECTIVE. Compare bounded scoring with a full FP32 head on the same rounded operands.
+    """COLLECTIVE. Match native BF16 backward rounding, then bound unrounded FP32-head drift separately.
 
-    Native BF16 backward rounds dlogits before its GEMMs; the oracle does not.
-    Gradient limits of 2.2% dense / 1.9% MoE give the measured 2.03% / 1.72% a small margin;
-    each BF16-compute weight step adds only actual gradient disagreement and one storage quantum
-    to its inherited divergence. Strict scorer parity uses identical current weights, while both
-    trajectories step independently; FP32 comparison bounds stay unchanged.
+    Same-state scoring uses identical weights; the full-head control and bounded trainer
+    still take independent optimizer steps. The scored token IDs and masks are pinned first.
     """
     if family not in ("dense", "qwen3_moe") or dtype_name not in ("float32", "bfloat16"):
         raise ValueError("DPO scoring equivalence accepts dense/Qwen3-MoE and float32/bfloat16")

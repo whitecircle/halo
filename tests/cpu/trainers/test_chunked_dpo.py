@@ -89,6 +89,18 @@ def _batch():
     return DataCollatorForPreference(pad_token_id=0)(_rows())
 
 
+def test_distributed_scoring_fixture_pins_scored_ids_and_masks():
+    batch = dpo_scoring._batch(0, "cpu")
+    dpo_scoring._assert_fixture_tokens(batch)
+    altered = {name: value.clone() for name, value in batch.items()}
+    # A second terminator on a padded row can fool two scorers reading the same wrong batch.
+    altered["input_ids"][2, 4] = 1
+    altered["attention_mask"][2, 4] = 1
+    altered["completion_mask"][2, 4] = 1
+    with pytest.raises(AssertionError, match="completion mask changed"):
+        dpo_scoring._assert_fixture_tokens(altered)
+
+
 def _loss_trainer(model, *, bounded):
     trainer = precompute_trainer("dpo")
     del trainer.compute_ref_log_probs
@@ -153,6 +165,40 @@ def test_pinned_full_head_derivative_separates_logits_gradient_rounding(dtype):
         torch.testing.assert_close(output["weight"], (dz.T @ hidden.float()).to(dtype), atol=2e-6, rtol=2e-5)
     assert torch.equal(exact["logps"], rounded["logps"])
     assert torch.equal(exact["hidden"], rounded["hidden"]) == (dtype == torch.float32)
+
+
+def test_bf16_matched_head_keeps_fp32_master_gradient_and_rejects_wrong_rounding():
+    generator = torch.Generator().manual_seed(102)
+    hidden = torch.randn(7, 16, generator=generator).to(torch.bfloat16).requires_grad_()
+    head = torch.nn.Linear(16, 32, bias=False)
+    with torch.no_grad():
+        head.weight.copy_(torch.randn(head.weight.shape, generator=generator))
+    targets = torch.arange(7) + 3
+    upstream = torch.linspace(-0.2312345, 0.5432123, 7)
+    logits = dpo_scoring._fp32_head_logits(head, hidden, backward_dtype=torch.bfloat16)
+    logps = logits.log_softmax(-1).gather(1, targets[:, None]).squeeze(1)
+    got_hidden, got_weight = torch.autograd.grad(logps, (hidden, head.weight), upstream)
+    matched = full_head_derivative(hidden, head.weight, targets, upstream, quantize_logits_gradient=True)
+    torch.testing.assert_close(logps, matched["logps"], rtol=0, atol=0)
+    torch.testing.assert_close(got_hidden, matched["hidden"], rtol=0, atol=0)
+    torch.testing.assert_close(got_weight, matched["weight"], rtol=0, atol=0)
+    for wrong in (
+        full_head_derivative(hidden, head.weight, targets, upstream, quantize_logits_gradient=torch.float16),
+        full_head_derivative(hidden, head.weight, targets, upstream, round_forward_logits=True),
+    ):
+        relative = (got_weight - wrong["weight"]).norm() / got_weight.norm()
+        assert relative > dpo_scoring.FP32_GRAD_REL_L2
+
+
+def test_bf16_same_state_control_leaves_independent_trajectory_intact_on_cpu():
+    bounded = _loss_trainer(_model().to(torch.bfloat16), bounded=True)
+    full = _loss_trainer(_model().to(torch.bfloat16), bounded=False)
+    for trainer in (bounded, full):
+        _configure_cpu_backward(trainer)
+    batch = _reference_batch(full, full.model)
+    got, relative, independent = dpo_scoring._compare_backward(bounded, full, batch, family="dense", bf16=True)
+    assert got.isfinite() and independent.isfinite() and relative < dpo_scoring.FP32_GRAD_REL_L2
+    assert full.state.global_step == 1 and all(parameter.grad is not None for parameter in full.model.parameters())
 
 
 def test_pinned_head_diagnosis_observes_real_loss_without_replacing_gradients():

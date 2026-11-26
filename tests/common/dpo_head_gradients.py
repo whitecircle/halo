@@ -18,14 +18,19 @@ def gradient_difference(actual, expected):
     return {"absolute_l2": float(error), "relative_l2": float(error / norm) if norm else None}
 
 
-def full_head_derivative(hidden, weight, targets, upstream, *, quantize_logits_gradient=False):
-    """Full-plane FP32 head on the same rounded operands; optionally round its logits gradient before GEMMs."""
+def full_head_derivative(
+    hidden, weight, targets, upstream, *, quantize_logits_gradient=False, round_forward_logits=False
+):
+    """Full-plane FP32 head on rounded operands, with optional backward or incorrect forward rounding."""
     with torch.enable_grad(), torch.autocast(hidden.device.type, enabled=False):
         h = hidden.detach().float().requires_grad_()
         w = weight.detach().to(hidden.dtype).float().requires_grad_()
         logits = F.linear(h, w)
+        if round_forward_logits:
+            logits = logits.to(hidden.dtype).float()
         if quantize_logits_gradient:
-            logits.register_hook(lambda gradient: gradient.to(hidden.dtype).float())
+            dtype = hidden.dtype if quantize_logits_gradient is True else quantize_logits_gradient
+            logits.register_hook(lambda gradient: gradient.to(dtype).float())
         logps = logits.log_softmax(-1).gather(1, targets[:, None]).squeeze(1)
         dh, dw, dz = torch.autograd.grad(logps, (h, w, logits), upstream.float())
     return {"logps": logps.detach(), "hidden": dh.to(hidden.dtype), "weight": dw.to(weight.dtype), "logits": dz}
