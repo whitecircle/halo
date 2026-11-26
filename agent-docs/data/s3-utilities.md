@@ -55,13 +55,13 @@ How it works:
 
 - **Cache key**: MD5 of `bucket/key` → one subdirectory per dataset.
 
-- **File locking**: `filelock.FileLock` prevents duplicate downloads across processes.
+- **File locking**: `filelock.FileLock` prevents duplicate downloads across processes. A complete cache whose fingerprint matches live S3, or cannot be checked, is served without the lock, so a cache pre-staged on a read-only mount serves.
 
-- **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and an ETag content fingerprint of the S3 prefix. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache. A stale tree that cannot be renamed aside (a permission error, say) raises and discards the fresh download, rather than serving the stale rows.
+- **Completion marker**: a `.download_complete` file marks a valid cache; it records the source URI and the ETag content fingerprint of the S3 prefix listed before the download. A prefix whose listing changes during the download raises and publishes nothing, since the copy may hold files of both states. Downloads stage into a unique temp dir and publish with an atomic rename, so a crashed writer never leaves a half-valid cache. A stale tree that cannot be renamed aside (a permission error, say) raises and discards the fresh download, rather than serving the stale rows.
 
 - **One copy on disk**: the tree downloads straight into that temp dir through the client's parallel transfer (`download_dataset_tree`), so no second copy waits under `TMPDIR` for the process to exit. A tree larger than the cache volume's free space is refused before the first byte. A tree missing its load gates (a torn promote) raises there and its partial download is removed, so it is never published.
 
-- **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a mismatch triggers a re-download. A marker carrying no fingerprint is trusted and upgraded in place.
+- **Staleness check**: on a cache hit the marker's fingerprint is re-validated against live S3 — an in-place re-push to the same URI changes the ETags, and a stale dataset tree or shard is downloaded again. A stale `token_sources` folder is refused instead, also without the lock ([Pre-training](../training-methods/pretraining.md#training-from-datatrove-token-folders)). A marker carrying no fingerprint is trusted and upgraded in place.
 
 - **Offline-resilient hit**: a complete cache skips the existence probe and the download, and the staleness probe fails soft.
 
