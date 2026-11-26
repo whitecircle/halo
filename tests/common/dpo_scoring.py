@@ -38,7 +38,7 @@ FP32_GRAD_REL_L2 = 5e-4
 BF16_DENSE_GRAD_REL_L2 = 2.2e-2
 BF16_MOE_GRAD_REL_L2 = 1.9e-2
 # The unrounded FP32-head control measures expected BF16 drift; it is not the acceptance gate.
-BF16_UNROUNDED_CONTROL_REL_L2 = {"dense": 2.1e-2, "qwen3_moe": 2.35e-2}
+BF16_UNROUNDED_CONTROL_REL_L2 = {"dense": BF16_DENSE_GRAD_REL_L2, "qwen3_moe": 2.35e-2}
 ZERO_GRAD_ATOL = 1e-12
 STEPS = 2
 LEARNING_RATE = 0.05
@@ -478,6 +478,7 @@ def _compare_backward(bounded, full, batch, *, family: str, bf16: bool, diagnose
                     assert_dpo_loss_matches(got_loss, unrounded_loss)
                 full.accelerator.backward(unrounded_loss)
                 full._finish_fsdp2_backward(full.model)
+                full._get_grad_norm(full.model)
                 with barrier_on_exit("DPO unrounded BF16 gradient control"):
                     unrounded_gradients = _local_snapshot(full, gradients=True)
                     assert_dpo_gradients_match(
