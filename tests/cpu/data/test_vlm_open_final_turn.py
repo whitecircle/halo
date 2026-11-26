@@ -14,7 +14,11 @@ from PIL import Image
 from halo.data.collators.vlm import VLMDataCollator
 from halo.data.pipeline.vlm_rows import _filter_vlm_over_length, vlm_map_features
 from halo.data.preprocessed import tokenization
-from halo.data.preprocessed.metadata import PreprocessingConfig
+from halo.data.preprocessed.metadata import (
+    PreprocessingConfig,
+    load_preprocessed_metadata,
+    verify_preprocessed_dataset,
+)
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from halo.data.turn_markers import resolve_eos_token_ids
@@ -228,6 +232,28 @@ def test_a_full_sequence_bake_reads_the_terminators_from_the_model_config(monkey
     closer = processor.tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
     assert [result[split][0]["input_ids"][-1] for split in ("train", "test")] == [closer, closer]
     assert len(reads) == 1, f"the model config was read {len(reads)} times for two splits"
+
+
+def test_the_bake_records_its_closers_off_the_processor_and_a_run_on_it_accepts_them(monkeypatch, tmp_path):
+    """A VLM row renders with the processor's template, so the recorded closers are read off it, as the run's check
+    reads them."""
+    processor, config = _load(GLM5_3_FLASH)
+    tokenizer = processor.tokenizer
+    monkeypatch.setattr(tokenization.AutoConfig, "from_pretrained", lambda *args, **kwargs: config)
+    split = Dataset.from_list([{"conversation": TWO_EXCHANGES}])
+    bake_config = _bake_config(GLM5_3_FLASH, completions_only=False)
+    preprocess_dataset(DatasetDict({"train": split, "test": split}), processor, bake_config, output_dir=str(tmp_path))
+    metadata = load_preprocessed_metadata(str(tmp_path))
+    closers = metadata.final_turn_closer_ids
+    assert (closers["answer"], closers["call"]) == tuple(
+        tokenizer.convert_tokens_to_ids([GLM_ANSWER_CLOSER, GLM_CALL_CLOSER])
+    )
+    verify_preprocessed_dataset(
+        metadata,
+        required_max_length=MAX_LENGTH,
+        run_processing_class=processor,
+        required_eos_token_ids=frozenset(metadata.eos_token_ids),
+    )
 
 
 if __name__ == "__main__":

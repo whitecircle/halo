@@ -10,6 +10,7 @@ import pytest
 from datasets import Dataset, load_from_disk
 from huggingface_hub.errors import EntryNotFoundError
 
+from halo.data.chat_render import resolve_final_turn_closers
 from halo.data.preprocessed import metadata as mod
 from halo.data.preprocessed.metadata import (
     _RENDER_CHECKED_FIELDS,
@@ -26,8 +27,11 @@ from halo.data.preprocessed.shard_index import (
 )
 from halo.data.preprocessed.tokenization import tokenize_dataset
 from halo.data.sources.paths import hub_repo_id
+from halo.data.turn_markers import resolve_eos_token_ids
 from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
-from tests.common.tokenizers import load_cached_tokenizer
+from tests.common.models import QWEN3_0_6B
+from tests.common.open_turn_templates import GLM_ANSWER_CLOSER, load_open_turn_tokenizer
+from tests.common.tokenizers import load_cached_tokenizer, resolve_cached_eos_token_ids
 
 
 def test_shard_info_and_index():
@@ -495,10 +499,61 @@ def test_a_chat_bake_predating_the_terminator_record_is_refused_with_the_rebake_
         verify_preprocessed_dataset(legacy, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
 
 
+def _closing_bake(eos_token_ids: frozenset[int], closers: dict[str, int] | None) -> PreprocessedDatasetMetadata:
+    """A chat bake's stamp recording ``eos_token_ids`` and, unless ``None``, the ``closers`` of its open last turns."""
+    baked = _metadata_with_recorded_config()
+    baked.eos_token_ids = sorted(eos_token_ids)
+    baked.final_turn_closer_ids = closers
+    return baked
+
+
+def test_a_chat_bake_is_held_to_the_closers_the_run_renders():
+    """The bake closed its rows' open last turns with the recorded ids, so a run whose template closes one otherwise
+    trains a stop its own raw rows would not."""
+    tokenizer, model_config = load_open_turn_tokenizer("hub")
+    eos_token_ids = resolve_eos_token_ids(tokenizer, model_config)
+    run = resolve_final_turn_closers(tokenizer, eos_token_ids)
+    check = {"required_max_length": 4096, "run_processing_class": tokenizer, "required_eos_token_ids": eos_token_ids}
+    verify_preprocessed_dataset(_closing_bake(eos_token_ids, run), **check)
+    with pytest.raises(ValueError, match=r"leaves open with \{'answer': '<\|endoftext\|>'.*'answer': '<\|user\|>'"):
+        verify_preprocessed_dataset(_closing_bake(eos_token_ids, dict.fromkeys(run, tokenizer.eos_token_id)), **check)
+
+
+def test_a_chat_bake_predating_the_closer_record_is_refused_where_the_run_closes_a_turn_otherwise():
+    """Such a bake closed every open last turn with the eos: stale on GLM, whose run closes one with a role marker,
+    and as the run would build it on a template that closes its last turn itself."""
+    glm, model_config = load_open_turn_tokenizer("hub")
+    eos_token_ids = resolve_eos_token_ids(glm, model_config)
+    assert resolve_final_turn_closers(glm, eos_token_ids)["answer"] == glm.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    with pytest.raises(IncompatiblePreprocessedDataset, match="final_turn_closer_ids.*prepare_dataset.py"):
+        verify_preprocessed_dataset(
+            _closing_bake(eos_token_ids, None),
+            required_max_length=4096,
+            run_processing_class=glm,
+            required_eos_token_ids=eos_token_ids,
+        )
+
+    qwen = load_cached_tokenizer(QWEN3_0_6B)
+    eos_token_ids = resolve_cached_eos_token_ids(QWEN3_0_6B, qwen)
+    verify_preprocessed_dataset(
+        _closing_bake(eos_token_ids, None),
+        required_max_length=4096,
+        run_processing_class=qwen,
+        required_eos_token_ids=eos_token_ids,
+    )
+
+
 def test_a_text_bake_closes_no_turn_and_is_held_to_no_terminators():
+    """Nor to closers, even on GLM's template, which closes an open last turn with a role marker."""
     text = _metadata_with_recorded_config(mode="text")
-    assert text.eos_token_ids is None
-    verify_preprocessed_dataset(text, required_max_length=4096, required_eos_token_ids=frozenset({151645}))
+    assert text.eos_token_ids is None and text.final_turn_closer_ids is None
+    glm, model_config = load_open_turn_tokenizer("hub")
+    verify_preprocessed_dataset(
+        text,
+        required_max_length=4096,
+        run_processing_class=glm,
+        required_eos_token_ids=resolve_eos_token_ids(glm, model_config),
+    )
 
 
 def test_legacy_metadata_without_recorded_render_knobs_warns_not_raises(caplog):

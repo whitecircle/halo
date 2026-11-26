@@ -326,6 +326,22 @@ def resolve_final_turn_closer(
     return tokenizer.eos_token_id if closers[key] is None else closers[key]
 
 
+def resolve_final_turn_closers(
+    tokenizer: PreTrainedTokenizer, eos_token_ids: frozenset[int], *, template_owner: Any = None
+) -> dict[str, int]:
+    """:func:`resolve_final_turn_closer` for each kind of last turn, keyed ``answer`` or ``call``, suffixed
+    ``_with_tools`` where the row declares tools: what the training renders close an open last turn with, which a chat
+    bake records and a run is checked against."""
+    turns = {"answer": {"role": "assistant", "content": "a"}, "call": _probe_tool_round({"value": "1"})[0]}
+    return {
+        f"{kind}_with_tools" if with_tools else kind: resolve_final_turn_closer(
+            tokenizer, turn, eos_token_ids, with_tools=with_tools, template_owner=template_owner
+        )
+        for kind, turn in turns.items()
+        for with_tools in (False, True)
+    }
+
+
 def close_final_assistant_turn(
     encoded,
     conversation: list[dict[str, Any]],

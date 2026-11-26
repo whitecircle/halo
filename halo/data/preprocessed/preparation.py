@@ -7,6 +7,7 @@ from typing import Any
 
 from datasets import Dataset, DatasetDict
 
+from halo.data.chat_render import resolve_final_turn_closers
 from halo.data.pipeline.coordinated_map import coordinated_pack, resolve_map_num_proc
 from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, PreprocessingConfig, is_chat_bake
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo, write_stamped_sidecar
@@ -215,6 +216,11 @@ def preprocess_dataset(
         # The processor's for a VLM bake: it renders with a template of its own.
         rendered_chat_template=tokenizer_or_processor.chat_template if config.mode == "chat" else None,
         eos_token_ids=sorted(eos_token_ids) if eos_token_ids is not None else None,
+        final_turn_closer_ids=(
+            resolve_final_turn_closers(tokenizer, eos_token_ids, template_owner=tokenizer_or_processor)
+            if eos_token_ids is not None
+            else None
+        ),
         max_length=config.max_length,
         packed=config.pack_sequences,
         packing_strategy=config.packing_strategy if config.pack_sequences else None,

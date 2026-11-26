@@ -47,6 +47,14 @@ and generation config) differs, and as `IncompatiblePreprocessedDataset` when it
 set to check, and on a template that leaves the last turn open (GLM's) its rows may end where a raw run's would not. Either way,
 re-run `prepare_dataset.py` with the run's model and `eos_token`.
 
+It records, too, the token that closed a row's last assistant turn where the template leaves it open
+(`final_turn_closer_ids`, per kind of turn: `answer`, `call`, each also `_with_tools`;
+[Collators](collators.md#eos-pad-and-the-response-template)), read off the processor's template under `--is_vlm`.
+SFT reads the same closers off its own tokenizer or processor and refuses a bake whose record differs. A bake that
+records none closed every such turn with the tokenizer's eos: SFT takes it where the run closes them with the eos
+too, as on a template that closes its last turn itself, and refuses it as `IncompatiblePreprocessedDataset` where the
+run closes one otherwise (GLM's `<|user|>` and `<|observation|>`). Re-run `prepare_dataset.py` to record them.
+
 The checked set is every `PreprocessingConfig` field outside `_UNCOMPARED_FIELDS`, so a new knob is
 compared by default, and a knob the metadata does not record warns instead. `--mode text`
 artifacts render no template and skip the render check entirely. A training config setting
