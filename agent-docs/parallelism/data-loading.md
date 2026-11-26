@@ -83,8 +83,15 @@ So on every path a train sampler left without a generator gets one seeded with `
 `seed` (`_get_train_sampler`). That covers the two shuffles accelerate's seedable sampler does not
 reach: `train_sampling_strategy: group_by_length`, and a `RandomSampler` on a one-process loader
 (`data_parallel_size == 1`, or a pre-sharded dataset) under
-`accelerator_config.use_seedable_sampler: false`. The on-policy GRPO trainers' `RepeatSampler`
+`accelerator_config.use_seedable_sampler: false`. Each epoch's stamp reseeds the generator with the
+seed plus the epoch, so a resumed run draws the order of the epoch it resumes into. That holds wherever
+the sampler keeps the generator: under `group_by_length`, and for a `RandomSampler` under
+`use_seedable_sampler: false` at any data-parallel size. The on-policy GRPO trainers' `RepeatSampler`
 carries its own generator, seeded with `seed`.
+
+`group_by_length` measures every row's `input_ids` in Python on each rank at each launch and resume.
+One process takes about 7 minutes per million
+2,048-token rows and 1 minute per million 256-token rows on a Xeon Platinum 8559C.
 
 **Sweeps over the dataset.** The `precompute_ref_log_probs` sweep builds its own loader and
 prepares it with the world-keyed accelerator, so it would shard by global rank and let TP/CP/expert-TP
