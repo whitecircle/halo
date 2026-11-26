@@ -153,7 +153,7 @@ def test_a_flat_image_list_is_what_the_processor_refuses():
     processor = _tiny_gemma3_processor()
     rows = [_row(3), _row(5)]
     texts = [render_vlm_text(processor, row["history"]) for row in rows]
-    with pytest.raises(ValueError, match="inconsistently sized batches"):
+    with pytest.raises(ValueError, match=r"Found \[1, 1\] <start_of_image> tokens and \[2\] images per sample"):
         processor(text=texts, images=[image for row in rows for image in row["images"]], return_tensors="pt")
 
 

@@ -18,6 +18,7 @@ from halo.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
 from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
 from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
@@ -34,8 +35,9 @@ E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
 _SHARED_EXPERT_LAYERS = sorted(
     {cls for cls in MOE_LAYER_MAP.values() if cls.FAMILY.shared_expert_attrs}, key=lambda cls: cls.__name__
 )
-# Upstream builds these only under a config flag (LFM-2 never), so an absent module there is a configuration.
-_CONDITIONAL_SHARED_EXPERT = (EPBailingMoELayer, EPCohere2MoELayer, EPLfm2MoELayer)
+# Upstream builds these only under a config flag (LFM-2 and Inkling 2 never), so an absent module there is a
+# configuration.
+_CONDITIONAL_SHARED_EXPERT = (EPBailingMoELayer, EPCohere2MoELayer, EPInkling2MoELayer, EPLfm2MoELayer)
 
 
 def _ep_config(experts_fsdp_managed: bool = False) -> EPConfig:

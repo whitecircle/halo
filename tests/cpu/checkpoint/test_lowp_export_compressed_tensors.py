@@ -9,8 +9,9 @@ place of Halo's ``block_scaled`` manifest, which it refuses.
   targets that match exactly the quantized modules under the engine's matching rule.
 - What an engine cannot load quantized is refused before any write. An nvfp4 pair whose shared scale rounds is
   written rounded, with the largest change logged, and refused only past the --verify tolerance.
-The decoders and the expected config mirror compressed-tensors 0.17.0 and vLLM 0.32.0, the releases in the
-``vllm-0.32.0`` image, which the training image does not install."""
+The training image does not install compressed-tensors: the expected config is the library's own serialization,
+recorded in the upstream image ``Dockerfile.vllm`` builds on (``tests.common.compressed_tensors_presets``), and the
+decoders mirror its compressors."""
 
 import json
 import logging
@@ -28,7 +29,6 @@ from halo.checkpoint.tools import lowp_export
 from halo.checkpoint.tools.compressed_tensors_layout import (
     BLOCK_SCALED,
     COMPRESSED_TENSORS,
-    COMPRESSED_TENSORS_FORMAT,
     DEFAULT_EXPORT_FORMAT,
     ExportFormat,
     compressed_tensors_config,
@@ -36,39 +36,19 @@ from halo.checkpoint.tools.compressed_tensors_layout import (
 from halo.checkpoint.tools.lowp_export import quantize_checkpoint
 from halo.kernels.lowp.quantization import E2M1_MAX, fake_quant, quantize_nvfp4
 from halo.kernels.lowp.spec import QuantFormat
-from tests.common.repo import load_script_module
+from tests.common.fake_engines import FakeVLLMServer
+from tests.common.repo import REPO_ROOT, load_script_module
 
 _BLOCKS = 3
 _EXPERTS = 2
 _PROJECTIONS = ("gate_proj", "up_proj", "down_proj")
 # compressed_tensors.compressors.nvfp4.helpers.kE2M1ToFloat
 _E2M1 = torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0])
-# ``QuantizationScheme(targets=[...], format=..., **PRESET_SCHEMES[name]).model_dump_json()`` for MXFP8, MXFP4 and
-# NVFP4A16, as compressed-tensors 0.17.0 prints it.
-_WEIGHT_ARGS = {
-    "mxfp8": {"num_bits": 8, "group_size": 32, "strategy": "group", "scale_dtype": "torch.uint8"},
-    "mxfp4": {"num_bits": 4, "group_size": 32, "strategy": "group", "scale_dtype": "torch.uint8"},
-    "nvfp4": {"num_bits": 4, "group_size": 16, "strategy": "tensor_group", "scale_dtype": "torch.float8_e4m3fn"},
+_RECORD = json.loads((REPO_ROOT / "tests/common/compressed_tensors_presets.json").read_text(encoding="utf-8"))
+# The weights one stored scale covers, as each format's preset declares it.
+_GROUP_SIZE = {
+    fmt: preset["config_groups"]["group_0"]["weights"]["group_size"] for fmt, preset in _RECORD["presets"].items()
 }
-_COMPRESSION_FORMAT = {
-    "mxfp8": "mxfp8-quantized",
-    "mxfp4": "mxfp4-pack-quantized",
-    "nvfp4": "nvfp4-pack-quantized",
-}
-
-
-def _expected_args(fmt: str, *, dynamic: bool) -> dict:
-    return {
-        "type": "float",
-        "symmetric": True,
-        "block_structure": None,
-        "dynamic": dynamic,
-        "actorder": None,
-        "zp_dtype": None,
-        "observer": None if dynamic else "memoryless_minmax",
-        "observer_kwargs": {},
-        **_WEIGHT_ARGS[fmt],
-    }
 
 
 def _weights(blocks: int = _BLOCKS) -> dict[str, torch.Tensor]:
@@ -138,8 +118,7 @@ def _compressed_tensors_dequant(saved: dict, module: str, fmt: str) -> torch.Ten
     else:
         values = _unpack_fp4(saved[f"{module}.weight_packed"])
         scale = saved[f"{module}.weight_scale"].float() / saved[f"{module}.weight_global_scale"]
-    group = _WEIGHT_ARGS[fmt]["group_size"]
-    return (values * scale.repeat_interleave(group, dim=-1)).to(torch.bfloat16)
+    return (values * scale.repeat_interleave(_GROUP_SIZE[fmt], dim=-1)).to(torch.bfloat16)
 
 
 def _engine_matches(layer_name: str, targets: list[str]) -> bool:
@@ -153,7 +132,7 @@ def _engine_matches(layer_name: str, targets: list[str]) -> bool:
 @pytest.mark.parametrize("fmt", get_args(QuantFormat))
 def test_each_format_writes_the_tensors_its_compressor_names(tmp_path, fmt):
     source, saved, _config, _manifest = _export(tmp_path, fmt)
-    group = _WEIGHT_ARGS[fmt]["group_size"]
+    group = _GROUP_SIZE[fmt]
     for module in _quantized_modules():
         out_features, in_features = source[f"{module}.weight"].shape
         expected = {f"{module}.weight_scale"}
@@ -193,24 +172,11 @@ def test_decoding_by_compressed_tensors_rules_reproduces_the_qat_forward(tmp_pat
 @pytest.mark.parametrize("fmt", get_args(QuantFormat))
 def test_config_json_carries_what_compressed_tensors_serializes_for_the_format(tmp_path, fmt):
     _source, _saved, config, manifest = _export(tmp_path, fmt)
-    (group,) = config.pop("config_groups").values()
-    assert config == {
-        "quant_method": "compressed-tensors",
-        "kv_cache_scheme": None,
-        "format": _COMPRESSION_FORMAT[fmt],
-        "quantization_status": "compressed",
-        "global_compression_ratio": None,
-        "ignore": [],
-    }
-    targets = group.pop("targets")
+    targets = config["config_groups"]["group_0"]["targets"]
     assert targets and all(target.startswith("re:") for target in targets)
-    assert group == {
-        "weights": _expected_args(fmt, dynamic=False),
-        # MX trained with both GEMM operands quantized. NVFP4 exports weight-only (NVFP4A16).
-        "input_activations": None if fmt == "nvfp4" else _expected_args(fmt, dynamic=True),
-        "output_activations": None,
-        "format": _COMPRESSION_FORMAT[fmt],
-    }
+    preset = _RECORD["presets"][fmt]
+    group = {**preset["config_groups"]["group_0"], "targets": targets}
+    assert config == {**preset, "config_groups": {"group_0": group}}
     # Halo's own description stays in the sidecar, for its tools and a re-export.
     assert manifest["format"] == fmt and manifest["scope"]["apply_moe_experts"] is True
     assert sorted(manifest["quantized_weights"]) == sorted(f"{module}.weight" for module in _quantized_modules())
@@ -295,19 +261,22 @@ def test_the_header_only_refusals_come_before_the_shared_scale_pass_reads_data(t
 
 @pytest.mark.parametrize("fmt", get_args(QuantFormat))
 def test_the_config_equals_compressed_tensors_own_serialization_of_its_preset(fmt):
-    """Where compressed-tensors is installed (the vLLM image, not the training image): its preset for the format,
-    serialized by the library itself, equals what the export writes, so a release that changes a field fails here."""
-    quantization = pytest.importorskip("compressed_tensors.quantization")
-    presets = pytest.importorskip("compressed_tensors.quantization.quant_scheme").PRESET_SCHEMES
-    targets = [r"re:(?:.*\.)?layers\.(?:0)\.mlp\.gate_proj$"]
-    preset = {"mxfp8": "MXFP8", "mxfp4": "MXFP4", "nvfp4": "NVFP4A16"}[fmt]
-    scheme = quantization.QuantizationScheme(targets=targets, format=COMPRESSED_TENSORS_FORMAT[fmt], **presets[preset])
-    expected = quantization.QuantizationConfig(
-        config_groups={"group_0": scheme},
-        format=COMPRESSED_TENSORS_FORMAT[fmt],
-        quantization_status=quantization.QuantizationStatus.COMPRESSED,
+    """The format's preset as compressed-tensors in the vLLM image serializes it, compression format included, equals
+    what the export writes for the same targets."""
+    assert compressed_tensors_config(fmt, _RECORD["targets"]) == _RECORD["presets"][fmt]
+
+
+def test_the_record_is_taken_in_the_vllm_release_the_image_builds():
+    """Each vLLM release brings its own compressed-tensors, so a vLLM bump re-takes the record in the new release's
+    upstream image."""
+    assert _RECORD["vllm"] == FakeVLLMServer.VERSION, (
+        f"the compressed-tensors presets were recorded in vLLM {_RECORD['vllm']}, but Dockerfile.vllm builds vLLM "
+        f"{FakeVLLMServer.VERSION}, whose compressed-tensors may serialize them otherwise: take the record again in "
+        "the upstream image it builds on, from the repo root: "
+        'docker run --rm --user "$(id -u):$(id -g)" --entrypoint python3 -v "$PWD":/workspace -w /workspace '
+        f"vllm/vllm-openai:v{FakeVLLMServer.VERSION} -m tests.common.compressed_tensors_presets --regen"
     )
-    assert compressed_tensors_config(fmt, targets) == json.loads(expected.model_dump_json())
+    assert set(_RECORD["presets"]) == set(get_args(QuantFormat))
 
 
 def test_targets_match_exactly_the_quantized_modules(tmp_path):

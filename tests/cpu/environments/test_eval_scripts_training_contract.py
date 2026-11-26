@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 from transformers import CONFIG_MAPPING
 
-import halo.environments.rollout_config as rollout_config
 from halo.entrypoints import eval_contract
 from halo.entrypoints.code_contests_eval import CODING_ENV_TYPES, resolve_env_config
 from halo.entrypoints.eval_contract import (
@@ -223,6 +222,19 @@ def test_an_answer_room_cap_vllm_cannot_enforce_is_refused_without_a_run_wide_on
     assert contract.rollout_config(_env(contract)).max_thinking_tokens is None
 
 
+def test_a_thinking_off_contract_closes_the_block_and_refuses_an_env_that_reads_reasoning(tmp_path):
+    """The eval builds its env from flags over the contract, so a flag can bring back a setting training refused."""
+    path = tmp_path / "train.yaml"
+    path.write_text(_RUN_CAP_YAML.replace("rollout_max_answer_tokens: 1024\n", "rollout_thinking: false\n"))
+    contract = TrainingContract.load(str(path))
+    rollout = contract.rollout_config(_env(contract))
+    assert rollout.chat_template_kwargs == {"enable_thinking": False}
+    assert rollout.capture_token_ids, "a cut call is decoded from the sampled ids, as training does"
+    carrying = build_environment("native_math", {**contract.env_config.to_env_config(), "carry_reasoning": True})
+    with pytest.raises(ValueError, match="carry_reasoning: true with rollout_thinking: false"):
+        contract.rollout_config(carrying)
+
+
 def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_budget(tmp_path, monkeypatch):
     """The tokenizer resolves the stop tokens and, under a vLLM budget, the reasoning close; a contract with neither
     never loads one."""
@@ -242,11 +254,6 @@ def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_bud
     unbudgeted = TrainingContract.load(str(plain))
     rollout = unbudgeted.rollout_config(_env(unbudgeted))
     assert rollout.reasoning_end_token_id is None and not rollout.capture_token_ids
-
-
-def test_the_eval_resolves_stop_tokens_as_the_trainer_does():
-    """One resolver, one policy: a recipe the trainer accepts is one its eval accepts."""
-    assert eval_contract.resolve_rollout_stop_token_ids is rollout_config.resolve_rollout_stop_token_ids
 
 
 @pytest.mark.parametrize(

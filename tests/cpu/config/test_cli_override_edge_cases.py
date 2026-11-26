@@ -79,13 +79,17 @@ class _OptionalUnionArgs:
     bf16: bool | None = None
 
 
-@pytest.mark.parametrize("spelling", ["none", "None", "null"])
-def test_optional_container_union_clears_to_none(spelling):
+_NONE_SPELLINGS = ("none", "None", "null")
+
+
+def test_optional_container_union_clears_to_none(subtests):
     """--report_to=none is the standard smoke-run override; the None | str | list[str] union has no confident value
     cast to hide behind."""
-    parser = HaloArgumentParser((_OptionalUnionArgs,))
-    (parsed,) = _override(parser, [f"--report_to={spelling}"])
-    assert parsed.report_to is None
+    for spelling in _NONE_SPELLINGS:
+        with subtests.test(spelling):
+            parser = HaloArgumentParser((_OptionalUnionArgs,))
+            (parsed,) = _override(parser, [f"--report_to={spelling}"])
+            assert parsed.report_to is None
 
 
 def test_optional_container_union_still_rejects_a_value_override():
@@ -95,13 +99,13 @@ def test_optional_container_union_still_rejects_a_value_override():
         _override(parser, ["--report_to=wandb"])
 
 
-@pytest.mark.parametrize("spelling", ["none", "None", "null"])
-def test_optional_bool_refuses_none_clearing(spelling):
+def test_optional_bool_refuses_none_clearing(subtests):
     """An optional bool reads any none-spelling as a mistyped boolean; clearing it would silently flip the run's
     precision or re-arm an auto-default."""
-    parser = HaloArgumentParser((_OptionalUnionArgs,))
-    with pytest.raises(ValueError, match="boolean"):
-        _override(parser, [f"--bf16={spelling}"])
+    for spelling in _NONE_SPELLINGS:
+        parser = HaloArgumentParser((_OptionalUnionArgs,))
+        with subtests.test(spelling), pytest.raises(ValueError, match="boolean"):
+            _override(parser, [f"--bf16={spelling}"])
 
 
 def test_optional_bool_still_parses_true_false():

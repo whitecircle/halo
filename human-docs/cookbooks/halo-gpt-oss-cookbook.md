@@ -2,7 +2,8 @@
 
 [GPT-OSS](https://huggingface.co/openai/gpt-oss-20b) is OpenAI's open-weight MoE in two sizes, 20B and
 120B. Its attention adds a learned per-head "sink" logit, and its experts store gate and up projections
-interleaved. Halo's SFT recipes load both sizes from OpenAI's release, and the BF16 mirrors elsewhere.
+interleaved. Halo's SFT recipes load both sizes from OpenAI's release, and its other recipes load the
+20B's BF16 mirror.
 
 ## Support
 
@@ -30,8 +31,8 @@ halo launch sft examples/sft/gptoss/gptoss-20b-multinode-ep.yaml -n 8 \
 ```
 
 The shipped recipe is a two-node EP16 layout. These overrides run it on one eight-GPU node. They also
-turn grouped GEMM back on: the file turns it off because at EP16, with two experts per rank, the
-per-expert loop keeps up, while at EP8 grouped GEMM is faster.
+turn grouped GEMM back on. The file turns it off because at EP16, with two experts per rank, grouped
+GEMM has few launches to fuse; at EP8 it is faster than the per-expert loop.
 
 ### Other layouts
 
@@ -74,7 +75,7 @@ This one is a full fine-tune at EP4 with two vLLM servers on GPUs 0–3.
 On the host, start the servers on the SFT checkpoint:
 
 ```bash
-export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft
+export VLLM_MODEL=/data/checkpoints/gpt-oss-20b-sft/checkpoint-<step>
 export VLLM_CHAT_TEMPLATE=/jinja-templates/gpt-oss/gpt-oss-harmony.jinja
 export VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text
 export VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
@@ -90,7 +91,7 @@ In the training container, copy the recipe, set its `dataset`, and launch on GPU
 cp examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-full-ep4.yaml gpt-oss-grpo.yaml
 CUDA_VISIBLE_DEVICES=4,5,6,7 DIST_NCCL_TIMEOUT_MINUTES=60 \
   halo launch grpo/environmental gpt-oss-grpo.yaml -n 4 \
-  --model_name_or_path=/data/checkpoints/gpt-oss-20b-sft \
+  --model_name_or_path=/data/checkpoints/gpt-oss-20b-sft/checkpoint-<step> \
   --output_dir=/data/checkpoints/gpt-oss-20b-grpo
 ```
 
@@ -112,10 +113,11 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - **Router aux-loss coefficient.** The hub config ships `router_aux_loss_coef: 0.9`, which swamps the SFT
   loss. The shipped SFT recipes set it to `0.001` in `model_init_kwargs`. Do the same on any other run
   that balances with `aux_loss`, which is what `auto` picks for GPT-OSS.
-- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`, without which
-  the model writes past its tool call and invents the result. They also set
-  `use_chunked_grpo_logprobs: true`, because the ~201k-token vocabulary makes the full logits plane too
-  large.
+- **RL rollouts.** The environment GRPO recipes set `rollout_stop_tokens: ["<|call|>"]`. On a checkpoint
+  whose `generation_config.json` does not list `<|call|>`, a turn would run past its tool call and the
+  model would write the result itself, so Halo refuses a tool-using run without the field when it builds
+  the trainer. The recipes also set `use_chunked_grpo_logprobs: true`, because the vocabulary of
+  about 201k tokens makes the full logits plane too large.
 
 ## Limits
 
@@ -130,9 +132,8 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
 - The DPO, SMPO, reward, classification and offline GRPO recipes pin FA4, so they run on Blackwell only;
   FA4 is also what those scripts pick there unpinned. Unpinned on other GPUs, they take SDPA; on Hopper,
-  pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains without
-  gradient checkpointing and reserved 138 GiB per GPU over three steps at 16k tokens, so on an 80 GB
-  GPU it also needs `--gradient_checkpointing=true`.
+  pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains 16,384-token rows
+  without gradient checkpointing, so on an 80 GB GPU it also needs `--gradient_checkpointing=true`.
 
 ## Export and serve
 
@@ -142,7 +143,7 @@ it directly. Smoke-test it with `AutoModelForCausalLM`
 [host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-sft" \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/gpt-oss-20b-sft/checkpoint-<step>" \
   docker compose -f docker-compose.sglang.yml up -d
 ```
 

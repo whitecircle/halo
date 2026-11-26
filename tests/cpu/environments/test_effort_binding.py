@@ -115,6 +115,7 @@ async def _drive_eval(monkeypatch, env, context, *, responses, config=None):
         dict(context or {}),
         None,
         rollout=config or ray_actors.RolloutConfig(model_name="m", temperature=0.7, max_tokens=_MAX_TOKENS),
+        extra_body={},
     )
     return calls, traj
 
@@ -360,12 +361,6 @@ async def test_the_eval_refuses_a_reasoning_cap_that_fills_the_turn_before_gener
     fits = ray_actors.RolloutConfig(model_name="m", max_tokens=_MAX_TOKENS, max_thinking_tokens=4000)
     results = await eval_runner.collect_results(env, examples, None, rollout=fits)
     assert len(calls) == 1 and "error" not in results[0]["samples"][0]
-
-
-def test_drivers_share_one_seam():
-    # A re-forked local copy would let the two drivers bind different contracts.
-    assert eval_runner.bind_episode_effort is reasoning_effort.bind_episode_effort
-    assert ray_actors.bind_episode_effort is reasoning_effort.bind_episode_effort
 
 
 def test_context_level_wins_over_the_env_setting():

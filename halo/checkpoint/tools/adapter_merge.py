@@ -20,7 +20,12 @@ from halo.checkpoint.adapters import (
     read_adapter_config,
     reject_expert_lora_adapter,
 )
-from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MERGED_ADAPTER_CONFIG_DIR, PROCESSOR_FILES
+from halo.checkpoint.format import (
+    ADAPTER_CONFIG_FILE,
+    DEFAULT_MAX_SHARD_SIZE,
+    MERGED_ADAPTER_CONFIG_DIR,
+    PROCESSOR_FILES,
+)
 from halo.checkpoint.reading import reject_partial_checkpoint
 from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
 from halo.checkpoint.tools.adapter_stream_merge import merge_adapter_streaming
@@ -70,8 +75,8 @@ def load_base_for_adapter(
     excuse_task_head: bool,
     log,
 ) -> _AdapterBaseModel:
-    """The base loaded through the class the adapter's keys address, since ``PeftModel.from_pretrained`` only warns
-    when saved keys name no live module and then merges nothing. A key set neither class carries raises."""
+    """The base loaded through the class the adapter's keys address, since an adapter tensor keyed to no live module
+    applies to nothing, which ``PeftModel.from_pretrained`` only warns about. A key set neither class carries raises."""
     paths = adapter_module_paths(adapter_dir)
     base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
     absent = _paths_absent_from(base_model, paths)
@@ -82,16 +87,20 @@ def load_base_for_adapter(
     wrapper = type(base_model).__name__
     del base_model
     mismatch = (
-        f"The adapter at {adapter_dir} addresses {len(absent)} module(s) that {wrapper} loaded from "
-        f"{base_model_path} does not have (e.g. {absent[0]}). PEFT would merge nothing there and the tool "
-        f"would write the bare base; the adapter and its base_model_name_or_path do not belong together."
+        f"The adapter at {adapter_dir} addresses {len(absent)} module(s) that {wrapper} of {base_model_path} does "
+        f"not have (e.g. {absent[0]}), so their adapter tensors would apply to nothing: the adapter and its "
+        f"base_model_name_or_path do not belong together. Set base_model_name_or_path in {ADAPTER_CONFIG_FILE} to "
+        f"the checkpoint the adapter was trained on."
     )
     try:
         text_only_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head, text_only=True)
     except ValueError as no_text_only_class:
         raise ValueError(mismatch) from no_text_only_class
     if not _paths_absent_from(text_only_model, paths):
-        log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(text_only_model).__name__}.")
+        log(
+            f"The adapter addresses the text-only class of {wrapper}; reading the base as "
+            f"{type(text_only_model).__name__}."
+        )
         return _AdapterBaseModel(text_only_model, text_only=True)
     raise ValueError(mismatch)
 

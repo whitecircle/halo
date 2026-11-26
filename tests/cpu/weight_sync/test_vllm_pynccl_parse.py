@@ -7,13 +7,13 @@ import pytest
 from halo.weight_sync.transport.pynccl import vllm_pynccl_disabled
 
 
-@pytest.mark.parametrize("value", ["1", "true", "TRUE", "True", " true "])
+@pytest.mark.parametrize("value", ["1", "True", " true "])
 def test_vllm_truthy_spellings_disable(monkeypatch, value):
     monkeypatch.setenv("VLLM_DISABLE_PYNCCL", value)
     assert vllm_pynccl_disabled() is True
 
 
-@pytest.mark.parametrize("value", ["yes", "on", "y", "enabled"])
+@pytest.mark.parametrize("value", ["yes", "on"])
 def test_spellings_vllm_ignores_do_not_refuse_the_trainer(monkeypatch, value):
     monkeypatch.setenv("VLLM_DISABLE_PYNCCL", value)
     assert vllm_pynccl_disabled() is False

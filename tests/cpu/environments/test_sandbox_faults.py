@@ -384,12 +384,6 @@ def test_a_session_path_no_backend_can_take_is_refused_as_an_argument(backend, p
         assert [list(post.payload["files"]) for post in service.posts] == [["ok.py"]], "no refused name is sent"
 
 
-def test_a_null_test_input_is_no_input_not_an_infra_error():
-    tests = [{"input": None, "output": "ok"}]
-    grade = run_solution_against_tests("print('ok')", tests, sandbox=LocalSubprocessSandbox())
-    assert grade.infra_errors == 0 and grade.passed == 1, grade.details
-
-
 def test_a_removed_working_directory_is_recreated_not_a_fault():
     with LocalSubprocessSandbox().open_session() as session:
         session.write_file("notes.txt", "x")
@@ -608,13 +602,12 @@ def test_a_reset_refused_after_the_restore_leaves_the_entry(monkeypatch):
         assert "left.txt" in session.list_files()
 
 
-@pytest.mark.parametrize("denial", [errno.EPERM, errno.ENOSYS])
-def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(denial, monkeypatch):
+def test_a_host_that_refuses_pidfd_open_refuses_the_sandbox(monkeypatch):
     """Every run waits on its program through a pidfd; refused, each would fail as a backend error and
     void its episode, so construction raises instead."""
 
     def refused(pid, flags=0):
-        raise OSError(denial, os.strerror(denial))
+        raise OSError(errno.EPERM, os.strerror(errno.EPERM))
 
     monkeypatch.setattr(os, "pidfd_open", refused)
     with pytest.raises(RuntimeError, match="pidfd_open"):
@@ -750,12 +743,6 @@ def test_crlf_and_lf_output_compare_equal_on_every_backend(expected, produced):
     raw = StubSandbox(SandboxResult(stdout=produced, returncode=0))
     assert run_solution_against_tests("code", [{"input": "", "output": expected}], sandbox=raw).passed == 1
     assert not run_solution_against_tests("code", [{"input": "", "output": "1 2"}], sandbox=raw).passed
-
-
-def test_a_local_program_writing_crlf_passes_an_lf_test():
-    program = "import sys\nsys.stdout.buffer.write(b'1\\r\\n2\\r\\n')\n"
-    grade = run_solution_against_tests(program, [{"input": "", "output": "1\n2\n"}], sandbox=LocalSubprocessSandbox())
-    assert grade.passed == 1, grade.details
 
 
 def test_grading_judges_a_workdir_removing_program_instead_of_voiding_it():

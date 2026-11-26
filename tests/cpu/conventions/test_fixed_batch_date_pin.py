@@ -36,7 +36,7 @@ def test_harmony_batch_carries_the_pinned_date():
     text = _batch_text(_tokenizer(GPT_OSS_20B))
     assert f"Current date: {PINNED_DATE}" in text, (
         f"gpt-oss fixed batch does not carry the pinned date {PINNED_DATE}. Its harmony template "
-        f"renders the live clock unless fixed_chat_batch shadows `strftime_now`. Rendered: {text[:300]!r}"
+        f"renders the live clock unless fixed_chat_batch pins the template clock. Rendered: {text[:300]!r}"
     )
     today = datetime.now().strftime("%Y-%m-%d")
     assert today == PINNED_DATE or today not in text, (

@@ -2,6 +2,7 @@
 
 import hashlib
 import pickle
+from collections.abc import Mapping
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
@@ -9,7 +10,12 @@ from halo.data.pipeline.coordinated_map import run_load_rank_first
 from halo.data.pipeline.map_cache_key import stamp_cache_key
 from halo.data.preprocessed.metadata import is_preprocessed_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE
-from halo.data.render_columns import drop_empty_conversation_rows, reject_missing_render_column
+from halo.data.render_columns import (
+    drop_empty_conversation_rows,
+    reject_missing_render_column,
+    render_column_checks_across_ranks,
+    resolve_declared_render_columns,
+)
 from halo.data.sources.corpus import build_corpus, placeholder_test_split, resolve_dataset_ratios, subset_dataset_dict
 from halo.data.sources.paths import (
     DATA_FILE_BUILDERS,
@@ -277,17 +283,21 @@ def _load_single(
     conversation_field: str,
     conversation_declared: bool,
     conversation_knob: str,
-    tools_field: str | None,
+    template_columns: Mapping[str, str | None],
 ) -> tuple[DatasetDict, bool, str]:
-    """A checked, filtered and subset ``DatasetDict``, whether it loaded sharded, and its pre-filter signature."""
+    """COLLECTIVE: a checked, filtered and subset ``DatasetDict``, whether it loaded sharded, and its pre-filter
+    signature."""
     ds, sharded = _load_dataset_from_path(path, test_size, data_parallel_rank, data_parallel_size)
     # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped).
     reject_partial_splits(ds, path)
     content_sig = _content_signature(ds)
-    drop_empty_conversation_rows(ds, path, conversation_field, required=conversation_declared, knob=conversation_knob)
-    if tools_field:
-        # An optional knob's typo never surfaces downstream: rows just render without tools.
-        reject_missing_render_column(ds, path, "tools_field", tools_field)
+    declared = resolve_declared_render_columns(
+        conversation_knob, conversation_field if conversation_declared else None, template_columns
+    )
+    with render_column_checks_across_ranks(path, sharded=sharded):
+        for knob, column in declared.items():
+            reject_missing_render_column(ds, path, knob, column)
+    drop_empty_conversation_rows(ds, conversation_field)
     return subset_dataset_dict(ds, ratio, seed), sharded, content_sig
 
 
@@ -323,11 +333,12 @@ def load_datasets(
     seed: int = _DEFAULT_DATA_SEED,
     data_parallel_rank: int = 0,
     data_parallel_size: int = 1,
-    tools_field: str | None = None,
+    template_columns: Mapping[str, str | None] | None = None,
     conversation_knob: str = "conversation_field",
 ):
     """A declared ``conversation_field`` must exist; the refusal names ``conversation_knob``, the config field the
-    caller read it from (``prompt_field`` on GRPO prompt scripts)."""
+    caller read it from (``prompt_field`` on GRPO prompt scripts). ``template_columns`` maps each template knob to the
+    column it names, as :func:`~halo.data.conversation.template_column_kwargs` reads them off a config."""
     dataset_ratio = resolve_dataset_ratios(path, dataset_ratio)
     conversation_declared = conversation_field is not _UNDECLARED
     if not conversation_declared:
@@ -336,7 +347,7 @@ def load_datasets(
         "conversation_field": conversation_field,
         "conversation_declared": conversation_declared,
         "conversation_knob": conversation_knob,
-        "tools_field": tools_field,
+        "template_columns": template_columns or {},
     }
     # No outer barrier: _load_dataset_from_path coordinates the downloads and the rest is rank-deterministic.
     if isinstance(path, list):
@@ -353,9 +364,11 @@ def load_datasets(
     # HF's own fingerprints diverge between writer and loader ranks, breaking downstream cache keys.
     path_repr = ",".join(path) if isinstance(path, list) else str(path)
     ratio_repr = ",".join([str(r) for r in dataset_ratio]) if isinstance(dataset_ratio, list) else str(dataset_ratio)
+    # The schema too: the content signature is read before a corpus pins the declared columns an unpinned load drops.
+    schema_sig = ",".join(f"{name}:{ds[name].features}" for name in sorted(ds))
     meta = (
         f"{path_repr}|{test_size}|{ratio_repr}|{seed}|{len(ds['train'])}|{len(ds['test'])}"
-        f"|{conversation_field}|{content_sig}"
+        f"|{conversation_field}|{content_sig}|{schema_sig}"
     )
     # Equal-length shards would otherwise stamp identical keys and load rank 0's mapped shard.
     if sharded:
@@ -432,7 +445,7 @@ def load_datasets_auto(
     seed: int = _DEFAULT_DATA_SEED,
     data_parallel_rank: int = 0,
     data_parallel_size: int = 1,
-    tools_field: str | None = None,
+    template_columns: Mapping[str, str | None] | None = None,
 ) -> tuple[DatasetDict, bool]:
     """``(DatasetDict, is_preprocessed)``. Pass the DATA-PARALLEL rank/size, so CP/TP-group siblings share shards."""
     # Cross-rank agreed: a transient S3 error must not split ranks onto the raw and preprocessed paths.
@@ -459,6 +472,6 @@ def load_datasets_auto(
         seed=seed,
         data_parallel_rank=data_parallel_rank,
         data_parallel_size=data_parallel_size,
-        tools_field=tools_field,
+        template_columns=template_columns,
     )
     return ds, False

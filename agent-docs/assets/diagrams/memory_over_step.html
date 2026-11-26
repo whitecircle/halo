@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Memory over one step</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 420px;
+    --bar-h: 40px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* One row per case: its name, then one stacked bar per column. A group's heading spans the row. */
+  .rows {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--columns), 1fr);
+    column-gap: 40px;
+    row-gap: 22px;
+    align-items: center;
+  }
+
+  .rows .group {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: calc(var(--heading-gap) - 22px);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .rows .group.later { margin-top: calc(var(--group-gap) - 22px); }
+
+  .rows .group span {
+    font-family: var(--sans);
+    font-size: 22px;
+    letter-spacing: 0;
+    color: var(--secondary);
+  }
+
+  .rows .head .name {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--text);
+  }
+
+  .rows .head .of {
+    margin-top: 2px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+  }
+
+  .label .case {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .label .sub {
+    margin-top: 1px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  .track .seg {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 7px;
+    background: var(--hue);
+    font-size: 20px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: #000;
+    white-space: nowrap;
+    overflow: hidden;
+  }
+
+  .track .total {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 21px;
+    font-weight: 500;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--text);
+    white-space: nowrap;
+  }
+
+  .track .total.none {
+    font-weight: 400;
+    color: var(--danger);
+  }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px 36px;
+    margin-top: 40px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .legend span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .legend i {
+    width: 30px;
+    height: 20px;
+    border-radius: 5px;
+    background: var(--hue);
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="rows" id="rows"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Qwen3-4B in bf16 on one B300: one row of {tokens} tokens through a forward and a backward, with Flash Attention and the loss on full logits.</span>
+      <span class="s">Memory is what PyTorch has allocated.</span>
+      <span class="s">Checkpointing is per decoder layer.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_training_step.py --experiment activations:
+  // Qwen/Qwen3-4B-Instruct-2507 in bf16 (4,022,468,096 parameters, 36 layers), flash_attention_4, the loss on full
+  // logits, every parameter trainable, forward and backward with no optimizer step.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_training_step.py --experiment activations --output step-act-4b.json
+  // step-act-4b.json, the two rows[] with batch 1 and seq 16384, in GiB of PyTorch's allocated memory:
+  // allocated_before_step_bytes, backbone_saved.bytes (what a forward of the decoder stack alone keeps),
+  // saved_by_forward_bytes (allocated after the forward minus before it), peak_allocated_bytes, and
+  // step_seconds_summary.median in ms (7 steps).
+  const TOKENS = 16384;
+  const RUNS = [
+    { checkpointing: "off", before: 7.5084, savedByStack: 93.859, saved: 107.77, peak: 133.82, stepMs: 813.9 },
+    { checkpointing: "on", before: 7.5084, savedByStack: 3.133, saved: 17.043, peak: 43.098, stepMs: 1046 },
+  ];
+  /**
+   * The parts of the allocated memory, in the order they are stacked. What the forward saves is blue, in two
+   * tones, and what the backward adds violet.
+   */
+  const PARTS = [
+    { id: "weights", name: "Weights", hue: "var(--body)" },
+    { id: "stack", name: "Saved by the decoder stack", hue: "var(--halo-blue)" },
+    { id: "head", name: "Saved by the output head and the loss", hue: "color-mix(in oklab, var(--halo-blue) 50%, var(--text))" },
+    { id: "backward", name: "Added by the backward at the peak", hue: "var(--halo-violet)" },
+  ];
+  /** The three moments of a step the run recorded, each with the parts allocated at it. */
+  const MOMENTS = [
+    { name: "Before the step", sub: "The model is loaded", parts: ["weights"] },
+    { name: "After the forward", sub: "Everything the backward will need", parts: ["weights", "stack", "head"] },
+    { name: "At the peak", sub: "In the backward", parts: ["weights", "stack", "head", "backward"] },
+  ];
+  const HEADINGS = { off: "Without gradient checkpointing", on: "With gradient checkpointing" };
+
+  /** Space between two segments of a bar, and from a bar's end to its total, in px. */
+  const SEGMENT_GAP = 3;
+  const TOTAL_GAP = 12;
+
+  /**
+   * Builds the rows into `root`: per group a heading, per row a label and one stacked bar per column. Every
+   * column has its own scale from zero, the longest bar ending where its total still fits in the column. A row's
+   * bar for a column is { segments: [{ value, hue, text }], total } or { none: "why there is no bar" }. A column
+   * with a name is headed by it and its unit.
+   */
+  function drawRows(root, { columns, groups }) {
+    root.style.setProperty("--columns", columns.length);
+    const tracks = [];
+
+    // Columns that carry a name get a row of headings above the first row.
+    if (columns.some((column) => column.name !== undefined)) {
+      root.append(el("div"));
+
+      for (const column of columns) {
+        const head = el("div", "head");
+        head.append(el("div", "name", column.name), el("div", "of", column.of));
+        root.append(head);
+      }
+    }
+
+    groups.forEach((group, g) => {
+      if (group.heading !== undefined) {
+        const heading = el("div", g === 0 ? "group" : "group later", group.heading);
+
+        if (group.note !== undefined) {
+          heading.append(el("span", undefined, group.note));
+        }
+
+        root.append(heading);
+      }
+
+      for (const row of group.rows) {
+        const label = el("div", "label");
+        label.append(el("div", "case", row.name), el("div", "sub", row.sub));
+        root.append(label);
+
+        for (const column of columns) {
+          const track = el("div", "track");
+          root.append(track);
+          tracks.push({ track, column, bar: row.bars[column.id] });
+        }
+      }
+    });
+
+    for (const column of columns) {
+      const mine = tracks.filter((t) => t.column === column && t.bar.none === undefined);
+      const sum = (bar) => bar.segments.reduce((total, s) => total + s.value, 0);
+      const totals = mine.map(({ track, bar }) => {
+        const node = el("div", "total", bar.total);
+        track.append(node);
+
+        return node;
+      });
+      const width = mine[0].track.getBoundingClientRect().width;
+      // The scale that lets the longest bar and its total end at the column's right edge.
+      const scale = Math.min(...mine.map(({ bar }, i) => (width - TOTAL_GAP - totals[i].getBoundingClientRect().width - SEGMENT_GAP * (bar.segments.length - 1)) / sum(bar)));
+
+      mine.forEach(({ track, bar }, i) => {
+        let x = 0;
+
+        for (const segment of bar.segments) {
+          const node = el("div", "seg");
+          const length = segment.value * scale;
+          node.style.cssText = `left:${x}px; width:${length}px; --hue:${segment.hue}`;
+          track.append(node);
+
+          // A segment prints its value where it is wide enough to hold it. A bar of one segment has its total.
+          if (segment.text !== undefined && bar.segments.length > 1) {
+            const text = el("span", undefined, segment.text);
+            node.append(text);
+
+            if (text.getBoundingClientRect().width + 16 > length) {
+              text.remove();
+            }
+          }
+
+          x += length + SEGMENT_GAP;
+        }
+
+        totals[i].style.left = `${x - SEGMENT_GAP + TOTAL_GAP}px`;
+      });
+    }
+
+    for (const { track, bar } of tracks.filter((t) => t.bar.none !== undefined)) {
+      const node = el("div", "total none", bar.none);
+      node.style.left = "0";
+      track.append(node);
+    }
+  }
+
+  /** Fills the legend under the rows: one swatch and name per segment kind. */
+  function drawLegend(root, items) {
+    for (const [hue, text] of items) {
+      const item = el("span");
+      const dot = el("i");
+      dot.style.setProperty("--hue", hue);
+      item.append(dot, text);
+      root.append(item);
+    }
+  }
+
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const gib = (v) => (v >= 100 ? fmt(v) : v.toFixed(1));
+  /** A run's parts in GiB: what was allocated before the step, what the forward saved, what the backward added. */
+  const partsOf = (run) => ({
+    weights: run.before,
+    stack: run.savedByStack,
+    head: run.saved - run.savedByStack,
+    backward: run.peak - run.before - run.saved,
+  });
+  const byMode = Object.fromEntries(RUNS.map((run) => [run.checkpointing, run]));
+
+  document.getElementById("title").textContent =
+    `At ${fmt(TOKENS)} tokens gradient checkpointing cuts the peak from ${fmt(byMode.off.peak)} to ${fmt(byMode.on.peak)} GiB`;
+  fillValues({ tokens: fmt(TOKENS) });
+
+  drawRows(document.getElementById("rows"), {
+    columns: [{ id: "memory" }],
+    groups: RUNS.map((run) => {
+      const parts = partsOf(run);
+
+      return {
+        heading: HEADINGS[run.checkpointing],
+        note: `Allocated GiB · ${fmt(run.stepMs)} ms for the forward and the backward`,
+        rows: MOMENTS.map((moment) => ({
+          name: moment.name,
+          sub: moment.sub,
+          bars: {
+            memory: {
+              segments: moment.parts.map((id) => ({ value: parts[id], hue: PARTS.find((p) => p.id === id).hue, text: gib(parts[id]) })),
+              total: gib(moment.parts.reduce((sum, id) => sum + parts[id], 0)),
+            },
+          },
+        })),
+      };
+    }),
+  });
+
+  // The legend names each part with its size in both runs.
+  const [off, on] = [partsOf(byMode.off), partsOf(byMode.on)];
+  drawLegend(document.getElementById("legend"), PARTS.map((part) => [
+    part.hue,
+    gib(off[part.id]) === gib(on[part.id]) ? `${part.name}: ${gib(off[part.id])} GiB` : `${part.name}: ${gib(off[part.id])} GiB, ${gib(on[part.id])} with checkpointing`,
+  ]));
+</script>
+</body>
+</html>

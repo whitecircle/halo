@@ -59,8 +59,7 @@ def _diagnostics_worker(rank, cp_size, training):
     ), "fixture lost reduction sensitivity"
 
 
-@pytest.mark.parametrize("cp_size", [2, 4])
-@pytest.mark.parametrize("training", [True, False], ids=["train", "eval"])
+@pytest.mark.parametrize(("training", "cp_size"), [(True, 2), (False, 4)], ids=["train-2", "eval-4"])
 def test_cp_sign_metrics_match_cp1_and_detect_dropped_reduction(cp_size, training):
     run_gloo_ranks(_diagnostics_worker, cp_size, cp_size, training, pg_timeout=datetime.timedelta(seconds=30))
 

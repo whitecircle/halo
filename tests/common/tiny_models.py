@@ -40,6 +40,10 @@ from transformers import (
     Glm5NextForConditionalGeneration,
     GptOssConfig,
     GptOssForCausalLM,
+    Inkling2Config,
+    Inkling2ForCausalLM,
+    Inkling2ForConditionalGeneration,
+    Inkling2TextConfig,
     InklingConfig,
     InklingForCausalLM,
     InklingForConditionalGeneration,
@@ -108,6 +112,7 @@ from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
 from halo.models.introspection.param_roles import fp32_pinned_names
 from halo.models.upstream.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
+from tests.common.inkling2 import TINY_INKLING2_TEXT, TINY_INKLING2_VISION
 from tests.common.models import (
     BAILING_LING_3_TINY,
     BAILING_MOE_LING_MINI,
@@ -167,7 +172,7 @@ VOCAB_PAD_MULTIPLE = 128
 TINY_SHARD_SIZE = "4MB"
 DSV4_TID2EID_SEED = 1234
 # Families whose transformers class pins parameters (not only buffers) in fp32 via ``_keep_in_fp32_modules_strict``.
-PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
+PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text", "inkling2_text")
 # A release's router bias: far from zero with a small spread, where bf16's spacing erases its differences. A bias near
 # zero survives the cast, so a lost fp32 pin would pass.
 RELEASE_BIAS_CENTER = 42.0
@@ -356,6 +361,22 @@ def _composite(
     )
 
 
+def _inkling2_text(overrides: dict) -> dict:
+    """The roster draws labels from the whole vocabulary, so no padded rows are cut from the head."""
+    config = {**TINY_INKLING2_TEXT, **overrides}
+    return {**config, "unpadded_vocab_size": config["vocab_size"]}
+
+
+def _tiny_inkling2(overrides: dict) -> PreTrainedModel:
+    return Inkling2ForCausalLM(Inkling2TextConfig(**_inkling2_text(overrides)))
+
+
+def _tiny_inkling2_composite(overrides: dict) -> PreTrainedModel:
+    return Inkling2ForConditionalGeneration(
+        Inkling2Config(text_config=_inkling2_text(overrides), vision_config=dict(TINY_INKLING2_VISION))
+    )
+
+
 def _tiny_deepseek_v4(overrides: dict) -> PreTrainedModel:
     model = DeepseekV4ForCausalLM(DeepseekV4Config(**{**TINY_DSV4_CONFIG, **overrides}))
     randomize_tid2eid(model)
@@ -440,10 +461,17 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         _causal(InklingTextConfig, InklingForCausalLM, TINY_INKLING_CONFIG),
         text_overrides={"max_position_embeddings": 512},
     ),
+    # Short convolutions on K/V and around each sublayer.
+    "inkling2_text": TinyFamily(
+        _tiny_inkling2,
+        text_overrides={"max_position_embeddings": 512},
+        # Its index spells the hub's ``attn_sink_proj``, not the module tree's ``sink_proj``.
+        attention_targets=("q_proj", "k_proj", "v_proj", "o_proj"),
+    ),
     # Neither attention is one the Ulysses wrapper implements.
     "laguna": TinyFamily(_causal(LagunaConfig, LagunaForCausalLM, TINY_LAGUNA_CONFIG)),
     "lfm2_moe": TinyFamily(_causal(Lfm2MoeConfig, Lfm2MoeForCausalLM, TINY_LFM2_MOE_CONFIG)),
-    # No AutoModelForCausalLM entry for mistral4 in transformers 5.20.
+    # No AutoModelForCausalLM entry for mistral4 in transformers 5.23.
     "mistral4": TinyFamily(
         _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG),
         load_class=Mistral4ForCausalLM,
@@ -513,6 +541,7 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         _composite(InklingConfig, InklingForConditionalGeneration, TINY_INKLING_CONFIG, TINY_INKLING_VISION_CONFIG),
         load_class=AutoModelForImageTextToText,
     ),
+    "inkling2": TinyFamily(_tiny_inkling2_composite, load_class=AutoModelForImageTextToText),
     "lfm2_vl": TinyFamily(
         _composite(
             Lfm2VlConfig,

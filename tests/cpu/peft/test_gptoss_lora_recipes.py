@@ -111,7 +111,7 @@ def test_the_merged_save_reloads_in_stock_transformers(recipe, monkeypatch, tmp_
     # What the flag is for: this same adapter saved unmerged is refused by the in-memory merge.
     adapter_dir = str(tmp_path / "adapter")
     save_peft_adapters(context, adapter_dir)
-    with pytest.raises(ValueError, match="or set merge_expert_lora_on_save=True"):
+    with pytest.raises(ValueError, match="resume the run with merge_expert_lora_on_save=True"):
         reject_expert_lora_adapter(adapter_dir)
 
 

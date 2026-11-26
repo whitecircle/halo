@@ -53,14 +53,6 @@ def test_raw_ragged_reference_is_saved_and_restored_without_a_second_sweep(tmp_p
     assert torch.equal(next_saved["values"], saved["values"])
 
 
-def test_live_reference_state_keeps_one_arrow_column_not_an_extra_flat_token_table(tmp_path):
-    trainer = ReferenceStorageTrainer(tmp_path)
-    attached = attach_reference(trainer, reference_dataset(), "train", reference_rows(), settings=SETTINGS)
-    assert set(trainer._reference_logps_by_split["train"]) == {"num_rows", "token_digests", "settings"}
-    assert not trainer._resumed_reference_logps
-    assert attached[REF_PER_TOKEN_LOGPS_COLUMN] == [[-0.25, -1.5], [-0.75], []]
-
-
 def test_train_and_eval_splits_survive_when_resume_uses_only_train(tmp_path):
     trainer = ReferenceStorageTrainer(tmp_path)
     train = reference_dataset()

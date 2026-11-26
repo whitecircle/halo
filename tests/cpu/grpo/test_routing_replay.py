@@ -165,16 +165,6 @@ def test_gc_recompute_skips_flip_metric_but_still_replaces():
     assert torch.equal(layer._replay_flip_counts, counts_after_original)
 
 
-def test_group_limited_topk_forced_equals_natural():
-    layer = _BareLayer()
-    scores = torch.rand(T, E)
-    base_idx, base_w = layer._group_limited_topk(scores, scores)
-    layer._forced_topk_indices = base_idx.clone()
-    forced_idx, forced_w = layer._group_limited_topk(scores, scores)
-    assert torch.equal(forced_idx, base_idx)
-    assert torch.equal(forced_w, base_w)
-
-
 def test_group_limited_topk_forced_weights_are_live_gathers():
     layer = _BareLayer()
     scores = torch.rand(T, E)

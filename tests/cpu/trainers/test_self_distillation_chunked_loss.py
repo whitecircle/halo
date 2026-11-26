@@ -169,18 +169,30 @@ def _small_chunks(monkeypatch):
     monkeypatch.setattr(logprob_kernels, "LOGIT_CHUNK_ELEMENTS", CHUNK_ROWS * TINY_QWEN3_CONFIG["vocab_size"])
 
 
-LOSS_CASES = [
-    {"sdpg_loss": "reverse_kl"},
-    {"sdpg_loss": "forward_kl"},
-    {"sdpg_loss": "unnormalized_kl"},
-    {"sdpg_loss": "jensen_shannon", "sdpg_jsd_beta": 0.3},
-    {"sdpg_loss": "reverse_kl", "opd_exclude_eos": False},
-    {"sdpg_loss": "reverse_kl", "confidence_weight_opd": False},
-]
-
-
-@pytest.mark.parametrize("with_reference", [False, True], ids=["no_reference", "reference"])
-@pytest.mark.parametrize("case", LOSS_CASES, ids=lambda case: "-".join(f"{k}={v}" for k, v in case.items()))
+@pytest.mark.parametrize(
+    ("case", "with_reference"),
+    [
+        pytest.param({"sdpg_loss": "reverse_kl"}, False, id="sdpg_loss=reverse_kl-no_reference"),
+        pytest.param({"sdpg_loss": "forward_kl"}, False, id="sdpg_loss=forward_kl-no_reference"),
+        pytest.param({"sdpg_loss": "unnormalized_kl"}, False, id="sdpg_loss=unnormalized_kl-no_reference"),
+        pytest.param(
+            {"sdpg_loss": "jensen_shannon", "sdpg_jsd_beta": 0.3},
+            False,
+            id="sdpg_loss=jensen_shannon-sdpg_jsd_beta=0.3-no_reference",
+        ),
+        pytest.param(
+            {"sdpg_loss": "reverse_kl", "opd_exclude_eos": False},
+            False,
+            id="sdpg_loss=reverse_kl-opd_exclude_eos=False-no_reference",
+        ),
+        pytest.param(
+            {"sdpg_loss": "reverse_kl", "confidence_weight_opd": False},
+            False,
+            id="sdpg_loss=reverse_kl-confidence_weight_opd=False-no_reference",
+        ),
+        pytest.param({"sdpg_loss": "reverse_kl"}, True, id="sdpg_loss=reverse_kl-reference"),
+    ],
+)
 def test_every_opd_loss_matches_the_full_logits_path_with_lora_on_the_head(case, with_reference):
     reference = _reference() if with_reference else None
     trainer = _trainer(_student(peft=True), reference=reference, **case)

@@ -15,6 +15,7 @@ import transformers.models.radio.modeling_radio as radio_modeling
 from torch import nn
 
 from halo.models.attention.tensor_memo import TensorMemo
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.row_documents import row_documents
 from halo.models.upstream.conversion_overrides import NEMOTRON_H_COMPOSITE_CLASS
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
@@ -220,7 +221,7 @@ def _patch_mamba_mixer() -> None:
         return original_forward(self, *args, **kwargs)
 
     mixer_cls.__init__ = __init__
-    mixer_cls.forward = forward
+    patch_layer_forward(mixer_cls, forward)
 
 
 def _patch_radio_layer_scale() -> None:

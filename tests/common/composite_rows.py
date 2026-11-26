@@ -80,6 +80,12 @@ def _pixels(family: str, config) -> tuple[torch.Tensor, dict[str, torch.Tensor]]
             "spatial_shapes": torch.tensor([[side, side]]),
             "pixel_attention_mask": torch.ones(1, patches, dtype=torch.long),
         }
+    if family == "inkling2":
+        # One merged patch per language-model image token; the grid counts those tokens.
+        width = vision.patch_size * vision.spatial_merge_size
+        tokens = _IMAGE_SIDE_IN_MERGES**2
+        pixels = torch.randn(tokens, width, width, vision.num_channels, generator=generator)
+        return pixels, {"image_grid_thw": torch.tensor([[1, _IMAGE_SIDE_IN_MERGES, _IMAGE_SIDE_IN_MERGES]])}
     if family == "inkling_mm_model":
         layout = (vision.temporal_patch_size, vision.patch_size, vision.patch_size, 3)
         return torch.randn(_IMAGE_SIDE_IN_MERGES**2, *layout, generator=generator), {}

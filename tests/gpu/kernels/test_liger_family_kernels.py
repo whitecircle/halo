@@ -231,8 +231,11 @@ def _check_gated_norms(spec, originals, device) -> None:
 
 
 def _build_mlp(cls, config):
-    """A family whose MLP takes an explicit width is a MoE shared expert, whose text config spells its size per
-    role."""
+    """Gemma 4's MLP is sized per layer; a family whose MLP takes an explicit width is a MoE shared expert, whose text
+    config spells its size per role."""
+    # The fused subclass's ``__init__`` forwards ``*args``, so the upstream one in its MRO names the parameters.
+    if any("layer_idx" in inspect.signature(k.__init__).parameters for k in cls.__mro__ if "__init__" in vars(k)):
+        return cls(config, layer_idx=0)
     try:
         return cls(config)
     except TypeError:

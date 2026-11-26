@@ -21,7 +21,6 @@ import torch
 import transformers
 from peft import LoraConfig, get_peft_model
 from torch.distributed.device_mesh import init_device_mesh
-from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
@@ -31,7 +30,7 @@ from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from halo.kernels.lowp.spec import LowpSpec
-from tests.common.distributed import fake_process_group
+from tests.common.distributed import apply_hf_tensor_parallelism, fake_process_group
 from tests.common.equivalence.revisions import (
     RAISED,
     compare_outputs,
@@ -301,7 +300,7 @@ def _apply_tensor_parallelism(model: torch.nn.Module, family: str, parallelism) 
     if family in MOE_FAMILIES:
         apply_tp_to_attention_only(model, mesh)
     else:
-        apply_tensor_parallelism(model, tp_submesh(mesh))
+        apply_hf_tensor_parallelism(model, tp_submesh(mesh))
 
 
 def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Module:

@@ -39,6 +39,17 @@ def resolve_use_reentrant(parallelism_config, model_config, configured: bool | N
     return True
 
 
+def apply_checkpointing_args(training_args, checkpointing_kwargs: dict, *, enabled: bool | None = None) -> None:
+    """Write the checkpoint kwargs, and ``enabled`` when given, under both of transformers' spellings.
+    ``TrainingArguments`` mirrors ``gradient_checkpointing*`` and ``activation_checkpointing*`` only at construction:
+    its Trainer reads the second pair in ``train()``, TRL the first."""
+    training_args.gradient_checkpointing_kwargs = checkpointing_kwargs
+    training_args.activation_checkpointing_kwargs = checkpointing_kwargs
+    if enabled is not None:
+        training_args.gradient_checkpointing = enabled
+        training_args.activation_checkpointing = enabled
+
+
 def require_ep_config(ep_config):
     """Raise on a path that only runs with EP layers present: without ``ep_config`` every process group would come back
     ``None``, turning each collective into a silent no-op."""
@@ -116,6 +127,6 @@ class EPLayersMixin:
         # Explicit where nothing forces reentrancy too: the PP stage's checkpoint takes the value as given.
         gc_kwargs = {**gc_kwargs, "use_reentrant": bool(use_reentrant)}
         enable_scoped_gradient_checkpointing(self.model, gradient_checkpointing_kwargs=gc_kwargs)
-        # TRL's disable_gradient_checkpointing context manager re-enables GC from these kwargs on exit.
-        self.args.gradient_checkpointing_kwargs = gc_kwargs
-        self.args.gradient_checkpointing = False
+        # TRL's disable_gradient_checkpointing context manager re-enables GC from these kwargs on exit. Left on,
+        # transformers' Trainer re-installs a bare checkpoint in train().
+        apply_checkpointing_args(self.args, gc_kwargs, enabled=False)

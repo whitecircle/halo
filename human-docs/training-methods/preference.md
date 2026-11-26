@@ -43,14 +43,16 @@ halo launch kto  examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml -n 
 
 These recipes are dense; the MoE ones under `examples/preference/gptoss/`,
 `examples/preference/gemma4/` and `examples/preference/nemotron_h/` run expert parallelism. SMPO alone also takes context parallelism. All
-three take pipeline parallelism, where DPO and KTO need precomputed reference log-probs
+three take pipeline parallelism, where DPO and KTO need precomputed reference log-probs. KTO under pipeline
+parallelism runs only `loss_type: apo_zero_unpaired`, text-only, with a `ref_logps` column already in the dataset
 ([Supported matrix](../supported-matrix.md#training-methods)).
 
 - **SMPO**: `target_margin` is the log-probability gap a pair should reach, and `chosen_sft_ratio` splits
   the anchor between the chosen and rejected sides.
 - **DPO's reference is where the memory goes.** With `use_peft: true` it is the base model with the
-  adapter switched off. Otherwise a second full model stays resident, unsharded under expert or tensor
-  parallelism; there `precompute_ref_log_probs: true` scores the reference once before step 1 instead.
+  adapter switched off. Otherwise a second full model stays resident, a whole unsharded copy on every
+  rank. Under expert or tensor parallelism, `precompute_ref_log_probs: true` scores the reference once
+  before step 1 instead.
   KTO follows the same rules.
 - **KTO**'s `kto` loss builds each row's KL term from its batch neighbors, so it needs
   `per_device_train_batch_size` of 2 or more. When the labels are skewed, set `desirable_weight` and

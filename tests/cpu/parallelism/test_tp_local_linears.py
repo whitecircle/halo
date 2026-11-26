@@ -16,7 +16,7 @@ import torch.nn as nn
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 from transformers import DistributedConfig
-from transformers.distributed.tensor_parallel import _get_parameter_plan
+from transformers.distributed.parallel_utils import _get_parameter_plan
 
 from halo.distributed.fsdp import apply_fsdp2_for_tp
 from halo.distributed.mesh import build_dp_tp_mesh, tp_submesh

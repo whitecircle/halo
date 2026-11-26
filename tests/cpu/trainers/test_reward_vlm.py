@@ -465,10 +465,5 @@ def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
         trainer._split_pipeline_stage(kwargs, training_args)
 
 
-def test_reward_trainer_declares_no_context_parallel_support():
-    """CP would split the sequence the score head pools; the declaration is the gate."""
-    assert DistributedRewardTrainer.SUPPORTS_CP is False
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

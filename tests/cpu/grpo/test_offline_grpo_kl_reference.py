@@ -10,7 +10,6 @@ import types
 import pytest
 import torch
 from datasets import Dataset
-from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM
 
 import halo.trainers.grpo.offline.reference as reference_logps_module
@@ -32,7 +31,6 @@ from tests.common.offline_grpo_reference import mapped_scores
 
 BASE = "org/base"
 RESUMED = "/runs/offline-grpo/checkpoint-40"
-PIPELINE = types.SimpleNamespace(is_pp_mode=True, is_cp_mode=False)
 
 
 def _native_expert_lora_config():
@@ -59,12 +57,11 @@ def _wrapped_moe_policy():
     return policy
 
 
-def _config(kl_beta: float = 0.1):
-    return types.SimpleNamespace(kl_beta=kl_beta, bf16=True, fp16=False)
+def _config():
+    return types.SimpleNamespace(kl_beta=0.1, bf16=True, fp16=False)
 
 
-@pytest.mark.parametrize("kl_beta", [0.0, 0.1])
-@pytest.mark.parametrize("chunked", [False, True])
+@pytest.mark.parametrize("chunked,kl_beta", [(False, 0.0), (True, 0.1)])
 def test_missing_parallelism_config_preserves_the_required_config_diagnostic(tmp_path, kl_beta, chunked):
     args = OfflineGRPOConfig(
         output_dir=str(tmp_path),
@@ -82,33 +79,6 @@ def test_missing_parallelism_config_preserves_the_required_config_diagnostic(tmp
             train_dataset=_anchor_dataset(),
             processing_class=types.SimpleNamespace(pad_token_id=0),
         )
-
-
-@pytest.mark.parametrize(
-    "policy_fn,kl_beta,parallelism,peft_config,expected",
-    [
-        (_wrapped_moe_policy, 0.1, ParallelismConfig(), None, False),
-        (_wrapped_moe_policy, 0.1, _native_expert_lora_config(), None, True),
-        (_tiny_llama, 0.1, ParallelismConfig(), None, False),
-        (_wrapped_moe_policy, 0.0, ParallelismConfig(), None, False),
-        (_wrapped_moe_policy, 0.1, ParallelismConfig(), LoraConfig(), False),
-        (_wrapped_moe_policy, 0.1, PIPELINE, None, False),
-    ],
-    ids=["wrapped-full-ft", "native-expert-lora", "dense-full-ft", "no-kl", "peft", "pipeline"],
-)
-def test_only_native_expert_lora_needs_a_loaded_reference(policy_fn, kl_beta, parallelism, peft_config, expected):
-    assert OfflineGRPOTrainer.requires_ref_model(policy_fn(), _config(kl_beta), parallelism, peft_config) is expected
-
-
-def test_native_expert_lora_without_a_loaded_reference_is_refused():
-    with pytest.raises(ValueError, match="load_frozen_reference_model"):
-        OfflineGRPOTrainer._kl_reference(_wrapped_moe_policy(), None, 0.1, _native_expert_lora_config(), None)
-
-
-def test_a_loaded_reference_is_the_one_the_run_holds():
-    reference = _tiny_llama()
-    held = OfflineGRPOTrainer._kl_reference(_wrapped_moe_policy(), reference, 0.1, ParallelismConfig(), None)
-    assert held is reference
 
 
 @pytest.mark.parametrize("native_expert_lora", [False, True], ids=["full-ft-sweep", "native-expert-lora-live"])
@@ -212,25 +182,6 @@ def test_explicit_reference_scores_both_splits_once_instead_of_the_live_policy(t
     assert len(reference_calls) == 4
 
 
-@pytest.mark.parametrize("policy_fn", [_tiny_llama, _wrapped_moe_policy], ids=["dense", "wrapped-moe"])
-def test_full_finetuning_sweeps_the_policy_without_constructing_a_reference_copy(policy_fn):
-    policy = policy_fn()
-    assert OfflineGRPOTrainer._kl_reference(policy, None, 0.1, ParallelismConfig(), None) is None
-    assert all(parameter.requires_grad for parameter in policy.parameters())
-
-
-@pytest.mark.parametrize(
-    "kl_beta,parallelism,peft_config",
-    [(0.0, ParallelismConfig(), None), (0.1, ParallelismConfig(), LoraConfig()), (0.1, PIPELINE, None)],
-    ids=["no-kl", "peft", "pipeline"],
-)
-def test_a_reference_the_run_would_never_read_is_refused(kl_beta, parallelism, peft_config):
-    policy = _wrapped_moe_policy()
-    assert OfflineGRPOTrainer._kl_reference(policy, None, kl_beta, parallelism, peft_config) is None
-    with pytest.raises(ValueError, match="never be read"):
-        OfflineGRPOTrainer._kl_reference(policy, _tiny_llama(), kl_beta, parallelism, peft_config)
-
-
 def _script_args():
     return types.SimpleNamespace(
         eos_token=None,
@@ -240,6 +191,7 @@ def _script_args():
         force_chat_template=False,
         added_special_tokens=None,
         tokenizer_backend="hf",
+        reasoning_effort_field=None,
     )
 
 

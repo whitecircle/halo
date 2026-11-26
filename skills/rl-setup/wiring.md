@@ -44,19 +44,20 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
   --expert_parallel_size=4
 ```
 
-### Async GRPO with Environments — multi-turn tool-use
+### Async GRPO with environments for multi-turn tool use
 
 Recipes live at `examples/grpo/environmental/<family>/<backend>/` (`gemma4`, `gptoss`, `qwen3_5`,
-each with `vllm/` and — ep1 only — `sglang/`); in a filename `-lora-`/`-full-` is the adapter and
-`-ep1`/`-ep4` the expert distribution. Start from
+each with `vllm/` and an ep1-only `sglang/`; `inkling2` and `qwen4_exp` with `vllm/` only); in a
+filename `-lora-`/`-full-` is the adapter and `-ep1`/`-ep2`/`-ep4`/`-ep8` the expert distribution.
+Start from
 `qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml` (template:
 `environmental-grpo-template.yaml`), `qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-lora-ep1.yaml` for
 a graded tool-heavy one, or `gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml` on SGLang. Each
 reads `EnvironmentConfig` + `AsyncRolloutConfig` from YAML.
 
-Each recipe's header carries its server flags and GPU split. React-math (EP=4) serves on GPUs 4-7
-with `--reasoning-parser qwen3` and no tool-call parser — react_math reads its Action from the
-text — so compose runs it with the tool-calling flags emptied:
+Each recipe's header carries its server flags and GPU split. React-math (`ep4`) serves on GPUs 4-7
+with `--reasoning-parser qwen3` and no tool-call parser, because react_math reads its Action from the
+text. Compose runs it with the tool-calling flags emptied:
 
 ```bash
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 VLLM_REASONING_PARSER=qwen3 \

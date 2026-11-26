@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-import itertools
 import logging
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -277,10 +276,17 @@ def test_split_ranks_generate_every_world_size_th_sample():
     assert [prompt for prompt, _, _ in generator.calls] == [[1, 10], [1, 14]]
 
 
-@pytest.mark.parametrize("flags", list(itertools.product([True, False], repeat=3)))
+@pytest.mark.parametrize(
+    "flags",
+    [
+        pytest.param((True, True, True), id="flags0"),
+        pytest.param((True, False, False), id="flags3"),
+        pytest.param((False, False, False), id="flags7"),
+    ],
+)
 @pytest.mark.parametrize("fail", [False, True])
 def test_gradient_checkpointing_is_off_during_generation_and_restored_exactly(flags, fail):
-    """Over every on/off pattern: switching GC back on everywhere would change memory and step time on layers a
+    """Over all-on, mixed and all-off patterns: switching GC back on everywhere would change memory and step time on layers a
     partially checkpointed model left off. A collective failure must restore too."""
     generator = _fsdp_stamped(_Generator(*(_GCLayer(flag) for flag in flags), fail=fail))
     if fail:

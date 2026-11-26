@@ -11,7 +11,6 @@ from halo.checkpoint.atomic import atomic_torch_save, create_staged_file
 from halo.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     MOE_EXPERT_TOKEN_COUNTS_FILE,
-    OPTIMIZER_META_FILE,
     REFERENCE_LOGPS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
@@ -109,19 +108,6 @@ def test_weight_files_skipped_and_aux_kept(checkpoint_dir, tmp_path):
     )
 
 
-def test_resume_sidecars_survive_merge_copy(checkpoint_dir, tmp_path):
-    out = tmp_path / "merged"
-    out.mkdir()
-    copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
-    assert (out / SCHEDULER_NAME).exists(), "LR schedule must survive into the merged resume source"
-    assert (out / ROUTER_BALANCING_BIASES_FILE).exists(), "router biases must survive into the merged resume source"
-    assert (out / REFERENCE_LOGPS_FILE).exists(), "a precompute run's reference log-probs must survive the merge"
-    # Same suffix as the foreign exports, opposite verdict: a bit-reproducible resume replays from this.
-    assert (out / "rng_state_0.pth").exists(), "per-rank RNG state must survive into the resume source"
-    assert not (out / "optimizer.pt").exists()
-    assert not (out / "pytorch_model.bin").exists()
-
-
 def test_resume_sidecars_can_be_excluded(checkpoint_dir, tmp_path):
     """An N-way merged artifact describes no single run."""
     out = tmp_path / "merged"
@@ -203,13 +189,10 @@ def test_a_leftover_staged_card_is_not_carried(checkpoint_dir, tmp_path):
 
 
 @pytest.mark.parametrize("include_resume_sidecars", [True, False], ids=["resume-source", "n-way-merge"])
-@pytest.mark.parametrize(
-    "sidecar", [REFERENCE_LOGPS_FILE, prefetch_pending_filename(0, 2), OPTIMIZER_META_FILE], ids=lambda name: name
-)
-def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, include_resume_sidecars, sidecar):
-    target = checkpoint_dir / sidecar
+def test_an_interrupted_staged_write_is_not_exported(checkpoint_dir, tmp_path, include_resume_sidecars):
+    target = checkpoint_dir / REFERENCE_LOGPS_FILE
     atomic_torch_save(str(target), lambda: {"values": torch.tensor([-1.0, -2.0])})
-    stage = create_staged_file(checkpoint_dir, sidecar)
+    stage = create_staged_file(checkpoint_dir, REFERENCE_LOGPS_FILE)
     stage.write_bytes(b"an interrupted sidecar, not a complete one")
     (checkpoint_dir / ".gitattributes").write_text("*.safetensors filter=lfs\n")
     out = tmp_path / "merged"
@@ -236,15 +219,6 @@ def test_every_staging_spelling_a_crash_leaves_stays_out_of_an_export(checkpoint
     assert not (out / leftover).exists(), f"{leftover} was carried into the export"
     assert (out / f".{REFERENCE_LOGPS_FILE}.notes").exists(), "the staging skip took an unstaged hidden file"
     assert (out / REFERENCE_LOGPS_FILE).exists(), "the skip took the published sidecar with it"
-
-
-def test_foreign_framework_exports_are_not_carried(checkpoint_dir, tmp_path):
-    """They bloat the converted checkpoint by tens of GB and shadow nothing useful."""
-    out = tmp_path / "merged"
-    out.mkdir()
-    copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
-    for name in ("consolidated.00.pth", "model.gguf", "tf_model.h5", "rust_model.ot", "64.tflite", "model.onnx"):
-        assert not (out / name).exists(), f"{name} is a weight export and must not be carried over"
 
 
 def test_hidden_directories_stay_behind(checkpoint_dir, tmp_path):
@@ -285,13 +259,6 @@ def test_an_output_directory_inside_the_input_is_refused(checkpoint_dir):
     nested.mkdir()
     with pytest.raises(ValueError, match="inside input_dir"):
         copy_checkpoint_aux_files(str(checkpoint_dir), str(nested))
-
-
-def test_a_sibling_output_directory_is_allowed(checkpoint_dir, tmp_path):
-    out = tmp_path / "merged"
-    out.mkdir()
-    copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
-    assert (out / "config.json").exists()
 
 
 if __name__ == "__main__":

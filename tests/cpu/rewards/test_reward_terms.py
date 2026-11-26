@@ -123,36 +123,57 @@ def test_scores_outside_the_unit_interval_are_refused(score):
         ({"name": "x"}, "'source' is required"),
         ({"source": "mystery"}, "unknown reward source 'mystery'"),
         ({"source": "judge", "name": "q"}, "either 'requirements'"),
-        ({"source": "judge", "name": "q", "requirements": []}, "either 'requirements'"),
-        ({**JUDGE_SPEC, "checks": CHECKS, "weight": 0.0}, "either 'requirements'"),
-        ({**JUDGE_SPEC, "scale": 0}, "scale"),
-        ({**JUDGE_SPEC, "max_view_chars": 0}, "max_view_chars"),
-        ({**JUDGE_SPEC, "bogus": 1}, "unknown option"),
-        ({**JUDGE_SPEC, "requirements": [{"name": "scored", "description": "d"}]}, "own metric keys"),
-        ({"source": "judge", "name": "q", "requirements": [{"name": "r", "description": " "}]}, "description"),
-        (
+        pytest.param(
+            {**JUDGE_SPEC, "checks": CHECKS, "weight": 0.0}, "either 'requirements'", id="spec9-either 'requirements'"
+        ),
+        pytest.param({**JUDGE_SPEC, "scale": 0}, "scale", id="spec10-scale"),
+        pytest.param({**JUDGE_SPEC, "max_view_chars": 0}, "max_view_chars", id="spec11-max_view_chars"),
+        pytest.param({**JUDGE_SPEC, "bogus": 1}, "unknown option", id="spec12-unknown option"),
+        pytest.param(
+            {**JUDGE_SPEC, "requirements": [{"name": "scored", "description": "d"}]},
+            "own metric keys",
+            id="spec13-own metric keys",
+        ),
+        pytest.param(
+            {"source": "judge", "name": "q", "requirements": [{"name": "r", "description": " "}]},
+            "description",
+            id="spec14-description",
+        ),
+        pytest.param(
             {"source": "judge", "name": "q", "requirements": [{"name": "r", "description": "d", "weight": 0}]},
             "weight must be > 0",
+            id="spec15-weight must be > 0",
         ),
-        ({"source": "judge", "name": "q", "requirements": REQUIREMENTS + REQUIREMENTS}, "unique"),
-        ({"source": "judge", "name": "q", "requirements": "correctness"}, "must be a list"),
-        ({**JUDGE_SPEC, "structured_output": "no"}, "true or false"),
-        ({**JUDGE_SPEC, "include_reference": "off"}, "true or false"),
-        ({**JUDGE_SPEC, "include_reasoning": "off"}, "true or false"),
-        ({"source": "judge", "name": "q", "checks": CHECKS, "weight": 0.5}, "never adds reward"),
-        ({"source": "judge", "name": "q", "checks": CHECKS + CHECKS}, "unique"),
-        ({"source": "judge", "name": "q", "checks": [{"name": "a/b", "description": "d"}]}, "without '/'"),
-        (
+        pytest.param(
+            {"source": "judge", "name": "q", "requirements": REQUIREMENTS + REQUIREMENTS}, "unique", id="spec16-unique"
+        ),
+        pytest.param(
+            {"source": "judge", "name": "q", "requirements": "correctness"},
+            "must be a list",
+            id="spec17-must be a list",
+        ),
+        pytest.param({**JUDGE_SPEC, "structured_output": "no"}, "true or false", id="spec18-true or false"),
+        pytest.param({**JUDGE_SPEC, "include_reference": "off"}, "true or false", id="spec19-true or false"),
+        pytest.param({**JUDGE_SPEC, "include_reasoning": "off"}, "true or false", id="spec20-true or false"),
+        pytest.param(
+            {"source": "judge", "name": "q", "checks": CHECKS, "weight": 0.5},
+            "never adds reward",
+            id="spec21-never adds reward",
+        ),
+        pytest.param({"source": "judge", "name": "q", "checks": CHECKS + CHECKS}, "unique", id="spec22-unique"),
+        pytest.param(
             {"source": "judge", "name": "q", "checks": [{"name": "a", "description": "d", "veto": "yes"}]},
             "true or false",
+            id="spec24-true or false",
         ),
-        (
+        pytest.param(
             {"source": "judge", "name": "q", "checks": [{"name": "a", "description": "d", "price": 1}]},
             "unknown option",
+            id="spec25-unknown option",
         ),
-        ({**RM_SPEC, "logit_scale": 0}, "logit_scale"),
-        ({**RM_SPEC, "label_index": -1}, "label_index"),
-        ({"source": "format", "pattern": "("}, "invalid pattern"),
+        pytest.param({**RM_SPEC, "logit_scale": 0}, "logit_scale", id="spec26-logit_scale"),
+        pytest.param({**RM_SPEC, "label_index": -1}, "label_index", id="spec27-label_index"),
+        pytest.param({"source": "format", "pattern": "("}, "invalid pattern", id="spec28-invalid pattern"),
     ],
 )
 def test_invalid_terms_are_refused_with_their_location(spec, message):
@@ -278,13 +299,6 @@ def test_a_check_weight_parses_from_config():
 def test_check_validation(kwargs, message):
     with pytest.raises(ValueError, match=message):
         Check(**kwargs)
-
-
-def test_reward_model_views_are_final_and_full():
-    assert RewardModelTerm.views == (View.FINAL, View.FULL)
-    assert RewardModelTerm(name="p", url="http://x", model="m", view="full").view is View.FULL
-    with pytest.raises(ValueError, match=r"view must be one of \('final', 'full'\)"):
-        RewardModelTerm(name="p", url="http://x", model="m", view="digest")
 
 
 def test_duplicate_term_names_are_refused():

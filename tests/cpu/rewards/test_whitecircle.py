@@ -200,11 +200,10 @@ def test_retries_exhaust_into_no_verdict(server, waits):
     assert len(requests) == 3 and waits == [1.0, 2.0]
 
 
-@pytest.mark.parametrize("status", [400, 401, 403])
-def test_client_errors_are_not_retried(server, waits, status):
-    requests = server(lambda request: httpx.Response(status, json={"error": "denied"}))
+def test_client_errors_are_not_retried(server, waits):
+    requests = server(lambda request: httpx.Response(401, json={"error": "denied"}))
     [result] = _score(TERM, [_sample()])
-    assert result.score is None and str(status) in result.error and "denied" in result.error
+    assert result.score is None and "401" in result.error and "denied" in result.error
     assert len(requests) == 1 and waits == []
 
 

@@ -26,6 +26,7 @@ from tests.common.checkpoint_io import (
 )
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
+from tests.common.harness import exact_replay
 from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.numerics import max_or_nan, relative_l2
 from tests.common.optimizer_state import optimizer_state_matches
@@ -183,6 +184,7 @@ def final_weight_checks(unbroken: str, resumed: str) -> tuple[dict[str, bool], d
     return checks, {"resume_final_weight_rel_l2": drift}
 
 
+@exact_replay()
 def run_resume_export(
     ctx, route: ResumeExportRoute, parallelism_config, *, base: str, root: str, save_step: int, total_steps: int
 ) -> tuple[dict[str, bool], dict[str, float]]:

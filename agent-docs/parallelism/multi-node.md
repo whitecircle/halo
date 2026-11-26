@@ -1,6 +1,6 @@
 # Multi-Node Parallelism
 
-Multi-node training spans DP, EP and PP across machines connected by InfiniBand/RDMA, with TP, CP
+Multi-node training spans DP, EP and PP across machines connected by an RDMA network (InfiniBand, RoCE or AWS EFA), with TP, CP
 and ETP kept inside each NVLink domain. `ParallelismConfig` (`halo/distributed/parallelism_config.py`)
 validates every combination against the [supported-axis allowlist](README.md#supported-combinations)
 and the refusals in `halo/distributed/parallelism_rules.py`; this page adds the locality rules, the
@@ -24,7 +24,7 @@ ranks, so EP never reduces DP.
 
 **NVLink domain vs OS node:** on a standard cluster the NVLink domain is the OS node (≤8 GPUs), so
 `nvlink_domain_size == gpus_per_node` and "node-local" means the OS node. On GB200/GB300 NVL72 the
-fabric spans the rack (up to 72 GPUs across ~18 OS nodes); set `NVLINK_DOMAIN_SIZE` to run
+fabric spans the rack (72 GPUs across 18 OS nodes); set `NVLINK_DOMAIN_SIZE` to run
 NVLink-wide TP/CP/EP — see [NVL72](#gb200gb300-nvl72-multi-node-nvlink).
 
 | Term | Definition |
@@ -205,9 +205,12 @@ NVLink (non-Gin) path; across domains (`requires_rdma=True`, `EPConfig.spans_dom
 backend (GPU-Initiated Networking / RDMA, e.g. AWS EFA). The backend sets `EP_DISABLE_GIN` (`0`
 across domains, `1` within one) before its first buffer build; an explicit env value is honored.
 
-NVLink carries the all-to-all several times faster than any RDMA fabric ([measured busbw by
-interconnect](../reference/gpu-training-theory.md#interconnect-tiers)), so prefer `ep_scope="node"`
-unless you need maximum expert distribution — cross-node EP buys per-GPU memory (GPT-OSS 20B on
+NVLink carries the all-to-all several times faster than the network: a 4 GiB NCCL all-to-all
+reached 444 GB/s bus bandwidth on 2 and 608 GB/s on 4 GPUs of one B300 node
+([GPU Training Theory → Small messages and large ones](../reference/gpu-training-theory.md#small-messages-and-large-ones)),
+and an NCCL all-to-all across two 8-GPU B300 nodes over EFA reaches about 173 GB/s
+([GPU Training Theory → Across nodes](../reference/gpu-training-theory.md#across-nodes)), so prefer `ep_scope="node"`
+unless you need maximum expert distribution. Cross-node EP holds fewer experts per GPU (GPT-OSS 20B on
 2 nodes × 8 B300: `ep16` global holds 2 experts per GPU against `ep8` node-local's 4).
 
 ## RDMA fabrics
@@ -354,9 +357,9 @@ algebra, not the fabric. The 1.2.0 two-machine rows used per-node storage, not a
 
 ## GB200/GB300 NVL72 (multi-node NVLink)
 
-An NVL72 rack spans the NVLink/NVSwitch fabric across up to 72 GPUs on ~18 OS nodes (4 GPUs each) as
-a single NVLink domain with direct GPU-to-GPU P2P across OS-node boundaries (MNNVL, 130 TB/s
-aggregate). TP, EP, and CP can run NVLink-wide with no RDMA. The rack's Grace hosts are aarch64, and
+An NVL72 rack spans the NVLink/NVSwitch fabric across 72 GPUs on 18 OS nodes (4 GPUs each) as
+a single NVLink domain with direct GPU-to-GPU P2P across OS-node boundaries (MNNVL; NVIDIA's
+130 TB/s adds both directions over all 72 GPUs, 0.9 TB/s per GPU per direction). TP, EP, and CP can run NVLink-wide with no RDMA. The rack's Grace hosts are aarch64, and
 the published images are x86_64-only ([Docker](../infrastructure/docker.md)).
 
 Here the NVLink domain exceeds the OS node, so the two units diverge: `gpus_per_node`
@@ -434,7 +437,7 @@ outside a live job the same verdict only logs.
 > NVLink-wide EP across OS-node boundaries depends on the NCCL Gin / NVSHMEM build targeting
 > MNNVL on Blackwell. Validate before relying on rack-wide EP all-to-all.
 
-Each compute tray is an OS node with 4 GPUs: launch with `--nproc_per_node=4` and ~18 nodes per
+Each compute tray is an OS node with 4 GPUs: launch with `--nproc_per_node=4` and 18 nodes per
 rack. With SLURM use the `topology/block` plugin with one block per NVL72 domain and `--segment` to
 keep a job in one rack.
 

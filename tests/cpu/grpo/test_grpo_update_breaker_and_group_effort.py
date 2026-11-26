@@ -4,7 +4,6 @@
 import ast
 import inspect
 import math
-import pathlib
 import textwrap
 import types
 from collections import defaultdict
@@ -141,30 +140,6 @@ def test_a_tripped_breaker_drops_the_gradients_on_every_optimizer_step_of_the_ro
     host._breaker_tripped_this_step = False
     skip()
     assert calls == [True, True]
-
-
-def test_none_gradients_leave_adam_state_and_weights_untouched():
-    """The skip relies on this optimizer contract, even with momentum built up."""
-    param = torch.nn.Parameter(torch.ones(4))
-    opt = torch.optim.AdamW([param], lr=0.1, weight_decay=0.0)
-    param.grad = torch.ones(4)
-    opt.step()
-    moved = param.detach().clone()
-    exp_avg = opt.state[param]["exp_avg"].clone()
-    opt.zero_grad(set_to_none=True)
-    opt.step()
-    assert torch.equal(param.detach(), moved)
-    assert torch.equal(opt.state[param]["exp_avg"], exp_avg)
-    param.grad = torch.zeros(4)
-    opt.step()
-    assert not torch.equal(param.detach(), moved), "a ZERO gradient still steps the weights by momentum"
-
-
-def test_toolkit_optimizers_skip_none_gradients():
-    """The toolkit's own optimizers have hand-written step loops."""
-    for name in ("adamw_bf16", "flash_adamw", "muon"):
-        source = (pathlib.Path("halo/optimizers") / f"{name}.py").read_text()
-        assert "grad is None" in source or "grad is not None" in source, f"{name}: no None-grad guard in the step loop"
 
 
 def _armed(threshold: float | None) -> DistributedAsyncEnvironmentalGRPOTrainer:

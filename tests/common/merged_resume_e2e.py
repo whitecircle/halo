@@ -33,6 +33,7 @@ from tests.common.adapters import (
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_all
+from tests.common.harness import exact_replay
 from tests.common.memory import finish_phase
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import relative_l2
@@ -220,6 +221,7 @@ def _serving_checks(
     return checks
 
 
+@exact_replay()
 def run_merged_resume(
     ctx,
     *,

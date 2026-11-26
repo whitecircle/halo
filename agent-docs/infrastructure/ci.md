@@ -9,7 +9,7 @@ contribution gate.
 | Self-hosted | GPU box `[self-hosted, halo]` | `.github/workflows/cpu-tests.yml`, `.github/workflows/gpu-tests.yml` | `workflow_dispatch` | dispatch-only |
 
 Hosted jobs need no image. The test tiers import torch and run inside the prebuilt image, built on the
-self-hosted box and never pulled or rebuilt by CI; GPU tests also need Blackwell (SM100) or Hopper
+self-hosted box and never pulled or rebuilt by CI; GPU tests also need Blackwell (SM100/SM103) or Hopper
 (SM90) for FA3/FA4 and DeepEP, which no hosted runner provides. CodeQL (the default code-scanning
 setup), GitGuardian and CodeRabbit report on every PR from outside `.github/workflows/`.
 
@@ -119,8 +119,8 @@ The scope Halo 1.2.0 is validated on:
   ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
 - **Model size:** full-size checkpoints ran up to GLM-5.3-Flash (321B): `ep8` LoRA on one machine, `ep16` and
   `pp2 × ep8` full fine-tunes on two 8-GPU machines. Also Qwen3.6-35B-A3B (`ep8`), Nemotron 3.5 Super VL at `ep8`
-  for 5 to 20 steps per recipe, a few full-depth EP8 LoRA steps of Qwen3.8-Flash-Next, and Step-3.7 Flash as a weight
-  push at EP=2 and one expert-LoRA step at EP=4. gpt-oss-120b and Qwen3.5-122B-A10B at EP8 last ran on earlier code.
+  for 5 to 20 steps per recipe, a few full-depth `ep8` LoRA steps of Qwen3.8-Flash-Next, and Step-3.7 Flash as a weight
+  push at `ep2` and one expert-LoRA step at `ep4`. gpt-oss-120b and Qwen3.5-122B-A10B at `ep8` last ran on earlier code.
 - **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored (step counters continue, every
   second moment carries over, losses continue), and export and merge: FSDP2 full fine-tuning, LoRA adapters, EP
   gathered saves, EP sharded saves after `merge_ep_shards.py`, and async GRPO whose prefetched rounds hold plain

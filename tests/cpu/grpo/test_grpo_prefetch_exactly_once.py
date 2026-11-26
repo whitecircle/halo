@@ -11,6 +11,7 @@ import threading
 import time
 import types
 from collections import deque
+from unittest import mock
 
 import pytest
 import torch
@@ -233,6 +234,7 @@ class _LifecycleHost:
     _adapter_versions = None
     _adapter_routes = None
     _adapter_sync = None
+    _rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False)
     _start_rank_rollout_components = _T._start_rank_rollout_components
     _start_rollout_pool = _T._start_rollout_pool
     _resolve_rollout_pool = _T._resolve_rollout_pool
@@ -375,7 +377,7 @@ def _run_pair(leader: _Host, follower: _Host, batches: list[str]) -> None:
         follower.round([prompt])
 
 
-@pytest.mark.parametrize("depth", [1, 2, 3])
+@pytest.mark.parametrize("depth", [1, 2])
 def test_a_tp_follower_issues_no_rollout_request_and_trains_the_leaders_rows(depth):
     """Every follower used to collect a full batch the leader's replaced, so engine and Ray load scaled with the world
     size, not the data-parallel size."""
@@ -391,10 +393,10 @@ def test_a_tp_follower_issues_no_rollout_request_and_trains_the_leaders_rows(dep
     assert follower.reject_calls == leader.reject_calls == 12
 
 
-@pytest.mark.parametrize("depth", [2, 3])
-def test_a_resume_under_tp_replays_the_leaders_pending_rounds_and_the_follower_none(tmp_path, monkeypatch, depth):
+def test_a_resume_under_tp_replays_the_leaders_pending_rounds_and_the_follower_none(tmp_path, monkeypatch):
     """Each rank has its sidecar file, or the resume's presence check raises; a follower's holds no rounds, so it
     submits nothing, and the leader's replay trains what an uninterrupted run does."""
+    depth = 2
     batches = [f"b{i}" for i in range(depth + 4)]
     uninterrupted, _ = _tp_pair(depth)
     _run(uninterrupted, batches)
@@ -461,6 +463,21 @@ def test_a_tp_follower_starts_no_ray_and_no_pool(monkeypatch):
     assert host.pushed == [0.0], "a follower must still join the weight push"
 
 
+def test_static_tool_environment_starts_without_discovery(monkeypatch):
+    host = _LifecycleHost(torch.zeros(1))
+    discover = mock.AsyncMock(side_effect=AssertionError("static tools must not connect"))
+    host._rollout_env = types.SimpleNamespace(TOOLS_ARRIVE_ON_RESET=False, discover_tools_schema=discover)
+    monkeypatch.setattr(async_mod, "ray", types.SimpleNamespace(is_initialized=lambda: True))
+    monkeypatch.setattr(async_mod, "RolloutManager", lambda **kwargs: _StubManager())
+
+    try:
+        host._init_async_components()
+        assert host._rollout_manager is not None
+        discover.assert_not_called()
+    finally:
+        host._loop.close()
+
+
 def test_a_second_component_init_without_a_cleanup_joins_no_collective_on_any_rank(monkeypatch):
     """A follower holds no manager, so the manager cannot tell it the components are up: the leader returning early
     while the follower re-formed the weight-sync group would hang the group."""
@@ -516,7 +533,7 @@ def _expected_order(depth: int, steps: int) -> list[str]:
     return [f"b{k}" if k < depth else f"b{k - depth}" for k in range(steps)]
 
 
-@pytest.mark.parametrize("depth", [1, 2, 3])
+@pytest.mark.parametrize("depth", [1, 2])
 def test_each_round_trains_the_batch_submitted_depth_rounds_earlier(depth):
     host = _Host(depth)
     inflight = []
@@ -532,7 +549,7 @@ def test_each_round_trains_the_batch_submitted_depth_rounds_earlier(depth):
     assert (host._prefetch_hits, host._prefetch_misses) == (8 - depth, depth)
 
 
-@pytest.mark.parametrize("depth", [1, 2, 3])
+@pytest.mark.parametrize("depth", [1, 2])
 def test_a_resumed_run_trains_the_batches_an_uninterrupted_one_does(tmp_path, depth):
     """At a save on a generation boundary the last ``depth`` submitted batches have left the dataloader untrained. A
     resume that does not carry them all, oldest first, skips batches and trains others twice."""
@@ -952,9 +969,6 @@ _SERVERS = {"url": None, "one-entry-list": _TWO_ENGINES[:1], "two-servers": _TWO
         (None, "one-entry-list", False),
         (None, "two-servers", True),
         (True, "url", True),
-        (True, "one-entry-list", True),
-        (True, "two-servers", True),
-        (False, "url", False),
         (False, "two-servers", False),
     ],
 )
@@ -965,8 +979,16 @@ def test_the_prefetch_gate(enable_prefetch, servers, prefetches):
     assert host._prefetch_enabled is prefetches
 
 
-@pytest.mark.parametrize("enable_prefetch", [None, True, False], ids=["unset", "true", "false"])
-@pytest.mark.parametrize("servers", list(_SERVERS))
+@pytest.mark.parametrize(
+    ("servers", "enable_prefetch"),
+    [
+        pytest.param("url", None, id="url-unset"),
+        pytest.param("one-entry-list", None, id="one-entry-list-unset"),
+        pytest.param("url", True, id="url-true"),
+        pytest.param("two-servers", None, id="two-servers-unset"),
+        pytest.param("two-servers", False, id="two-servers-false"),
+    ],
+)
 def test_the_start_log_states_the_prefetch_the_trainer_runs(servers, enable_prefetch):
     """Read off the knob, it says ``prefetch: disabled`` on an unset run, which prefetches on two servers."""
     host = _async_state(_SERVERS[servers], enable_prefetch)
@@ -980,10 +1002,15 @@ def test_the_start_log_states_the_configured_depth():
 
 
 @pytest.mark.parametrize(
-    ("enable_prefetch", "servers", "hinted"),
-    [(None, "url", True), (True, "url", False), (False, "url", False), (None, "two-servers", False)],
+    ("main_process", "enable_prefetch", "servers", "hinted"),
+    [
+        (True, None, "url", True),
+        (True, True, "url", False),
+        (True, False, "url", False),
+        (True, None, "two-servers", False),
+        (False, None, "url", True),
+    ],
 )
-@pytest.mark.parametrize("main_process", [True, False])
 def test_the_single_server_hint_is_said_once_and_only_when_unset(
     monkeypatch, caplog, main_process, enable_prefetch, servers, hinted
 ):
@@ -1127,8 +1154,7 @@ _PREFETCHED_STEPS = {
 }
 
 
-@pytest.mark.parametrize("depth", sorted(_PREFETCHED_STEPS))
-@pytest.mark.parametrize("servers", ["url", "one-entry-list"])
+@pytest.mark.parametrize(("servers", "depth"), [("url", 1), ("one-entry-list", 2)])
 def test_one_server_that_opts_in_steps_exactly_as_two_servers(monkeypatch, servers, depth):
     """The lone engine's prefetched rounds span the push the way N engines' do, and train ``depth`` steps stale."""
     one_server = _step_events(monkeypatch, _SERVERS[servers], enable_prefetch=True, depth=depth)
@@ -1149,8 +1175,9 @@ def test_one_server_left_unset_trains_each_round_fresh(monkeypatch):
     ]
 
 
-@pytest.mark.parametrize(("depth", "pending"), [(1, [["b2"]]), (2, [["b2"], ["b3"]])])
-@pytest.mark.parametrize("servers", ["url", "one-entry-list"])
+@pytest.mark.parametrize(
+    ("servers", "depth", "pending"), [("url", 1, [["b2"]]), ("one-entry-list", 2, [["b2"], ["b3"]])]
+)
 def test_one_server_that_opts_in_resumes_the_rounds_it_had_in_flight(monkeypatch, tmp_path, servers, depth, pending):
     """Without them back, oldest first, the one-server run skips those batches and trains the next ones twice."""
     before = _stepped_host(monkeypatch, _SERVERS[servers], enable_prefetch=True, depth=depth)

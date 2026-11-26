@@ -101,24 +101,24 @@ def test_catalogue_rows_are_unique():
     assert not duplicates, f"documented twice in the environment-variable table: {duplicates}"
 
 
-@pytest.mark.parametrize("variable", sorted(set(_CATALOGUED)), ids=lambda name: name)
-def test_every_catalogued_variable_has_a_reader(variable):
-    if variable in THIRD_PARTY_ROWS:
-        pytest.skip(f"{variable}: {THIRD_PARTY_ROWS[variable]}")
-    assert variable in _READ, (
-        f"`{variable}` has a row in {CATALOGUE.name} but no module under halo/ or scripts/ names it. "
-        "Delete the row, or add it to THIRD_PARTY_ROWS with the reader that consumes it."
-    )
+def test_every_catalogued_variable_has_a_reader(subtests):
+    for variable in sorted(set(_CATALOGUED)):
+        if variable in THIRD_PARTY_ROWS:
+            continue
+        with subtests.test(variable):
+            assert variable in _READ, (
+                f"`{variable}` has a row in {CATALOGUE.name} but no module under halo/ or scripts/ names it. "
+                "Delete the row, or add it to THIRD_PARTY_ROWS with the reader that consumes it."
+            )
 
 
-@pytest.mark.parametrize(
-    "variable", sorted(name for name in _READ if name.startswith(TOOLKIT_PREFIXES)), ids=lambda name: name
-)
-def test_every_toolkit_variable_the_code_reads_is_catalogued(variable):
-    assert variable in _CATALOGUED, (
-        f"`{variable}` is read at {_READ[variable]} but has no row in the "
-        f"'Environment variables' table of {CATALOGUE.name}."
-    )
+def test_every_toolkit_variable_the_code_reads_is_catalogued(subtests):
+    for variable in sorted(name for name in _READ if name.startswith(TOOLKIT_PREFIXES)):
+        with subtests.test(variable):
+            assert variable in _CATALOGUED, (
+                f"`{variable}` is read at {_READ[variable]} but has no row in the "
+                f"'Environment variables' table of {CATALOGUE.name}."
+            )
 
 
 def test_third_party_rows_are_still_documented():

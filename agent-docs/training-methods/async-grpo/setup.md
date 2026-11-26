@@ -105,8 +105,9 @@ round's generation.
 - Startup and every push fail fast: an error on any rank raises on all ranks together. An engine restarted between
   syncs is the exception: the client reconnects and re-sends, with a warning
   ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
-- Each EP layer's expert gather transiently materializes the **full expert set** on every rank, so its cost scales
-  with total expert count, not `ep_size`.
+- Each EP layer's expert gather assembles the **full expert set** on the forwarding rank alone, which also holds the
+  layer issued ahead (`HALO_WEIGHT_SYNC_GATHER_AHEAD`, 1 by default), so that rank's peak scales with total expert
+  count, not `ep_size` ([Streaming and quiesce](../../infrastructure/rollout-servers.md#streaming-and-quiesce)).
 
 ## Multiple servers and prefetch
 
@@ -128,7 +129,7 @@ rollout_server_configs:
   two or more servers that report one model and one set of weight-loading flags
   ([One group over every server](../../infrastructure/rollout-servers.md#one-group-over-every-server)). `single_group` takes one
   `rollout_group_port` and no per-entry `group_port`. Online GRPO talks to one server and has no such field.
-- `rollout_adapter_sync: true` (SGLang, LoRA) sends the adapter alone after one base push and pauses nothing: a round
+- `rollout_adapter_sync: true` (LoRA; SGLang, or vLLM for Inkling 2 with `rollout_adapter_dir`) sends the adapter alone (after one base push on SGLang; on vLLM for Inkling 2 nothing is pushed) and pauses nothing: a round
   in flight finishes on the adapter version it started with, and rounds drawn later name the newest
   ([Adapter sync](../../infrastructure/rollout-servers.md#adapter-sync)).
 - Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
@@ -198,8 +199,9 @@ address differs per server.
 ## Shipped recipes
 
 `examples/grpo/environmental/<family>/<backend>/`: `gemma4`, `gptoss` and `qwen3_5`, each with `vllm/` and `sglang/`
-(`sglang/` ships ep1 files only). In a filename, `-lora-` / `-full-` is the adapter and `-ep1` / `-ep4` the expert distribution
-(none, or a 4-rank DeepEP group). Each header carries its launch line and server flags. One template sits at the root:
+(`sglang/` ships ep1 files only), plus `inkling2/vllm/` and `qwen4_exp/vllm/`. In a filename, `-lora-` / `-full-` is
+the adapter and `-ep<N>` the expert distribution (`-ep1` none, otherwise an N-rank DeepEP group: 2, 4 or 8). Each
+header carries its launch line and server flags. One template sits at the root:
 `environmental-grpo-template.yaml` (`react_math`). `code-contests-judge/` holds the audit judge's `context_file`s the
 code-contests recipes share ([Reward](environments/tasks/code-contests/reward.md)).
 

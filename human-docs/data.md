@@ -20,15 +20,20 @@ record:
 | Classification | `prompt` or `text_field`, `label` | `List[Dict]`/`str`, a label or a list of labels (strings or ints) |
 | Online GRPO | `prompt`, `answer` | `str`/`List[Dict]`, `str` |
 | Async GRPO with environments | `prompt` (+ `answer` where the environment grades one) | `str`/`List[Dict]`, `str` |
+| Teacher distillation | `messages` | `List[Dict]` |
+| Self-distillation | `prompt`, `answer` | `List[Dict]`, `str` |
 
-These column names can be renamed in the config:
+You can rename these columns in the config:
 
 - SFT: `conversation_field`
 - Classification: `text_field`
 - KTO: `completion_field`, `label_field`
 - Online and async GRPO: `prompt_field`, `answer_field`
+- Teacher and self-distillation: `conversation_field`, plus `sdpg_answer_field`
+  for self-distillation's answer
 
-The `prompt`/`chosen`/`rejected` and offline GRPO column names are fixed. A
+The preference and reward columns (`prompt`, `chosen`, `rejected`) and the
+offline GRPO ones are fixed. A
 preference pair without a `prompt` column gets the turns both sides share
 extracted as the prompt.
 
@@ -59,9 +64,11 @@ Mixing sources has side effects:
 
 - Only columns common to every source survive. Every source must carry the
   conversation column your config names, or the load raises naming the source.
-  The tools column it names is null-filled where a source lacks it.
+  The tools and reasoning-effort columns it names are null-filled where a source
+  lacks them or holds only nulls.
 - Columns whose types differ between sources are dropped. This is the usual
-  reason a field goes missing.
+  reason a field goes missing. The conversation, tools or reasoning-effort column
+  your config names is refused instead.
 - A list loads fully on every rank. A sharded entry loads whole on every rank,
   and a pre-processed dataset is detected only at a single path. Point `dataset`
   at a single path to use either.
@@ -96,7 +103,8 @@ choice through `tokenizer_backend`. Every flag and the packing strategies:
 
 ## Data for the RL environments
 
-The code-contests environment reads a prepared pool, not a plain dataset:
+The code-contests environment reads a prepared pool, not a plain dataset. You
+build the pool in two steps:
 
 1. `halo run compact-code-tests` compacts a test corpus into one row per
    problem, capping the tests in each suite.

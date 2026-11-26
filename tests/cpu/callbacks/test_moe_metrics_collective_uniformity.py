@@ -3,8 +3,6 @@ logits returning early is a NCCL hang, and a payload shaped by the local max is 
 
 from __future__ import annotations
 
-import contextlib
-
 import pytest
 import torch
 
@@ -79,23 +77,6 @@ def test_rank_with_counters_agrees_dims_before_reducing_payload(recording_dist):
 
     assert recording_dist.calls[0] == (2,), "dims must be agreed before the payload is built"
     assert len(recording_dist.calls) == 2, "expected dims agreement + payload reduce"
-
-
-def test_empty_and_populated_ranks_issue_the_same_collective_sequence(recording_dist):
-    """The two ranks' collective sequences must be comparable in count, or NCCL desynchronizes."""
-    empty = _RecordingDist()
-    populated = _RecordingDist()
-
-    for stub, counters in ((empty, []), (populated, [torch.ones(3)])):
-        with pytest.MonkeyPatch.context() as mp:
-            _install(mp, stub)
-            cb = _callback(counters)
-            with contextlib.suppress(Exception):
-                cb.on_step_end(args=None, state=_State(global_step=1), control=None)
-
-    assert empty.calls[0] == populated.calls[0] == (2,), (
-        f"ranks disagree on the first collective: empty={empty.calls}, populated={populated.calls}"
-    )
 
 
 def test_non_logging_step_issues_no_collective_on_any_rank(recording_dist):

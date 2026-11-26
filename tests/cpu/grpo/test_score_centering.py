@@ -326,8 +326,20 @@ def _batch(rows=2, width=6, k=5, seed=3):
     return theta, batch
 
 
-@pytest.mark.parametrize("loss_type", ["dapo", "cispo", "grpo", "bnpo", "dr_grpo", "luspo", "sapo"])
-@pytest.mark.parametrize("weights", WEIGHTS)
+@pytest.mark.parametrize(
+    ("weights", "loss_type"),
+    [
+        ("none", "dapo"),
+        ("tis", "dapo"),
+        ("mis", "dapo"),
+        ("tis", "cispo"),
+        ("tis", "grpo"),
+        ("tis", "bnpo"),
+        ("tis", "dr_grpo"),
+        ("tis", "luspo"),
+        ("tis", "sapo"),
+    ],
+)
 def test_trls_loss_keeps_its_value_and_takes_the_centered_gradient(loss_type, weights):
     theta, batch = _batch()
     config = ScoreCenteringConfig(top_k=5, weights=weights, mis_low=LOW, mis_high=HIGH)

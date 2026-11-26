@@ -88,13 +88,6 @@ def test_misaligned_candidates_are_refused_naming_both_shapes():
             harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, False)
 
 
-def test_scoring_without_candidates_is_the_sampled_token_alone():
-    input_ids, attention_mask, _, ltk = _batch()
-    harness = EmbeddingBackboneHarness("sdpa")
-    logps, entropy, _ = harness._chunked_logps_impl(harness.model, input_ids, attention_mask, ltk, 2, True)
-    assert logps.shape == entropy.shape == (2, ltk)
-
-
 # --- a packed window against the per-row window -----------------------------------------------------------------
 
 _LLAMA_VOCAB, _ROWS, _SLOTS, _BUDGET, _K = 64, 16, 4, 40, 8

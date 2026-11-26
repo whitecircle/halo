@@ -18,7 +18,7 @@ halo launch <method> <config.yaml> [launcher flags] [field overrides]
 | Flag | Short | Meaning |
 | --- | --- | --- |
 | `--nproc N` | `-n` | number of processes (GPUs); `N > 1` launches with `torchrun` |
-| `--accelerate <yaml>` | `-a` | launch with `accelerate launch` and this config (plain FSDP) |
+| `--accelerate <yaml>` | `-a` | launch with `accelerate launch` and this config (plain FSDP), such as `launcher-configs/accelerate/fsdp2_gradop_config.yaml` |
 | `--port P` | `-p` | rendezvous port for a multi-process launch; set it when two jobs share a host |
 | `--numa-binding <mode>` | | `torchrun`'s NUMA binding (`node` runs each rank on its GPU's NUMA node); `torchrun` launches only, refused with `--accelerate` or one process ([NUMA binding](../agent-docs/optimization/throughput-benchmarks.md#numa-binding) ↗) |
 | `--halo-rollout-backend <name>` | | run the RL environments' code execution on a hosted sandbox (`modal`, `baseten`). With `baseten` the Python REPL tools still run on the training host, in the environment's process, unless `HALO_SANDBOX_REPL=1` is set ([Modal](../agent-docs/training-methods/async-grpo/environments/sandbox.md#modal) ↗, [Baseten](../agent-docs/training-methods/async-grpo/environments/sandbox.md#baseten-sandboxes) ↗) |
@@ -78,6 +78,7 @@ tool's help, not the launcher's.
 | `convert-to-bf16` / `quantize-to-lowp` / `unfuse-moe-experts` / `reset-sinks` / `reattach-vision-tower` | checkpoint post-processing: bf16 export, low-precision export, per-expert layout, GPT-OSS sink reset, the vision tower back on a text-only export |
 | `patch-vocab` | add tokens to a model's vocabulary before training |
 | `export-block-fp8` | write the block-FP8 checkpoint a rollout server boots from under `rollout_weight_precision: fp8_block`; see [Rollout Servers](rollout-servers.md) |
+| `export-engine-adapter` | write a saved LoRA adapter as the directory a rollout server loads by path; see [Checkpoints](checkpoints.md) |
 | `convert-glm5-bf16` / `convert-mistral4-bf16` / `convert-deepseek-v4-bf16` | convert that family's low-precision Hub release to bf16, required before training it |
 | `prepare-dataset` / `s3` | tokenize SFT or pretraining data offline, optionally packed and sharded; move datasets to and from S3 |
 | `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then build prompts, pack tests and checker, and publish rating bands |

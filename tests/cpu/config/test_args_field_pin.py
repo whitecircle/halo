@@ -61,6 +61,7 @@ _EXPECTED = {
         "profiler_wait": "5",
         "profiler_warmup": "1",
         "project_name": "'default-project'",
+        "reasoning_effort_field": "None",
         "report_mfu_diagnostics": "False",
         "reset_sinks": "True",
         "router_balancing_rate": "0.001",
@@ -258,16 +259,18 @@ def _own_field_defaults(cls) -> dict[str, str]:
     return {name: default for name, default in actual.items() if common.get(name) != default}
 
 
-@pytest.mark.parametrize("cls_name", sorted(_EXPECTED))
-def test_fields_and_defaults_unchanged(cls_name):
-    actual = _own_field_defaults(_CLASSES[cls_name])
-    expected = _EXPECTED[cls_name]
-    assert actual == expected, (
-        f"{cls_name} field surface drifted.\n"
-        f"missing: {sorted(set(expected) - set(actual))}\n"
-        f"added: {sorted(set(actual) - set(expected))}\n"
-        f"re-defaulted: { {k: (expected[k], actual[k]) for k in set(expected) & set(actual) if expected[k] != actual[k]} }"
-    )
+def test_fields_and_defaults_unchanged(subtests):
+    assert _EXPECTED, "no script-argument class is pinned"
+    for cls_name in sorted(_EXPECTED):
+        with subtests.test(cls_name):
+            actual = _own_field_defaults(_CLASSES[cls_name])
+            expected = _EXPECTED[cls_name]
+            assert actual == expected, (
+                f"{cls_name} field surface drifted.\n"
+                f"missing: {sorted(set(expected) - set(actual))}\n"
+                f"added: {sorted(set(actual) - set(expected))}\n"
+                f"re-defaulted: { {k: (expected[k], actual[k]) for k in set(expected) & set(actual) if expected[k] != actual[k]} }"
+            )
 
 
 if __name__ == "__main__":

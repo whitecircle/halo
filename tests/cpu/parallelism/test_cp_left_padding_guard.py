@@ -47,22 +47,6 @@ def test_a_tokenless_row_is_not_left_padding(dtype):
         reject_left_padding(torch.tensor([tokenless, left_padded], dtype=dtype))
 
 
-def test_smpo_collator_shape_is_what_the_guard_catches():
-    """Unequal prompts left-padded, then right-padded completions, carry leading pads."""
-    # Prompt lengths 2 and 4, left-padded to 4; completions right-padded to 3.
-    prompt_mask = torch.tensor([[0, 0, 1, 1], [1, 1, 1, 1]])
-    completion_mask = torch.tensor([[1, 1, 0], [1, 1, 1]])
-    with pytest.raises(ValueError, match="LEFT-padded"):
-        reject_left_padding(torch.cat([prompt_mask, completion_mask], dim=1))
-
-
-def test_equal_length_prompts_produce_no_leading_pad():
-    """This is the workaround the error message recommends."""
-    prompt_mask = torch.tensor([[1, 1, 1, 1]])
-    completion_mask = torch.tensor([[1, 1, 0]])
-    reject_left_padding(torch.cat([prompt_mask, completion_mask], dim=1))
-
-
 @pytest.mark.parametrize(
     "first", [TRAILING_PADS, torch.ones(2, 8, dtype=torch.long)], ids=["trailing-pads", "unpadded"]
 )

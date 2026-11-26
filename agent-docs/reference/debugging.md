@@ -128,8 +128,9 @@ access py-spy fails with `Permission denied`.
 
 ## 2. Finding throughput bottlenecks
 
-One `nvidia-smi` sample narrows it before any trace — read power, not util %
-([GPU Training Theory §11](gpu-training-theory.md#watch-power-not-utilization)).
+A few seconds of `nvidia-smi` samples during a steady step narrow it before any trace. Read power,
+utilization and the SM clock together
+([GPU Training Theory → Power and utilization](gpu-training-theory.md#power-and-utilization)).
 
 Open the Chrome trace in Perfetto and read the gaps on the CUDA stream:
 
@@ -139,19 +140,20 @@ Open the Chrome trace in Perfetto and read the gaps on the CUDA stream:
   mostly the wait for the busiest rank ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)).
 - CPU thread busy, GPU idle → dataloader / host overhead; confirm with a py-spy flame graph (§1c)
   and raise `dataloader_num_workers`.
-- Back-to-back GEMM/attention, GPU ~100% busy → compute-bound (the good case); read `top_ops.txt`
-  for the dominant kernels.
+- Back-to-back kernels with no gaps → no host or communication stall. Whether the step is compute- or
+  memory-bound shows in the dominant kernels of `top_ops.txt`; utilization does not tell the two apart.
 
 `enable_efficiency_metrics: true` logs per-step time, tokens/s, and peak memory. MFU/S-MFU are
 computed every step but reach the headline log only with `report_mfu_diagnostics: true` — MFU as
 `step_mfu_percent` / `avg_mfu_percent`, S-MFU as `step_smfu_percent` / `avg_smfu_percent` (MoE
 only, `sparsity_factor < 1.0`).
 
-For MoE, read **S-MFU** (and achieved TFLOPS / tokens/s/GPU), not plain MFU: plain MFU tracks local
-params per rank, so low EP keeps most params local and over-reads while high EP shrinks `N_local`
-and under-reads at the same throughput
-([why](../optimization/throughput-benchmarks.md#why-moe-utilization-reads-low)). Judge against the
-model class and EP degree, not the dense ceiling.
+For MoE, read **S-MFU** and tokens/s/GPU, not plain MFU. Plain MFU charges every local expert for
+every token, so it over-reads at low EP and falls as EP grows at the same throughput
+([why](../optimization/throughput-benchmarks.md#why-moe-utilization-reads-low)). It matches S-MFU only
+at `ep_size = num_experts / top_k`. Achieved TFLOPS has the same numerator as plain MFU, so it compares
+only configurations with the same parameters per rank. Judge against the model class and EP degree, not
+the dense ceiling.
 
 **Rank skew (stragglers)** — capture every rank with `profiler_ranks: "all"` and read the TraceLens
 collective report (`scripts/profiling/trace_report.py`), which attributes wait time per collective
@@ -208,10 +210,11 @@ all-gather, broadcast, barrier) that another never reaches, so NCCL blocks until
 
 ### Data-dependent backward graph desyncs FSDP/EP collectives
 
-Signature: every GPU reads **100% utilization at idle power** (~190 W on a B300), every rank spins a
-full CPU core, and no NCCL error is raised until the watchdog fires. The NCCL flight recorder names
-it exactly: at the same `collective_seq_id` one rank issues a *different* collective than its peers
-(e.g. `_reduce_scatter_base` on one rank, `_all_gather_base` on the others).
+Signature: every GPU reads **100% utilization at the power of an idle process** (238 W, 22% of the
+1,100 W board power limit, SM clock at its 2,032 MHz maximum, measured on two B300s), every rank spins
+a full CPU core, and no NCCL error is raised until the watchdog fires. PyTorch's flight recorder for
+its NCCL collectives names it exactly: at the same `collective_seq_id` one rank issues a *different*
+collective than its peers (e.g. `_reduce_scatter_base` on one rank, `_all_gather_base` on the others).
 
 Root cause is a **per-rank backward graph**: every rank must run the same FSDP2 / EP grad
 collectives in the same order, so any rank that skips a module's backward deadlocks the rest.
@@ -247,7 +250,7 @@ from halo.runtime.consensus import assert_rank_uniform
 assert_rank_uniform(tuple(hidden_states.shape), group=tp_group, label="attn_in", strict=True)
 ```
 
-### NCCL flight recorder + watchdog timeout
+### PyTorch's NCCL flight recorder + watchdog timeout
 
 PyTorch's NCCL watchdog defaults to 10 minutes; `init_distributed()` raises it via
 `DIST_NCCL_TIMEOUT_MINUTES` (default 30). Raise it further for very large cross-node all-to-all or

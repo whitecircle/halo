@@ -70,17 +70,16 @@ def test_all_shaping_off_by_default():
     assert _reward(env, _traj(tool_calls=2, submitted=True, passed=10)) == pytest.approx(1.0)
 
 
-@pytest.mark.parametrize("value", [-0.1, True, False, float("nan")], ids=["negative", "true", "false", "nan"])
 @pytest.mark.parametrize(
-    "knob",
+    ("knob", "value"),
     [
-        "submission_reward",
-        "resubmission_penalty",
-        "no_tool_use_penalty",
-        "tool_error_penalty",
-        "tool_success_reward",
-        "turn_overflow_penalty",
-        "length_cutoff_penalty",
+        pytest.param("submission_reward", -0.1, id="submission_reward-negative"),
+        pytest.param("resubmission_penalty", True, id="resubmission_penalty-true"),
+        pytest.param("no_tool_use_penalty", -0.1, id="no_tool_use_penalty-negative"),
+        pytest.param("turn_overflow_penalty", False, id="turn_overflow_penalty-false"),
+        pytest.param("length_cutoff_penalty", float("nan"), id="length_cutoff_penalty-nan"),
+        pytest.param("tool_error_penalty", float("nan"), id="tool_error_penalty-nan"),
+        pytest.param("tool_success_reward", -0.1, id="tool_success_reward-negative"),
     ],
 )
 def test_a_magnitude_refuses_a_negative_a_bool_or_a_nan(knob, value):

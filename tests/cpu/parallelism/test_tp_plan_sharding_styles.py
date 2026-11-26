@@ -7,7 +7,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_plan
+from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES, _get_parameter_plan
 from transformers.models.glm5_next.configuration_glm5_next import Glm5NextTextConfig
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
@@ -67,8 +67,9 @@ def test_embedded_digit_names_are_reported_as_sharded(name):
 
 def test_an_unregistered_style_raises_instead_of_answering_no():
     """Answering that it shards nothing would report the load as a wasted-replica run."""
-    with pytest.raises(ValueError, match="embedding_colwise"):
-        plan_shards_param("model.embed_tokens.weight", {"model.embed_tokens": "embedding_colwise"})
+    assert "vocab_parallel" not in ALL_PARALLEL_STYLES, "premise: transformers registers no such style"
+    with pytest.raises(ValueError, match="vocab_parallel"):
+        plan_shards_param("model.embed_tokens.weight", {"model.embed_tokens": "vocab_parallel"})
 
 
 def test_shipped_moe_plans_resolve_end_to_end():

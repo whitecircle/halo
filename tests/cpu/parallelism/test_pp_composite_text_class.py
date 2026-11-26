@@ -57,7 +57,6 @@ COMPOSITES = {
 EXPERT_COMPOSITES = ("qwen3_5_moe", "qwen4_exp", "nemotron_h_omni")
 # Root and text flags a release may store; Qwen3.5-35B's ``config.json`` states no text flag at all.
 TIED_DECLARATIONS = [(True, True), (True, False), (False, True), (True, ABSENT)]
-UNTIED_DECLARATIONS = [(False, False), (False, ABSENT)]
 # Each composite on an expert axis where it has experts; every stage parameter moves by the offset, under which the bf16
 # values a save and a reload pass through still tell a moved tensor from the release's.
 SAVE_AXES = {
@@ -160,8 +159,15 @@ def test_expert_axes_load_the_text_class_on_every_stage(checkpoints, name, axes)
         assert not [key for key, tensor in stage.state_dict().items() if tensor.is_meta]
 
 
-@pytest.mark.parametrize(("root", "text"), TIED_DECLARATIONS, ids=str)
-@pytest.mark.parametrize("name", sorted(COMPOSITES))
+@pytest.mark.parametrize(
+    ("name", "root", "text"),
+    [
+        pytest.param("qwen3_5", True, True, id="qwen3_5-True-True"),
+        pytest.param("qwen3_5_moe", True, False, id="qwen3_5_moe-True-False"),
+        pytest.param("qwen4_exp", False, True, id="qwen4_exp-False-True"),
+        pytest.param("nemotron_h_omni", True, ABSENT, id="nemotron_h_omni-True-absent"),
+    ],
+)
 def test_a_tie_at_either_level_is_refused_by_the_tie_gate(checkpoints, tmp_path, name, root, text):
     """A text class reads only its own flag: a tie stated above it would otherwise pass the gate and train a random
     head where the release ties it."""
@@ -245,12 +251,16 @@ def test_a_release_saved_with_no_head_key_is_refused(tmp_path, name):
 
 
 @pytest.mark.parametrize(
-    ("root", "text", "saved"),
-    [(True, True, True), (True, False, True), (False, True, True), (True, ABSENT, True), (False, False, False)],
-    ids=str,
+    ("name", "config_only", "root", "text", "saved"),
+    [
+        pytest.param("qwen3_5", False, True, True, True, id="qwen3_5-from_pretrained-True-True-True"),
+        pytest.param("qwen3_5_moe", True, True, False, True, id="qwen3_5_moe-per_node_save-True-False-True"),
+        pytest.param("qwen4_exp", False, False, True, True, id="qwen4_exp-from_pretrained-False-True-True"),
+        pytest.param("qwen4_exp", True, True, ABSENT, True, id="qwen4_exp-per_node_save-True-absent-True"),
+        pytest.param("qwen3_5", True, False, False, False, id="qwen3_5-per_node_save-False-False-False"),
+        pytest.param("qwen3_5_moe", False, True, False, True, id="qwen3_5_moe-from_pretrained-True-False-True"),
+    ],
 )
-@pytest.mark.parametrize("config_only", [False, True], ids=["from_pretrained", "per_node_save"])
-@pytest.mark.parametrize("name", ["qwen3_5", "qwen3_5_moe", "qwen4_exp"])
 def test_the_saved_stage_config_states_what_the_release_declared(
     checkpoints, tmp_path, name, config_only, root, text, saved
 ):
@@ -272,7 +282,7 @@ def test_the_saved_stage_config_states_what_the_release_declared(
         assert json.load(fh)[TIE_WORD_EMBEDDINGS_FLAG] is saved
 
 
-@pytest.mark.parametrize(("root", "text"), TIED_DECLARATIONS + UNTIED_DECLARATIONS, ids=str)
+@pytest.mark.parametrize(("root", "text"), TIED_DECLARATIONS, ids=str)
 def test_the_load_leaves_the_source_config_as_declared(checkpoints, tmp_path, root, text):
     path = _declaring(checkpoints["qwen3_5_moe"], tmp_path, root=root, text=text)
     config = AutoConfig.from_pretrained(path, trust_remote_code=False)

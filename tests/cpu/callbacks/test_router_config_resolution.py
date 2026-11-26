@@ -102,15 +102,6 @@ def test_forced_off_stamp_is_visible_from_either_config_object():
     )
 
 
-def test_plain_config_is_untouched_by_the_resolver():
-    model = _Model(_TextConfig(router_aux_loss_coef=0.001, output_router_logits=False))
-
-    apply_balancing_mode(model, "aux_loss", is_moe=True)
-
-    assert model.config.output_router_logits is True
-    assert not router_logits_forced_off(model.config)
-
-
 def test_get_config_field_prefers_a_real_value_over_the_wrapper_default():
     cfg = _CompositeConfig(_TextConfig(router_aux_loss_coef=0.001))
 

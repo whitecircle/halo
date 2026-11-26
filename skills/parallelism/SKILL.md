@@ -45,7 +45,9 @@ advising.
 
 1. **Dense (non-MoE) model?** EP/ETP do nothing — use **TP** (memory/large hidden),
    **CP** (long seq, where the family and trainer admit it) or **PP** across nodes (step 5), else plain FSDP2 DDP (`dp_size = world_size`).
-2. **MoE model?** Start with **EP** (orthogonal to DP, keeps full DP). For finer
+2. **MoE model?** Use plain FSDP2 (`ep1`, experts sharded) when the run fits in memory, because it has no all-to-all
+   ([Maximizing achieved TFLOPS](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
+   Otherwise start with **EP** (orthogonal to DP, keeps full DP). For finer
    expert sharding add **ETP** (EP+ETP); EP+TP shards attention only, and TP+ETP is rejected.
    For long sequences on MoE use **EP+CP** (node-local EP only).
 3. **Long sequence, OOM on activations?** add **CP** (Ulysses, node-local). CP

@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Alignment slowdown</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* The key names the three stepped dimensions in a column left of the panels. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 40px;
+    align-items: start;
+  }
+
+  .key h3 {
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
+  }
+
+  .key p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
+    color: var(--body);
+  }
+
+  .key p.mark svg { margin-top: 3px; }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+  svg .panel { font-size: 25px; fill: var(--text); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+    <svg class="chart" id="chart"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each point is the median of 7 samples of back-to-back calls on one B300.</span>
+      <span class="s" id="clocks"></span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py: torch.mm(x, w) with x [M, K] and w [K, N],
+  // the weight read from HBM on every call.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --output roofline.json
+  // roofline.json, sections.alignment[]: for each dtype and each stepped axis, the 17 rows with that
+  // dimension at its base value + 0 … + 16 and the other two at theirs, in order:
+  // [eager.seconds_summary.median in µs, state.sm_clock_mhz]. Medians of 7 samples of back-to-back calls. The
+  // clock is NVML's reading right after the point. tf32 is fp32 with float32 matmul precision "high", fp32 the
+  // same at "highest".
+  const BASE = { k: 2880, n: 2880, m: 4096 };
+  const SWEEPS = {
+    bf16: {
+      k: [[61.27, 1462], [437.1, 2032], [290.7, 2032], [443.4, 2032], [293.5, 2032], [448.2, 2032], [292.5, 2032], [453.7, 2032], [61.92, 1462], [454.9, 2032], [293.6, 2032], [447.3, 2032], [292.3, 2032], [450.6, 2032], [293.3, 2032], [452.9, 2032], [61.31, 1500]],
+      n: [[60.23, 1477], [489.8, 2032], [266.3, 2032], [476.8, 2032], [267.2, 2032], [479, 2032], [267, 2032], [497, 2032], [61.64, 1485], [498.6, 2032], [267, 2032], [481.6, 2032], [267, 2032], [481.1, 2032], [266.6, 2032], [495.5, 2032], [54.85, 1395]],
+      m: [[60.14, 1485], [59.32, 1440], [59.36, 1425], [59.36, 1432], [59.36, 1425], [59.4, 1425], [59.38, 1425], [59.4, 1425], [59.37, 1425], [59.29, 1425], [59.35, 1425], [59.35, 1425], [59.32, 1417], [59.31, 1440], [59.35, 1425], [59.33, 1425], [59.28, 1440]],
+    },
+    tf32: {
+      k: [[114.4, 1455], [471.4, 2032], [472.9, 2032], [475.4, 2032], [116.7, 1462], [483, 2032], [484.1, 2032], [485.7, 2032], [114.8, 1492], [489.7, 2032], [489.8, 2032], [491.3, 2032], [116, 1485], [493.2, 2032], [492.2, 2032], [490.9, 2032], [114.8, 1500]],
+      n: [[113.5, 1507], [455, 2032], [457.2, 2032], [457.9, 2032], [108.9, 1410], [460.3, 2032], [461.1, 2032], [462, 2032], [103.2, 1372], [463.2, 2032], [464.2, 2032], [464.1, 2032], [108.9, 1410], [464.9, 2032], [465, 2032], [462.8, 2032], [102.5, 1410]],
+      m: [[113.7, 1507], [115.7, 1410], [115.7, 1410], [115.6, 1417], [115.8, 1425], [115.8, 1432], [115.7, 1425], [115.7, 1425], [115.7, 1410], [115.7, 1425], [115.7, 1410], [115.7, 1425], [115.8, 1425], [115.7, 1410], [115.7, 1410], [115.7, 1417], [115.7, 1410]],
+    },
+    fp32: {
+      k: [[1058, 2032], [1063, 2032], [1063, 2032], [1063, 2032], [1063, 2032], [1063, 2032], [1063, 2032], [1063, 2032], [1063, 2032], [1064, 2032], [1064, 2032], [1064, 2032], [1064, 2032], [1064, 2032], [1064, 2032], [1064, 2032], [1064, 2032]],
+      n: [[1058, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1058, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1059, 2032], [1058, 2032]],
+      m: [[1058, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1165, 2032], [1164, 2032], [1165, 2032], [1165, 2032]],
+    },
+  };
+  /** roofline.json, gpu.max_sm_clock_mhz. */
+  const MAX_CLOCK = 2032;
+  /** The panels, left to right, and the bytes of one value of each type. */
+  const PANELS = [
+    { dtype: "bf16", name: "bf16", bytes: 2 },
+    { dtype: "tf32", name: "fp32 with TF32", bytes: 4 },
+    { dtype: "fp32", name: "fp32 at full precision", bytes: 4 },
+  ];
+  /** NVIDIA's rule: a dimension is aligned when it spans a multiple of this many bytes. */
+  const ALIGN_BYTES = 16;
+  const AXES = [
+    { axis: "k", name: "K stepped", hue: "var(--halo-blue)" },
+    { axis: "n", name: "N stepped", hue: "var(--halo-violet)" },
+    { axis: "m", name: "M stepped", hue: "var(--halo-indigo)" },
+  ];
+
+  /** Each series as its points: the offset and the time against the same series at offset 0. */
+  const series = (dtype, axis) => SWEEPS[dtype][axis].map(([time, clock], offset) => ({ offset, slowdown: time / SWEEPS[dtype][axis][0][0], clock }));
+  /** The slowdowns of K and N at the offsets that are, or are not, a multiple of the type's aligned width. */
+  const widths = (dtype, bytes, aligned) =>
+    ["k", "n"].flatMap((axis) => series(dtype, axis).filter((p) => (p.offset % (ALIGN_BYTES / bytes) === 0) === aligned));
+  const range = (values) => [Math.min(...values), Math.max(...values)];
+  /** A range as printed, kept on one line. */
+  const span = ([low, high], digits = 1) => (low.toFixed(digits) === high.toFixed(digits) ? low.toFixed(digits) : `${low.toFixed(digits)}\u00a0to\u00a0${high.toFixed(digits)}`);
+  const fmt = (v) => v.toLocaleString("en-US");
+
+  const [bf16] = PANELS;
+  const off = widths(bf16.dtype, bf16.bytes, false);
+  document.getElementById("title").textContent =
+    `With K or N off a multiple of ${ALIGN_BYTES / bf16.bytes}, a bf16 GEMM runs ${span(range(off.map((p) => p.slowdown)))} times slower`;
+  const [slowClock, fastClock] = range(widths(bf16.dtype, bf16.bytes, true).map((p) => p.clock));
+  const offClocks = range(off.map((p) => p.clock));
+
+  if (offClocks[0] !== MAX_CLOCK || fastClock >= MAX_CLOCK) {
+    throw new Error("The note on clocks assumes aligned points below the maximum clock and the others at it.");
+  }
+
+  document.getElementById("clocks").textContent =
+    `The aligned bf16 points ran with the clock held to ${fmt(slowClock)} to ${fmt(fastClock)} MHz by the power cap and the others at the full ${fmt(MAX_CLOCK)} MHz, so at equal clocks the gap is wider.`;
+
+  /** Mark shapes, one per stepped dimension, so three values at one offset stay apart: a dot, a ring, a dash. */
+  const MARKS = {
+    k: (x, y, hue) => svgEl("circle", { cx: x, cy: y, r: 4, fill: hue }),
+    n: (x, y, hue) => svgEl("circle", { cx: x, cy: y, r: 7, fill: "none", stroke: hue, "stroke-width": 2 }),
+    m: (x, y, hue) => svgEl("line", { x1: x - 8, y1: y, x2: x + 8, y2: y, stroke: hue, "stroke-width": 2.5 }),
+  };
+
+  const key = document.getElementById("key");
+  key.append(
+    el("h3", undefined, "One dimension at a time"),
+    el("p", undefined, `A GEMM [M, K] @ [K, N] at M = ${fmt(BASE.m)}, K = N = ${BASE.k}, with one dimension stepped from +0 to +16 and its time set against +0`),
+  );
+
+  for (const { axis, name, hue } of AXES) {
+    const p = el("p", "mark");
+    const swatch = svgEl("svg", { viewBox: "0 0 36 24", "aria-hidden": "true" });
+    swatch.append(MARKS[axis](18, 12, hue));
+    p.append(swatch, el("span", undefined, name));
+    key.append(p);
+  }
+
+  for (const { dtype, name, bytes } of PANELS.slice(1)) {
+    const even = widths(dtype, bytes, false);
+    const text = dtype === "tf32"
+      ? `${name}: K or N off a multiple of ${ALIGN_BYTES / bytes} runs ${span(range(even.map((p) => p.slowdown)))} times slower`
+      : `${name}, on the CUDA cores: K and N stay within ${span(range(["k", "n"].flatMap((a) => series(dtype, a).map((p) => p.slowdown))), 2)}`;
+    key.append(el("p", undefined, text));
+  }
+
+  const HEIGHT = 640;
+  /** Insets inside the SVG: the y title and ticks, the panel names above, the x ticks and title below. */
+  const PAD = { l: 96, r: 14, t: 52, b: 84 };
+  /** The gap between two panels. */
+  const GUTTER = 28;
+
+  const chart = document.getElementById("chart");
+  const width = chart.getBoundingClientRect().width;
+  chart.setAttribute("height", HEIGHT);
+  chart.setAttribute("viewBox", `0 0 ${width} ${HEIGHT}`);
+  const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+  const plot = { t: PAD.t, b: HEIGHT - PAD.b };
+  const panelWidth = (width - PAD.l - PAD.r - GUTTER * (PANELS.length - 1)) / PANELS.length;
+  const offsets = SWEEPS[bf16.dtype].k.length;
+  const slowest = Math.max(...PANELS.flatMap(({ dtype }) => AXES.flatMap(({ axis }) => series(dtype, axis).map((p) => p.slowdown))));
+  const axis = niceAxis(slowest * 1.04, undefined, { most: 5 });
+  const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
+
+  add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Time against +0, times");
+
+  for (const v of axis.ticks) {
+    add("text", { class: "tick", x: PAD.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, String(v));
+  }
+
+  PANELS.forEach(({ dtype, name, bytes }, i) => {
+    const l = PAD.l + i * (panelWidth + GUTTER);
+    const r = l + panelWidth;
+    const sx = (offset) => l + ((offset + 0.5) / offsets) * panelWidth;
+    add("text", { class: "panel", x: l, y: plot.t - 22 }, name);
+
+    for (const v of axis.ticks) {
+      if (v > 0) {
+        add("line", { x1: l, x2: r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+    }
+
+    // The line of no slowdown is data: every aligned shape sits on it.
+    add("line", { x1: l, x2: r, y1: sy(1), y2: sy(1), stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+    add("line", { x1: l, x2: r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: l, x2: l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+
+    // A tick at every offset, a longer one and a label at each aligned width of this type.
+    for (let offset = 0; offset < offsets; offset += 1) {
+      const aligned = offset % (ALIGN_BYTES / bytes) === 0;
+      add("line", { x1: sx(offset), x2: sx(offset), y1: plot.b, y2: plot.b + (aligned ? 9 : 5), stroke: "var(--secondary)", "stroke-width": 1 });
+
+      if (aligned) {
+        add("text", { class: "tick", x: sx(offset), y: plot.b + 34, "text-anchor": "middle" }, `+${offset}`);
+      }
+    }
+
+    for (const { axis: stepped, hue } of [...AXES].reverse()) {
+      for (const p of series(dtype, stepped)) {
+        chart.append(MARKS[stepped](sx(p.offset), sy(p.slowdown), hue));
+      }
+    }
+  });
+
+  add("text", { class: "axis", x: PAD.l + (width - PAD.l - PAD.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, "Added to the stepped dimension, with a label at each multiple of 16 bytes");
+</script>
+</body>
+</html>

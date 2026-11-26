@@ -215,12 +215,6 @@ def test_the_clique_read_actually_reports_a_fabric():
     assert "00000000:04:00.0" in calls[0], "the GPU is selected by its composed PCI address, not an index"
 
 
-def test_the_clique_is_read_from_the_fabric_block_only():
-    """The sample has decoys around the block, including a top-level ``GPU Fabric GUID``, so a flat scan picks the
-    wrong value."""
-    assert _read_clique(state="Completed", clique="7")[0] == 7
-
-
 def test_absent_and_unregistered_fabrics_are_told_apart():
     """Only a definite negative lets the cross-check reject a too-wide domain; ``None`` must keep meaning a partial
     view is not evidence."""

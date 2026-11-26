@@ -98,50 +98,59 @@ def test_detection_answers_none_when_no_name_classifies(monkeypatch, smi):
     assert detect_gpu_model() is None
 
 
-@pytest.mark.parametrize("gpu_key", sorted(_DIE_SPECS))
-def test_bf16_peak_does_not_exceed_architectural_ceiling(gpu_key):
+def test_bf16_peak_does_not_exceed_architectural_ceiling(subtests):
     """A dense figure replaced by a sparsity (2x) or marketing multiplier exceeds what the die can retire."""
-    entry = GPU_PEAK_FLOPS[gpu_key].flops
-    ceiling = _bf16_ceiling(gpu_key) * _CLOCK_TOLERANCE
-    assert entry["bf16"] <= ceiling, (
-        f"{gpu_key} bf16 peak {entry['bf16'] / 1e12:.1f} TFLOP/s exceeds its architectural ceiling "
-        f"{ceiling / 1e12:.1f} TFLOP/s ({_DIE_SPECS[gpu_key][0]} SMs x "
-        f"{_DIE_SPECS[gpu_key][1]} GHz x {_ARCH_BF16_FLOPS_PER_SM_CLOCK[_DIE_SPECS[gpu_key][2]]} "
-        "FLOP/SM/clk). A peak above the ceiling is a sparsity or marketing figure, not a dense one, "
-        "and it understates every reported MFU."
-    )
+    assert _DIE_SPECS, "_DIE_SPECS lists no die"
+    for gpu_key in sorted(_DIE_SPECS):
+        with subtests.test(gpu_key):
+            entry = GPU_PEAK_FLOPS[gpu_key].flops
+            ceiling = _bf16_ceiling(gpu_key) * _CLOCK_TOLERANCE
+            assert entry["bf16"] <= ceiling, (
+                f"{gpu_key} bf16 peak {entry['bf16'] / 1e12:.1f} TFLOP/s exceeds its architectural ceiling "
+                f"{ceiling / 1e12:.1f} TFLOP/s ({_DIE_SPECS[gpu_key][0]} SMs x "
+                f"{_DIE_SPECS[gpu_key][1]} GHz x {_ARCH_BF16_FLOPS_PER_SM_CLOCK[_DIE_SPECS[gpu_key][2]]} "
+                "FLOP/SM/clk). A peak above the ceiling is a sparsity or marketing figure, not a dense one, "
+                "and it understates every reported MFU."
+            )
 
 
-@pytest.mark.parametrize("gpu_key", sorted(_DIE_SPECS))
-def test_bf16_peak_is_not_implausibly_low(gpu_key):
-    entry = GPU_PEAK_FLOPS[gpu_key].flops
-    floor = _bf16_ceiling(gpu_key) * 0.5
-    assert entry["bf16"] >= floor, (
-        f"{gpu_key} bf16 peak {entry['bf16'] / 1e12:.1f} TFLOP/s is below half its ceiling "
-        f"{_bf16_ceiling(gpu_key) / 1e12:.1f} TFLOP/s — MFU computed against it would overstate."
-    )
+def test_bf16_peak_is_not_implausibly_low(subtests):
+    assert _DIE_SPECS, "_DIE_SPECS lists no die"
+    for gpu_key in sorted(_DIE_SPECS):
+        with subtests.test(gpu_key):
+            entry = GPU_PEAK_FLOPS[gpu_key].flops
+            floor = _bf16_ceiling(gpu_key) * 0.5
+            assert entry["bf16"] >= floor, (
+                f"{gpu_key} bf16 peak {entry['bf16'] / 1e12:.1f} TFLOP/s is below half its ceiling "
+                f"{_bf16_ceiling(gpu_key) / 1e12:.1f} TFLOP/s — MFU computed against it would overstate."
+            )
 
 
-@pytest.mark.parametrize("gpu_key", sorted(GPU_PEAK_FLOPS))
-def test_tensor_core_dtype_ratios_match_the_datapath(gpu_key):
+def test_tensor_core_dtype_ratios_match_the_datapath(subtests):
     """Catches a single-dtype typo, and a row where only some dtypes were rescaled."""
-    entry = GPU_PEAK_FLOPS[gpu_key].flops
-    bf16 = entry["bf16"]
-    for dtype, ratio in _DTYPE_RATIO_TO_BF16.items():
-        if dtype not in entry:
-            continue
-        expected = bf16 * ratio
-        assert entry[dtype] == pytest.approx(expected, rel=0.01), (
-            f"{gpu_key} {dtype} peak {entry[dtype] / 1e12:.1f} TFLOP/s is not {ratio}x its bf16 peak "
-            f"{bf16 / 1e12:.1f} TFLOP/s (expected {expected / 1e12:.1f}); the tensor-core datapath "
-            "fixes this ratio, so one of the two entries is wrong."
-        )
+    assert GPU_PEAK_FLOPS, "GPU_PEAK_FLOPS lists no GPU"
+    for gpu_key in sorted(GPU_PEAK_FLOPS):
+        with subtests.test(gpu_key):
+            entry = GPU_PEAK_FLOPS[gpu_key].flops
+            bf16 = entry["bf16"]
+            for dtype, ratio in _DTYPE_RATIO_TO_BF16.items():
+                if dtype not in entry:
+                    continue
+                expected = bf16 * ratio
+                assert entry[dtype] == pytest.approx(expected, rel=0.01), (
+                    f"{gpu_key} {dtype} peak {entry[dtype] / 1e12:.1f} TFLOP/s is not {ratio}x its bf16 peak "
+                    f"{bf16 / 1e12:.1f} TFLOP/s (expected {expected / 1e12:.1f}); the tensor-core datapath "
+                    "fixes this ratio, so one of the two entries is wrong."
+                )
 
 
-@pytest.mark.parametrize("gpu_key", [key for key, spec in _DIE_SPECS.items() if spec[2] == "blackwell"])
-def test_every_blackwell_die_has_an_fp4_peak(gpu_key):
+def test_every_blackwell_die_has_an_fp4_peak(subtests):
     """The tensor cores run MXFP4 and NVFP4 on every Blackwell die; a missing entry leaves a native 4-bit run unscored."""
-    assert "fp4" in GPU_PEAK_FLOPS[gpu_key].flops
+    blackwell_dies = [key for key, spec in _DIE_SPECS.items() if spec[2] == "blackwell"]
+    assert blackwell_dies, "_DIE_SPECS lists no Blackwell die"
+    for gpu_key in blackwell_dies:
+        with subtests.test(gpu_key):
+            assert "fp4" in GPU_PEAK_FLOPS[gpu_key].flops
 
 
 def test_b300_matches_the_b200_dense_tensor_core_rates():

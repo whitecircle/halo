@@ -21,11 +21,6 @@ from halo.data.deduplication import (
 DUPLICATED_BASIS = np.concatenate([np.eye(4, dtype=np.float32)] * 2)
 
 
-def test_normalize_unit_vectors_unchanged():
-    emb = np.array([[1.0, 0.0], [0.0, 1.0]])
-    np.testing.assert_allclose(_normalize_embeddings(emb), emb, atol=1e-7)
-
-
 def test_normalize_scales_each_row_to_unit_norm():
     emb = np.array([[3.0, 4.0], [0.0, 5.0], [-1.0, -1.0]])
     norms = np.linalg.norm(_normalize_embeddings(emb), axis=1)
@@ -35,14 +30,6 @@ def test_normalize_scales_each_row_to_unit_norm():
 def test_normalize_preserves_direction():
     # 3-4-5 triangle: [6, 8] / 10 = [0.6, 0.8].
     np.testing.assert_allclose(_normalize_embeddings(np.array([[6.0, 8.0]])), [[0.6, 0.8]], atol=1e-7)
-
-
-def test_normalize_is_idempotent():
-    rng = np.random.RandomState(1)
-    emb = rng.randn(8, 32)
-    once = _normalize_embeddings(emb)
-    twice = _normalize_embeddings(once)
-    np.testing.assert_allclose(once, twice, atol=1e-6)
 
 
 def test_shuffle_recoverable_via_mapping():

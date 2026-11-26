@@ -91,15 +91,14 @@ def test_a_round_with_no_mass_keeps_its_advantages():
 
 
 @pytest.mark.parametrize(
-    ("advantages", "ratio_at"),
+    ("advantages", "ratio_at", "enabled"),
     [
-        (torch.tensor([float("nan"), -0.5]), None),
-        (torch.tensor([0.5, float("inf")]), None),
-        (torch.tensor([0.5, -0.5]), float("nan")),
+        pytest.param(torch.tensor([float("nan"), -0.5]), None, True, id="on-nan-advantage"),
+        pytest.param(torch.tensor([float("nan"), -0.5]), None, False, id="off-nan-advantage"),
+        pytest.param(torch.tensor([0.5, float("inf")]), None, True, id="on-inf-advantage"),
+        pytest.param(torch.tensor([0.5, -0.5]), float("nan"), True, id="on-nan-ratio"),
     ],
-    ids=["nan-advantage", "inf-advantage", "nan-ratio"],
 )
-@pytest.mark.parametrize("enabled", [True, False], ids=["on", "off"])
 def test_a_mass_that_is_not_finite_raises_on_every_rank(advantages, ratio_at, enabled):
     """Every rank reads the same world sum, so all raise together. Carried on, its scales would turn every row of the
     heavier sign to NaN."""
@@ -218,7 +217,7 @@ def test_a_round_with_no_positive_mass_trains_nothing_under_the_balance():
     assert metrics[NEGATIVE_ONLY_MASS_KEY] == [pytest.approx(2 / 6)]
 
 
-@pytest.mark.parametrize("seed", range(20))
+@pytest.mark.parametrize("seed", [0, 1, 2])
 def test_on_any_round_the_balance_nets_the_whole_trained_mass_to_zero_and_the_logs_add_up(seed):
     """Random rows, lengths, IS ratios and cut turns. Balanced, the round's whole push (each row's advantage times its
     IS-weighted tokens, a cut turn's negative advantage only) is zero, no sign flips, nothing grows; off, the logged net

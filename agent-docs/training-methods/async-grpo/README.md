@@ -51,8 +51,10 @@ entry, or an `answer_field` renamed away from `answer`, that names no column rai
   the script refuses an image part earlier, while it processes the dataset.
 - The trainer forces `remove_unused_columns: false` (warning when a config sets it true): pruning would strip `answer`
   and the `context_fields` columns.
-- The environment owns the system turn and the tool schema: there is no `system_prompt` field and `tools_field` is
-  rejected. An override, where accepted, is `environment_kwargs.system_prompt`; the ReAct presets refuse it.
+- The environment owns the system turn, the tool schema and the episode's level: there is no `system_prompt` field,
+  and `tools_field` and `reasoning_effort_field` are rejected. An override, where accepted, is
+  `environment_kwargs.system_prompt`; the ReAct presets refuse it. A row's own level goes through `context_fields`
+  ([Effort levels](reasoning.md#effort-levels)).
 - `text_only_model` is rejected: the sync forwards names verbatim, and the text-only sibling's `model.layers.*` would
   miss a multimodal server's `model.language_model.layers.*`.
 
@@ -115,7 +117,7 @@ python scripts/environments/inference/eval_env.py \
 - [Episodes](episodes.md): sampling, turn and episode budgets, tool calls, unproductive turns
 - [Reasoning Budgets](reasoning.md): effort levels, the engine's reasoning cap, the per-level budget and price
 - [Objective and Stability](objective.md): training rows, importance sampling, advantages, KL
-- [Memory and Throughput](performance.md): the logits wall, chunked log-probs, sizing
+- [Memory and Throughput](performance.md): the logits plane, chunked log-probs, sizing
 - [Monitoring](monitoring.md): logged metrics, saved trajectories, early stop
 - [Evaluation](evaluation.md): eval during training, the offline runner, re-grading
 - [Troubleshooting](troubleshooting.md): symptoms and fixes

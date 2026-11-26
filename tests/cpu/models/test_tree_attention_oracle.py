@@ -53,6 +53,16 @@ FAMILIES = {
     "qwen3_5_text": (TINY_QWEN35_DENSE_FAMILY, {"num_hidden_layers": 4}),
     "qwen3_5_moe_text": (TINY_MOE_FAMILIES["qwen3_5_moe_text"], {"num_hidden_layers": 4}),
 }
+# Every family under the split form with a reentrant checkpoint and the gather form with a non-reentrant one, and the
+# gather form's no-grad first pass of a reentrant checkpoint once.
+CHECKPOINTED_CELLS = [
+    *(
+        (model_type, form, use_reentrant)
+        for model_type in sorted(FAMILIES)
+        for form, use_reentrant in (("split", True), ("gather", False))
+    ),
+    ("qwen3", "gather", True),
+]
 
 
 def test_every_admitted_family_is_swept():
@@ -273,9 +283,14 @@ def test_a_gather_over_the_call_budget_gives_the_one_call_logits_and_gradients(m
     assert max((chunked_grads[name] - grad).abs().max().item() for name, grad in one_grads.items()) <= 1e-6 * scale
 
 
-@pytest.mark.parametrize("use_reentrant", [True, False], ids=["reentrant", "non_reentrant"])
-@pytest.mark.parametrize("form", ["split", "gather"])
-@pytest.mark.parametrize("model_type", sorted(FAMILIES))
+@pytest.mark.parametrize(
+    ("model_type", "form", "use_reentrant"),
+    CHECKPOINTED_CELLS,
+    ids=[
+        f"{model_type}-{form}-{'reentrant' if use_reentrant else 'non_reentrant'}"
+        for model_type, form, use_reentrant in CHECKPOINTED_CELLS
+    ],
+)
 def test_a_tree_row_trains_identically_under_gradient_checkpointing(
     model_type, form, use_reentrant, tree, monkeypatch
 ):

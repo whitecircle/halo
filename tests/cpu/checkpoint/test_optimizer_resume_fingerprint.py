@@ -145,23 +145,21 @@ def test_capture_raises_on_a_config_missing_a_field():
         OptimizerStateFingerprint.capture(pc, _sgd(_TinyModel()), 1)
 
 
-def test_dict_round_trip():
-    fp = _live_fp(_sgd(_TinyModel()), _StubParallelismConfig(ep_size=2, cp_size=2), world_size=4)
-    assert fp.mismatches(fp.to_dict()) == []
-
-
 def test_the_saved_fingerprint_keeps_the_keys_1_1_0_wrote():
     """A renamed key would warm-restart every existing shard set (``use_hsdp`` is saved as ``hsdp``)."""
     live = _live_fp(torch.optim.AdamW(_TinyModel().parameters()))
     assert list(live.to_dict()) == list(SAVED_BY_1_1_0["fingerprint"])
 
 
-@pytest.mark.parametrize("key", [key for key in SAVED_BY_1_1_0["fingerprint"] if key != "expert_replica_size"])
-def test_a_saved_fingerprint_missing_a_key_mismatches(key):
+def test_a_saved_fingerprint_missing_a_key_mismatches(subtests):
     """Any key but the replica size: it warm-restarts, or raises under PP, as a topology change does."""
-    live = _live_fp(_sgd(_TinyModel()))
-    saved = {name: value for name, value in live.to_dict().items() if name != key}
-    assert live.mismatches(saved) == [f"{key}: saved='<absent>' current={live.to_dict()[key]!r}"]
+    keys = [key for key in SAVED_BY_1_1_0["fingerprint"] if key != "expert_replica_size"]
+    assert keys, "the 1.1.0 fingerprint holds no key to drop"
+    for key in keys:
+        with subtests.test(key):
+            live = _live_fp(_sgd(_TinyModel()))
+            saved = {name: value for name, value in live.to_dict().items() if name != key}
+            assert live.mismatches(saved) == [f"{key}: saved='<absent>' current={live.to_dict()[key]!r}"]
 
 
 def test_a_saved_field_the_live_run_lacks_mismatches():

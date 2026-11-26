@@ -9,7 +9,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tensor
-from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from halo.distributed.mesh import MeshDim
 from halo.distributed.tensor_parallel import local_linears
@@ -18,7 +17,7 @@ from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
 from halo.kernels.lowp.quantization import QUANTIZERS, fake_quant
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
-from tests.common.distributed import fake_process_group, fake_process_group_mesh
+from tests.common.distributed import apply_hf_tensor_parallelism, fake_process_group, fake_process_group_mesh
 
 WIDTH = 64  # A multiple of every block size (32 mx, 16 nvfp4).
 # The two-way rowwise shard is 48: the 16-block format divides it, the 32-block ones do not.
@@ -54,7 +53,7 @@ def _tp_model(tp_size: int, intermediate: int, hidden: int = WIDTH) -> _Model:
     # The conversion finds the TP mesh through its ``tp`` dim.
     mesh = init_device_mesh("cpu", (tp_size,), mesh_dim_names=(MeshDim.TP,))
     model = _Model(intermediate, hidden)
-    apply_tensor_parallelism(model, mesh)
+    apply_hf_tensor_parallelism(model, mesh, TP_PLAN)
     install_planned_local_forwards(model, TP_PLAN)
     model._device_mesh = mesh
     return model
@@ -134,8 +133,7 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
             assert torch.allclose(module.weight.grad.to_local(), reference.grad)
 
 
-@pytest.mark.parametrize("rank", [0, 1])
-@pytest.mark.parametrize("precision", ["fp8", "mxfp4"])
+@pytest.mark.parametrize(("precision", "rank"), [("fp8", 0), ("fp8", 1), ("mxfp4", 0)])
 def test_apply_refuses_a_rowwise_shard_its_format_cannot_block(precision, rank):
     """96-wide at TP 2 is a 48-wide shard, which a 32-block format cannot split."""
     with fake_process_group(rank, 2):

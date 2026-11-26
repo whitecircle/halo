@@ -103,7 +103,7 @@ and the toolkit and cache variables are cataloged in
 | Path | Role |
 |---|---|
 | `/workspace` | Repo bind-mount and working dir in the image (`-v $(pwd):/workspace -w /workspace`); also `PYTHONPATH` |
-| scratch volume (`HALO_SCRATCH`) | Checkpoints, logs, HF cache, temp — verify its capacity before a large write |
+| scratch volume (`HALO_SCRATCH`) | HF cache, dataset cache, temp and `HALO_DATA_ROOT` scratch; checkpoints and logs go to `output_dir`, which is relative to the repo root unless you point it at this volume. Verify its capacity before a large write |
 | `.env` (repo root) | Secrets, passed via `--env-file .env` |
 | `/root/.aws` | AWS credentials, bind-mounted for S3 / ECR |
 | `.venv/` (repo root) | Host-side uv environment for the IDE (git-ignored) |

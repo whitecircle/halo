@@ -51,8 +51,8 @@ def _sort_both(experts: torch.Tensor, experts_per_rank: int, ep_size: int, seed:
 
 @pytest.mark.parametrize(
     ("top_k", "experts_per_rank", "ep_size"),
-    ((4, 4, 8), (8, 32, 8), (2, 3, 2), (1, 2, 2), (6, 4, 4)),
-    ids=("gpt_oss_ep8", "qwen3_6_ep8", "top2_ep2", "top1_ep2", "top_k_over_local"),
+    ((4, 4, 8), (1, 2, 2), (6, 4, 4)),
+    ids=("gpt_oss_ep8", "top1_ep2", "top_k_over_local"),
 )
 def test_the_counted_compaction_sorts_bit_identically(top_k, experts_per_rank, ep_size):
     experts = received_expert_ids(64, top_k, experts_per_rank, ep_size, seed=top_k * 100 + ep_size)

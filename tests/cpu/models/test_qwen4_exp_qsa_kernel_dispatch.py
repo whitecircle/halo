@@ -40,6 +40,22 @@ GROUPED_LAYOUTS = {"group-1": (2, 2), "group-2": (4, 2), "group-12": (12, 1)}
 REGIMES = {"sparse-2": (4, 8), "sparse-8": (2, 16), "dense": (4, 4096)}
 BF16_CPU = (torch.bfloat16, torch.device("cpu"))
 ALL_ROWS = {**ROWS, "short-documents": SHORT_DOCUMENT_ROWS}
+# (regime, row set): every row set under both sparse regimes, and the dense one on the packed rows.
+KEY_SET_CELLS = [
+    ("sparse-2", "one-document"),
+    ("sparse-2", "packed"),
+    ("sparse-2", "packed-two-rows"),
+    ("sparse-2", "right-padded"),
+    ("sparse-2", "left-padded"),
+    ("sparse-2", "short-documents"),
+    ("sparse-8", "one-document"),
+    ("sparse-8", "packed"),
+    ("sparse-8", "packed-two-rows"),
+    ("sparse-8", "right-padded"),
+    ("sparse-8", "left-padded"),
+    ("sparse-8", "short-documents"),
+    ("dense", "packed"),
+]
 
 
 def _attention(config, seed=SEED):
@@ -86,10 +102,10 @@ def test_padding_leaves_the_tiled_paths_visibility():
     assert (right.spans[0, 220:, 1] == 220).all()
 
 
-@pytest.mark.parametrize("rows", ALL_ROWS.values(), ids=ALL_ROWS.keys())
-@pytest.mark.parametrize("regime", REGIMES.values(), ids=REGIMES.keys())
-def test_kernel_key_set_equals_the_tiled_mask_and_transformers(rows, regime):
-    ratio, budget = regime
+@pytest.mark.parametrize(("regime", "row_set"), KEY_SET_CELLS, ids=["-".join(cell) for cell in KEY_SET_CELLS])
+def test_kernel_key_set_equals_the_tiled_mask_and_transformers(regime, row_set):
+    rows = ALL_ROWS[row_set]
+    ratio, budget = REGIMES[regime]
     config = tiny_qwen4_exp_text_config(indexer_compress_ratio=ratio, indexer_budget=budget)
     attention, inputs, selection = _selection(config, rows)
     batch, length = inputs.hidden.shape[:2]
@@ -111,12 +127,13 @@ def test_kernel_key_set_equals_the_tiled_mask_and_transformers(rows, regime):
     assert torch.equal(from_spans[attended], transformers_keys[attended])
 
 
-@pytest.mark.parametrize("layout", GROUPED_LAYOUTS.values(), ids=GROUPED_LAYOUTS.keys())
 @pytest.mark.parametrize(
-    "rows", [ROWS["packed"], ROWS["right-padded"], SHORT_DOCUMENT_ROWS], ids=lambda r: str(r)[:30]
+    ("rows", "layout"),
+    [(ROWS["packed"], "group-1"), (ROWS["right-padded"], "group-2"), (SHORT_DOCUMENT_ROWS, "group-12")],
+    ids=lambda value: str(value)[:30],
 )
-def test_gather_reference_matches_the_tiled_path(layout, rows):
-    heads, kv_heads = layout
+def test_gather_reference_matches_the_tiled_path(rows, layout):
+    heads, kv_heads = GROUPED_LAYOUTS[layout]
     config = tiny_qwen4_exp_text_config(num_attention_heads=heads, num_key_value_heads=kv_heads)
     _, inputs, selection = _selection(config, rows)
     batch, length = inputs.hidden.shape[:2]
@@ -196,7 +213,10 @@ def _resolve(**overrides):
     return resolve_qsa_kernel(**{**arguments, "ratio": 4, **overrides})
 
 
-def test_off_takes_the_tiled_path(monkeypatch):
+def test_off_takes_the_tiled_path_where_the_kernel_can_run(monkeypatch):
+    monkeypatch.setattr(sparse_attention, "qsa_kernel_refusal", lambda *arguments: None)
+    monkeypatch.setenv("HALO_QSA_KERNEL", "auto")
+    assert _resolve() is True
     monkeypatch.setenv("HALO_QSA_KERNEL", "off")
     assert _resolve() is False
 
@@ -262,7 +282,7 @@ def test_every_launch_config_keeps_its_ratio_room():
             assert config.keys >= kernel.MIN_DOT_EXTENT
 
 
-@pytest.mark.parametrize("groups", [1, 2, 3, 12, 16, 17, 128])
+@pytest.mark.parametrize("groups", [1, 16, 17, 128])
 def test_group_tile_fits_the_group_in_a_dot_tile(groups):
     tile = kernel.group_tile(groups)
     assert tile >= max(groups, kernel.MIN_DOT_EXTENT)
@@ -309,6 +329,8 @@ def test_the_dispatcher_keeps_the_tiled_path_when_the_kernel_is_off(monkeypatch)
     config = tiny_qwen4_exp_text_config()
     _, inputs, selection = _selection(config, ROWS["one-document"])
     query, key, value, _ = attention_operands(config, 1, 300, SEED)
+    # Nothing but the mode keeps this call off the kernel.
+    monkeypatch.setattr(sparse_attention, "qsa_kernel_refusal", lambda *arguments: None)
     monkeypatch.setenv("HALO_QSA_KERNEL", "off")
 
     def unreachable(*arguments):

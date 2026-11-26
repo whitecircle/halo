@@ -5,7 +5,10 @@ holds it, and a restarted server gets the base and the adapter again. And every 
 as an adapter is refused with its reason."""
 
 import asyncio
+import re
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,17 +16,23 @@ import requests
 import torch
 from huggingface_hub import constants
 from peft import LoraConfig, get_peft_model
+from peft.tuners.lora.layer import Linear as LoraLinear
+from safetensors.torch import load_file
 from transformers import Qwen3Config, Qwen3ForCausalLM
+from transformers.models.inkling2.configuration_inkling2 import Inkling2TextConfig
+from transformers.models.inkling2.modeling_inkling2 import Inkling2SparseMoeBlock
 
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_REVISION_ATTR
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.environments.episodes.messages import Trajectory
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.rollouts.engine_wire import build_payload
 from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.environments.rollouts.ray_actors import EnvironmentActor, RolloutManager
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.grpo.rollout import adapter_sync
 from halo.trainers.grpo.rollout.adapter_sync import (
-    ADAPTER_NAME_PREFIX,
     AdapterSync,
     build_adapter_requirements,
     reject_unadaptable_config,
@@ -34,12 +43,14 @@ from halo.trainers.grpo.rollout.adapter_sync import (
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements, verify_adapter_servers
 from halo.weight_sync.adapter_routes import AdapterRoutes
 from halo.weight_sync.adapter_servers import AdapterServers
-from halo.weight_sync.adapter_versions import AdapterVersions
+from halo.weight_sync.adapter_versions import ADAPTER_NAME_PREFIX, AdapterVersions
 from halo.weight_sync.clients.base import ServedBase
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.adapter_sync import build_adapter_sync
-from tests.common.fake_engines import FakeSGLangServer
+from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
+from tests.common.parallelism import single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _LORA = {
     "max_lora_rank": 16,
@@ -124,9 +135,10 @@ def base_pushes(monkeypatch, events):
     return pushes
 
 
-def _adapter_sync(model, pool, launch_base=None) -> AdapterSync:
+def _adapter_sync(model, pool, launch_base=None, base_refusal=None, adapter_dir=None) -> AdapterSync:
     routes = AdapterRoutes(SGLangWeightSyncClient.is_adapter_missing)
-    sync = AdapterSync(resolve_adapter_serving(model), AdapterVersions(), routes, launch_base)
+    serving = resolve_adapter_serving(model)
+    sync = AdapterSync(serving, AdapterVersions(), routes, launch_base, base_refusal, adapter_dir)
     sync.servers = pool
     return sync
 
@@ -157,8 +169,22 @@ def test_the_first_sync_pushes_the_base_unfolded_then_loads_the_adapter(sync_of,
 
     assert base_pushes == [False], "the base alone: folding the adapter in would count its delta twice"
     [name] = sync.versions.held() | {sync.versions.current}
-    assert name.startswith(f"{ADAPTER_NAME_PREFIX}-")
+    assert name.startswith(ADAPTER_NAME_PREFIX)
     assert _held_everywhere(fakes) == [[name], [name]]
+
+
+def test_a_version_is_named_halo_adapter_nonce_sequence(sync_of, base_pushes, client_pool):
+    """The form every release has published, so a server holding an older build's version still reads as this
+    toolkit's; the prefix the sweep and the preflight match runs up to the nonce, dash included."""
+    sync, trainer = sync_of
+    names = []
+    for _ in range(2):
+        sync.sync(trainer, client_pool)
+        names.append(sync.versions.current)
+
+    first = re.fullmatch(r"halo-adapter-([0-9a-f]{8})-0", names[0])
+    assert first is not None and names[1] == f"halo-adapter-{first[1]}-1", names
+    assert [name.removeprefix(ADAPTER_NAME_PREFIX) for name in names] == [f"{first[1]}-0", f"{first[1]}-1"]
 
 
 def test_the_wire_adapter_is_the_trainers_with_the_scaling_folded_into_b(sync_of, servers, base_pushes, client_pool):
@@ -451,6 +477,378 @@ def test_a_restarted_server_that_serves_another_base_gets_the_full_push(
     assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
 
 
+_BASE_REFUSAL = "no full push into this family is validated"
+
+
+@pytest.fixture
+def unpushable_sync_of(servers):
+    """A sync whose model's base no engine takes, served from the launch base the fake servers hold."""
+    pool, _ = servers
+    model = _peft_model()
+    return _adapter_sync(model, pool, _LAUNCH_BASE, _BASE_REFUSAL), SimpleNamespace(model=model)
+
+
+def test_an_unpushable_base_is_never_pushed_and_each_sync_loads_the_adapter(
+    unpushable_sync_of, servers, base_pushes, events
+):
+    """No group either: the trainer forms none for a base no push carries, so the sync runs without a pool."""
+    (sync, trainer), (_, fakes) = unpushable_sync_of, servers
+    sync.sync(trainer, None)
+    first = sync.versions.current
+    sync.sync(trainer, None)
+
+    assert base_pushes == [] and events == [], "no push and no reconnect: the servers launched on the base"
+    assert first != sync.versions.current
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+@pytest.mark.parametrize("pushable", [True, False], ids=["pushed-base", "unpushable-base"])
+def test_no_collective_runs_inside_a_rank0_probe(pushable, request, monkeypatch, client_pool, base_pushes):
+    """A probe runs on rank 0 alone: a collective inside it pairs with the other ranks' outer one and desyncs them."""
+    depth = []
+    verdict = adapter_sync.rank0_verdict
+
+    def tracked(probe, what, *args, **kwargs):
+        assert not depth, f"{what!r} is a collective inside a rank-0 probe"
+        depth.append(what)
+        try:
+            return verdict(probe, what, *args, **kwargs)
+        finally:
+            depth.pop()
+
+    monkeypatch.setattr(adapter_sync, "rank0_verdict", tracked)
+    sync, trainer = request.getfixturevalue("sync_of" if pushable else "unpushable_sync_of")
+    pool = client_pool if pushable else None
+    sync.sync(trainer, pool)
+    sync.sync(trainer, pool)
+    sync.recover(pool)
+
+
+@pytest.mark.parametrize("between_syncs", [False, True], ids=["at-the-sync", "between-syncs"])
+def test_an_unpushable_base_gets_its_adapter_back_on_a_restart_onto_the_launch_base(
+    between_syncs, unpushable_sync_of, servers, base_pushes, events
+):
+    (sync, trainer), (_, [kept, restarted]) = unpushable_sync_of, servers
+    sync.sync(trainer, None)
+    restarted.restart()
+
+    if between_syncs:
+        sync.recover(None)
+    else:
+        sync.sync(trainer, None)
+
+    assert base_pushes == []
+    assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
+
+
+@pytest.mark.parametrize("launched_as", [{"model_path": "/models/other"}, {"served_model_name": "org/other"}])
+def test_an_unpushable_base_refuses_a_server_on_another_base(launched_as, unpushable_sync_of, servers, base_pushes):
+    (sync, trainer), (_, [_, foreign]) = unpushable_sync_of, servers
+    for field, value in launched_as.items():
+        setattr(foreign, field, value)
+
+    with pytest.raises(Exception, match=_BASE_REFUSAL) as raised:
+        sync.sync(trainer, None)
+
+    assert foreign.url in str(raised.value) and base_pushes == []
+
+
+@pytest.fixture
+def vllm_unpushable(tmp_path):
+    """Inkling 2's shape: vLLM servers launched on the base, a base no push carries, versions read from a directory."""
+    fakes = [FakeVLLMServer(), FakeVLLMServer()]
+    for fake in fakes:
+        fake.lora = dict(_VLLM_LORA)
+    pool = AdapterServers([fake.url for fake in fakes], client_cls=VLLMWeightSyncClient, connection_timeout=5.0)
+    model = _peft_model()
+    launch_base = ServedBase(model_id="fake-model", path="/models/policy", revision=None)
+    sync = AdapterSync(
+        resolve_adapter_serving(model),
+        AdapterVersions(),
+        AdapterRoutes(VLLMWeightSyncClient.is_adapter_missing),
+        launch_base,
+        _BASE_REFUSAL,
+        str(tmp_path),
+    )
+    sync.servers = pool
+    yield sync, SimpleNamespace(model=model), fakes
+    pool.close()
+    for fake in fakes:
+        fake.close()
+
+
+def test_vllm_servers_load_each_version_from_its_directory_over_a_base_never_pushed(
+    vllm_unpushable, base_pushes, tmp_path
+):
+    sync, trainer, fakes = vllm_unpushable
+    sync.sync(trainer, None)
+    first = sync.versions.current
+    sync.sync(trainer, None)
+    current = sync.versions.current
+
+    assert base_pushes == [] and first != current
+    assert [dict(fake.adapters) for fake in fakes] == [{current: str(tmp_path / current)}] * 2
+    assert (tmp_path / current / "adapter_config.json").is_file() and not (tmp_path / first).exists()
+
+
+def test_a_restarted_vllm_server_on_the_launch_base_gets_the_adapter_back(vllm_unpushable, base_pushes):
+    sync, trainer, [kept, restarted] = vllm_unpushable
+    sync.sync(trainer, None)
+    restarted.restart()
+
+    sync.recover(None)
+
+    assert base_pushes == [] and list(restarted.adapters) == list(kept.adapters) == [sync.versions.current]
+
+
+@pytest.mark.parametrize("launched_as", [{"model_path": "/models/other"}, {"revision": "abc123"}])
+def test_a_vllm_server_on_another_base_is_refused_over_a_base_never_pushed(launched_as, vllm_unpushable, base_pushes):
+    sync, trainer, [_, foreign] = vllm_unpushable
+    for field, value in launched_as.items():
+        setattr(foreign, field, value)
+
+    with pytest.raises(Exception, match=_BASE_REFUSAL) as raised:
+        sync.sync(trainer, None)
+
+    assert foreign.url in str(raised.value) and base_pushes == [] and not foreign.adapters
+
+
+_EXPERTS, _EXPERT_HIDDEN, _EXPERT_WIDTH = 4, 32, 16
+
+
+def _with_expert_lora(model: torch.nn.Module) -> EPInkling2MoELayer:
+    """An Inkling 2 EP layer with native expert LoRA, in place of the first decoder layer's MLP."""
+    torch.manual_seed(1)
+    block = Inkling2SparseMoeBlock(
+        Inkling2TextConfig(
+            hidden_size=_EXPERT_HIDDEN,
+            moe_intermediate_size=_EXPERT_WIDTH,
+            n_routed_experts=_EXPERTS,
+            num_experts_per_tok=2,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=1,
+            vocab_size=32,
+        )
+    ).to(torch.bfloat16)
+    layer = EPInkling2MoELayer(block, single_process_ep_config(_EXPERTS, expert_lora=ExpertLoraSpec(r=8, alpha=24)))
+    for name, param in layer.named_parameters():
+        if "_lora_" in name:
+            torch.nn.init.normal_(param, std=0.05)
+    model.base_model.model.model.layers[0].mlp = layer
+    return layer
+
+
+def test_expert_adapters_reach_the_engine_as_deltas_of_the_w13_and_w2_weights(vllm_unpushable, base_pushes, tmp_path):
+    """The engine adds ``B @ A`` to each expert's ``w13_weight`` (rows alternating gate and up) and ``w2_weight``; the
+    trainer's grouped adapters hold the same delta in matmul convention, gate and up side by side."""
+    sync, trainer, _ = vllm_unpushable
+    layer = _with_expert_lora(trainer.model)
+    scaling = 24 / 8
+
+    sync.sync(trainer, None)
+
+    wire = load_file(str(tmp_path / sync.versions.current / "adapter_model.safetensors"))
+    prefix = "base_model.model.model.layers.0.mlp.experts"
+    assert {key for key in wire if ".experts." in key} == {
+        f"{prefix}.{weight}.lora_{side}.weight" for weight in ("w13_weight", "w2_weight") for side in "AB"
+    }
+    for attr, weight in (("gate_up_proj", "w13_weight"), ("down_proj", "w2_weight")):
+        a, b = (getattr(layer, f"{attr}_lora_{side}").detach().float() for side in "AB")
+        trained = (a @ b).transpose(1, 2) * scaling
+        if attr == "gate_up_proj":
+            gate, up = trained.chunk(2, dim=1)
+            trained = torch.stack((gate, up), dim=2).flatten(1, 2)
+        engine_a, engine_b = (wire[f"{prefix}.{weight}.lora_{side}.weight"].float() for side in "AB")
+        assert trained.abs().max() > 1e-3
+        torch.testing.assert_close(engine_b @ engine_a, trained, rtol=2e-2, atol=1e-3)
+
+
+def _rebound(sync: AdapterSync, fakes) -> AdapterServers:
+    """The servers a second ``train()`` binds after the first one's ``reset()`` closed its own."""
+    sync.servers = AdapterServers(
+        [fake.url for fake in fakes], client_cls=SGLangWeightSyncClient, connection_timeout=5.0
+    )
+    return sync.servers
+
+
+def test_a_second_train_over_an_unpushable_base_retires_the_version_the_first_left(
+    unpushable_sync_of, servers, base_pushes
+):
+    """No base push marks the second run's first sync, and its ``reset()`` forgot the versions it had loaded."""
+    (sync, trainer), (_, fakes) = unpushable_sync_of, servers
+    sync.sync(trainer, None)
+    sync.reset()
+    rebound = _rebound(sync, fakes)
+    try:
+        sync.sync(trainer, None)
+        sync.sync(trainer, None)
+    finally:
+        rebound.close()
+
+    assert base_pushes == []
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+def _published(directory) -> list[str]:
+    return sorted(path.name for path in directory.iterdir())
+
+
+@pytest.mark.parametrize("pushable", [True, False], ids=["pushed-base", "unpushable-base"])
+def test_a_version_directory_leaves_with_its_version(pushable, servers, base_pushes, client_pool, tmp_path):
+    """At a later sync, at a second ``train()`` and for a restarted trainer, whose predecessor's versions it finds on
+    the servers."""
+    pool, fakes = servers
+    model = _peft_model()
+    trainer = SimpleNamespace(model=model)
+    launch = (_LAUNCH_BASE, None if pushable else _BASE_REFUSAL)
+    client_pool = client_pool if pushable else None
+    sync = _adapter_sync(model, pool, *launch, adapter_dir=str(tmp_path))
+
+    sync.sync(trainer, client_pool)
+    first = sync.versions.current
+    assert _published(tmp_path) == [first]
+    assert fakes[0].adapters[first][0]["r"] == 8, "the servers loaded the directory by path"
+    sync.sync(trainer, client_pool)
+    assert _published(tmp_path) == [sync.versions.current] and first != sync.versions.current
+
+    sync.reset()
+    rebound = _rebound(sync, fakes)
+    try:
+        sync.sync(trainer, client_pool)
+        assert _published(tmp_path) == [sync.versions.current]
+
+        successor = _adapter_sync(model, rebound, *launch, adapter_dir=str(tmp_path))
+        successor.sync(trainer, client_pool)
+        assert _published(tmp_path) == [successor.versions.current]
+        assert _held_everywhere(fakes) == [[successor.versions.current]] * 2
+    finally:
+        rebound.close()
+
+
+def test_a_predecessors_version_no_server_lists_leaves_its_directory_at_the_first_sync(
+    servers, base_pushes, client_pool, tmp_path
+):
+    """A trainer that died before retiring its versions, on servers that restarted since: no server lists them, and
+    without the sweep their directories would pile up run after run."""
+    pool, fakes = servers
+    model = _peft_model()
+    (tmp_path / "halo-adapter-0badc0de-7").mkdir()
+    (tmp_path / "someone-elses-adapter").mkdir()
+    sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
+
+    sync.sync(SimpleNamespace(model=model), client_pool)
+
+    assert _published(tmp_path) == sorted(["someone-elses-adapter", sync.versions.current])
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+@pytest.mark.parametrize("published", [False, True], ids=["tensors", "directory"])
+def test_a_base_push_mid_run_keeps_a_leased_version_on_the_server_that_kept_it(
+    published, servers, base_pushes, events, client_pool, tmp_path
+):
+    """A server restarted onto another base takes the base at the next sync, which retires a predecessor's version it
+    came back with. The server that kept its adapters still serves a later turn of an episode leasing the old version,
+    which leaves at the first sync after the episode ends."""
+    pool, [kept, restarted] = servers
+    model = _peft_model()
+    trainer = SimpleNamespace(model=model)
+    sync = _adapter_sync(model, pool, _LAUNCH_BASE, adapter_dir=str(tmp_path) if published else None)
+    manager = _manager_over(sync, [kept, restarted])
+    sync.sync(trainer, client_pool)
+    restarted.restart()
+    restarted.model_path = "/models/other"
+    leftover = "halo-adapter-0badc0de-7"
+    restarted.adapters[leftover] = kept.adapters[sync.versions.current]
+    if published:
+        (tmp_path / leftover).mkdir()
+    events.clear()
+
+    with manager._episode_config() as (config, running):
+        sync.sync(trainer, client_pool)
+
+        assert events == [("reconnect", [restarted.url]), ("push", False)], "a base push in the middle of the run"
+        current = sync.versions.current
+        held_by_kept, held_by_restarted = _held_everywhere([kept, restarted])
+        assert held_by_kept == sorted([running, current]), "the lease is live"
+        assert held_by_restarted == [current], "the predecessor's version leaves with the base push"
+        if published:
+            assert _published(tmp_path) == sorted([running, current]), "the leased version's directory alone stays"
+        later_turn = asyncio.run(manager._play_leased("p0", None, config, running))
+        assert later_turn.error is None and kept.completion_models == [f"{_BASE_MODEL}:{running}"]
+
+    sync.sync(trainer, client_pool)
+
+    assert base_pushes == [False, False]
+    assert _held_everywhere([kept, restarted]) == [[sync.versions.current]] * 2
+    if published:
+        assert _published(tmp_path) == [sync.versions.current]
+
+
+@pytest.fixture(params=["sglang", "vllm"])
+def unsynced(request, tmp_path, base_pushes):
+    """A sync on either engine's fakes that publishes to ``tmp_path`` and has not run yet, and the pool it takes."""
+    if request.param == "vllm":
+        sync, trainer, fakes = request.getfixturevalue("vllm_unpushable")
+        return sync, trainer, fakes, None
+    pool, fakes = request.getfixturevalue("servers")
+    model = _peft_model()
+    sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
+    return sync, SimpleNamespace(model=model), fakes, request.getfixturevalue("client_pool")
+
+
+def test_the_first_sync_leaves_names_that_share_only_the_prefixs_letters(unsynced, tmp_path):
+    """The prefix ends in its dash: ``halo-adapters-*`` and ``halo-adapter_*`` are someone else's."""
+    sync, trainer, fakes, pool = unsynced
+    (tmp_path / "halo-adapters-archive").mkdir()
+    (tmp_path / "halo-adapters-archive" / "kept.txt").write_text("theirs")
+    (tmp_path / "halo-adapter_backup").mkdir()
+    for fake in fakes:
+        fake.adapters["halo-adapters-x"] = ({"r": 8}, {}) if isinstance(fake, FakeSGLangServer) else "/theirs"
+
+    sync.sync(trainer, pool)
+
+    assert _published(tmp_path) == sorted(["halo-adapter_backup", "halo-adapters-archive", sync.versions.current])
+    assert (tmp_path / "halo-adapters-archive" / "kept.txt").read_text() == "theirs"
+    assert _held_everywhere(fakes) == [sorted(["halo-adapters-x", sync.versions.current])] * 2
+
+
+def test_the_first_sync_removes_the_stage_a_killed_trainer_left_and_nothing_else(unsynced, tmp_path):
+    """A trainer killed mid-write runs no handler, so its ``.<version>.<random>`` stage stays; a regular file of that
+    form and a dot-directory of another name are not stages."""
+    sync, trainer, fakes, pool = unsynced
+    stage = Path(tempfile.mkdtemp(prefix=".halo-adapter-0badc0de-7.", dir=tmp_path))
+    (stage / "adapter_model.safetensors").write_bytes(b"cut short")
+    (tmp_path / ".halo-adapter-0badc0de-8.k3j2h1").write_text("a file")
+    (tmp_path / ".someone-elses-adapter.k3j2h1").mkdir()
+    (tmp_path / ".halo-adapters-archive.k3j2h1").mkdir()
+
+    sync.sync(trainer, pool)
+
+    assert _published(tmp_path) == sorted(
+        [
+            ".halo-adapter-0badc0de-8.k3j2h1",
+            ".halo-adapters-archive.k3j2h1",
+            ".someone-elses-adapter.k3j2h1",
+            sync.versions.current,
+        ]
+    )
+    assert _held_everywhere(fakes) == [[sync.versions.current]] * 2
+
+
+def test_a_load_a_server_refuses_leaves_no_directory(servers, base_pushes, client_pool, tmp_path):
+    pool, [_, refusing] = servers
+    refusing.lora["max_lora_rank"] = 4
+    model = _peft_model()
+    sync = _adapter_sync(model, pool, adapter_dir=str(tmp_path))
+
+    with pytest.raises(Exception, match="incompatible with the current LoRA memory pool"):
+        sync.sync(SimpleNamespace(model=model), client_pool)
+
+    assert _published(tmp_path) == []
+    assert sync.versions.current is None
+
+
 def test_a_trainer_base_no_engine_launched_with_is_never_reloaded_at_once(sync_of, servers, base_pushes, client_pool):
     """A from-scratch or vocabulary-grown model has no launch base (``None``), whatever the server reports."""
     (sync, trainer), (_, [_, restarted]) = sync_of, servers
@@ -668,10 +1066,6 @@ def _refusal_cases():
         "grown vocabulary": (grown, "grown vocabulary"),
         "other trainable parameters": (trainable_norm, "trainable parameters other than the adapters"),
         "qlora": (patched(lambda m: m.setattr(adapter_sync, "has_packed_quantized_params", lambda _: True)), "QLoRA"),
-        "expert lora": (
-            patched(lambda m: m.setattr(adapter_sync, "model_has_expert_lora", lambda _: True)),
-            "native expert LoRA",
-        ),
     }
 
 
@@ -719,27 +1113,56 @@ def test_rslora_scales_by_the_square_root_of_the_rank():
     assert resolve_adapter_serving(_peft_model(use_rslora=True)).scaling == pytest.approx(24 / 8**0.5)
 
 
+def test_a_lora_layer_of_another_class_than_pefts_plain_linear_is_refused_on_a_served_name():
+    model = _peft_model()
+    model.base_model.model.model.layers[0].self_attn.q_proj.__class__ = type("OtherLinear", (LoraLinear,), {})
+
+    with pytest.raises(ValueError, match=r"layers\.0\.self_attn\.q_proj' is not one SGLang 0\.5\.22 serves"):
+        reject_unadaptable_model(model, _NO_PARALLELISM, SGLangWeightSyncClient)
+
+
 def _config(**overrides):
-    fields = {"rollout_backend": "sglang", "routing_replay": "none", "model_name": _BASE_MODEL}
+    fields = {
+        "rollout_backend": "sglang",
+        "routing_replay": "none",
+        "model_name": _BASE_MODEL,
+        "rollout_adapter_dir": None,
+    }
     return SimpleNamespace(**{**fields, **overrides})
 
 
+_SHARED_DIR = {"rollout_adapter_dir": "/shared/adapters"}
+_INKLING2_CONFIG = SimpleNamespace(model_type="inkling2")
+_DENSE_CONFIG = SimpleNamespace(model_type="qwen3")
+
+
 @pytest.mark.parametrize(
-    ("overrides", "reason"),
+    ("overrides", "model_config", "reason"),
     [
-        ({"rollout_backend": "vllm"}, VLLMWeightSyncClient.ADAPTER_SYNC_REFUSAL[:30]),
-        ({"routing_replay": "rollout"}, "R3"),
-        ({"model_name": None}, "must be set and hold no colon"),
-        ({"model_name": "org:policy"}, "must be set and hold no colon"),
+        ({"rollout_backend": "vllm", **_SHARED_DIR}, None, "ran over 5% slower than the merged weights"),
+        ({"rollout_backend": "vllm", **_SHARED_DIR}, _DENSE_CONFIG, "ran over 5% slower than the merged weights"),
+        ({"rollout_backend": "vllm"}, _INKLING2_CONFIG, "loads an adapter only from a directory"),
+        ({"routing_replay": "rollout"}, None, "R3"),
+        ({"model_name": None}, None, "must be set and hold no colon"),
+        ({"model_name": "org:policy"}, None, "must be set and hold no colon"),
     ],
 )
-def test_a_config_the_engine_cannot_serve_is_refused(overrides, reason):
+def test_a_config_the_engine_cannot_serve_is_refused(overrides, model_config, reason):
     with pytest.raises(ValueError, match=f"rollout_adapter_sync cannot serve this run.*{reason}"):
-        reject_unadaptable_config(_config(**overrides))
+        reject_unadaptable_config(_config(**overrides), model_config)
 
 
-def test_a_servable_config_passes():
-    reject_unadaptable_config(_config())
+@pytest.mark.parametrize(
+    ("overrides", "model_config"),
+    [
+        ({}, None),
+        (_SHARED_DIR, _DENSE_CONFIG),
+        ({"rollout_backend": "vllm", **_SHARED_DIR}, _INKLING2_CONFIG),
+    ],
+    ids=["sglang-tensors", "sglang-directory", "vllm-inkling2"],
+)
+def test_a_servable_config_passes(overrides, model_config):
+    reject_unadaptable_config(_config(**overrides), model_config)
 
 
 @pytest.mark.parametrize(("prefetch_depth", "active", "live"), [(3, True, 5), (1, True, 3), (3, False, 2)])
@@ -773,8 +1196,114 @@ def test_a_server_launched_without_what_the_adapters_need_is_refused(launch, rea
     fake = FakeSGLangServer()
     try:
         fake.lora = None if launch is None else {**_LORA, **launch}
-        with pytest.raises(ValueError, match=reason):
+        with pytest.raises(ValueError, match=reason) as refusal:
             _verify(fake)
+        assert "SGLANG_LORA_MAX_RANK" in str(refusal.value)
+    finally:
+        fake.close()
+
+
+_VLLM_LORA = {"max_lora_rank": 16, "max_loras": 2, "max_cpu_loras": 4}
+
+
+@pytest.mark.parametrize(
+    ("runtime_routes", "refused"),
+    [
+        pytest.param(False, True, id="False-True0"),
+        ("", True),
+        (True, False),
+        ("1", False),
+        (None, False),
+    ],
+)
+def test_a_vllm_server_without_its_runtime_adapter_routes_is_refused_before_any_load(runtime_routes, refused):
+    """Its load route answers 404, which reads as a directory the server cannot see."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora, fake.runtime_lora_updating = dict(_VLLM_LORA), runtime_routes
+        if refused:
+            with pytest.raises(ValueError, match="VLLM_ALLOW_RUNTIME_LORA_UPDATING=True.*answer 404"):
+                verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+        else:
+            verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+    finally:
+        fake.close()
+
+
+@pytest.mark.parametrize(
+    ("launch", "reason"),
+    [
+        ({"max_cpu_loras": 2}, r"--max-cpu-loras is 2, below the 3 versions"),
+        ({"max_loras": 1}, r"--max-loras is 1, so rounds on two versions"),
+        ({"max_lora_rank": 4}, r"--max-lora-rank is 4, below the run's lora_r 8"),
+    ],
+)
+def test_a_vllm_server_short_of_what_the_adapters_need_is_refused_under_its_own_flags(launch, reason):
+    """The vLLM client reads ``--max-loras`` and ``--max-cpu-loras`` into the fact names SGLang's flags carry."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora, fake.runtime_lora_updating = {**_VLLM_LORA, **launch}, True
+        with pytest.raises(ValueError, match=reason) as refusal:
+            verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
+        assert "VLLM_EXTRA_ARGS" in str(refusal.value) and "SGLANG" not in str(refusal.value)
+    finally:
+        fake.close()
+
+
+@pytest.mark.parametrize(
+    ("held", "refused"),
+    [
+        (["tenant-a", "tenant-b", "tenant-c"], True),
+        (["tenant-a", "tenant-b"], False),
+        ([f"halo-adapter-0badc0de-{i}" for i in range(3)], False),
+        (["halo-adapters-a", "halo-adapters-b", "halo-adapters-c"], True),
+    ],
+    ids=["foreign-eat-a-live-slot", "foreign-leave-room", "a-predecessors-versions", "the-prefixs-letters-alone"],
+)
+def test_adapters_someone_else_loaded_count_against_the_sglang_loaded_limit(held, refused):
+    """Five slots, three live versions: a load past the limit makes SGLang unload what it lists, theirs or a version a
+    round runs under. A predecessor's versions take no slot, since the first sync retires them. The refusal ends with
+    its own remedy, not the launch-flag one, which this server's flags already satisfy."""
+    fake = FakeSGLangServer()
+    try:
+        fake.lora = {**_LORA, "max_loaded_loras": 5}
+        fake.adapters.update(dict.fromkeys(held))
+        if not refused:
+            _verify(fake)
+            return
+        with pytest.raises(
+            ValueError, match=rf"holds 3 adapter\(s\) this toolkit did not load \({re.escape(', '.join(held))}\)"
+        ) as e:
+            _verify(fake)
+        assert str(e.value).endswith(
+            "Unload them (/unload_lora_adapter), raise --max-loaded-loras, or set rollout_adapter_sync: false."
+        )
+        assert "SGLANG_LORA_MAX_RANK" not in str(e.value)
+    finally:
+        fake.close()
+
+
+def test_a_server_already_short_of_the_live_versions_is_refused_for_its_limit_alone():
+    """Adapters someone else loaded ask nothing of it that raising the limit does not."""
+    fake = FakeSGLangServer()
+    try:
+        fake.lora = {**_LORA, "max_loaded_loras": 2}
+        fake.adapters.update(dict.fromkeys(["tenant-a", "tenant-b", "tenant-c"]))
+        with pytest.raises(ValueError, match=r"--max-loaded-loras is 2, below the 3 versions") as e:
+            _verify(fake)
+        assert "this toolkit did not load" not in str(e.value)
+    finally:
+        fake.close()
+
+
+def test_adapters_someone_else_registered_on_vllm_take_no_slot():
+    """vLLM lists every registered adapter, and ``--max-cpu-loras`` sizes a cache it refills from an adapter's directory:
+    theirs cost a reload, never a version."""
+    fake = FakeVLLMServer()
+    try:
+        fake.lora = {**_VLLM_LORA, "max_cpu_loras": 5}
+        fake.adapters.update(dict.fromkeys(["tenant-a", "tenant-b", "tenant-c"]))
+        verify_adapter_servers([fake.url], _NEEDS, backend="vllm", connection_timeout=5.0)
     finally:
         fake.close()
 
@@ -817,6 +1346,118 @@ def test_the_gpu_e2e_builds_its_sync_with_the_class_signature():
     sync = build_adapter_sync(resolve_adapter_serving(_peft_model()), AdapterVersions())
 
     assert isinstance(sync, AdapterSync)
+
+
+_INKLING2_ATTENTION = ("q_proj", "k_proj", "v_proj", "r_proj", "o_proj")
+
+
+def _inkling2_peft(family: str, targets: tuple[str, ...]) -> torch.nn.Module:
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_FAMILIES.get(family) or TINY_MOE_VLM_FAMILIES[family])
+    return get_peft_model(model, LoraConfig(r=8, lora_alpha=16, target_modules=list(targets))).to(torch.bfloat16)
+
+
+@pytest.mark.parametrize("family", ["inkling2_text", "inkling2"])
+def test_inkling2_attention_adapters_reach_the_release_names_vllm_packs(family):
+    """vLLM loads Inkling 2's adapters under the release's names and packs wq_du/wk_dv/wv_dv/wr_du into qkvr."""
+    model = _inkling2_peft(family, _INKLING2_ATTENTION)
+    parallelism = SimpleNamespace(is_tp_mode=False, is_pp_mode=False, is_cp_mode=False)
+    assert adapter_sync._unadaptable_reasons(model, parallelism, VLLMWeightSyncClient) == []
+    state = {name: param for name, param in model.named_parameters() if ".lora_" in name}
+    hub = adapter_sync._hub_adapter_state(model, state)
+    hub = {key: value for key, value in hub.items() if ".visual." not in key}
+    layer0 = {key.split(".attn.")[1].split(".")[0] for key in hub if ".layers.0.attn." in key}
+    assert layer0 == {"wq_du", "wk_dv", "wv_dv", "wr_du", "wo_ud"}
+    assert all(".model.llm.layers." in key for key in hub), "the release's layer path"
+
+
+def test_an_adapted_module_the_hub_layout_fuses_or_splits_is_refused():
+    model = _inkling2_peft("step3p7", ("k_proj",))
+
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, SGLangWeightSyncClient)
+
+    assert any("fused or split in the hub layout" in each for each in reasons), reasons
+
+
+class _ExpertLoraLayer:
+    """An EP layer with native expert LoRA at rank 8 and the given scaling."""
+
+    def __init__(self, scaling: float):
+        self.ep_config = SimpleNamespace(expert_lora=ExpertLoraSpec(r=8, alpha=8 * scaling))
+
+
+@pytest.mark.parametrize(
+    ("family", "client_cls", "scaling", "reason"),
+    [
+        ("inkling2_text", VLLMWeightSyncClient, 2.0, None),
+        ("inkling2_text", VLLMWeightSyncClient, 1.0, "another rank or scaling"),
+        (
+            "inkling2_text",
+            SGLangWeightSyncClient,
+            2.0,
+            f"{SGLangWeightSyncClient.ENGINE_RELEASE} serves no routed-expert adapter",
+        ),
+        ("qwen3_moe", VLLMWeightSyncClient, 2.0, f"{VLLMWeightSyncClient.IMAGE.tag} serves no routed-expert adapter"),
+    ],
+)
+def test_native_expert_lora_is_served_only_where_the_engine_takes_it(family, client_cls, scaling, reason, monkeypatch):
+    """vLLM's Inkling 2 experts take an adapter (with Halo's source patch); one config carries every module's rank. A
+    refusal names the server the model needs, as the module refusal does."""
+    model = _inkling2_peft(family, ("q_proj", "o_proj"))
+    monkeypatch.setattr(adapter_sync, "expert_lora_layers", lambda _: [("mlp", _ExpertLoraLayer(scaling))])
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
+    if reason is None:
+        assert reasons == []
+    else:
+        assert any(reason in each for each in reasons), reasons
+
+
+@pytest.mark.parametrize(
+    ("family", "client_cls", "server"),
+    [
+        ("inkling2_text", VLLMWeightSyncClient, VLLMWeightSyncClient.INKLING2_IMAGE.tag),
+        ("qwen3_moe", VLLMWeightSyncClient, VLLMWeightSyncClient.IMAGE.tag),
+        ("inkling2_text", SGLangWeightSyncClient, SGLangWeightSyncClient.ENGINE_RELEASE),
+    ],
+    ids=["inkling2-vllm", "qwen3_moe-vllm", "inkling2-sglang"],
+)
+def test_an_unservable_adapted_module_names_the_server_the_model_needs(family, client_cls, server, monkeypatch):
+    """vLLM serves Inkling 2 from its own tag, so the refusal names that tag, not the release every other family
+    runs on."""
+    model = _inkling2_peft(family, ("q_proj",))
+    monkeypatch.setattr(adapter_sync, "_adapted_modules", lambda _: {"layers.0.mlp.gate": torch.nn.Linear(2, 2)})
+    reasons = adapter_sync._unadaptable_reasons(model, _NO_PARALLELISM, client_cls)
+    assert any(f"is not one {server} serves" in each for each in reasons), reasons
+
+
+def test_expert_adapters_reach_vllm_per_expert_with_gate_and_up_interleaved():
+    """Halo's grouped ``[E, in, r]`` / ``[E, r, out]`` adapters become vLLM's ``[E, r, in]`` / ``[E, out, r]`` on
+    ``w13_weight`` / ``w2_weight`` under the release's layer path, the w13 B rows alternating gate and up."""
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES["inkling2"])
+    layer = next(name for name, _ in model.named_modules() if name.endswith("layers.0.mlp"))
+    experts, hidden, width, rank = 4, 8, 6, 2
+    gate_up_a, gate_up_b = torch.randn(experts, hidden, rank), torch.randn(experts, rank, 2 * width)
+    down_a, down_b = torch.randn(experts, width, rank), torch.randn(experts, rank, hidden)
+    gathered = {
+        f"{layer}.experts.gate_up_proj.lora_A": gate_up_a,
+        f"{layer}.experts.gate_up_proj.lora_B": gate_up_b,
+        f"{layer}.experts.down_proj.lora_A": down_a,
+        f"{layer}.experts.down_proj.lora_B": down_b,
+    }
+
+    engine = adapter_sync._engine_expert_adapters(model, gathered)
+
+    prefix = f"{PEFT_BASE_MODEL_PREFIX}model.llm.layers.0.mlp.experts"
+    assert engine.keys() == {
+        f"{prefix}.{weight}.lora_{side}.weight" for weight in ("w13_weight", "w2_weight") for side in "AB"
+    }
+    assert torch.equal(engine[f"{prefix}.w13_weight.lora_A.weight"], gate_up_a.transpose(1, 2))
+    assert torch.equal(engine[f"{prefix}.w2_weight.lora_A.weight"], down_a.transpose(1, 2))
+    assert torch.equal(engine[f"{prefix}.w2_weight.lora_B.weight"], down_b.transpose(1, 2))
+    # The engine's w13 delta, rows (g0, u0, g1, u1, ...), against the layer's [gate | up] one.
+    delta = engine[f"{prefix}.w13_weight.lora_B.weight"][1] @ engine[f"{prefix}.w13_weight.lora_A.weight"][1]
+    halo_delta = (gate_up_a[1] @ gate_up_b[1]).T
+    assert torch.allclose(delta[0::2], halo_delta[:width]) and torch.allclose(delta[1::2], halo_delta[width:])
 
 
 if __name__ == "__main__":

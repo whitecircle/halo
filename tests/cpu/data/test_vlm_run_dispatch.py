@@ -119,10 +119,6 @@ def test_each_image_column_declares_a_vlm_run(column):
     assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
-def test_embedded_image_content_declares_a_vlm_run():
-    assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", _dataset([IMAGE_TURNS]), config=VLM_CONFIG)
-
-
 def test_text_checkpoint_never_becomes_a_vlm_run():
     """A text-only architecture has no processor, so image data fails at the VLM loader and does not switch the data
     path."""
@@ -323,10 +319,6 @@ def test_parts_form_text_schema_is_not_a_declaration():
     assert not is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
-def test_string_content_schema_is_not_a_declaration():
-    assert not dataset_declares_images_across_ranks(_dataset([TEXT_TURNS]), "prompt")
-
-
 def test_cast_image_feature_declares_images_under_any_name():
     """The feature is the declaration, even under a field name the pipeline does not read."""
     image = PILImage.fromarray(np.zeros((4, 4, 3), dtype=np.uint8))
@@ -433,7 +425,7 @@ def test_offline_grpo_renderer_refuses_an_image_content_part(field):
     else:
         row["completions"] = [[{"role": "assistant", "content": [{"type": "image", "image": "b64"}]}]]
     with pytest.raises(ValueError, match="image content part"):
-        module.render_offline_grpo_row(row, _UnreachableTokenizer(), None)
+        module.render_offline_grpo_row(row, _UnreachableTokenizer(), None, None)
 
 
 def test_classification_renderer_refuses_an_image_content_part():

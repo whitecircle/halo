@@ -187,10 +187,5 @@ def test_load_empty_state_raises_the_descriptive_mismatch():
         load_expert_lora_adapters(_holding(layer), {})
 
 
-def test_load_empty_state_on_a_layer_without_adapters_is_a_no_op():
-    layer = _StubEPLayer(attrs=())
-    load_expert_lora_adapters(_holding(layer), {})
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -29,7 +29,7 @@ HF_HOME=$D/hf python scripts/before_training/convert_glm5_bf16.py \
 
 Budget ~330 GB download cache + ~650 GB output; the conversion streams shard-by-shard, so host RAM stays bounded by `--max_shard_size`. Unquantized tensors keep their stored dtype, and the emitted `config.json` drops its `quantization_config`.
 
-The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict` (`e_score_correction_bias`, `conv1d`, `dt_bias`, `A_log`); the `hc_*` tensors are not among them. Every training loader casts the pinned parameters to the run dtype unless `fp32_non_ep_params` keeps them as fp32 masters ([Load precision](README.md#load-precision)), while the `e_score_correction_bias` buffer stays fp32, and every toolkit save keeps each at its trained dtype (`save_dtype_caster`).
+The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict`: `e_score_correction_bias`, `conv1d`, `dt_bias`, `A_log`, and each hyper-connection's `base` and `scale` (`attn_hc.*` and `ffn_hc.*`, the hub's `hc_attn_*` and `hc_ffn_*`). The hyper-connections' `fn` matrices are not among them. Every training loader casts the pinned parameters to the run dtype unless `fp32_non_ep_params` keeps them as fp32 masters ([Load precision](README.md#load-precision)), while the `e_score_correction_bias` buffer stays fp32, and every toolkit save keeps each at its trained dtype (`save_dtype_caster`).
 
 ## Model loading
 
@@ -62,7 +62,7 @@ SGLang's hyper-connection path reads `hc_attn_fn`/`hc_ffn_fn` live on every forw
 
 Serving flags for the two engines (set through `SGLANG_EXTRA_ARGS` / `VLLM_EXTRA_ARGS` in [Rollout Servers](../infrastructure/rollout-servers.md)):
 
-- **SGLang: `--mamba-track-interval 1024`.** The checkpoint's `index_kpool` of 16 makes the engine's DSA page 64 x 16 = 1,024 tokens, and the hybrid-linear radix cache the family resolves to (`extra_buffer`) asserts that `mamba_track_interval` (default 256) is a multiple of the page size, so a launch without the flag exits at argument resolution. Any multiple of 1,024 passes.
+- **SGLang: `--mamba-track-interval 1024`** (for an `index_kpool` of 8 or 16). The engine's DSA page is 64 x `index_kpool` tokens, and the hybrid-linear radix cache the family resolves to (`extra_buffer`) asserts that `mamba_track_interval` (default 256) is a multiple of the page size, so such a launch without the flag exits at argument resolution. The release's `index_kpool` of 4 makes a 256-token page, which the default tiles; transformers' default of 16, which the tiny `--write-checkpoint` checkpoint keeps, makes it 1,024, the flag's value. A larger `index_kpool` needs a multiple of its own page (2,048 tokens at 32).
 - **SGLang: `--skip-server-warmup` (optional).** For any model it advertises as image-capable, the server's startup warmup is a chat request with a 32x32 PNG, so a text-only launch still runs the vision tower once; a vision config the engine cannot run kills the scheduler there, in the prefill graph path. The tiny checkpoint's vision tower carries the release's patch, merge, image and head sizes, so the warmup passes; the flag skips it for a checkpoint whose tower is not release-sized.
 - **vLLM: `--limit-mm-per-prompt.image 0 --limit-mm-per-prompt.video 0`** (optional; the same as `--limit-mm-per-prompt '{"image":0,"video":0}'`). RL feeds the text tower only, and the flag skips the vision-encoder profiling, which fails on a vision tower whose patch size differs from the 14 px the processor cuts (`shape '[32000, -1, 2, 4, 4]'`).
 
@@ -72,13 +72,17 @@ The router carries a native fp32 `e_score_correction_bias` buffer — GLM-4's ex
 
 ## Attention
 
-Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel the toolkit keeps on `num_warps=2` ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
+Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself). The KDA layers run their own linear-attention kernels regardless of the backend choice, and their autotune picks can move a run's logits across fresh caches ([Docker](../infrastructure/docker.md#baked-in-environment-variables)); they reach `fla` through the hub-kernel funnel the toolkit repairs, and on Blackwell share the delta-rule state kernel, which fla autotunes only over its `num_warps=2` configs there ([Qwen3.5 → Linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) — without the repair the funnel silently captures the torch scan.
 
 The 11 DSA layers keep `config._attn_implementation == "sdpa"` and its boolean `[B, 1, S, S]` mask, but on Blackwell the `sdpa` slot of `modeling_glm5_next` holds `masked_matmul_attention` (`halo/models/attention/masked_matmul.py`, [how it works](../optimization/flash-attention.md#masked-matmul-attention)). Any call it does not serve goes to the library's SDPA. `HALO_DSA_MATMUL` defaults off on other GPUs, and `0` keeps stock SDPA throughout. A [tree](#tree-packing) forward carrying a plan attends in its own forward and never reaches this slot.
 
-A DSA query reads about 1,800 to 1,900 keys, at most 2,051, under a mask as wide as the row. Torch's mem-efficient kernel is a general one: it scores every key of the row, and its backward costs about 7.5× its forward. The matmul kernel runs a forward, its recompute and a backward 4.95× faster at 8k and 5.13× at 16k ([numbers](../optimization/flash-attention.md#masked-matmul-attention)).
+A DSA query reads about 1,900 keys, at most 2,051, under a mask as wide as the row. Torch's mem-efficient kernel is a general one: it scores every key of the row, and its backward costs about 7.4× its forward. The matmul kernel runs a forward, its recompute and a backward 4.95× faster at 8k and 5.13× at 16k ([numbers](../optimization/flash-attention.md#masked-matmul-attention)).
 
 On a 7-layer cut at `ep1` and 32,752 tokens, the per-token gap to an fp32 reference reads 0.0195 with both kernels on and 0.0232 with neither, and top-k disagreement 1.00% against 1.34%. With hyper-connection kernels off, the DSA kernel's forward is bit-identical to SDPA's.
+
+On a padded batch the DSA indexer scores a bounded number of one row's queries per call (`patch_glm5_next_indexer`, `halo/models/attention/dsa_indexer.py`). Upstream scores every query against every key pool at once. At the release's 32 indexer heads and 4-token pools that is three `[B, S, 32, S / 4]` score tensors: 96 bytes a squared token in fp32, as an SFT step runs them (no autocast), and 48 in bf16 under bf16 autocast. Past one row it also broadcasts the pool keys across the queries, 128 more bytes a squared token in fp32. Under bf16 autocast a B300 measured upstream's peak at 12.4 GiB at 16,384 tokens and four times that at 32,768, against 3.0 and 10.4 GiB chunked.
+
+The chunked selection returns upstream's keys bit for bit. `tests/cpu/models/test_glm5_next_dsa_indexer.py` pins it on CPU for one-row, right-padded and left-padded batches on a shrunk indexer (8 heads, `index_topk` 8, `index_kpool` 4); at the release's sizes (32 heads, `index_topk` 2,048) one check on one row on a B300 matched, and no test pins it. What is left grows with the square of the row as well: upstream's visibility mask and its tail count, 9 bytes a squared token, then 5 in the mask the attention reads. A forward with a cache keeps upstream's indexer.
 
 ## Throughput
 
@@ -92,6 +96,7 @@ Both kernels on, with torch's general kernel and upstream's hyper-connections in
 | | `pp2 × ep8`, 8,192 | 2,423 (about 1,060) | 12.82 (29.29) | 218.0–218.7 / 197.5–197.9 |
 
 - The PP rate counts attended tokens ([how a PP rate is counted](../parallelism/pipeline-parallelism.md#measured-throughput)). PP leads `ep16` by 1.61×, 1.16× on the general kernels.
+- A LoRA run at `ep8` with r=64 on every adaptable linear, `fsdp_reshard_after_backward: false`, `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` and one row a GPU fits rows of 32,760 tokens: it peaks at 243 GiB of 267.7 there and runs 1,561 tok/s/GPU. The default allocator runs out of memory at that length. Its micro-steps hold rows of one length on every rank, since a micro-step runs at its longest row.
 - `ep8` with DP runs out of memory in the first optimizer step, about 3 minutes in, since no gate refuses it first. At 40.2B trainable per rank, AdamWBF16's state takes the allocation to 243–250 GiB of 267.7.
 - The LoRA rows are long real-text rows averaging about 7,760 and 15,520 tokens, rendered with `glm-chat.jinja`. The shipped recipe reads `ultrachat_200k` at about 1,140 tokens a row under `glm5-chat.jinja`; it ran 5 steps on a cold cache with no steady rate to read, and its loss and rate do not compare with these rows.
 - Raising `max_length` still costs tok/s, 16% from 8k to 16k against 30% on the general kernels: a query's keys are capped at 2,051, while each tile's forward still scores its crop up to its last selected key.
@@ -131,5 +136,9 @@ assistant_message_template: "<|assistant|>"
 `merge_expert_lora_on_save` takes about 8 minutes and 612 GiB on disk. It renders with
 `glm5-chat.jinja`, GLM-5's own non-thinking turn ([Tree packing](#tree-packing)); GLM-4's `glm-chat.jinja`
 writes a lone `</think>` GLM-5 never does.
+
+Tool-use data renders with the hub template (leave `chat_template` unset, `assistant_message_template: "<|assistant|>"`):
+it keeps the `Reasoning Effort` line and each turn's `<think>` block as served, its generation prompt is the engines'
+own, and the row maps close the last assistant turn it leaves open ([Collators](../data/collators.md#eos-pad-and-the-response-template)).
 
 The config points `model_name_or_path` at the BF16 conversion output above. Full fine-tuning takes two 8-GPU machines ([rates](#throughput)), through `pp2 × ep8` on padded rows or cross-node EP (`ep_scope: global`, e.g. EP=16 across 2×8), where the Gin dispatch ceiling caps `per_device_train_batch_size × max_length` at 8192 tokens/rank ([DeepEP](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)).

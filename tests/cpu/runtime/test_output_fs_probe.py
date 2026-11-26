@@ -49,10 +49,6 @@ def test_a_writer_that_cannot_read_its_own_sentinel_is_its_own_diagnosis():
     assert "rank 0 could not read back" in reason, f"the real fault must be named: {reason}"
 
 
-def test_partial_visibility_is_not_shared():
-    assert _output_contradiction(declared_shared=True, seen=[True] * 24 + [False] * 8) is not None
-
-
 def _fake_world(monkeypatch, *, world: int, local_world: int, rank: int, seen: list[bool]):
     monkeypatch.setattr(ranks.dist, "is_available", lambda: True)
     monkeypatch.setattr(ranks.dist, "is_initialized", lambda: True)

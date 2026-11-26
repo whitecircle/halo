@@ -67,6 +67,7 @@ rollout_max_tokens: 8192
 # rollout_max_thinking_tokens: null   # per-turn reasoning-token cap for every level; vLLM only (else rollout_max_tokens less rollout_max_answer_tokens)
 # rollout_max_episode_tokens: null    # the most an episode may sample over all its turns, reasoning and visible output together
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
+# rollout_thinking: true              # false: no reasoning block per turn (needs a template that reads enable_thinking)
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
 # max_train_row_tokens: null          # longest training row a rank takes; null = no cap beyond the context check
