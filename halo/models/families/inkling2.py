@@ -1,6 +1,6 @@
 """Inkling 2's patched forwards: the router at the run dtype, the compact relative logits
-``inkling2_relative_flex`` reads, short convolutions whose taps stop at the start of each packed document, and the block
-attention residual as plain matmuls."""
+``inkling2_relative_flex`` reads (with no dense relative distances behind them), short convolutions whose taps stop at
+the start of each packed document, and the block attention residual as plain matmuls."""
 
 from __future__ import annotations
 
@@ -14,11 +14,12 @@ import transformers.models.inkling2.modeling_inkling2 as inkling2_modeling
 from halo.models.attention.inkling2_relative_flex import INKLING2_RELATIVE_FLEX
 from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.segment_markers import positions_restart
-from halo.models.upstream.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import takes_legacy_cache_names, verify_upstream_parameters
 
 # ``Inkling2TopKRouter``'s renormalization floor.
 _TOPK_WEIGHT_NORM_EPS = 1e-20
 # Kept for the parity tests: this module is the only one that replaces them.
+UPSTREAM_GET_RELATIVE_DISTANCE = inkling2_modeling.get_relative_distance
 UPSTREAM_RELATIVE_POSITION_BIAS_FORWARD = inkling2_modeling.Inkling2RelativePositionBias.forward
 UPSTREAM_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2ShortConvolution.forward
 UPSTREAM_DYNAMIC_SHORT_CONVOLUTION_FORWARD = inkling2_modeling.Inkling2DynamicShortConvolution.forward
@@ -58,12 +59,26 @@ def _block_attention_residual_forward(self, block_states, partial_block_states):
     return (weights.transpose(-1, -2) @ stacked_states).unbind(-2)
 
 
+def _get_relative_distance(inputs_embeds, cache, is_sliding):
+    """Without a cache, every layer's distance is ``arange(q)[:, None] - arange(q)[None, :]``, which the model builds
+    as two dense int64 ``[q_len, q_len]`` matrices held through the decoder loop (16 GiB at 32,768 tokens) while
+    ``inkling2_relative_flex`` reads only their shape. Here it is a zero-stride view of that shape, and the eager bias
+    rebuilds the values for its own layer."""
+    if cache is not None:
+        return UPSTREAM_GET_RELATIVE_DISTANCE(inputs_embeds, cache, is_sliding)
+    q_len = inputs_embeds.shape[1]
+    return torch.zeros((), dtype=torch.long, device=inputs_embeds.device).expand(q_len, q_len)
+
+
 def _relative_position_bias_forward(self, hidden_states, relative_distance, position_ids):
     """Under ``inkling2_relative_flex``, the ``[batch, heads, q_len, rel_extent]`` logits in place of the dense
     ``[batch, heads, q_len, kv_len]`` bias the eager path adds."""
     # A KV-cache decode step has fewer queries than keys and runs the eager attention.
     q_len, kv_len = relative_distance.shape[-2:]
     if not getattr(self, "emits_compact_logits", False) or q_len != kv_len:
+        if relative_distance.stride() == (0, 0):  # _get_relative_distance's stand-in for an uncached forward
+            positions = torch.arange(q_len, device=relative_distance.device)
+            relative_distance = positions[:, None] - positions[None, :]
         return UPSTREAM_RELATIVE_POSITION_BIAS_FORWARD(self, hidden_states, relative_distance, position_ids)
     relative_states = self.linear(hidden_states).view(*hidden_states.shape[:-1], self.num_heads, -1)
     relative_states = self.norm(relative_states, position_ids)
@@ -76,6 +91,7 @@ def _decoder_layer_forward(upstream):
     short convolution the ``position_ids`` of a full-sequence forward (None under a KV cache). Set per layer call, so
     a gradient-checkpoint recompute, which calls the layer again, sets it too."""
 
+    @takes_legacy_cache_names
     @functools.wraps(upstream)
     def forward(self, *args, **kwargs):
         attention = self.self_attn
@@ -147,6 +163,7 @@ def _layer_crossing_taps(convolution, hidden_states: torch.Tensor) -> tuple[tupl
     return taps
 
 
+@takes_legacy_cache_names
 def _short_convolution_forward(
     self, hidden_states, dynamic_input=None, cache=None, conv_mask=None, cache_offset=0, **kwargs
 ):
@@ -170,6 +187,7 @@ def _short_convolution_forward(
     return out.to(input_dtype)
 
 
+@takes_legacy_cache_names
 def _dynamic_short_convolution_forward(
     self, hidden_states, dynamic_input, cache=None, conv_mask=None, cache_offset=0, **kwargs
 ):
@@ -206,6 +224,9 @@ def apply_inkling2_patches() -> None:
         return
     verify_upstream_parameters(router.forward, ("self", "hidden_states"), "_router_forward")
     verify_upstream_parameters(
+        UPSTREAM_GET_RELATIVE_DISTANCE, ("inputs_embeds", "cache", "is_sliding"), "_get_relative_distance"
+    )
+    verify_upstream_parameters(
         UPSTREAM_RELATIVE_POSITION_BIAS_FORWARD,
         ("self", "hidden_states", "relative_distance", "position_ids"),
         "_relative_position_bias_forward",
@@ -223,6 +244,7 @@ def apply_inkling2_patches() -> None:
         "_block_attention_residual_forward",
     )
     patch_layer_forward(router, _router_forward)
+    inkling2_modeling.get_relative_distance = _get_relative_distance
     patch_layer_forward(inkling2_modeling.Inkling2BlockAttentionResidual, _block_attention_residual_forward)
     patch_layer_forward(inkling2_modeling.Inkling2RelativePositionBias, _relative_position_bias_forward)
     patch_layer_forward(inkling2_modeling.Inkling2ShortConvolution, _short_convolution_forward)

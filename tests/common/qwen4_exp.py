@@ -97,7 +97,8 @@ def transformers_forwards():
     for cls, forward in installed.items():
         # A checkpointing layer's replacement sits inside transformers' checkpoint wrapper.
         replacement = forward.__wrapped__ if issubclass(cls, GradientCheckpointingLayer) else forward
-        cls.forward = replacement.__wrapped__
+        # Past the legacy cache-name alias, then the document forward.
+        cls.forward = replacement.__wrapped__.__wrapped__
     try:
         yield
     finally:

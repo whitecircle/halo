@@ -32,7 +32,7 @@ from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped
 from halo.models.kernel_warmups import register_kernel_warmup
 from halo.models.segment_markers import document_starts
-from halo.models.upstream.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import takes_legacy_cache_names, verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -113,6 +113,7 @@ def patch_qwen4_exp_ngram_embedding() -> None:
             stock.num_embeddings, stock.embedding_dim, part_count, stock.weight.dtype
         )
 
+    @takes_legacy_cache_names
     @functools.wraps(original_forward)
     def forward(self, input_ids, cache):
         if not isinstance(self.ngram_embedding, HostNGramTable):
@@ -288,6 +289,7 @@ def patch_qwen4_exp_document_forwards() -> None:
     )
     original_model, original_layer, original_attention = model_cls.forward, layer_cls.forward, attention_cls.forward
 
+    @takes_legacy_cache_names
     @functools.wraps(original_model)
     def model_forward(
         self,
@@ -320,6 +322,7 @@ def patch_qwen4_exp_document_forwards() -> None:
             **kwargs,
         )
 
+    @takes_legacy_cache_names
     @functools.wraps(original_layer)
     def layer_forward(
         self,
@@ -347,6 +350,7 @@ def patch_qwen4_exp_document_forwards() -> None:
             self, hidden_states, position_embeddings, attention_mask, conv_mask, ple_input_ids, **kwargs
         )
 
+    @takes_legacy_cache_names
     @functools.wraps(original_attention)
     def attention_forward(self, hidden_states, position_embeddings, attention_mask, cache=None, **kwargs):
         if not _is_document_call(attention_mask, cache):

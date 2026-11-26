@@ -146,6 +146,13 @@ def test_a_config_attention_dropout_refuses_a_kernel_that_drops_it(label):
         _resolve(_config("llama", attention_dropout=0.1), label)
 
 
+@pytest.mark.parametrize("label", [FA3, FA4])
+def test_gpt_j_attn_pdrop_refuses_a_kernel_that_drops_it(label):
+    """GPT-J keeps its attention dropout as ``attn_pdrop`` and reaches FA3 and FA4 since transformers 5.24."""
+    with _on("blackwell"), pytest.raises(ValueError, match="takes no attention dropout.*attn_pdrop=0.1"):
+        _resolve(_config("gptj", attn_pdrop=0.1), label)
+
+
 def test_a_config_attention_dropout_refuses_an_unset_pick_of_such_a_kernel():
     with _on("blackwell"), pytest.raises(ValueError, match="takes no attention dropout"):
         _resolve(_config("llama", attention_dropout=0.1), None)

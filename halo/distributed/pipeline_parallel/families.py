@@ -16,6 +16,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast, MoeModelOutpu
 from halo.models.families.qwen4_exp.forwards import document_forwards_installed, document_padding_mask
 from halo.models.introspection.config_access import text_config
 from halo.models.introspection.module_tree import find_attr_name
+from halo.models.upstream.upstream_guard import takes_legacy_cache_names
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ def _stream_prologue(
     return hidden_states, embeds_ref, position_ids, cache
 
 
+@takes_legacy_cache_names
 def deepseek_v4_stream_forward(
     self,
     input_ids: torch.LongTensor | None = None,
@@ -126,6 +128,7 @@ def deepseek_v4_stream_forward(
     return MoeModelOutputWithPast(last_hidden_state=hidden_states, cache=cache)
 
 
+@takes_legacy_cache_names
 def glm5_next_stream_forward(
     self,
     input_ids: torch.LongTensor | None = None,
@@ -177,6 +180,7 @@ def glm5_next_stream_forward(
     return MoeModelOutputWithPast(last_hidden_state=hidden_states, cache=cache)
 
 
+@takes_legacy_cache_names
 def qwen4_exp_stream_forward(
     self,
     input_ids: torch.LongTensor | None = None,
