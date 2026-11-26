@@ -31,6 +31,7 @@ from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, 
 from halo.environments.tools.toolsets import build_math_tools
 from halo.inference.response import FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.rewards.scorers import whitecircle
 from tests.common.repo import REPO_ROOT
 
 
@@ -185,6 +186,76 @@ async def test_rollout_manager_start_shutdown():
         ray.shutdown()
 
 
+async def test_a_node_without_a_scorers_key_fails_the_pool_start(monkeypatch):
+    """Built in the first settlement instead, the scorer would raise in every one, each losing its episode as an error
+    row while the other nodes' episodes train."""
+    monkeypatch.delenv(whitecircle.API_KEY_VARIABLE, raising=False)
+    if ray.is_initialized():
+        ray.shutdown()
+    # Started after the delenv, the local raylet's workers lack the key, as on a node where it was never exported.
+    ray.init(**ray_init_kwargs(num_cpus=2))
+    try:
+        manager = RolloutManager(
+            num_workers=2,
+            env_type="react_math",
+            env_config={"max_turns": 3, "reward_terms": [{"source": "whitecircle", "environment_id": "env_test"}]},
+            server_urls=["http://localhost:8000"],
+            rollout_config=RolloutConfig(),
+            max_concurrent_rollouts=2,
+        )
+        with pytest.raises(RuntimeError, match=f"no API key — set {whitecircle.API_KEY_VARIABLE}"):
+            await manager.start()
+        await manager.shutdown()
+    finally:
+        ray.shutdown()
+
+
+class _NeverBuiltActor:
+    """The actor class of a pool whose environments never finish building."""
+
+    @classmethod
+    def options(cls, **_):
+        return cls
+
+    @classmethod
+    def remote(cls, *_):
+        return cls()
+
+    @property
+    def build_scorers(self):
+        return SimpleNamespace(remote=asyncio.get_running_loop().create_future)
+
+    @property
+    def shutdown(self):
+        async def stopped():
+            return None
+
+        return SimpleNamespace(remote=stopped)
+
+
+async def test_a_pool_whose_actors_never_build_fails_its_start_at_the_episode_deadline(monkeypatch):
+    """Unbounded, the start would hold rank 0 while its peers wait in the next collective."""
+    monkeypatch.setattr(ray_actors, "EnvironmentActor", _NeverBuiltActor)
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(**ray_init_kwargs(num_cpus=2))
+    try:
+        manager = RolloutManager(
+            num_workers=2,
+            env_type="react_math",
+            env_config={},
+            server_urls=["http://localhost:8000"],
+            rollout_config=RolloutConfig(episode_timeout=0.5),
+            max_concurrent_rollouts=2,
+        )
+        with pytest.raises(RuntimeError, match="did not build their environments within episode_timeout=0.5s"):
+            # Bounded here as well: a start with no deadline would hang this test, not fail it.
+            await asyncio.wait_for(manager.start(), 60)
+        await manager.shutdown()
+    finally:
+        ray.shutdown()
+
+
 class _Spawner:
     """Stands in for a ``@ray.remote`` class: records each spawn with the scheduling strategy it was placed under."""
 
@@ -196,7 +267,7 @@ class _Spawner:
 
     def remote(self, *args):
         self.spawned.append((self.name, self.strategy))
-        return SimpleNamespace()
+        return SimpleNamespace(build_scorers=SimpleNamespace(remote=lambda: asyncio.sleep(0)))
 
 
 async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(monkeypatch):

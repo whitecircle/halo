@@ -215,8 +215,8 @@ def test_composer_scores_external_terms_per_sample(fake_scorers):
     assert [sorted(v) for v in verdicts] == [["pref", "quality"], ["pref", "quality"]]
     assert verdicts[0]["quality"].score == 0.5 and verdicts[1]["pref"].score is None
     asyncio.run(monkeypatched.verify())
-    assert all(scorer.verified == 1 for scorer in monkeypatched.scorers.values())
-    scorers = list(monkeypatched.scorers.values())
+    scorers = list(monkeypatched.build_scorers().values())
+    assert all(scorer.verified == 1 for scorer in scorers)
     asyncio.run(monkeypatched.aclose())
     assert all(scorer.closed for scorer in scorers) and monkeypatched._scorers is None
 
@@ -224,7 +224,7 @@ def test_composer_scores_external_terms_per_sample(fake_scorers):
 def test_composer_without_external_terms_builds_no_scorer():
     composer = RewardComposer((EnvironmentTerm(),))
     assert asyncio.run(composer.score([ScoringSample(prompt=[], completion=[])])) == [{}]
-    assert composer.scorers == {} and composer.external_terms == ()
+    assert composer.build_scorers() == {} and composer.external_terms == ()
 
 
 def test_composer_construction_refuses_an_ungated_veto_judge_and_an_unscored_term():

@@ -10,7 +10,7 @@ import logging
 import httpx
 import pytest
 
-from halo.entrypoints.offline_reward_scoring import build_reward_functions, score_rows
+from halo.entrypoints.offline_reward_scoring import build_reward_functions, run_offline_reward_scoring, score_rows
 from halo.rewards.composer import build_scorer
 from halo.rewards.graders.verifiable import RLVR_REWARD_SOURCES
 from halo.rewards.samples import ScoringSample
@@ -591,6 +591,24 @@ def test_offline_rewards_match_the_online_terms(server, tmp_path):
         values = asyncio.run(values) if asyncio.iscoroutine(values) else values
         online[function.__name__] = [weight * value for value in values]
     assert [sum(pair) for pair in zip(*online.values(), strict=True)] == scored["rewards"]
+
+
+def test_offline_accuracy_without_an_answer_field_is_refused_before_any_request_or_write(server, tmp_path):
+    config = tmp_path / "rewards.yaml"
+    config.write_text(
+        "rewards:\n  - source: accuracy\n  - {source: whitecircle, name: policy, environment_id: env_test}\n"
+    )
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps({"prompt": "2+2?", "completions": ["\\boxed{4}"], "answer": "4"}) + "\n")
+    output = tmp_path / "scored.jsonl"
+    output.write_text("an earlier run's rows\n")
+    requests = server()
+
+    with pytest.raises(ValueError, match="no --answer_field names the row field"):
+        asyncio.run(run_offline_reward_scoring(config, rows, output, answer_field=None))
+
+    assert requests == [], "the probe ran before the refusal"
+    assert output.read_text() == "an earlier run's rows\n", "the output was truncated before the refusal"
 
 
 if __name__ == "__main__":

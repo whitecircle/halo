@@ -213,7 +213,8 @@ def ray_init_kwargs(**overrides) -> dict:
 # Stateless between episodes; a permanent gap in the round-robin would mask every episode routed to the dead actor.
 @ray.remote(max_restarts=-1)
 class EnvironmentActor:
-    """Plays episodes against a rollout server; its env, HTTP session and tool schema are built on first use."""
+    """Plays episodes against a rollout server. The pool's start builds its env and reward scorers (a restarted
+    actor builds them on first use); its HTTP session and tool schema are built on first use."""
 
     def __init__(
         self,
@@ -237,6 +238,11 @@ class EnvironmentActor:
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
         return self._env.get_tools_schema()
+
+    async def build_scorers(self) -> None:
+        """Build the environment and its reward scorers, so a scorer this node cannot build (a ``whitecircle`` term
+        without its key) fails the pool's start instead of every settlement on this actor."""
+        self._env.build_scorers()
 
     @cached_property
     def _http_client(self) -> aiohttp.ClientSession:
@@ -493,6 +499,16 @@ class RolloutManager:
             for i in range(self.num_workers)
         ]
         self._started = True
+        built = asyncio.gather(*(actor.build_scorers.remote() for actor in self._actors))
+        try:
+            # Bounded as an episode is: an actor Ray cannot place, or a constructor that hangs, would hold the start.
+            await asyncio.wait_for(built, self.rollout_config.episode_timeout)
+        except TimeoutError:
+            raise RuntimeError(
+                f"The {self.num_workers} environment actors did not build their environments within episode_timeout="
+                f"{self.rollout_config.episode_timeout}s: Ray could not place them all, or an environment constructor "
+                f"hangs. Check `ray status` for pending actors, or raise episode_timeout for a slow constructor."
+            ) from None
         logger.info(f"Started {len(self._actors)} environment actors")
 
     async def shutdown(self):

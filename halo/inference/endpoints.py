@@ -16,7 +16,14 @@ LOCAL_SERVER_API_KEY = "EMPTY"
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "0.0.0.0", "::1", "localhost"})
 
 
+def resolve_local_server_api_key() -> str:
+    """A self-hosted server's own key (``VLLM_API_KEY``, the server's ``--api-key``) or the placeholder a keyless one
+    accepts, never a hosted vendor's key."""
+    return env_str("VLLM_API_KEY") or LOCAL_SERVER_API_KEY
+
+
 def resolve_local_api_key() -> str:
+    """The CLIs' default key, which also reads the SDK's own ``OPENAI_API_KEY``."""
     return env_str("VLLM_API_KEY") or env_str("OPENAI_API_KEY") or LOCAL_SERVER_API_KEY
 
 

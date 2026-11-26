@@ -396,9 +396,10 @@ class AsyncRolloutConfig(
         default=50,
         metadata={
             "help": "Raise after this many train rounds in a row in which no token anywhere carries a policy gradient, "
-            "while no earlier round of this launch has: every group tied or dropped, or every token masked, trains on "
-            "nothing while logging loss 0. Past the first round that trained, a streak this long only warns. Logged as "
-            "sampling/zero_gradient_round. Positive; null = off."
+            "while no earlier round of this run has (a resume keeps that verdict): every group tied or dropped, or "
+            "every token masked, trains on nothing while logging loss 0. Past the first round that trained, a streak "
+            "this long only warns. Warns on the first such round and logs sampling/zero_gradient_round. Positive; "
+            "null never raises."
         },
     )
     episode_error_rate_limit: float | None = field(
@@ -772,8 +773,8 @@ class EnvironmentConfig(ValidatedConfig):
         default_factory=lambda: [{"source": "environment"}],
         metadata={
             "help": "Reward terms, each {source, name?, weight?, exponent?, ...}, summed into the episode reward as "
-            "weight × score^exponent: 'environment' (the environment's own grade), 'judge' or 'reward_model'. The "
-            "environment's per-turn and shaping terms add on top; YAML-only. "
+            "weight × score^exponent: 'environment' (the environment's own grade), 'judge', 'reward_model' or "
+            "'whitecircle'. The environment's per-turn and shaping terms add on top; YAML-only. "
             "See agent-docs/training-methods/grpo/rewards/README.md#environment-arm."
         },
     )

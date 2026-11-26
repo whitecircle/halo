@@ -138,6 +138,11 @@ class EpisodeScoringMixin:
         if self._rewards.external_terms:
             asyncio.run(self._rewards.verify())
 
+    def build_scorers(self) -> None:
+        """Build every external term's scorer ahead of the first settlement, so one this host cannot build (its key
+        unset) raises here and not in each settlement."""
+        self._rewards.build_scorers()
+
     async def settle_async(self, episode_ids: list[int]) -> None:
         """Every scorer runs concurrently over the batch; an episode without a pending reward is a no-op."""
         pending = [trajectory for trajectory in self._episodes(episode_ids) if REWARD_PENDING_KEY in trajectory.info]
