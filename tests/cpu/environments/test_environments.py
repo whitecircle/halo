@@ -860,8 +860,8 @@ def test_build_mcp_environment():
     assert env2.server_env == {"BRAVE_API_KEY": "test-key"}
 
 
-def test_multi_tool_environment_with_all_tools():
-    registry = build_combined_tools()
+def test_multi_tool_environment_with_all_tools(allow_mock_search):
+    registry = build_combined_tools(search_backend="mock")
     env = NativeToolUseEnvironment(tool_registry=registry, max_turns=10)
 
     tools_schema = env.get_tools_schema()
@@ -894,8 +894,8 @@ def test_multi_tool_environment_with_all_tools():
     assert traj.info["successful_tool_calls"] == 3
 
 
-def test_multi_tool_parallel_calls():
-    registry = build_combined_tools()
+def test_multi_tool_parallel_calls(allow_mock_search):
+    registry = build_combined_tools(search_backend="mock")
     env = NativeToolUseEnvironment(
         tool_registry=registry,
         max_turns=10,
