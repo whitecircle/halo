@@ -76,7 +76,7 @@ _MEMBER_ORDERS = {
     ),
     "distributed.expert_parallel": (
         ("config",),
-        ("deepep",),
+        ("deepep", "mok"),
         ("moe_layer",),
         ("families",),
         ("parallelize",),

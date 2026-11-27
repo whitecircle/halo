@@ -7,7 +7,8 @@ from typing import Optional, get_args
 
 from halo.distributed import group_layout
 from halo.distributed.context_parallel.config import CPConfig
-from halo.distributed.expert_parallel.config import EPBufferBackend, EPConfig
+from halo.distributed.expert_parallel.config import EPBufferBackend, EPConfig, MoEBackend
+from halo.distributed.expert_parallel.mok import mok_token_capacity
 from halo.distributed.nvlink import (
     requested_nvlink_domain_size,
     validate_nvlink_domain_against_fabric,
@@ -64,6 +65,7 @@ class ParallelismConfig:
     ep_lazy_loading: bool = True  # every EP path; TP-only MoE ignores it, PP always loads stage-lazily
     frozen_quantized_experts: bool = False  # the release's NVFP4/MXFP8 experts as a frozen base under LoRA
     ep_buffer_backend: EPBufferBackend = "auto"  # "auto" == "elastic" (DeepEP V2); "legacy" = V1 CUDA-IPC
+    moe_backend: MoEBackend = "deepep"
 
     # The rows one MoE forward carries per device and the max_length the dispatch-ceiling gate checks;
     # 0 rows = no budget, 0 length = context window.
@@ -156,6 +158,8 @@ class ParallelismConfig:
             raise ValueError(
                 f"ep_buffer_backend must be one of {get_args(EPBufferBackend)}, got {self.ep_buffer_backend!r}"
             )
+        if self.moe_backend not in get_args(MoEBackend):
+            raise ValueError(f"moe_backend must be one of {get_args(MoEBackend)}, got {self.moe_backend!r}")
         if self.frozen_quantized_experts:
             needs = {
                 "expert_parallel_size >= 2": self.ep_size >= 2,
@@ -419,6 +423,11 @@ class ParallelismConfig:
             return dispatch_ep_rank * layout.num_groups + ep_group_idx
         return self.stage_local_rank // max(self.tp_size, self.cp_size)
 
+    @property
+    def mok_token_capacity(self) -> int:
+        """The padded per-rank tokens of every MoK forward, from the declared budget."""
+        return mok_token_capacity(self.ep_rows_per_device * self.ep_declared_max_length)
+
     def ep_config(self) -> "EPConfig":
         """COLLECTIVE on first call, which builds every EP process group."""
         if self._ep_config is None:
@@ -439,6 +448,8 @@ class ParallelismConfig:
                 expert_lora=self.expert_lora,
                 experts_fsdp_managed=self.experts_fsdp_managed,
                 ep_buffer_backend=self.ep_buffer_backend,
+                moe_backend=self.moe_backend,
+                mok_token_capacity=self.mok_token_capacity,
             )
         return self._ep_config
 

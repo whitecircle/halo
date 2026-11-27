@@ -91,23 +91,40 @@ def partition_rows(lengths: Sequence[int], num_bins: int, budget: int) -> list[l
     return sorted(bins, key=lambda rows: -sum(lengths[row] for row in rows))
 
 
+def heaviest_slot_tokens(lengths: Sequence[int], bins: Sequence[Sequence[int]], rows_per_bin: int) -> int:
+    """The most tokens one slot of ``rows_per_bin`` rows packs: a bin's rows, and a :data:`MIN_ROW_TOKENS` filler row
+    for each row the bin is short of."""
+    return max(sum(lengths[row] for row in rows) + MIN_ROW_TOKENS * (rows_per_bin - len(rows)) for rows in bins)
+
+
 def agree_microbatch_geometry(
     lengths: Sequence[int], budget: int, *, slots: int, ceiling: int | None, round_rows: int
 ) -> MicrobatchPlan:
     """COLLECTIVE. ``lengths`` are this rank's real rows' attended tokens (at least :data:`MIN_ROW_TOKENS`). Every rank
     gets the world's bin count (at least one, so a round with no row anywhere still runs the backward and its
     collectives) and its own rows re-partitioned into that many bins, then the world's widest bin. Raises on every
-    rank when some rank's rows fit no ``slots`` bins of ``ceiling`` tokens."""
+    rank when some rank's rows fit no ``slots`` bins of ``ceiling`` tokens, or when a slot padded to the widest bin
+    packs more than ``ceiling``."""
     bins_needed, tokens = rank_max([local_bin_count(lengths, budget, slots, ceiling), sum(lengths)])
     if bins_needed > slots:
         raise ValueError(
             f"A rank holds {tokens} row tokens this round, more than steps_per_generation ({slots}) packed "
-            f"micro-batches of at most {ceiling} tokens (the DeepEP dispatch ceiling) can carry. Raise "
+            f"micro-batches of at most {ceiling} tokens (the most one EP forward carries per rank) can carry. Raise "
             f"steps_per_generation, or lower the rollouts per step or the row length cap."
         )
     bins = partition_rows(lengths, max(bins_needed, 1), budget)
     (rows_per_bin,) = rank_max([max(len(rows) for rows in bins)])
-    return MicrobatchPlan(tuple(tuple(rows) for rows in bins), max(rows_per_bin, 1), slots, round_rows)
+    rows_per_bin = max(rows_per_bin, 1)
+    if ceiling is not None:
+        (packed,) = rank_max([heaviest_slot_tokens(lengths, bins, rows_per_bin)])
+        if packed > ceiling:
+            raise ValueError(
+                f"A rank's packed micro-batch carries {packed} tokens this round, more than the {ceiling} one EP "
+                f"forward carries per rank: every slot is padded to the world's widest bin ({rows_per_bin} rows) with "
+                f"{MIN_ROW_TOKENS}-token filler rows. Raise steps_per_generation, or lower the rollouts per step or the "
+                f"row length cap."
+            )
+    return MicrobatchPlan(tuple(tuple(rows) for rows in bins), rows_per_bin, slots, round_rows)
 
 
 def plan_round_microbatches(

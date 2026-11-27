@@ -174,8 +174,10 @@ def test_the_mrope_decoders_are_admitted_with_their_markers(kernels_present):
         reject_unpackable_model(_model(family), "flash_attention_2")
 
 
-def _parallelism(ep_size: int, requires_rdma: bool = False):
-    return types.SimpleNamespace(ep_size=ep_size, requires_rdma=requires_rdma)
+def _parallelism(ep_size: int, requires_rdma: bool = False, moe_backend: str = "deepep", mok_token_capacity: int = 0):
+    return types.SimpleNamespace(
+        ep_size=ep_size, requires_rdma=requires_rdma, moe_backend=moe_backend, mok_token_capacity=mok_token_capacity
+    )
 
 
 def test_a_budget_past_the_old_wire_ceiling_is_dispatchable_within_a_domain():
@@ -185,16 +187,27 @@ def test_a_budget_past_the_old_wire_ceiling_is_dispatchable_within_a_domain():
         reject_undispatchable_budget(_parallelism(8), budget)
 
 
+@pytest.mark.parametrize("ep_size", [1, 4])
+def test_a_budget_past_moks_fixed_buffers_is_refused_with_the_packed_remedy(ep_size):
+    """MoK sizes its buffers to the batch's rows, and a packed bin carries several: the first one would raise mid-run."""
+    pc = _parallelism(ep_size, moe_backend="mok", mok_token_capacity=8192)
+    reject_undispatchable_budget(pc, 8192)
+    with pytest.raises(ValueError, match="packed_microbatch_tokens=32768 exceeds the 8192 tokens.*Lower packed_micro"):
+        reject_undispatchable_budget(pc, 32768)
+
+
 def test_the_gin_ceiling_still_refuses_a_cross_domain_budget():
     reject_undispatchable_budget(_parallelism(16, requires_rdma=True), 8192)
     with pytest.raises(ValueError, match="packed_microbatch_tokens=9000 cannot be dispatched.*proxy-GIN ceiling"):
         reject_undispatchable_budget(_parallelism(16, requires_rdma=True), 9000)
 
 
-def test_the_planner_ceiling_exists_only_across_domains():
+def test_the_planner_ceiling_is_the_gin_ceiling_across_domains_and_moks_buffers():
     assert resolve_dispatch_ceiling(_parallelism(1)) is None
     assert resolve_dispatch_ceiling(_parallelism(8)) is None
     assert resolve_dispatch_ceiling(_parallelism(16, requires_rdma=True)) == 8192
+    for ep_size in (1, 4):
+        assert resolve_dispatch_ceiling(_parallelism(ep_size, moe_backend="mok", mok_token_capacity=4096)) == 4096
 
 
 if __name__ == "__main__":

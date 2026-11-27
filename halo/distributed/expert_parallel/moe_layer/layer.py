@@ -20,9 +20,11 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraM
 from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.grad_sync import EPGradSyncMixin
 from halo.distributed.expert_parallel.moe_layer.routing import EPRoutingMixin
+from halo.distributed.expert_parallel.mok import MOK_ALIGN, MoKExperts, require_mok
 from halo.distributed.grad_reduce import SumAcrossGroup, SumGradAcrossGroup
 from halo.env import env_flag
 from halo.hardware import current_device
+from halo.kernels.fused_glu import is_silu_activation
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.runtime.ranks import is_global_main_process
 
@@ -151,7 +153,8 @@ class EPMoELayerBase(
         self.fp32_router = ep_config.fp32_router
         self.fp32_experts = ep_config.fp32_experts
 
-        self.dispatcher = DeepEPDispatcher(ep_config, self.num_experts, hidden_dim)
+        routed_experts = MoKExperts if ep_config.moe_backend == "mok" else DeepEPDispatcher
+        self.dispatcher = routed_experts(ep_config, self.num_experts, hidden_dim)
         self._grad_sync_hooks = []
 
         self._use_grouped_mm = ep_config.grouped_gemm_enabled
@@ -225,10 +228,33 @@ class EPMoELayerBase(
         """Device, expert LoRA, fp32 upcasts, grad-sync hooks. The upcast keeps the LoRA freeze's ``requires_grad`` and
         rebinds each tensor, so the hooks register after it."""
         self.to(self._resident_device())
+        if self._runs_mok:
+            self._verify_mok_experts()
         self._init_expert_lora()
         self._upcast_router_to_fp32()
         self._upcast_experts_to_fp32()
         self._install_gradient_sync_hooks()
+
+    @property
+    def _runs_mok(self) -> bool:
+        return isinstance(self.dispatcher, MoKExperts)
+
+    def _verify_mok_experts(self) -> None:
+        """Raise where MoK's fused SwiGLU kernels would compute something other than this layer's experts."""
+        require_mok()
+        if not self.FAMILY.supports_mok:
+            raise ValueError(
+                f"moe_backend='mok' cannot compute this model's experts: {type(self).__name__}'s family does not "
+                f"declare supports_mok, as its experts are not the bias-free SwiGLU MoK's kernels run."
+            )
+        intermediate = self.down_proj.shape[1]
+        refusals = []
+        if not is_silu_activation(self.act_fn):
+            refusals.append(f"its expert activation {type(self.act_fn).__name__} is not SiLU")
+        if self.hidden_dim % MOK_ALIGN or intermediate % MOK_ALIGN:
+            refusals.append(f"hidden {self.hidden_dim} / intermediate {intermediate} not multiples of {MOK_ALIGN}")
+        if refusals:
+            raise ValueError(f"moe_backend='mok' cannot compute this model's experts: {'; '.join(refusals)}.")
 
     def _resident_device(self) -> torch.device:
         """A layer materialized on CPU stays for the trainer to move; one with no real device goes to this rank's."""
@@ -310,16 +336,26 @@ class EPMoELayerBase(
         self, flat: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, input_dtype: torch.dtype
     ) -> torch.Tensor:
         """Dispatch -> expert compute -> combine, with the expert-TP sum in token space outside that span:
-        inside it, the strided ETP all-reduce couples DeepEP dispatch groups and times out their barrier."""
-        # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
-        # stalls every peer in DeepEP's barrier.
-        self._warm_expert_kernels(flat.device, input_dtype, flat.shape[-1], experts.shape[1])
-
+        inside it, the strided ETP all-reduce couples DeepEP dispatch groups and times out their barrier. Under
+        ``moe_backend: mok`` the three run as MoK's fused kernels."""
         self._record_expert_load(experts)
 
         if self._capture_routing:
             # Capture the global expert ids before dispatch localizes them; int16 (num_experts < 32768).
             self._captured_routing_chunks.append(experts.detach().to(torch.int16))
+
+        if self._runs_mok:
+            glu = (self.gate_up_proj,) if self._stores_fused_glu else (self.gate_proj, self.up_proj)
+            banks = (*glu, self.down_proj)
+            if not self._expert_kernels_warmed:  # before the span: a first-call compile inside it stalls every peer
+                self._expert_kernels_warmed = True
+                self.dispatcher.warm(banks, experts.shape[1])
+            with self._perf("ep.mok"):
+                return self.dispatcher(self._rank_uniform_dispatch_input(flat, weights), experts, weights, banks)
+
+        # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
+        # stalls every peer in DeepEP's barrier.
+        self._warm_expert_kernels(flat.device, input_dtype, flat.shape[-1], experts.shape[1])
 
         if self.expert_tp_size > 1:
             # Both operands need the ETP backward sum; without either, the router and everything

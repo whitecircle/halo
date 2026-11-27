@@ -8,6 +8,7 @@ import inspect
 import re
 import textwrap
 from dataclasses import fields
+from types import SimpleNamespace
 from typing import get_args, get_type_hints
 
 import pytest
@@ -42,6 +43,12 @@ class _LowpTrainer(DistributedTrainerMixin):
 
     SUPPORTS_LOWP_PRECISION = True
     SUPPORTS_NATIVE_LOWP = True
+
+
+# A declared per-forward token budget, which moe_backend='mok' sizes its buffers from.
+_TOKEN_BUDGET = SimpleNamespace(per_device_train_batch_size=1, max_length=1024)
+# What a knob's non-default value needs beside it to be a valid config: mok refuses FSDP2-managed experts at EP 1.
+_COMPANIONS = {"moe_backend": {"fsdp_shard_ep1_experts": False}}
 
 
 def _defaults(cls) -> dict:
@@ -193,8 +200,9 @@ def test_every_same_name_knob_lands_on_the_built_config(subtests):
             requested = _non_default_value(arg_field)
 
             config = parallelism_config_from_args(
-                ParallelismArguments(**{arg_field: requested}),
+                ParallelismArguments(**{arg_field: requested, **_COMPANIONS.get(arg_field, {})}),
                 trainer_cls=_LowpTrainer,
+                training_config=_TOKEN_BUDGET,
             )
 
             assert getattr(config, arg_field) == requested, (

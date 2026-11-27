@@ -103,6 +103,7 @@ docker run -d --rm --name <job> \
 | `flash-linear-attention` 0.6.0 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
 | FlashAdamW (`flashoptim==0.1.4`) | Yes | Yes |
 | DeepGEMM (commit `5081f85`, native fp8/fp4 grouped MoE GEMM behind `lowp_backend: native`; JIT-compiles at runtime) | No | Yes |
+| Mixture-of-Kittens (commit `f3a8bd2`, the fused MoE kernels behind `moe_backend: mok`) | No | Yes |
 | Gigatoken tokenizer backend (`gigatoken` 0.9.x, `tokenizer_backend: gigatoken`) | Yes | Yes |
 | uv 0.10.x, AWS CLI v2, bubblewrap (Claude Code via `INSTALL_CLAUDE_CODE=1`, off by default) | Yes | Yes |
 

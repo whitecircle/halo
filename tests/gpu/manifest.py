@@ -1067,6 +1067,20 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_gptoss_native_mxfp4_ep8.py": TestSpec(
         nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=2400
     ),
+    "parallelism/ep/test_mok_backend.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3"),
+        args_matrix=(
+            "--family qwen3",
+            "--family qwen3_5",
+            "--family qwen3 --skew",
+            Row("--family qwen3 --ep-size 1", nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", "qwen3")),
+            Row(
+                "--family qwen3 --ep-size 1 --ranks 2", nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")
+            ),
+        ),
+        timeout=900,
+    ),
     # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1500
