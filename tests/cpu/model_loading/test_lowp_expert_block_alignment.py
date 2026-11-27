@@ -197,7 +197,7 @@ def test_native_reaches_the_layer_with_its_backward(family, backward, monkeypatc
 def test_native_mxfp4_reads_its_non_finite_weight_flag_after_the_last_converted_layer(precision, hooked, monkeypatch):
     """The device-side cast only sets a flag, which must be read where a wrapper cannot skip it: PEFT's ``BaseTuner``
     calls the model's ``forward`` directly, so a hook on the model itself never runs under attention LoRA."""
-    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (object(), object()))
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (SimpleNamespace(__version__="2.8.2"), object()))
     family = next(iter(FAMILIES))
     model = _Model(*(_layer(family, ALIGNED_M, grouped=True) for _ in range(3)))
     lowp = LowpSpec(precision=precision, backend="native", apply_dense_mlp=False, keep_last_blocks=1)
