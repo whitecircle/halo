@@ -41,7 +41,7 @@ On B300 (Halo 1.1.0 or earlier), CP on FA4 measures 1.2–3× FA2 at ≥32k toke
 1. `major >= 10` (Blackwell SM100/SM103): `flash_attention_4` if `flash_attn.cute` imports, else `flash_attention_2`. A build that is present but unusable warns before degrading.
 2. `major == 9` (Hopper): `flash_attention_3` if `flash_attn_interface` (else `flash_attn_3`) provides the varlen kernel, else `flash_attention_2`.
 3. `major == 8` (Ampere, Ada), or any exception: `flash_attention_2`.
-4. `major < 8`: `sdpa` (`supports_flash_attention`), since FA2 raises on these GPUs in its first forward. A pinned `flash_attention_2` stays pinned and fails there with FA2's own message.
+4. `major < 8`: `sdpa` (`supports_flash_attention`), since FA2 raises on these GPUs in its first forward. The fallback chain of a softcapped or sink-carrying model skips FA2 there too and continues to `flex_attention`. A pinned `flash_attention_2` stays pinned and fails there with FA2's own message.
 
 The detection above, the sink probe and the FA4 warm-up resolve kernels through `flash_kernel(attn_impl, varlen=...)`: one module table in transformers' dispatch order (FA3 through `flash_attn_interface` first), FA4 imported only after `ensure_fa4_kernel_cache_env`. A build missing the entry point reads as absent. Context parallelism resolves its kernel through `flash_kernel` too, in `preferred_flash_impl`'s order under its FA4 flag, then FA2 ([above](#supported-backends)); the trainable-sink rescale imports `flash_attn.cute` directly.
 

@@ -314,7 +314,7 @@ def select_supported_attn_implementation(
         if dtype != torch.float32 and not has_head_dim_beyond_flash(model_config):
             if is_hopper_gpu() and _flash_build_imports("flash_attention_3"):
                 candidates.append("flash_attention_3")
-            if is_flash_attn_2_available():
+            if is_flash_attn_2_available() and supports_flash_attention():
                 candidates.append("flash_attention_2")
         candidates.append("flex_attention")
     if sdpa_ok:

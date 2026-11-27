@@ -20,7 +20,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.layout import has_latent_attention, has_sliding_window_layers
 
 FA2, FA3, FA4, SDPA, EAGER = "flash_attention_2", "flash_attention_3", "flash_attention_4", "sdpa", "eager"
-_DETECTED = {"blackwell": FA4, "hopper": FA3}
+_DETECTED = {"blackwell": FA4, "hopper": FA3, "pre_ampere": SDPA}
 
 
 class _RemoteCodeConfig(PretrainedConfig):
@@ -45,6 +45,7 @@ def _on(arch: str):
         patch.object(attention_mod, "is_blackwell_gpu", lambda: arch == "blackwell"),
         patch.object(attention_mod, "is_hopper_gpu", lambda: arch == "hopper"),
         patch.object(attention_mod, "is_flash_attn_2_available", lambda: True),
+        patch.object(attention_mod, "supports_flash_attention", lambda: arch != "pre_ampere"),
         patch.object(attention_mod, "_flash_build_imports", lambda _impl: True),
         patch.object(model_setup, "is_flash_attn_2_available", lambda: True),
         patch.object(attention_mod.logger, "warning"),
@@ -209,6 +210,12 @@ def test_a_softcapped_sdpa_request_falls_back_to_flash_then_flex():
                 assert _resolve(config, SDPA) == "flex_attention"
     with _on("blackwell"):
         assert _resolve(config, SDPA) == FA2, "FA3 is a Hopper build: Blackwell falls back to FA2"
+
+
+def test_a_softcapped_fallback_below_sm80_skips_flash_attention_2():
+    """FA2 imports on any CUDA host and raises in its first forward below SM80; flex carries the softcap."""
+    with _on("pre_ampere"):
+        assert _resolve(_config("gemma2"), SDPA) == "flex_attention"
 
 
 def test_a_softcapped_fallback_past_the_flash_head_cap_skips_flash_attention_2():

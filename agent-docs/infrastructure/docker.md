@@ -70,8 +70,12 @@ Load-bearing flags:
   programs take as their cap ([Sandbox → Limits](../training-methods/async-grpo/environments/sandbox.md#limits)).
 - `--cap-add=SYS_PTRACE` lets py-spy attach for hang triage (`halo run py-spy-diag`).
 
-One process on one GPU needs neither `--ipc=host` nor the two ulimits, and needs `--shm-size` only
-when its DataLoader workers' batches do not fit in docker's 64 MB `/dev/shm`.
+One process on one GPU needs neither `--ipc=host` nor `--ulimit memlock=-1`. It needs `--shm-size`
+only when the batches its DataLoader workers hold at once do not fit in docker's 64 MB `/dev/shm`:
+that is `dataloader_num_workers` × `dataloader_prefetch_factor` batches, and the factor defaults to 2.
+It keeps `--ulimit stack=67108864` when an environment grades compiled programs in the local sandbox,
+because their stack cap is the container's hard stack limit, which is otherwise whatever the docker
+daemon or the platform sets.
 
 `HALO_SCRATCH` is the one knob for that volume: the Makefile derives the mount and the four variables
 from it, the dev container requires it, and `docker-compose.vllm.yml` mounts it. Unset, the Makefile

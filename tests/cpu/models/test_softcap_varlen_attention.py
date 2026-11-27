@@ -62,6 +62,7 @@ def _on(arch: str, *, fa2: bool = True):
         patch.object(selection, "is_blackwell_gpu", lambda: arch == "blackwell"),
         patch.object(selection, "is_hopper_gpu", lambda: arch == "hopper"),
         patch.object(selection, "is_flash_attn_2_available", lambda: fa2),
+        patch.object(selection, "supports_flash_attention", lambda: True),
         patch.object(selection, "_flash_build_imports", lambda _impl: True),
         patch.object(model_setup, "is_flash_attn_2_available", lambda: fa2),
         patch.object(selection.logger, "warning"),
