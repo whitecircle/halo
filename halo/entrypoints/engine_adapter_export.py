@@ -30,6 +30,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
     build_adapter_serving,
     build_engine_adapter,
     engine_adapter_refusal,
+    hub_spellings_absent_from_base,
     unservable_adapter_reasons,
 )
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
@@ -158,6 +159,15 @@ def export_engine_adapter(
         sorted({key.rpartition(".lora_")[0] for key in state if ".lora_" in key}),
     )
     whole = sorted(key for key in state if ".lora_" not in key)
+    unheld = hub_spellings_absent_from_base(base, adapter.module_names)
+    if unheld:
+        name, path = next(iter(unheld.items()))
+        raise ValueError(
+            f"{adapter_dir} adapts {len(unheld)} module(s) whose hub spelling names no weight the checkpoint of "
+            f"{base_path} holds (e.g. {name}, spelled {path}): an engine would load those adapters under names it "
+            f"finds nothing at. The adapter was saved against another layout of this base; export it with the Halo "
+            f"release it was trained on."
+        )
 
     engine_reasons = _engine_reasons(rollout_backend, base, adapter)
     # What no engine serves, whatever it serves of the family.

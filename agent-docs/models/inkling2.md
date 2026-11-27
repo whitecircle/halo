@@ -51,12 +51,14 @@ The banks take no gradient. Expert adapters take each bank's logical `[E, K, N]`
 - **Packing.** On a packed row (`position_ids` restarting at 0) the family's patches stop every short-convolution tap at its document's start, and `inkling2_relative_flex` reads the documents off `position_ids`, so the on-policy GRPO trainers' `packed_microbatch_tokens` and SFT's `packing` train it ([Document isolation](../data/collators.md#document-isolation-under-packing)). The convolutions isolate one `[1, N]` row: a `[B > 1, N]` `position_ids` that restarts inside a row raises. `padding_free` is refused: it needs a varlen flash kernel.
 - **MTP.** The release ships a five-layer draft head under its own `mtp_config`, which transformers' class does not build; `mtp_loss_weight` refuses the family ([MTP heads](../optimization/mtp-heads.md)).
 - **Full fine-tuning of the release.** No save exports the frozen banks, so `frozen_quantized_experts` requires `use_peft: true`.
-- **Expert LoRA alone on the release.** Expert adapters with no PEFT adapter beside them are served by no engine and cannot merge into the packed experts, so `frozen_quantized_experts` refuses a `lora_target_modules` that names only expert projections: add `o_proj`.
+- **Expert LoRA alone on the release.** Expert adapters with no PEFT adapter beside them are served by no engine and cannot merge into the packed experts, so `frozen_quantized_experts` refuses a `lora_target_modules` that names only expert projections: add `o_proj.linear`.
 - **Online GRPO, and environmental GRPO with a weight push.** The spec's `weight_sync_refusal`: no full-weight push into either pinned engine has been validated. Environmental GRPO runs on vLLM with [adapter sync](#rollouts), which pushes no weights; SGLang is refused. Offline GRPO needs no server.
 
 ## LoRA
 
 Attention adapters (the `linear` inside `q_proj`, `k_proj`, `v_proj`, `relative_position_bias` and `o_proj`) train under PEFT; expert adapters train as native grouped adapters ([PEFT](../optimization/peft.md#moe-models--expert-targets-and-full-trained-modules)). On the release both are frozen-bank LoRA. On tiny models `tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family inkling2_text` runs bf16 expert and mixed adapters at ep1 and ep2 through a merged save and an exact resume, and checks that ep2 × cp2 is refused.
+
+**Adapters saved on 1.3.0rc2.** That release shipped transformers 5.23, whose attention linears sat directly under `self_attn`; 5.24 moved each inside a projection module (`q_proj`, `k_proj` and `v_proj` to `*.linear`, `r_proj` to `relative_position_bias.linear`, `o_proj` to `o_proj.linear`, `gate_proj` to `o_proj.gate_proj`). Such an adapter's keys name no linear on this release, so the merge tools, `export_engine_adapter.py`, `convert_to_bf16.py --check_inference` and a resume refuse it by name. Merge, export or resume it on the 1.3.0rc2 image (`halo:hopper-1.3.0rc2` or `halo:blackwell-1.3.0rc2`), or train it again with the targets above.
 
 Liger covers the weighted RMSNorm (Gemma casting mode) and the cross-entropy. The MLP and head stay eager: the softcapped SwiGLU has no fused kernel, and the head's softcap and vocab cut are the family's declared head transform (`Inkling2HeadTransform`, `halo/models/head_transform.py`), which offline GRPO's chunked log-prob sweep also applies.
 
@@ -81,7 +83,7 @@ The runs are the examples under `examples/grpo/environmental/inkling2/vllm/`:
 | Example | LoRA | Server LoRA modules |
 |---|---|---|
 | `inkling2-small-exam-qa-attention-lora-ep2.yaml` | r16 on the text tower's q/k/v/r/o | `qkvr`, `wo_ud` |
-| `inkling2-small-exam-qa-expert-lora-ep2.yaml` | r8 on `o_proj` and the routed experts | all |
+| `inkling2-small-exam-qa-expert-lora-ep2.yaml` | r8 on `o_proj.linear` and the routed experts | all |
 
 The trainer and the server read the release directory and the adapter directory at the same paths: the server loads each version from the path the trainer published it at, and the trainer matches the server's base by its path. A launch outside `make` passes both:
 
@@ -113,7 +115,7 @@ The server is the one [above](#rollouts), launched on the release the adapter wa
 
 On Inkling-2-Small, the adapter a 30-step SFT run saved (r8 on `o_proj` and the experts) loads only once converted. The saved directory is refused with HTTP 500 (`...experts.down_proj.lora_A is unsupported LoRA weight`). The converted one moves the log-probs of a 137-token text by 0.16 nats per token on average against the base, and by 0.045 against the same adapter with its expert B zeroed.
 
-After a refused load, restart a server at tensor-parallel size above 1 before loading again ([Troubleshooting](../infrastructure/rollout-servers.md#troubleshooting)). The tool refuses, before any write, an adapter of expert targets alone, which adapter sync serves only beside an attention adapter (train `o_proj` with the experts), and expert adapters at another rank or scaling than the attention ones.
+After a refused load, restart a server at tensor-parallel size above 1 before loading again ([Troubleshooting](../infrastructure/rollout-servers.md#troubleshooting)). The tool refuses, before any write, an adapter of expert targets alone, which adapter sync serves only beside an attention adapter (train `o_proj.linear` with the experts), expert adapters at another rank or scaling than the attention ones, and an adapted module whose hub name the base's checkpoint does not hold.
 
 ### Memory on two B300s
 

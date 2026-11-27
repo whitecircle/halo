@@ -17,7 +17,9 @@ from transformers import PreTrainedModel
 from halo.checkpoint.adapters import (
     adapter_module_paths,
     find_expert_lora_adapter_shape,
+    is_expert_lora_key,
     read_adapter_config,
+    read_adapter_keys,
     reject_expert_lora_adapter,
 )
 from halo.checkpoint.format import (
@@ -43,6 +45,8 @@ from halo.model_loading.tokenizer_setup import (
     resolve_peft_processing_class,
     resolve_tokenizer,
 )
+from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX
+from halo.models.moe.family_specs import inkling2_pre_524_adapter_reason
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +71,33 @@ def _paths_absent_from(model: PreTrainedModel, paths: set[str]) -> list[str]:
     return absent
 
 
+def _holds_weight_in_child(module: torch.nn.Module) -> bool:
+    return "weight" not in module._parameters and any("weight" in child._parameters for child in module.children())
+
+
+def _reject_wrapper_targets(model: PreTrainedModel, adapter_dir: str) -> None:
+    """A LoRA key on a module that holds its weight in a child was saved against another layout of the base: PEFT
+    refuses the wrapper by class, and an export would respell it to a name the base's checkpoint lacks. Inkling 2's
+    attention projections became such wrappers in transformers 5.24."""
+    paths = {
+        key.removeprefix(PEFT_BASE_MODEL_PREFIX).partition(".lora_")[0]
+        for key in read_adapter_keys(adapter_dir)
+        if ".lora_" in key and not is_expert_lora_key(key)
+    }
+    wrapped = sorted(path for path in paths if _holds_weight_in_child(model.get_submodule(path)))
+    if not wrapped:
+        return
+    model_type = getattr(getattr(model, "config", None), "model_type", None)
+    reason = inkling2_pre_524_adapter_reason(model_type, wrapped) or (
+        f"each holds its weight in a child module (e.g. {wrapped[0]}, a "
+        f"{type(model.get_submodule(wrapped[0])).__name__}), so the adapter was saved against another layout of this "
+        f"base. Use it with the Halo release it was trained on"
+    )
+    raise ValueError(
+        f"The adapter at {adapter_dir} adapts {len(wrapped)} module(s) that take no adapter on this base: {reason}."
+    )
+
+
 def load_base_for_adapter(
     adapter_dir: str,
     base_model_path: str,
@@ -76,12 +107,18 @@ def load_base_for_adapter(
     log,
 ) -> _AdapterBaseModel:
     """The base loaded through the class the adapter's keys address, since an adapter tensor keyed to no live module
-    applies to nothing, which ``PeftModel.from_pretrained`` only warns about. A key set neither class carries raises."""
+    applies to nothing, which ``PeftModel.from_pretrained`` only warns about. A key set neither class carries raises,
+    and so does a LoRA key on a module that holds its weight in a child."""
     paths = adapter_module_paths(adapter_dir)
     base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
     absent = _paths_absent_from(base_model, paths)
     if not absent:
+        _reject_wrapper_targets(base_model, adapter_dir)
         return _AdapterBaseModel(base_model, text_only=False)
+    # Before the text-only retry: 1.3.0rc2's Inkling 2 adapters key ``r_proj``, which 5.24 builds on neither class.
+    pre_524 = inkling2_pre_524_adapter_reason(getattr(getattr(base_model, "config", None), "model_type", None), absent)
+    if pre_524:
+        raise ValueError(f"The adapter at {adapter_dir} takes no base on this release: {pre_524}.")
     # A path both classes carry (a ``modules_to_save`` lm_head) resolves on the wrapper too, so any
     # absence is the text-only hypothesis.
     wrapper = type(base_model).__name__
@@ -97,6 +134,7 @@ def load_base_for_adapter(
     except ValueError as no_text_only_class:
         raise ValueError(mismatch) from no_text_only_class
     if not _paths_absent_from(text_only_model, paths):
+        _reject_wrapper_targets(text_only_model, adapter_dir)
         log(
             f"The adapter addresses the text-only class of {wrapper}; reading the base as "
             f"{type(text_only_model).__name__}."

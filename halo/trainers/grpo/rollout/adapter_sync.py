@@ -183,6 +183,21 @@ def _build_hub_respeller(model: torch.nn.Module) -> Callable[[str], str | None]:
     return respell
 
 
+def hub_spellings_absent_from_base(model: torch.nn.Module, module_names: Iterable[str]) -> dict[str, str | None]:
+    """Each of ``module_names`` (as PEFT keys spell them) whose hub spelling names no weight the base's own checkpoint
+    holds, with that spelling. ``model`` is the live model or the base's class built without weights; a module a later
+    transformers moved or wrapped respells to a name the engine would find nothing under."""
+    respell = _build_hub_respeller(model)
+    base = base_transformers_model(model)
+    # A live PEFT model holds an adapted module's weight under ``base_layer``.
+    held = {
+        respell(name.removesuffix(".weight").removesuffix(".base_layer"))
+        for name, _ in base.named_parameters(remove_duplicate=False)
+        if name.endswith(".weight")
+    }
+    return {name: path for name in module_names if (path := respell(name)) is None or path not in held}
+
+
 def _attention_lora_spec(config: Mapping) -> ExpertLoraSpec:
     return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=bool(config.get("use_rslora")))
 

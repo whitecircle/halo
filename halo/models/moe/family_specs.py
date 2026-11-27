@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -276,6 +277,42 @@ INKLING2_ATTENTION_LINEARS = (
     "relative_position_bias.linear",
     "o_proj.linear",
 )
+# Each Inkling 2 attention linear as Halo 1.3.0rc2, which shipped transformers 5.23, named it under ``self_attn``, and
+# its path since.
+INKLING2_PRE_524_ATTENTION_NAMES = {
+    "q_proj": "q_proj.linear",
+    "k_proj": "k_proj.linear",
+    "v_proj": "v_proj.linear",
+    "r_proj": "relative_position_bias.linear",
+    "o_proj": "o_proj.linear",
+    "gate_proj": "o_proj.gate_proj",
+}
+_INKLING2_PRE_524_IMAGES = "public.ecr.aws/whitecircle/halo:hopper-1.3.0rc2 or blackwell-1.3.0rc2"
+
+
+def inkling2_pre_524_adapter_reason(model_type: str | None, module_paths: Iterable[str]) -> str | None:
+    """Why an Inkling 2 adapter addressing ``module_paths`` was saved on Halo 1.3.0rc2, which shipped transformers 5.23
+    and its plain attention linears, or ``None`` for another family or the current layout."""
+    if find_moe_family_spec(model_type) is not INKLING2:
+        return None
+    old = sorted(
+        path
+        for path in module_paths
+        if path.rpartition(".")[2] in INKLING2_PRE_524_ATTENTION_NAMES
+        and path.rpartition(".")[0].endswith("self_attn")
+    )
+    if not old:
+        return None
+    renames = ", ".join(f"{name} to {path}" for name, path in INKLING2_PRE_524_ATTENTION_NAMES.items())
+    return (
+        f"it was saved on Halo 1.3.0rc2, which shipped transformers 5.23 and kept Inkling 2's attention projections as "
+        f"plain linears (e.g. {old[0]}). transformers 5.24 moved each inside a projection module ({renames}), so "
+        f"its keys name no linear on this release. Load, merge or export it on the 1.3.0rc2 image "
+        f"({_INKLING2_PRE_524_IMAGES}), or train it again here with the attention targets "
+        f"{', '.join(INKLING2_ATTENTION_LINEARS)}"
+    )
+
+
 # GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(
     model_types=("laguna",),
