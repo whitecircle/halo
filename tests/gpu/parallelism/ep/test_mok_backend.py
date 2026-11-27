@@ -27,6 +27,7 @@ from halo.distributed.expert_parallel.mok import MoKExperts, require_mok
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.batched_transpose import transpose_last_two
+from halo.kernels.lowp.quantization import WeightVersionCache
 from halo.kernels.lowp.spec import LowpSpec
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.harness import gpu_test_main
@@ -145,16 +146,18 @@ def _record_compile(*, fn, **_):
     return False  # a truthy return would skip the compile
 
 
-def _count_calls(module, name: str) -> list[int]:
-    """Replace ``module.name`` for the process with a wrapper counting its calls."""
-    real, calls = getattr(module, name), [0]
+def _record_bank_casts() -> list[bool]:
+    """Replace ``mok._mxfp8_layer_cast`` for the process with a wrapper recording, per cast, whether it returned
+    inference tensors."""
+    real, made_in_inference = mok_module._mxfp8_layer_cast, []
 
-    def counted(*args, **kwargs):
-        calls[0] += 1
-        return real(*args, **kwargs)
+    def recorded(w):
+        cast = real(w)
+        made_in_inference.append(all(t.is_inference() for t in cast))
+        return cast
 
-    setattr(module, name, counted)
-    return calls
+    mok_module._mxfp8_layer_cast = recorded
+    return made_in_inference
 
 
 def _bits_equal(left: tuple[torch.Tensor, ...], right: tuple[torch.Tensor, ...]) -> bool:
@@ -213,16 +216,20 @@ def run(ctx) -> dict:
     mok_ops._C = _RecordedEntryPoints(mok_ops._C)
     try:
         mok_layer = _ep_layer(block, "mok", ep_size, MXFP8 if ARGS.mxfp8 else None)
-        # An evaluation first: its cast, made under inference mode, serves the training step. The step runs under
-        # saved-tensor hooks, as in a non-reentrant checkpoint, which hand its backward other objects for the weights.
-        bank_casts = _count_calls(mok_module, "_mxfp8_layer_cast")
+        # Two evaluations first. The warm-up in the first leaves inference mode and casts the banks there; with that
+        # cast dropped, the second casts them as inference tensors, and those serve the training step. The step runs
+        # under saved-tensor hooks, as in a non-reentrant checkpoint, which hand its backward other objects for the
+        # weights.
+        bank_casts = _record_bank_casts()
         if ARGS.mxfp8:
             with torch.inference_mode():
                 mok_layer(x)
-        evaluation_casts = bank_casts[0]
+                mok_module._mxfp8_cache = WeightVersionCache()
+                mok_layer(x)
+        evaluation_casts = list(bank_casts)
         with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
             mok = _step(mok_layer, x, grad)
-        step_casts = bank_casts[0] - evaluation_casts
+        step_casts = len(bank_casts) - len(evaluation_casts)
     finally:
         triton.knobs.runtime.jit_cache_hook = previous
         mok_ops._C = mok_ops._C._compiled
@@ -242,13 +249,16 @@ def run(ctx) -> dict:
     }
     if ARGS.skew:
         local = EXPERTS // ctx.world_size
-        checks["every_token_routed_to_rank_0"] = len(routed) == 2 + ARGS.mxfp8 and all(
+        checks["every_token_routed_to_rank_0"] = len(routed) == 2 + 2 * ARGS.mxfp8 and all(
             bool((ids < local).all()) for ids in routed
         )
         checks["only_rank_0_takes_expert_gradients"] = (ctx.rank == 0) == ("grad_down_proj" in reference)
     if ARGS.mxfp8:
-        # Three banks cast once: a layer that stayed on bf16 would cast none, and pass a bare "no cast in the step".
-        checks["the_step_casts_no_bank_the_evaluation_cast"] = evaluation_casts == 3 and step_casts == 0
+        # Three banks cast in the warm-up and three in the evaluation after it: a layer that stayed on bf16 would cast
+        # none, and pass a bare "no cast in the step".
+        checks["the_step_casts_no_bank_the_evaluation_cast_in_inference_mode"] = (
+            evaluation_casts == [False] * 3 + [True] * 3 and step_casts == 0
+        )
         checks |= _mxfp8_cast_checks(mok_layer)
     metrics = {}
     for name, expected in reference.items():
