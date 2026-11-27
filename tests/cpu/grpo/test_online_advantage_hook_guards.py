@@ -11,27 +11,22 @@ import torch
 from trl import GRPOTrainer
 
 from halo.configs.grpo import RLRRConfig
-from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask
+from halo.trainers.grpo.objective.loss_inputs import MAXRL_ZERO_MEAN_GROUP_FRAC_KEY
 from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="group")
 NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normalize_then_sum", scale_rewards="group")
+UNSCALED = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="none")
 
 
 def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedOnlineGRPOTrainer:
-    """Pre-super hook adoption and refusals only, since TRL's ctor needs a live server."""
+    """Pre-super hook adoption and refusals only, through the trainer's own methods, since TRL's ctor needs a live
+    server."""
     trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer._adopt_advantage_hooks(kwargs)
-    reject_conflicting_advantage_hooks(
-        grpo_args,
-        trainer._rlrr_config,
-        std_floor=trainer._scale_rewards_std_floor,
-        drop_degenerate_groups=trainer._drop_degenerate_groups,
-        balance_token_mass=trainer._balance_token_mass,
-        recomputes_from_gathered_rewards=trainer._recomputes_from_gathered_rewards,
-    )
+    trainer._reject_conflicting_advantage_hooks(grpo_args)
     return trainer
 
 
@@ -45,6 +40,25 @@ def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedOnlineGRP
 def test_rlrr_refuses_every_hook_that_would_cancel_it(extra, match):
     with pytest.raises(ValueError, match=match):
         _resolve({"rlrr_config": RLRRConfig(), **extra})
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "grpo_args", "match"),
+    [
+        ({"use_maxrl": True, "rlrr_config": RLRRConfig()}, UNSCALED, "use_maxrl and use_rlrr cannot be combined"),
+        ({"use_maxrl": True}, SUM_THEN_NORMALIZE, r"use_maxrl with scale_rewards='group'"),
+        ({"use_maxrl": True, "scale_rewards_std_floor": 0.05}, UNSCALED, "use_maxrl with scale_rewards_std_floor"),
+    ],
+    ids=["rlrr", "std-scaling", "std-floor"],
+)
+def test_maxrl_conflicts_are_refused_through_the_trainers_own_call(kwargs, grpo_args, match):
+    """A trainer that stops passing ``use_maxrl`` would accept RLRR beside it, and MaxRL would overwrite RLRR."""
+    with pytest.raises(ValueError, match=match):
+        _resolve(kwargs, grpo_args)
+
+
+def test_maxrl_alone_resolves():
+    assert _resolve({"use_maxrl": True}, UNSCALED)._use_maxrl
 
 
 def test_the_balance_is_refused_under_a_per_completion_loss_and_resolves_beside_rlrr():
@@ -230,17 +244,45 @@ def test_the_balance_weighs_what_the_other_hooks_leave(monkeypatch):
     me.model = types.SimpleNamespace(training=True)
     me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     calls = []
+    # The order the generation batch runs them in: the advantage replacements, then the drop, then the balance.
     hooks = (
         "_apply_rlrr_advantages",
         "_apply_std_floor_advantages",
+        "_apply_maxrl_advantages",
         "_apply_degenerate_group_drop",
         "_apply_token_mass_balance",
     )
     for hook in hooks:
         setattr(me, hook, lambda result, hook=hook: calls.append(hook))
     DistributedOnlineGRPOTrainer._generate_and_score_completions(me, [])
-    assert sorted(calls) == sorted(hooks), calls
-    assert calls[-1] == "_apply_token_mass_balance", calls
+    assert calls == list(hooks), calls
+
+
+def test_the_generation_batch_installs_maxrl_advantages(monkeypatch):
+    """The real MaxRL hook, reached through ``_generate_and_score_completions``: the group's mean is 2/3, so each
+    success gets 1/2 and each failure -1, in the batch, in the completions record and with the stash consumed."""
+    monkeypatch.setattr(
+        GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {"advantages": torch.zeros(G)}
+    )
+    me = object.__new__(DistributedOnlineGRPOTrainer)
+    me._rlrr_config, me._drop_degenerate_groups, me._scale_rewards_std_floor = None, False, 0.0
+    me._use_maxrl, me._balance_token_mass = True, False
+    me._last_rewards_per_func = FULL_REWARDS
+    me.reward_weights = torch.ones(1)
+    me.num_generations = G
+    me.model = types.SimpleNamespace(training=True)
+    me.args = types.SimpleNamespace(scale_rewards="none")
+    me.accelerator = types.SimpleNamespace(process_index=0)
+    me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
+    me._logs = {"advantages": deque([0.0] * G, maxlen=G)}
+    me._metrics = {"train": defaultdict(list)}
+    me._apply_token_mass_balance = lambda result: None
+    result = DistributedOnlineGRPOTrainer._generate_and_score_completions(me, [])
+    expected = [0.5, 0.5, 0.5, -1.0, 0.5, -1.0]
+    assert result["advantages"].tolist() == pytest.approx(expected)
+    assert list(me._logs["advantages"]) == pytest.approx(expected)
+    assert me._metrics["train"][MAXRL_ZERO_MEAN_GROUP_FRAC_KEY] == [0.0]
+    assert me._last_rewards_per_func is None
 
 
 if __name__ == "__main__":

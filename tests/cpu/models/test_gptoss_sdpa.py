@@ -397,6 +397,7 @@ def _ref_load_stubs(checkpoint: str, attn_implementation: str | None = None):
         force_chat_template=False,
         added_special_tokens=None,
         tokenizer_backend="hf",
+        reasoning_effort_field=None,
     )
     model_config = ModelArguments(model_name_or_path=checkpoint, attn_implementation=attn_implementation)
     training_config = types.SimpleNamespace()  # no bf16/fp16 flags → fp32 reference

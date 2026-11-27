@@ -35,14 +35,15 @@ skips the ladder (writing the tokenizer through the same `save_tokenizer`), fold
 tensor as it is gathered and streams the result through `stream_gathered_checkpoint`. How it resumes,
 LoRA or full fine-tune: [Embedding — Saving](../training-methods/embedding.md#saving).
 
-Every gather is a collective, so **all** ranks run it. Only the save rank copies the result to host memory
-(`materialize_dtensor` on the others; under EP the same `retain` flag skips the layout assembly in
+Every gather is a collective, so **all** ranks run it. Only a writer copies the result to host memory, the
+save rank or, under an EP stripe, the writer that owns the chunk (`materialize_dtensor` on the others; under
+EP the same `retain` flag skips the layout assembly in
 `EPGatherMixin.gather_layer_state_dict`), so a node pays one writer's copy instead of `gpus_per_node` ×
 model. Every gathered save **streams** through `stream_gathered_checkpoint`: FSDP2, CP and TP one
 conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors and then each MoE layer as
 it is gathered. The writer holds at most one chunk, the shard it is filling and one shard per background
 write thread (`HALO_CHECKPOINT_WRITE_THREADS`, default `0`), so host memory stays well under 1× model
-([measured peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
+([computed peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
 line; opting in with a positive count writes the finished parts on that many threads while the next chunk is
 gathered and converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
 rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;
@@ -109,11 +110,12 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | `model.safetensors` (or sharded + index) | Yes | Yes | Weights, a trained [MTP head](../optimization/mtp-heads.md#checkpoints) under its release keys included |
 | `config.json`, `tokenizer.*` (full processor for VLMs and for RL runs on a multimodal checkpoint, whose `processing_class` stays the tokenizer) | Yes | Yes | Architecture config + `processing_class` |
 | `generation_config.json` | Yes | Yes | Sampling defaults, stop strings and the custom `eos_token_id` set — written for a generative model only, and paired with `config.json` by `save_model_config`. `PretrainedConfig` does not carry it, so a save that writes only `config.json` serves with defaults. |
-| `trainer_state.json` | Yes | Yes | Step count, epoch, loss history — published last ([Interrupted saves](#interrupted-saves)) |
+| `trainer_state.json` | Yes | Yes | Step count, epoch, loss history, and a `token_sources` run's mix fingerprint ([Pre-training](../training-methods/pretraining.md#training-from-datatrove-token-folders)) — published last ([Interrupted saves](#interrupted-saves)) |
 | `optimizer_shard_XXXXX.pt` | Yes | No | Per-rank optimizer shard — every torchrun sharded mode. Under multi-group EP only the replica group's lowest rank carries the replicated (FSDP-ignored) expert state; its peers read it from that shard |
 | `optimizer_meta.pt` | Yes | No | Topology fingerprint gating exact resume |
 | `scheduler.pt` | Yes | Yes | LR scheduler state — re-persisted on every mode so resume continues the schedule |
 | `router_balancing_biases.pt` | Yes | Yes | DeepSeek-V3 router balancing biases, restored on resume |
+| `moe_expert_token_counts.json` | Yes | Yes | Per-layer, per-expert routed token slots since the run's first step, continued on resume ([Callbacks](../training-methods/callbacks.md#expert-token-counts-over-the-run)) |
 | `reference_logps.pt` | Yes | Yes | Frozen per-split reference scores: DPO/KTO `precompute_ref_log_probs` columns and offline GRPO raw completion-token log-probs. Resume validates token digests, row counts and reference settings before attaching them ([DPO](../training-methods/preference/dpo.md#resuming-a-precompute-run), [Offline GRPO](../training-methods/grpo/offline.md#reference-model)) |
 | `rng_state_<rank>.pth` | Yes | No | Per-rank RNG state (`rng_state.pth` single-process) |
 | `prefetch_pending-<rank>-of-<world>.pt` | Yes | Yes | Every async environmental GRPO rank: the layout, the rounds it submitted but had not trained (empty without prefetch or on a TP/ETP follower), submitted again first on a resume under that layout, and the halting counters (zero-gradient, empty-rollout and episode-error rounds, early-stop streaks) ([Multiple servers and prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)) |
@@ -210,7 +212,8 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
   serialization (`exports_source_config_schema`, Step-3.7 Flash and Nemotron-H):
   `export_source_config_schema` writes the run's changed values back under the source's spellings and
   copies the `auto_map` modules in transitively. The source is the checkpoint the model was loaded from,
-  so a resume or a `patch_vocab.py` output carries the schema on. A change lands under the spelling the source
+  so a resume or a `patch_vocab.py` output carries the schema on, and a Hub source is read at the commit the weights
+  were read at. A change lands under the spelling the source
   already uses: the key itself, its `attribute_map` alias or its `_legacy_field_names` alias. The rewritten config
   is re-parsed against the live one, so a change the source schema swallows raises, while a field the class holds none for, the Trainer's `use_cache` on Nemotron-H's composite, is no change. A source of the same `model_type`
   in transformers' causal mapping needs no `auto_map` (Nemotron 3.5 Lightning), as stock `from_pretrained` and vLLM
@@ -354,7 +357,7 @@ live names differ from its hub's declares the pairs in its spec's `export_key_re
 gather and `merge_ep_shards.py` apply; the lazy loader reads the hub spelling through transformers' own
 Laguna renamings. Every lazy build plans its keys with the family's whole transformers conversion mapping,
 as `from_pretrained` does (`halo/model_loading/checkpoint_keys.py`), a SigLIP tower's `vision_model` level
-included. Four families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling,
+included. Five families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling, Inkling 2,
 DeepSeek-V4, GLM-5 Next, Step-3.7 Flash); each declared key must resolve in the installed transformers, and
 a text-only class with no mapping of its own (Inkling's text artifact) plans with those entries. A key stays
 unconverted when its rename target misses the live names while the key itself is live, the retry
@@ -438,6 +441,11 @@ accelerate-managed FSDP (the base Trainer's save owns the flat-param layout) and
 saved: `adapter_config.json`, `adapter_model.safetensors` (`adapter_model.bin` on a safetensors write
 failure), `tokenizer.*`.
 
+`adapter_config.json` names the base as the run read it: `base_model_name_or_path` and, for a Hub base, `revision`,
+the commit every rank agreed on at load. It is PEFT's own field, so `AutoPeftModel` reads the base there too, and an
+expert-only save writes the same two keys. A local base and an `init_from_scratch` run record no revision. Every tool
+that loads an adapter's base reads it at that commit ([PEFT → Merging adapters](../optimization/peft.md#merging-adapters)).
+
 | Mode | LoRA params | Saving rank | Collective |
 |------|-------------|-------------|:----------:|
 | **EP** | Attention adapters + native grouped expert adapters | Save rank | Yes (expert gather) |
@@ -473,8 +481,9 @@ branch. Resume reads the adapter file present on **every** rank (safetensors or 
 reading different files would order the per-key DTensor loads differently.
 
 A GptOss run also writes `training_provenance.json` (`write_training_provenance`,
-`halo/checkpoint/sidecars.py`) recording whether attention sinks were live or neutralized. The export tools
-re-apply it through `apply_training_sidecars`, because a merge rebuilds the base from the hub, whose sinks
+`halo/checkpoint/sidecars.py`) recording whether attention sinks were live or neutralized, beside a PEFT adapter
+and beside an expert-only one. The export tools re-apply it through `apply_training_sidecars`, and the streaming
+merge by writing the sinks at their dtype minimum, because a merge rebuilds the base from the hub, whose sinks
 are always live. It is a separate sidecar, so stock PEFT keeps loading the adapter unchanged.
 
 ### Merge-on-save checkpoints
@@ -525,9 +534,7 @@ FSDP2 (`fully_shard`) itself.
 transformers logger, which non-logging ranks silence — a truncated or wrong-architecture directory would
 train from random weights with no output. Every toolkit load path (the per-mode loaders, the lazy EP
 loader, the reference/teacher loads) routes its absent set through `verify_checkpoint_coverage`
-(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`,
-which also keeps the checkpoint's weights on every rank under accelerate's `fsdp_cpu_ram_efficient_loading`
-([Accelerate launch configs](../parallelism/data-parallelism.md#accelerate-launch-configs)).
+(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`.
 
 Legitimate absences are read off the model: a task head outside `base_model_prefix` (`score`,
 `classifier`, an untied `lm_head` — what makes reward / classification training on a base checkpoint

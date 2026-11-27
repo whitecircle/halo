@@ -117,7 +117,7 @@ class LigerFamilySpec:
 
 # A multimodal wrapper is listed only where its text tower can be nothing but the family named here; one
 # whose tower may be either of two siblings resolves through `text_config.model_type` instead. GLM-5 Next
-# and Step-3.7 define no `*ForCausalLM`, and Inkling's head truncates the vocabulary, so they keep the
+# and Step-3.7 define no `*ForCausalLM`, and both Inklings' heads truncate the vocabulary, so they keep the
 # unfused head.
 LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
     # Mistral 4, the text tower of `mistral3` checkpoints such as Mistral Small 4. Rotary is
@@ -276,6 +276,16 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         model_types=("inkling_text", "inkling_mm_model"),
         modeling_module="transformers.models.inkling.modeling_inkling",
         rms_norm=("InklingRMSNorm",),
+    ),
+    # Inkling 2. The norm multiplies its weight in fp32 before the cast back, Gemma's mode; `Inkling2UnweightedRMSNorm`
+    # carries no weight and multiplies in the input dtype. `Inkling2SoftcappedSwiGLU` softcaps the gate factor and up
+    # half, and positions enter as learned relative logits, so there is no rotary.
+    LigerFamilySpec(
+        model_types=("inkling2_text", "inkling2"),
+        modeling_module="transformers.models.inkling2.modeling_inkling2",
+        rms_norm=("Inkling2RMSNorm",),
+        rms_norm_casting_mode="gemma",
+        rms_norm_kernel="native",
     ),
     # LFM-2, dense and MoE. The only families on the roster whose rotary is Liger's (full head_dim,
     # `rotate_half` over concatenated halves). Their MLPs project through `w1`/`w3`/`w2` with a

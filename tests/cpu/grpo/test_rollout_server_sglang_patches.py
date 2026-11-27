@@ -153,6 +153,36 @@ HYPERCONNECTION = """            self.input_mix_weight_up = nn.Linear(
 """
 
 
+# sglang 0.5.22 srt/managers/tokenizer_control_mixin.py: the eviction inside load_lora_adapter, then the tail of
+# unload_lora_adapter, the explicit route.
+LORA_CONTROL = """                        unload_result = await self._unload_lora_adapter_locked(
+                            UnloadLoRAAdapterReqInput(lora_name=lru_lora_name)
+                        )
+                        if not unload_result.success:
+                            raise ValueError(
+                                f"Error while unloading LRU LoRA adapter '{lru_lora_name}': "
+                                f"{unload_result.error_message}"
+                            )
+                        del result.loaded_adapters[lru_lora_name]
+
+                return result
+        except ValueError as e:
+            return LoadLoRAAdapterReqOutput(
+                success=False,
+                error_message=str(e),
+            )
+            logger.info(
+                "Start unload Lora adapter. Lora name=%s",
+                obj.lora_name,
+            )
+
+            async with self.lora_update_lock:
+                return await self._unload_lora_adapter_locked(obj)
+        except ValueError as e:
+            return UnloadLoRAAdapterReqOutput(success=False, error_message=str(e))
+"""
+
+
 def _patched(text, path):
     for edit in patches.EDITS:
         if edit.path == path:
@@ -217,6 +247,22 @@ def test_the_mix_up_weight_loader_rewrites_the_padded_copy_in_place():
     _verify(patched, patches._HYPERCONNECTION_FILE)
     with pytest.raises(SystemExit, match="hyper-connection mix-up loader hook: the post-image is not in place"):
         _verify(HYPERCONNECTION, patches._HYPERCONNECTION_FILE)
+
+
+def test_an_explicit_unload_forgets_the_name_an_eviction_keeps():
+    """A request naming an unregistered adapter loads it back from ``lora_ref_cache``: an evicted one must come back,
+    one the trainer retired must not."""
+    patched = _patched(LORA_CONTROL, patches._LORA_CONTROL_FILE)
+    eviction, explicit = patched.split('"Start unload Lora adapter. Lora name=%s"')
+    assert "lora_ref_cache" not in eviction
+    forget = explicit.split("result = await self._unload_lora_adapter_locked(obj)")[1].split("return result")[0]
+    assert (
+        forget
+        == "\n                if result.success:\n                    self.lora_ref_cache.pop(obj.lora_name, None)\n                "
+    )
+    _verify(patched, patches._LORA_CONTROL_FILE)
+    with pytest.raises(SystemExit, match="LoRA unload forgets the name: the post-image is not in place"):
+        _verify(LORA_CONTROL, patches._LORA_CONTROL_FILE)
 
 
 def test_verify_refuses_a_gate_whose_weight_is_in_the_default_dtype():

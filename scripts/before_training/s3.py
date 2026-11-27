@@ -63,7 +63,11 @@ Examples:
     )
     push_parser.add_argument("local_path", help="Local folder path to upload")
     push_parser.add_argument("s3_key", help="S3 key/path, or s3:// URI, for the folder")
-    push_parser.add_argument("--no_overwrite", action="store_true", help="Don't overwrite if exists")
+    push_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing prefix; the objects the folder lacks are deleted (default: refuse it)",
+    )
     push_parser.set_defaults(func=push_command)
 
     download_parser = subparsers.add_parser(
@@ -71,7 +75,11 @@ Examples:
     )
     download_parser.add_argument("s3_key", help="S3 key/path, or s3:// URI, of the folder")
     download_parser.add_argument("local_path", help="Local path to download to")
-    download_parser.add_argument("--no_overwrite", action="store_true", help="Don't overwrite if local exists")
+    download_parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Replace an existing local path; it is removed before the download (default: refuse it)",
+    )
     download_parser.set_defaults(func=download_command)
 
     list_parser = subparsers.add_parser("list", parents=[common_parser], help="List objects in S3")

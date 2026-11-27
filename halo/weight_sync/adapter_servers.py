@@ -3,6 +3,7 @@ nothing runs under it. It holds no weight-sync group; the engines' base is pushe
 
 import logging
 from collections.abc import Callable, Iterable
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -56,7 +57,7 @@ class AdapterServers:
     def served_base(self, url: str) -> ServedBase:
         return self._clients[self._urls.index(url)].served_base()
 
-    def load(self, name: str, config: dict[str, Any], payload: str, urls: Iterable[str] | None = None) -> None:
+    def load(self, name: str, config: dict[str, Any], payload: str | Path, urls: Iterable[str] | None = None) -> None:
         """All or none over ``urls`` (every server by default): a server that refuses unloads the adapter from the others,
         so no round meets two policies."""
         chosen = list(self._urls if urls is None else urls)

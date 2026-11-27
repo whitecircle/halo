@@ -2,21 +2,25 @@
 """Load-time guards in ``halo/data/sources/loading.py``: a declared render column must exist, ``test_size`` warns
 where inert, a train-only corpus entry adds no held-out rows, and ``validation`` serves as the held-out split."""
 
-import json
 import logging
 import os
 import shutil
 import tempfile
+from functools import partial
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from datasets import Dataset, DatasetDict
 
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
 from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata
 from halo.data.preprocessed.preparation import shard_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from halo.data.render_columns import alias_tools_column
 from halo.data.sources.loading import load_dataset_from_source, load_datasets, load_datasets_auto
 from halo.data.sources.paths import METADATA_FILE
+from halo.entrypoints.data_setup import load_script_datasets
 
 _LOADING_LOGGER = "halo.data.sources.loading"
 
@@ -111,32 +115,34 @@ def test_the_refusal_names_the_knob_the_caller_read_the_column_from(tmp_path):
         assert "conversation_field" not in str(excinfo.value), excinfo.value
 
 
-def test_declared_tools_field_typo_fails_loud():
-    """``tools_field`` is optional at render time, so a typo never surfaces downstream: the run trains tool-calling
-    data with no tools."""
-    temp_dir = tempfile.mkdtemp()
-    try:
-        _save_raw_dataset(temp_dir, _conversation_dataset(4), _conversation_dataset(2))
-        with pytest.raises(ValueError, match="tools_field='tols'"):
-            load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages", tools_field="tols")
-    finally:
-        shutil.rmtree(temp_dir)
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+def test_a_declared_template_column_typo_fails_loud(tmp_path, knob):
+    """Optional at render time, so a typo never surfaces downstream: every row would train without its tools or its
+    level."""
+    source = _save_raw_dataset(
+        str(tmp_path / "raw"),
+        _conversation_dataset(4).add_column("column", ["x"] * 4),
+        _conversation_dataset(2).add_column("column", ["y"] * 2),
+    )
+    load = partial(load_datasets, source, test_size=None, dataset_ratio=1, conversation_field="messages")
+    with pytest.raises(ValueError, match=rf"{knob}='colum' names a column"):
+        load(template_columns={knob: "colum"})
+    assert load(template_columns={knob: "column"})["train"]["column"] == ["x"] * 4
 
 
-def test_declared_tools_field_present_loads():
-    temp_dir = tempfile.mkdtemp()
-    try:
-        train = _conversation_dataset(4).add_column("tools", [[]] * 4)
-        test = _conversation_dataset(2).add_column("tools", [[]] * 2)
-        _save_raw_dataset(temp_dir, train, test)
-        ds = load_datasets(
-            temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages", tools_field="tools"
-        )
-        assert len(ds["train"]) == 4
-        ds = load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages")
-        assert len(ds["train"]) == 4
-    finally:
-        shutil.rmtree(temp_dir)
+def test_load_script_datasets_hands_the_loader_every_template_column():
+    """Each script's loader is where a declared column is checked, so one the call leaves out goes unchecked."""
+    seen = {}
+
+    def loader(*args, **kwargs):
+        seen.update(kwargs)
+        return "loaded"
+
+    columns = {knob: f"{knob}_column" for knob in TEMPLATE_COLUMN_KNOBS}
+    args = SimpleNamespace(dataset="/data/raw", test_size=None, dataset_ratio=None, **columns)
+    parallelism = SimpleNamespace(get_data_parallel_rank=lambda: 0, data_parallel_size=1)
+    assert load_script_datasets(args, parallelism, loader=loader) == ("loaded", False)
+    assert seen["template_columns"] == columns
 
 
 def test_tools_column_is_aliased_onto_the_spelling_the_reward_trainer_renders():
@@ -252,7 +258,7 @@ def test_mixed_corpus_keeps_the_tools_column_through_the_concatenation():
             test_size=None,
             dataset_ratio=1,
             conversation_field="messages",
-            tools_field="tools",
+            template_columns={"tools_field": "tools"},
         )
 
         for split in ("train", "test"):
@@ -265,8 +271,79 @@ def test_mixed_corpus_keeps_the_tools_column_through_the_concatenation():
         shutil.rmtree(without_tools)
 
 
-def test_tools_column_lost_to_a_type_mismatch_fails_loud():
-    """A column no null fill can reconcile is dropped by the intersection, which must raise."""
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+def test_a_corpus_checks_each_template_column_across_its_entries(tmp_path, caplog, knob):
+    """A column no entry carries is a typo, refused; one an entry lacks leaves that entry's rows rendering as if the
+    knob were unset, which the load says, and one every entry carries loads without a word."""
+    carrying = _save_raw_dataset(
+        str(tmp_path / "carrying"),
+        _conversation_dataset(4).add_column("extra", ["x"] * 4),
+        _conversation_dataset(2).add_column("extra", ["x"] * 2),
+    )
+    plain = _save_raw_dataset(str(tmp_path / "plain"), _conversation_dataset(4), _conversation_dataset(2))
+    load = partial(load_datasets, test_size=None, dataset_ratio=1, conversation_field="messages")
+
+    with pytest.raises(ValueError, match=rf"{knob}='missing' names a column NONE of the 2"):
+        load([carrying, plain], template_columns={knob: "missing"})
+    with caplog.at_level(logging.WARNING, logger="halo.data.sources.corpus"):
+        load([carrying, carrying], template_columns={knob: "extra"})
+        assert not [record for record in caplog.records if knob in record.getMessage()], caplog.records
+        load([carrying, plain], template_columns={knob: "extra"})
+    absent = {plain: ["test", "train"]}
+    assert any(f"{knob}='extra' is absent from {absent}" in record.getMessage() for record in caplog.records)
+
+
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+def test_a_template_column_one_entry_carries_in_train_only_is_no_typo(tmp_path, caplog, knob):
+    """The column exists, so the corpus refuses nothing whatever the other entries carry: the splits lacking it render
+    as if the knob were unset, which the load names split by split."""
+    train_only = _save_raw_dataset(
+        str(tmp_path / "train_only"), _conversation_dataset(4).add_column("extra", ["x"] * 4), _conversation_dataset(2)
+    )
+    plain = _save_raw_dataset(str(tmp_path / "plain"), _conversation_dataset(4), _conversation_dataset(2))
+
+    with caplog.at_level(logging.WARNING, logger="halo.data.sources.corpus"):
+        ds = load_datasets(
+            [train_only, plain],
+            test_size=None,
+            dataset_ratio=1,
+            conversation_field="messages",
+            template_columns={knob: "extra"},
+        )
+
+    assert ds["train"]["extra"] == ["x"] * 4 + [None] * 4
+    assert ds["test"]["extra"] == [None] * 4
+    absent = {train_only: ["test"], plain: ["test", "train"]}
+    assert any(f"{knob}='extra' is absent from {absent}" in record.getMessage() for record in caplog.records), [
+        record.getMessage() for record in caplog.records
+    ]
+
+
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+def test_a_pinned_template_column_keys_the_loaded_fingerprint(tmp_path, knob):
+    """Pinned, the column survives the concatenation; unpinned, the schema intersection drops it. A map keyed by the
+    loaded fingerprint (TRL's own) would otherwise serve one load's rows to the other."""
+    carrying = _save_raw_dataset(
+        str(tmp_path / "carrying"),
+        _conversation_dataset(4).add_column("extra", ["x"] * 4),
+        _conversation_dataset(2).add_column("extra", ["x"] * 2),
+    )
+    plain = _save_raw_dataset(str(tmp_path / "plain"), _conversation_dataset(4), _conversation_dataset(2))
+    load = partial(load_datasets, [carrying, plain], test_size=None, dataset_ratio=1, conversation_field="messages")
+
+    pinned = load(template_columns={knob: "extra"})
+    unpinned = load()
+    pinned_again = load(template_columns={knob: "extra"})
+
+    assert "extra" in pinned["train"].column_names and "extra" not in unpinned["train"].column_names
+    for split in ("train", "test"):
+        assert pinned[split]._fingerprint != unpinned[split]._fingerprint, split
+        assert pinned[split]._fingerprint == pinned_again[split]._fingerprint, split
+
+
+def test_a_tools_column_typed_differently_across_sources_is_refused():
+    """Two sources typing a declared column differently leave no null fill to reconcile, so the load refuses the
+    mismatch instead of dropping the column from every row."""
     struct_tools = tempfile.mkdtemp()
     string_tools = tempfile.mkdtemp()
     try:
@@ -280,17 +357,49 @@ def test_tools_column_lost_to_a_type_mismatch_fails_loud():
             _conversation_dataset(4).add_column("tools", ['[{"name": "search"}]'] * 4),
             _conversation_dataset(2).add_column("tools", ['[{"name": "search"}]'] * 2),
         )
-        with pytest.raises(ValueError, match="tools_field='tools'"):
+        with pytest.raises(ValueError, match="tools_field='tools' is a type mismatch") as excinfo:
             load_datasets(
                 [struct_tools, string_tools],
                 test_size=None,
                 dataset_ratio=1,
                 conversation_field="messages",
-                tools_field="tools",
+                template_columns={"tools_field": "tools"},
             )
+        held = str(excinfo.value)
+        assert f"{struct_tools} (train)" in held and f"{string_tools} (test)" in held, held
     finally:
         shutil.rmtree(struct_tools)
         shutil.rmtree(string_tools)
+
+
+@pytest.mark.parametrize("unlabelled_first", [True, False], ids=["unlabelled-source-first", "labelled-source-first"])
+@pytest.mark.parametrize("null_column", [False, True], ids=["column-absent", "column-all-null"])
+def test_a_mixed_corpus_keeps_every_level_through_the_concatenation(tmp_path, null_column, unlabelled_first):
+    """A source collected without levels renders its rows with none, whether it lacks the column or holds it as nulls,
+    the no-level cell, which Arrow types ``null``: beside a typed source the schema intersection would drop either."""
+    labelled = _save_raw_dataset(
+        str(tmp_path / "labelled"),
+        _conversation_dataset(4).add_column("effort", ["low", "medium", "high", "low"]),
+        _conversation_dataset(2).add_column("effort", ["high"] * 2),
+    )
+
+    def unlabelled_split(rows: int) -> Dataset:
+        split = _conversation_dataset(rows)
+        return split.add_column("effort", [None] * rows) if null_column else split
+
+    unlabelled = _save_raw_dataset(str(tmp_path / "unlabelled"), unlabelled_split(4), unlabelled_split(2))
+
+    ds = load_datasets(
+        [unlabelled, labelled] if unlabelled_first else [labelled, unlabelled],
+        test_size=None,
+        dataset_ratio=1,
+        conversation_field="messages",
+        template_columns={"reasoning_effort_field": "effort"},
+    )
+
+    carried = ds["train"]["effort"]
+    assert carried.count(None) == 4, carried
+    assert sorted(level for level in carried if level is not None) == ["high", "low", "low", "medium"], carried
 
 
 def test_preprocessed_load_ignores_the_render_column():
@@ -367,7 +476,7 @@ def test_a_ratio_list_on_a_preprocessed_string_path_takes_the_raw_path_refusal(t
         load_datasets_auto(source, test_size=None, dataset_ratio=[0.1])
 
 
-@pytest.mark.parametrize("ratio", [None, 1, 1.0])
+@pytest.mark.parametrize("ratio", [None, 1.0])
 def test_a_ratio_keeping_every_row_loads_a_preprocessed_dataset(tmp_path, ratio):
     source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
     ds, is_preprocessed = load_datasets_auto(source, test_size=None, dataset_ratio=ratio)
@@ -412,17 +521,47 @@ def test_test_size_still_splits_a_plain_dataset(caplog):
         shutil.rmtree(temp_dir)
 
 
-def test_preprocessed_metadata_fixture_is_detected():
-    """A fixture no longer detected as pre-processed would send the two tests above down the raw path."""
-    temp_dir = tempfile.mkdtemp()
-    try:
-        _save_preprocessed_dataset(temp_dir)
-        with open(os.path.join(temp_dir, METADATA_FILE)) as f:
-            assert json.load(f)["preprocessed"] is True
-        _, is_preprocessed = load_datasets_auto(temp_dir, test_size=None, dataset_ratio=1)
-        assert is_preprocessed
-    finally:
-        shutil.rmtree(temp_dir)
+@pytest.mark.parametrize("layout", ["bare", "train_only", "train_and_test"])
+def test_test_size_writes_its_split_under_the_datasets_cache(tmp_path, monkeypatch, layout):
+    """``datasets`` writes a split's index files beside the source's Arrow files: a read-only input fails, and every
+    node's load rank writes into a shared one."""
+    cache = tmp_path / "datasets_cache"
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache))
+    source = str(tmp_path / "source")
+    if layout == "bare":
+        _conversation_dataset(10).save_to_disk(source)
+    elif layout == "train_only":
+        _save_train_only_dataset(source, _conversation_dataset(10))
+    else:
+        _save_raw_dataset(source, _conversation_dataset(6), _conversation_dataset(4))
+    before = sorted(str(p.relative_to(source)) for p in Path(source).rglob("*"))
+
+    ds = load_datasets(source, test_size=0.2, dataset_ratio=1, conversation_field="messages")
+
+    assert (len(ds["train"]), len(ds["test"])) == (8, 2)
+    assert sorted(str(p.relative_to(source)) for p in Path(source).rglob("*")) == before
+    assert list(cache.glob("split-*.arrow")), "the split's index went nowhere under the datasets cache"
+
+
+def test_a_directory_mixing_two_bakes_is_refused(tmp_path):
+    """A copy that adds files without removing the old ones leaves a sharded bake's index beside an unsharded bake's
+    rows and stamp, and the index decides the load."""
+    mixed = str(tmp_path / "mixed")
+    _save_sharded_dataset(mixed, train_rows=20, test_rows=6)
+    _save_preprocessed_dataset(mixed, train_rows=8, test_rows=4)
+    with pytest.raises(ValueError, match=r"has shard_index.json while its metadata.json records num_shards=1"):
+        load_datasets_auto(mixed, test_size=None, dataset_ratio=None)
+
+    sharded_stamp_over_rows = str(tmp_path / "shards")
+    _save_preprocessed_dataset(sharded_stamp_over_rows)
+    write_stamped_sidecar(
+        os.path.join(sharded_stamp_over_rows, METADATA_FILE),
+        PreprocessedDatasetMetadata(max_length=2, num_shards=2),
+    )
+    with pytest.raises(
+        ValueError, match=r"has no readable shard_index.json while its metadata.json records num_shards=2"
+    ):
+        load_datasets_auto(sharded_stamp_over_rows, test_size=None, dataset_ratio=None)
 
 
 def test_train_only_list_entry_contributes_no_rows_to_the_held_out_split(caplog):

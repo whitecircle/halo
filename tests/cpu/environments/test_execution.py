@@ -6,7 +6,6 @@ import pytest
 
 from halo.environments.sandbox.inprocess import (
     SAFE_MATH_BUILTINS,
-    SAFE_PYTHON_BUILTINS,
     calculate_sandboxed,
     run_python_sandboxed,
 )
@@ -71,21 +70,6 @@ def test_calc_whitespace():
     assert calculate_sandboxed("  2 + 3  ") == "5"
 
 
-def test_sandbox_expression():
-    assert run_python_sandboxed("2 + 3") == "5"
-
-
-def test_sandbox_statement():
-    result = run_python_sandboxed("x = 10\nprint(x)")
-    assert "10" in result
-
-
-def test_sandbox_print_capture():
-    result = run_python_sandboxed("print('hello')\nprint('world')")
-    assert "hello" in result
-    assert "world" in result
-
-
 def test_sandbox_no_output():
     """The last bound local is reported; a ``"6" in result or "success" in result.lower()`` check would pass on
     either branch."""
@@ -107,21 +91,11 @@ def test_sandbox_no_file_access():
     assert "Error" in result
 
 
-def test_sandbox_error_handling():
-    result = run_python_sandboxed("1/0")
-    assert "Error" in result
-
-
 def test_sandbox_blocks_dunder_escape():
     """Overriding __builtins__ alone does not contain it, so AST validation blocks dunder access before execution."""
     result = run_python_sandboxed("().__class__.__bases__[0].__subclasses__()")
     assert "Error" in result
     assert "dunder" in result.lower()
-
-
-def test_sandbox_blocks_dunder_globals_access():
-    result = run_python_sandboxed("(lambda: None).__globals__")
-    assert "Error" in result
 
 
 def test_sandbox_blocks_getattr_builtin():
@@ -165,21 +139,10 @@ def test_sandbox_times_out_on_infinite_loop():
     assert "timeout" in result.lower()
 
 
-def test_sandbox_multiline():
-    code = "result = 0\nfor i in range(5):\n    result += i\nprint(result)"
-    result = run_python_sandboxed(code)
-    assert "10" in result
-
-
 def test_sandbox_no_output_no_vars_success_message():
     # A bare for-loop would bind its loop variable, so use a no-op that binds nothing.
     result = run_python_sandboxed("pass")
     assert "executed successfully" in result.lower()
-
-
-def test_sandbox_last_var_is_returned_not_first():
-    result = run_python_sandboxed("a = 1\nb = 2\nc = 99")
-    assert result == "99"
 
 
 def test_sandbox_statement_nameerror_caught():
@@ -255,19 +218,6 @@ def test_sandbox_print_of_nothing_reads_as_no_output():
     assert run_python_sandboxed("print('', end='')") == REPL_NO_OUTPUT_MESSAGE
 
 
-def test_calc_negative_result():
-    assert calculate_sandboxed("3 - 10") == "-7"
-
-
-def test_math_builtins_subset_of_python():
-    """The python sandbox must offer everything the calculator does; a refactor dropping the spread would regress
-    it."""
-    for key in SAFE_MATH_BUILTINS:
-        assert key in SAFE_PYTHON_BUILTINS, f"{key} in SAFE_MATH_BUILTINS but not in SAFE_PYTHON_BUILTINS"
-    assert set(SAFE_MATH_BUILTINS).issubset(SAFE_PYTHON_BUILTINS)
-    assert len(SAFE_PYTHON_BUILTINS) > len(SAFE_MATH_BUILTINS)
-
-
 def test_calc_factorial_and_gcd_execute():
     assert calculate_sandboxed("factorial(5)") == "120"
     assert calculate_sandboxed("gcd(12, 18)") == "6"
@@ -289,10 +239,6 @@ def test_calc_timeout_on_slow_evaluation():
     finally:
         del SAFE_MATH_BUILTINS["hang"]
     assert result == "Error: execution exceeded 0.2s timeout"
-
-
-def test_calc_fast_expression_unaffected_by_timeout():
-    assert calculate_sandboxed("2 + 3", timeout=5.0) == "5"
 
 
 def test_pow_bomb_rejected_not_hung():

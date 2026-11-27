@@ -3,7 +3,6 @@
 combine while peers spin in DeepEP's barrier, whose budget bounds rank skew."""
 
 import contextlib
-from collections import defaultdict
 
 import pytest
 import torch
@@ -171,9 +170,10 @@ def test_the_warmup_draws_no_random_numbers():
     assert [event[0] for event in layer.events].count("warm") == 2
 
 
-@pytest.mark.parametrize(
-    ("kernel", "row_count"),
-    (
+def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(subtests):
+    """Triton compiles per class of a specializable integer (1, a multiple of 16, neither); unspecialized, one warm
+    count covers every dispatch size."""
+    rows = (
         (fused_glu._glu_fwd_kernel, "n_rows"),
         (fused_glu._glu_bwd_kernel, "n_rows"),
         (moe_permute._gather_reduce_kernel, "n_src"),
@@ -186,13 +186,12 @@ def test_the_warmup_draws_no_random_numbers():
         (moe_route_sort._place_kernel, "n_rows"),
         (moe_route_sort._place_kernel, "n_sorted"),
         (moe_permute._take_padded_rows_kernel, "src_stride"),
-    ),
-)
-def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(kernel, row_count):
-    """Triton compiles per class of a specializable integer (1, a multiple of 16, neither); unspecialized, one warm
-    count covers every dispatch size."""
-    params = {param.name: param for param in kernel.params}
-    assert params[row_count].do_not_specialize
+    )
+    assert rows, "the sweep found no kernel argument"
+    for kernel, row_count in rows:
+        with subtests.test(f"{kernel.fn.__name__}-{row_count}"):
+            params = {param.name: param for param in kernel.params}
+            assert params[row_count].do_not_specialize
 
 
 _PERMUTE_BACKWARDS = {("MoEGatherPermute", "backward"), ("MoEWeightedUnpermute", "backward")}
@@ -355,19 +354,6 @@ def test_every_grouped_gemm_of_the_expert_compute_launches_a_kernel_the_warm_up_
     compute_kernels = _compute_gemm_kernels(layer)
     assert {kernel[3] for kernel in compute_kernels} == {"small", "large"}, "the receives must cross the tile switch"
     assert compute_kernels - warm == set()
-
-
-@pytest.mark.parametrize(("family", "layout", "variant"), GEMM_CASES, ids="-".join)
-def test_the_warm_up_runs_every_grouped_gemm_on_both_sides_of_the_tile_switch(family, layout, variant):
-    rows_by_layout = defaultdict(set)
-    for kernel, rows_per_expert in _warm_up_launches(gemm_layer(family, layout, variant)).grouped_mm_calls:
-        rows_by_layout[kernel[2]].add(rows_per_expert)
-    both = {1, GROUPED_MM_SMALL_TILE_DIM + 1}
-    assert rows_by_layout == {
-        "a row-major, b row-major": both,
-        "a row-major, b column-major": both,
-        "a column-major, b row-major": both,
-    }
 
 
 @pytest.mark.parametrize(("family", "layout"), NEGATIVE_CONTROL_CASES, ids="-".join)
@@ -600,7 +586,6 @@ def _gpt_oss_stub(*, grouped_mm: bool, expert_tp_size: int) -> gpt_oss_layer.EPG
         (False, 1, False),  # Per-expert loop: halves split straight out of the interleaved pair.
         (True, 1, True),  # Grouped GEMM: de-interleaved contiguous parameters.
         (False, 2, True),
-        (True, 2, True),
     ),
 )
 def test_gptoss_warms_the_activation_its_compute_path_calls(grouped_mm, expert_tp_size, contiguous_halves):

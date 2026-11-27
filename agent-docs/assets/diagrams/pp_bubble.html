@@ -15,6 +15,8 @@
 
   body { width: 1600px; }
 
+  h1 { font-variant-numeric: lining-nums; }
+
   .figure { position: relative; }
 
   /* Stage label, the slots, then the live-microbatch count, in one grid per schedule. */
@@ -92,7 +94,7 @@
     color: var(--text);
   }
 
-  /* Fill and drain marks sit under the 1F1B grid, with the steady state named between them. */
+  /* Fill, steady state and drain are marked under the 1F1B grid. */
   .phases {
     position: relative;
     height: 40px;
@@ -162,6 +164,7 @@
       <span class="s">More microbatches shrink the bubble but thin every GEMM’s M, and more stages widen fill and drain.</span>
       <span class="s" id="shipped"></span>
       <span class="s">Live microbatches is the most a stage holds between a forward and its backward.</span>
+      <span class="s" id="weighted"></span>
     </p>
   </footer>
 </div>
@@ -214,8 +217,12 @@
     return s < p - 1 ? `${s + 1}B${k}` : `${s}F${k}`;
   }
 
-  /** Place every op in the first slot where its stage is free and its dependency has finished. */
-  function simulate(order, p) {
+  /** A backward runs two GEMMs per layer where a forward runs one. */
+  const TIME = { F: 1, B: 2 };
+  const EQUAL = { F: 1, B: 1 };
+
+  /** Place every op at the first time its stage is free and its dependency has finished, `cost[kind]` long. */
+  function simulate(order, p, cost = EQUAL) {
     const next = Array(p).fill(0);
     const free = Array(p).fill(0);
     const done = new Map();
@@ -237,9 +244,9 @@
         }
 
         const start = Math.max(free[s], dep !== null ? done.get(dep) : 0);
-        free[s] = start + 1;
+        free[s] = start + cost[kind];
         done.set(`${s}${kind}${k}`, free[s]);
-        placed.push({ s, kind, k, start });
+        placed.push({ s, kind, k, start, length: cost[kind] });
         next[s] += 1;
         progressed = true;
       }
@@ -252,8 +259,9 @@
     return { placed, slots: Math.max(...free) };
   }
 
-  /** Each stage's idle slots in a simulated step. */
-  const idlePerStage = ({ placed, slots }, p) => Array.from({ length: p }, (_, s) => slots - placed.filter((op) => op.s === s).length);
+  /** Each stage's idle time in a simulated step. */
+  const idlePerStage = ({ placed, slots }, p) =>
+    Array.from({ length: p }, (_, s) => slots - placed.filter((op) => op.s === s).reduce((sum, op) => sum + op.length, 0));
   const gcd = (a, b) => (b === 0 ? a : gcd(b, a % b));
 
   /** The most microbatches one stage holds at once: forward run, backward not yet. */
@@ -270,7 +278,7 @@
   }
 
   const SCHEDULES = [
-    { name: "1F1B, the default", order: oneFOneB(P, M) },
+    { name: "1F1B, the usual schedule", order: oneFOneB(P, M) },
     { name: "GPipe", order: gpipe(P, M) },
   ];
 
@@ -293,6 +301,19 @@
   document.getElementById("subtitle").textContent = `Two schedules at p = ${P} stages and m = ${M} microbatches, one slot per forward or backward`;
   document.getElementById("shipped").textContent =
     `The shipped p = ${SHIPPED.p}, m = ${SHIPPED.m} recipes idle ${shippedIdle / divisor}/${shipped.slots / divisor} of a step.`;
+
+  // The same step with a backward twice as long as a forward: the idle share must not move.
+  const timed = SCHEDULES.map((schedule) => simulate(schedule.order, P, TIME));
+  const timedIdle = timed.flatMap((run) => idlePerStage(run, P));
+  const UNITS = timed[0].slots;
+
+  if (timed.some((run) => run.slots !== UNITS) || timedIdle.some((n) => n !== timedIdle[0]) || timedIdle[0] * SLOTS !== IDLE * UNITS) {
+    throw new Error("with a backward twice a forward the idle share differs from the equal-slot one");
+  }
+
+  const longer = TIME.B / TIME.F === 2 ? "twice" : `${TIME.B / TIME.F} times`;
+  document.getElementById("weighted").textContent =
+    `A backward takes ${longer} as long as a forward: each stage then idles ${timedIdle[0]} of ${UNITS} time units, the same share.`;
 
   SCHEDULES[0].note = `One optimizer step is ${SLOTS} slots`;
   SCHEDULES[1].note = `All forwards, then all backwards: the same ${SLOTS} slots`;
@@ -343,29 +364,48 @@
   foot.append(key, el("div", "formula", `Idle = ${IDLE} of ${SLOTS} slots per stage = (p − 1)/(m + p − 1) = ${share}%`));
   figure.append(foot);
 
-  // Fill and drain each cover the first or last p - 1 slots of the 1F1B grid.
+  // The steady state is the longest run of slots in which every stage is busy: fill is before it, drain after.
   const phases = figure.querySelector(".phases");
   const slotsRow = [...firstGrid.children].filter((n) => n.classList.contains("slot")).slice(0, SLOTS);
   const base = phases.getBoundingClientRect().left;
   const left = (i) => slotsRow[i].getBoundingClientRect().left - base;
   const right = (i) => slotsRow[i].getBoundingClientRect().right - base;
+  const allBusy = Array.from({ length: SLOTS }, (_, t) => SCHEDULES[0].placed.filter((op) => op.start === t).length === P);
+  let steadyRun = { from: 0, to: -1 };
+
+  for (let t = 0; t < SLOTS; t += 1) {
+    if (!allBusy[t]) {
+      continue;
+    }
+
+    let end = t;
+
+    while (end + 1 < SLOTS && allBusy[end + 1]) {
+      end += 1;
+    }
+
+    if (end - t > steadyRun.to - steadyRun.from) {
+      steadyRun = { from: t, to: end };
+    }
+
+    t = end;
+  }
+
   const marks = [
-    [0, P - 2, "Fill"],
-    [SLOTS - (P - 1), SLOTS - 1, "Drain"],
+    [0, steadyRun.from - 1, "Fill"],
+    [steadyRun.from, steadyRun.to, "Steady state: every stage busy"],
+    [steadyRun.to + 1, SLOTS - 1, "Drain"],
   ];
 
   for (const [a, b, text] of marks) {
     const mark = el("div", "mark");
-    mark.style.left = `${left(a)}px`;
-    mark.style.width = `${right(b) - left(a)}px`;
+    // Neighbouring marks stop short of each other, so the three read as three.
+    mark.style.left = `${left(a) + 6}px`;
+    mark.style.width = `${right(b) - left(a) - 12}px`;
     const label = el("span", undefined, text);
     label.style.left = `${(left(a) + right(b)) / 2}px`;
     phases.append(mark, label);
   }
-
-  const steady = el("span", undefined, "Steady state: one forward and one backward per stage, per pair of slots");
-  steady.style.left = `${(left(0) + right(SLOTS - 1)) / 2}px`;
-  phases.append(steady);
 
   // A slot too narrow for its letter keeps only the microbatch number: its colour and the key name the pass.
   const labelled = [...figure.querySelectorAll(".slot.F, .slot.B")];

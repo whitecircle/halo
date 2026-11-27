@@ -10,7 +10,7 @@ from transformers import PreTrainedModel, PreTrainedTokenizerBase
 
 from halo.checkpoint.config_export import finalize_exported_config
 from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
-from halo.checkpoint.weights_source import config_schema_source
+from halo.checkpoint.weights_source import config_schema_source, weights_read_at
 
 
 class PreloadedTransformer(InputModule):
@@ -104,7 +104,12 @@ class PreloadedTransformer(InputModule):
         """For EP/TP, the trainer handles saving."""
         with save_pretrained_on_save_rank(self.auto_model):
             self.auto_model.save_pretrained(output_path)
-        finalize_exported_config(self.auto_model.config, output_path, source=config_schema_source(self.auto_model))
+        finalize_exported_config(
+            self.auto_model.config,
+            output_path,
+            source=config_schema_source(self.auto_model),
+            revision=weights_read_at(self.auto_model),
+        )
         self.tokenizer.save_pretrained(output_path)
         self.save_config(output_path)
 

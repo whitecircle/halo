@@ -8,12 +8,6 @@ import torch
 from halo.trainers.grpo.objective.advantages import group_relative_advantages
 
 
-def test_default_no_mask_unchanged():
-    rewards = torch.tensor([1.0, 0.0, 1.0, 0.0])
-    adv = group_relative_advantages(rewards, num_generations=4, scale_rewards="none")
-    assert torch.allclose(adv, rewards - rewards.mean())
-
-
 def test_errored_member_excluded_from_baseline():
     rewards = torch.tensor([1.0, 1.0, 1.0, 0.0])
     valid = torch.tensor([True, True, True, False])

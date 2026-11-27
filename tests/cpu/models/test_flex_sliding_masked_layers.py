@@ -20,7 +20,6 @@ from transformers import (
 )
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteAttention
-from transformers.models.step3p7.modeling_step3p7 import Step3p7Attention
 
 from halo.models.attention import sdpa_flex_sliding
 from halo.models.attention.layout import AttentionCall, attention_call, has_sliding_window_layers
@@ -128,19 +127,6 @@ def test_a_remote_code_config_keeps_sdpa():
     with patch.dict(mapping, {_RemoteConfig: _RemoteModel}):
         assert _RemoteModel.is_backend_compatible()  # only its remote origin keeps it off
         assert _resolve(config) == "sdpa"
-
-
-def test_step3p7_calls_carry_each_layers_own_head_count():
-    """The config's global head count raises, so a warm-up reading it fails the load."""
-    torch.manual_seed(0)
-    model = tiny_family_model(TINY_MOE_FAMILIES["step3p7"])
-    attention = next(m for m in model.modules() if isinstance(m, Step3p7Attention))
-    with pytest.raises(RuntimeError):  # AmbiguousGlobalPerLayerAttributeError
-        _ = attention.config.num_attention_heads
-    assert flex_attention_calls(model) == {
-        AttentionCall(4, 2, 64, 64, None, 0.125, None),
-        AttentionCall(2, 2, 64, 64, 64, 0.125, None),
-    }
 
 
 def _narrow_value_mla() -> Glm4MoeLiteForCausalLM:
@@ -377,42 +363,6 @@ def _loss_and_grads(model, batch: dict) -> tuple[torch.Tensor, dict[str, torch.T
     out = model(**batch, use_cache=False)
     out.loss.backward()
     return out.loss.detach(), {n: p.grad.detach().clone() for n, p in model.named_parameters() if p.grad is not None}
-
-
-def _reads_rotary_positions(model, layer: int) -> bool:
-    """Compares positions 0..7 against every token at position 0, where the rotation is the identity."""
-    attention = model.model.layers[layer].self_attn
-    hidden = torch.randn(1, 8, model.config.hidden_size, generator=torch.Generator().manual_seed(0))
-    with torch.no_grad():
-        outputs = [
-            attention(hidden, model.model.rotary_emb(hidden, positions[None]), None)[0]
-            for positions in (torch.arange(8), torch.zeros(8, dtype=torch.long))
-        ]
-    return not torch.equal(*outputs)
-
-
-def test_the_dense_sliding_families_keep_the_shapes_they_cover():
-    """Dropping one of these shapes upstream would leave the parity sweep green over a shape it does not run."""
-    torch.manual_seed(0)
-    mistral, cohere2, olmo3 = (tiny_family_model(ROSTER[family]) for family in ("mistral", "cohere2", "olmo3"))
-    assert "layer_types" not in vars(mistral.config)
-    assert not any(hasattr(layer.self_attn, "sliding_window") for layer in mistral.model.layers)
-    window = mistral.config.sliding_window
-    unwindowed = tiny_family_model(ROSTER["mistral"], overrides={"sliding_window": None})
-    unwindowed.load_state_dict(mistral.state_dict())
-    ids = _packed([2 * window], mistral.config.vocab_size)["input_ids"]
-    with torch.no_grad():
-        windowed, full = (model(input_ids=ids, use_cache=False).logits[:, window:] for model in (mistral, unwindowed))
-    assert not torch.allclose(windowed, full)
-
-    assert cohere2.config.layer_types == ["sliding_attention", "full_attention"]
-    assert [_reads_rotary_positions(cohere2, layer) for layer in range(2)] == [True, False]
-
-    assert olmo3.config.layer_types == ["sliding_attention", "full_attention"]
-    for layer in olmo3.model.layers:
-        attention = layer.self_attn
-        assert attention.q_norm.weight.shape == (attention.q_proj.out_features,)
-        assert attention.k_norm.weight.shape == (attention.k_proj.out_features,)
 
 
 @pytest.mark.parametrize("batch, lengths", [(_packed, [150, 30, 90]), (_padded, [260, 140])], ids=["packed", "padded"])

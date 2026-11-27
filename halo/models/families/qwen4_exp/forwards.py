@@ -28,6 +28,7 @@ from halo.models.families.qwen4_exp.gated_residual import (
 )
 from halo.models.families.qwen4_exp.ngram_table import HostNGramTable
 from halo.models.families.qwen4_exp.sparse_attention import qsa_attention_forward, warm_qsa_kernels
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped
 from halo.models.kernel_warmups import register_kernel_warmup
 from halo.models.segment_markers import document_starts
@@ -125,7 +126,7 @@ def patch_qwen4_exp_ngram_embedding() -> None:
 
     setattr(forward, _HOST_TABLE_ATTR, True)
     embedding_cls.__init__ = __init__
-    embedding_cls.forward = forward
+    patch_layer_forward(embedding_cls, forward)
     pretrained_cls.save_pretrained = save_pretrained
     pretrained_cls._keys_to_ignore_on_load_unexpected = [
         *pretrained_cls._keys_to_ignore_on_load_unexpected,
@@ -357,8 +358,8 @@ def patch_qwen4_exp_document_forwards() -> None:
         return qsa_attention_forward(self, hidden_states, position_embeddings, attention_mask, **kwargs)
 
     setattr(model_forward, _DOCUMENT_FORWARDS_ATTR, True)
-    model_cls.forward = model_forward
-    layer_cls.forward = layer_forward
-    attention_cls.forward = attention_forward
+    patch_layer_forward(model_cls, model_forward)
+    patch_layer_forward(layer_cls, layer_forward)
+    patch_layer_forward(attention_cls, attention_forward)
     if is_global_main_process():
         logger.info("Patched the Qwen4ExpText model, decoder layer and attention forwards for per-document rows")

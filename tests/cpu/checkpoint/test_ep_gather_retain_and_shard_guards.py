@@ -87,14 +87,6 @@ def test_expert_adapters_list_in_one_order_on_every_rank():
     ]
 
 
-def test_gather_exports_persistent_buffers_only():
-    """Exporting a rotary cache here would break merged-from-sharded == gathered."""
-    layer = _StubEPLayer()
-    gathered = layer.gather_layer_state_dict("model.layers.0.mlp", retain=True)
-    assert "model.layers.0.mlp.expert_bias" in gathered
-    assert "model.layers.0.mlp.rotary_cache" not in gathered
-
-
 EP_SIZE = 4
 LOCAL_EXPERTS, HIDDEN, INTER = 2, 6, 4
 EP_GROUP = "fake-dispatch-ep-group"

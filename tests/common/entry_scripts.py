@@ -181,6 +181,13 @@ def row_parser(description: str | None = None) -> argparse.ArgumentParser:
         default="recipe",
         help="'unset' drops the recipe's attn_implementation, so the run trains on the script's own default",
     )
+    parser.add_argument(
+        "--cp-size",
+        type=int,
+        default=1,
+        help="context_parallel_size of both launches; a full fine-tune then resumes on a policy read from the "
+        "checkpoint",
+    )
     return parser
 
 
@@ -249,12 +256,21 @@ def run_launch(argv: list[str]) -> subprocess.CompletedProcess:
     return subprocess.CompletedProcess(argv, launch.returncode, stdout="".join(lines))
 
 
-def first_launch_overrides() -> list[str]:
-    return [f"--max_steps={FIRST_STEPS}", "--save_steps=1"]
+def _parallelism_overrides(cp_size: int) -> list[str]:
+    return [f"--context_parallel_size={cp_size}"] if cp_size > 1 else []
 
 
-def resume_overrides() -> list[str]:
-    return [f"--max_steps={RESUMED_STEPS}", "--save_steps=1", "--resume_from_checkpoint=true"]
+def first_launch_overrides(*, cp_size: int = 1) -> list[str]:
+    return [f"--max_steps={FIRST_STEPS}", "--save_steps=1", *_parallelism_overrides(cp_size)]
+
+
+def resume_overrides(*, cp_size: int = 1) -> list[str]:
+    return [
+        f"--max_steps={RESUMED_STEPS}",
+        "--save_steps=1",
+        "--resume_from_checkpoint=true",
+        *_parallelism_overrides(cp_size),
+    ]
 
 
 def checkpoint_dir(output_dir: Path, step: int) -> Path:

@@ -133,13 +133,11 @@ def test_the_set_is_the_only_change_to_the_batch(completion_only, packing):
     assert _equal_batches(without_set(handed), bare([dict(row) for row in rows]))
 
 
-@pytest.mark.parametrize("labelled", [False, True], ids=("raw_rows", "precomputed_labels"))
 @pytest.mark.parametrize("pad_to_multiple_of", [None, 8])
 @pytest.mark.parametrize("rows", [(TWO_ROWS[0],), TWO_ROWS], ids=("one_row", "two_rows"))
-def test_the_full_sequence_route_is_trls_collator(rows, pad_to_multiple_of, labelled):
+def test_the_full_sequence_route_is_trls_collator(rows, pad_to_multiple_of):
     """The factory's collator is TRL's, built with the arguments TRL builds its own with, plus the set on an
     unpadded one-row batch."""
-    rows = [{**row, "labels": [-100, *row["input_ids"][1:]]} if labelled else dict(row) for row in rows]
     collator = _collator(_config("flash_attention_2"), pad_to_multiple_of=pad_to_multiple_of)
     assert type(collator) is DataCollatorForLanguageModelingWithVarlen
     assert isinstance(collator, TRLDataCollatorForLanguageModeling)

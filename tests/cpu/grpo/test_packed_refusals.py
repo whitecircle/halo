@@ -140,9 +140,18 @@ def test_a_family_a_row_would_cross_or_misread_is_refused(case, kernels_present)
         reject_unpackable_model(_model(TINY_MOE_FAMILIES[name]), attn)
 
 
+def test_inkling2_packs_on_its_own_kernel_only(kernels_present):
+    """Its short convolutions read the documents through the family's patches; only its own kernel carries the
+    relative logits and sinks and reads the documents off position_ids."""
+    model = _model(TINY_MOE_FAMILIES["inkling2_text"])
+    reject_unpackable_model(model, "inkling2_relative_flex")
+    with pytest.raises(ValueError, match="needs an attention backend that reads the row.s documents"):
+        reject_unpackable_model(model, "eager")
+
+
 @pytest.mark.parametrize("attn", ["sdpa", "eager", "flex_attention", None])
 def test_a_backend_that_is_not_varlen_flash_is_refused_for_every_family(attn, kernels_present):
-    with pytest.raises(ValueError, match="needs a varlen flash attention backend"):
+    with pytest.raises(ValueError, match="needs an attention backend that reads the row.s documents"):
         reject_unpackable_model(_model(TINY_DENSE_ATTENTION_FAMILIES["llama"]), attn)
 
 
@@ -193,10 +202,12 @@ def test_the_gin_ceiling_still_refuses_a_cross_domain_budget():
         reject_undispatchable_budget(_parallelism(16, requires_rdma=True), 9000)
 
 
-def test_the_planner_ceiling_exists_only_across_domains():
+def test_the_planner_ceiling_is_the_gin_ceiling_across_domains_and_moks_buffers():
     assert resolve_dispatch_ceiling(_parallelism(1)) is None
     assert resolve_dispatch_ceiling(_parallelism(8)) is None
     assert resolve_dispatch_ceiling(_parallelism(16, requires_rdma=True)) == 8192
+    for ep_size in (1, 4):
+        assert resolve_dispatch_ceiling(_parallelism(ep_size, moe_backend="mok", mok_token_capacity=4096)) == 4096
 
 
 if __name__ == "__main__":

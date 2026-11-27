@@ -2,7 +2,7 @@
 
 On EP MoE `torch.compile` gains at most 1%, and in `reduce-overhead` mode it costs throughput, so the trainer falls back to `default` when `torch_compile_mode` is unset. On Qwen3-30B-A3B EP=2 at seq 16384, batch 1, `default` mode gains **1%** without Liger and **0.3%** on top of it, `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger, and Liger alone adds **27%** ([Benchmark results](#benchmark-results)). At that shape keep `torch_compile` off and [Liger kernels](liger-kernels.md) on.
 
-What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
+What fusion helps with and what it does not: [GPU Training Theory → What fusion does not help with](../reference/gpu-training-theory.md#what-fusion-does-not-help-with).
 
 ## Expert activations are not compiled
 
@@ -14,7 +14,7 @@ The clamped combines latch into `_fused_glu_mul`, the GLU-combine seam every bas
 
 The EP routing sort stays eager too (`torch.compiler.disable` on the counting sort in `halo/kernels/moe_route_sort.py`, which every grouped-GEMM path runs on CUDA): its three Triton kernels are already fused, and traced, the slot counts that size it (the dispatch's host-side receive counts) would become graph inputs that change every step. A compiled EP layer breaks its graph there.
 
-The cached EP expert-weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats mxfp8 and mxfp4 (nvfp4's takes its fused kernel on a GPU that runs it, and eager elsewhere), with a permanent eager fallback on any compile or runtime failure. Uncached weights, such as the FSDP2-managed ep1 experts, quantize eagerly on every call, in every format — see [Low-Precision MoE](low-precision-moe-kernels.md).
+The cached EP expert-weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats mxfp8 and mxfp4 (nvfp4's takes its fused kernel on a GPU that runs it, and eager elsewhere), with a permanent eager fallback on any compile or runtime failure. Uncached weights, such as the FSDP2-managed ep1 experts, quantize on every call through the format's fused kernel, with the blocked axis moved last and back, and eagerly only on a GPU older than that kernel needs — see [Low-Precision MoE](low-precision-moe-kernels.md).
 
 ## Chunked log-prob head
 

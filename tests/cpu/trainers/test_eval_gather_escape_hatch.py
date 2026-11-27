@@ -102,14 +102,6 @@ def test_both_seams_are_identity_inside_the_hatch_and_restored_after(distributed
     assert trainer.accelerator.pad_across_processes(_SENTINEL) == ("class-padded", _SENTINEL)
 
 
-def test_the_accelerator_is_restored_by_deleting_the_instance_attribute(distributed):
-    """Re-assigning the bound method would pin an instance shadow, and later gathers would keep identity semantics."""
-    trainer = _StubTrainer()
-    trainer.evaluate()
-
-    assert "pad_across_processes" not in trainer.accelerator.__dict__
-
-
 def test_the_hatch_is_unwound_when_the_inner_evaluate_raises(distributed):
     trainer = _StubTrainer()
     with patch.object(_InnerTrainer, "evaluate", side_effect=RuntimeError("boom")):

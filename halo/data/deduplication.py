@@ -3,9 +3,9 @@
 
 import argparse
 import logging
+import tempfile
 import time
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import faiss
@@ -26,21 +26,16 @@ logger = logging.getLogger(__name__)
 # two runs over identical data keep different rows.
 DEDUP_SHUFFLE_SEED = 42
 
+# Rows one similarity search queries at once: its result holds every pair over the threshold, so a block of K identical
+# rows searched whole would return K squared pairs.
+_SEARCH_QUERY_ROWS = 4096
+
 OUTPUT_WRITERS: dict[str, Callable[[Dataset, str], object]] = {
     "jsonl": lambda dataset, path: dataset.to_json(path, lines=True),
     "json": lambda dataset, path: dataset.to_json(path, lines=False),
     "parquet": lambda dataset, path: dataset.to_parquet(path),
     "csv": lambda dataset, path: dataset.to_csv(path, index=False),
 }
-
-
-def _shuffle_matrix_with_mapping(matrix: np.ndarray, rng: np.random.Generator | None = None):
-    """Row-shuffle ``matrix``, returning the permutation too. :func:`deduplicate_embeddings` threads one generator
-    across its steps, so each shuffles differently while the run stays reproducible."""
-    generator = rng if rng is not None else np.random.default_rng(DEDUP_SHUFFLE_SEED)
-    permuted_indices = generator.permutation(matrix.shape[0])
-    shuffled_matrix = matrix[permuted_indices]
-    return shuffled_matrix, permuted_indices
 
 
 def _normalize_embeddings(embeddings: np.array):
@@ -71,53 +66,38 @@ def embed_texts(texts, batch_size, model, tokenizer, device, normalize=True):
 
 
 def _deduplicate_block(embeddings: np.ndarray, similarity_threshold: float) -> np.ndarray:
-    """Surviving row indices: each kept row drops every neighbor above ``similarity_threshold``."""
+    """Surviving row indices: each kept row, in order, drops every neighbor above ``similarity_threshold``. Rows are
+    queried :data:`_SEARCH_QUERY_ROWS` at a time, those already dropped left out."""
     index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings)
 
-    result = index.range_search(embeddings, similarity_threshold)
-    # lims: result ranges per query; indices: neighbor ids (distances unused).
-    lims, _, indices = result
-
     keep = np.ones(len(embeddings), dtype=bool)
-    visited = np.zeros(len(embeddings), dtype=bool)
-
-    for i in range(len(embeddings)):
-        if visited[i]:
+    for start in range(0, len(embeddings), _SEARCH_QUERY_ROWS):
+        queries = np.flatnonzero(keep[start : start + _SEARCH_QUERY_ROWS]) + start
+        if not len(queries):
             continue
+        # lims: result ranges per query; indices: neighbor ids (distances unused).
+        lims, _, indices = index.range_search(embeddings[queries], similarity_threshold)
+        for position, row in enumerate(queries):
+            if keep[row]:
+                neighbors = indices[lims[position] : lims[position + 1]]
+                keep[neighbors[neighbors != row]] = False
 
-        start_idx, end_idx = lims[i], lims[i + 1]
-        neighbors = indices[start_idx:end_idx]
-
-        neighbors = neighbors[neighbors != i]
-
-        visited[neighbors] = True
-        keep[neighbors] = False
-
-    return np.where(keep)[0]
+    return np.flatnonzero(keep)
 
 
 def deduplicate_blocks(
-    embeddings: np.ndarray,
-    *,
-    batch_size: int,
-    similarity_threshold: float,
-    max_workers: int | None = None,
+    embeddings: np.ndarray, rows: np.ndarray, *, batch_size: int, similarity_threshold: float
 ) -> np.ndarray:
-    """Survivors within each ``batch_size`` block, in batch order: the next pass shuffles them with the seeded
-    generator, and an order set by which thread finished first would make a seeded run keep different rows."""
-    starts = range(0, embeddings.shape[0], batch_size)
-    with ThreadPoolExecutor(max_workers=max_workers or available_cpu_count()) as executor:
-        futures = [
-            executor.submit(_deduplicate_block, embeddings[start : start + batch_size], similarity_threshold)
-            for start in starts
+    """The ``rows`` of ``embeddings`` that survive within their ``batch_size`` block of ``rows``, in ``rows`` order: a
+    pair in different blocks is never compared. One block at a time, each search on every OpenMP thread."""
+    blocks = [rows[start : start + batch_size] for start in range(0, len(rows), batch_size)]
+    return np.concatenate(
+        [
+            block[_deduplicate_block(embeddings[block], similarity_threshold)]
+            for block in tqdm(blocks, desc="Processing batches", unit="batch")
         ]
-        return np.concatenate(
-            [
-                future.result() + start
-                for start, future in zip(starts, tqdm(futures, desc="Processing batches", unit="batch"), strict=True)
-            ]
-        )
+    )
 
 
 def deduplicate_embeddings(
@@ -126,31 +106,25 @@ def deduplicate_embeddings(
     steps_count: int,
     batch_size: int,
     similarity_threshold: float,
-    max_workers: int | None = None,
     seed: int = DEDUP_SHUFFLE_SEED,
 ) -> tuple[np.ndarray, list[int]]:
-    """Surviving rows after ``steps_count`` reshuffled passes, and the row count before and after each pass."""
+    """Surviving rows in input order after ``steps_count`` passes, each over the survivors reshuffled into new blocks,
+    and the row count before and after each pass."""
     # One generator: the steps must shuffle differently to re-batch near-duplicates, while the run stays reproducible.
     rng = np.random.default_rng(seed)
-    surviving_indices = np.arange(len(embeddings))
-    progress_embeddings = embeddings
+    surviving = np.arange(len(embeddings))
     sizes_history = [len(embeddings)]
 
     for _ in tqdm(range(steps_count), desc="Running global dedup step", total=steps_count):
-        shuffled_embeddings, shuffled_indices = _shuffle_matrix_with_mapping(progress_embeddings, rng)
-        surviving_indices = surviving_indices[shuffled_indices]
-        shuffled_embeddings = shuffled_embeddings.astype(np.float32)
-        unique_indices = deduplicate_blocks(
-            shuffled_embeddings,
-            max_workers=max_workers,
+        surviving = deduplicate_blocks(
+            embeddings,
+            surviving[rng.permutation(len(surviving))],
             batch_size=batch_size,
             similarity_threshold=similarity_threshold,
         )
-        progress_embeddings = shuffled_embeddings[unique_indices]
-        sizes_history.append(len(progress_embeddings))
-        surviving_indices = surviving_indices[unique_indices]
+        sizes_history.append(len(surviving))
 
-    return surviving_indices, sizes_history
+    return np.sort(surviving), sizes_history
 
 
 def resolve_device(device_arg: str) -> torch.device:
@@ -235,20 +209,27 @@ def select_unique_rows(
     similarity_threshold: float,
     batch_size: int,
     steps: int,
-    max_workers: int | None,
 ) -> np.ndarray:
-    """One pass of :func:`deduplicate_blocks`, or ``steps`` reshuffled passes of :func:`deduplicate_embeddings`."""
+    """One pass of :func:`deduplicate_blocks` over the rows in order, or ``steps`` reshuffled passes of
+    :func:`deduplicate_embeddings`."""
     logger.info(f"Starting deduplication with threshold {similarity_threshold}")
     logger.info(f"Input embeddings shape: {embeddings.shape}")
+    embeddings = np.asarray(embeddings, dtype=np.float32)  # no copy when already float32
+    if len(embeddings) > batch_size:
+        met = 1 - (1 - batch_size / len(embeddings)) ** steps
+        logger.warning(
+            f"Rows are compared only within blocks of {batch_size}: a duplicate pair at random positions shares one "
+            f"in {steps} pass(es) with probability about {met:.0%}, and otherwise both rows survive. Raise "
+            f"--dedup_batch_size or --dedup_steps to compare more pairs."
+        )
 
     start_time = time.time()
 
     if steps > 1:
         logger.info(f"Using multi-step deduplication with {steps} steps")
         unique_indices, sizes_history = deduplicate_embeddings(
-            embeddings=embeddings.astype(np.float32),
+            embeddings=embeddings,
             steps_count=steps,
-            max_workers=max_workers,
             batch_size=batch_size,
             similarity_threshold=similarity_threshold,
         )
@@ -264,8 +245,8 @@ def select_unique_rows(
     else:
         logger.info("Using single-step deduplication")
         unique_indices = deduplicate_blocks(
-            embeddings=embeddings.astype(np.float32),
-            max_workers=max_workers,
+            embeddings,
+            np.arange(len(embeddings)),
             batch_size=batch_size,
             similarity_threshold=similarity_threshold,
         )
@@ -310,10 +291,14 @@ def save_deduplicated_dataset(
             deduplicated_dataset = deduplicated_dataset.remove_columns(list(columns_to_remove))
             logger.info(f"Keeping only specified fields: {keep_fields}")
 
-    output_dir = Path(output_path).parent
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    OUTPUT_WRITERS[output_format](deduplicated_dataset, output_path)
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    # Written under its own name, so the writer infers the same compression, then renamed over the output: a run killed
+    # mid-write would leave whole lines that load as a smaller dataset.
+    with tempfile.TemporaryDirectory(dir=output.parent, prefix=f".{output.name}.") as staging:
+        staged = Path(staging) / output.name
+        OUTPUT_WRITERS[output_format](deduplicated_dataset, str(staged))
+        staged.replace(output)
 
     logger.info(f"Saved {len(deduplicated_dataset)} deduplicated examples")
 
@@ -323,6 +308,8 @@ def run_deduplication(args: argparse.Namespace) -> int:
     logger.info("Starting dataset deduplication")
     logger.info(f"Arguments: {vars(args)}")
 
+    # faiss sizes its pool by the host's cores, not a container's CPU quota.
+    faiss.omp_set_num_threads(args.max_workers or available_cpu_count())
     try:
         device = resolve_device(args.device)
 
@@ -359,7 +346,6 @@ def run_deduplication(args: argparse.Namespace) -> int:
             similarity_threshold=args.similarity_threshold,
             batch_size=args.dedup_batch_size,
             steps=args.dedup_steps,
-            max_workers=args.max_workers,
         )
 
         if args.dry_run:

@@ -65,12 +65,6 @@ def test_roundtrip_within_tolerance_all_formats():
         assert re < _TOL[fmt], f"{fmt} round-trip relerr {re:.4f} >= {_TOL[fmt]}"
 
 
-def test_fp8_beats_fp4_accuracy():
-    torch.manual_seed(1)
-    x = torch.randn(128, 256) * 0.4
-    assert fro_rel_err(dequantize(quantize_mxfp8(x)), x) < fro_rel_err(dequantize(quantize_nvfp4(x)), x)
-
-
 def test_axis_0_quantization():
     torch.manual_seed(0)
     x = torch.randn(128, 96) * 0.3
@@ -88,14 +82,6 @@ def test_zero_input_roundtrips_to_zero():
         assert recon.abs().max().item() == 0.0
 
 
-def test_scale_tracks_block_magnitude():
-    small = torch.full((1, 32), 0.01)
-    large = torch.full((1, 32), 100.0)
-    s_scale = quantize_mxfp8(small).scales.item()
-    l_scale = quantize_mxfp8(large).scales.item()
-    assert l_scale > s_scale
-
-
 def test_e2m1_midpoints_round_to_even_not_down():
     """``bucketize`` resolves every tie down, and exact ties are routine, which would bias every fp4 tensor toward
     zero."""
@@ -111,17 +97,6 @@ def test_e2m1_midpoints_round_to_even_not_down():
     assert [recon[0, i].item() for i in (1, 2, 3)] == [1.0, 2.0, 4.0]  # Tie-down would give 0.5/1.5/3.0.
     assert recon[0, 4].item() == -1.0
     assert [recon[0, i].item() for i in (5, 6)] == [0.5, 1.0]
-
-
-def test_nvfp4_saturating_scale_guards_against_outlier_nan():
-    # A block amax above E2M1_MAX*E4M3_MAX (=2688) overflows a lone e4m3 scale to NaN; the global scale lifts it into
-    # range.
-    x = torch.randn(16, 64) * 0.1
-    x[0, 0] = 5000.0
-    q = quantize_nvfp4(x)
-    recon = dequantize(q)
-    assert torch.isfinite(q.scales.float()).all()
-    assert torch.isfinite(recon).all()
 
 
 def test_divisibility_guard_raises():

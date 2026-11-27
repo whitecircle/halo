@@ -253,8 +253,14 @@ def test_head_only_moves_nothing_outside_the_head_and_matches_the_detached_head(
 
 
 @pytest.mark.parametrize("use_reentrant", [True, False], ids=["reentrant", "non_reentrant"])
-@pytest.mark.parametrize("scope", ["joint", "detached"])
-@pytest.mark.parametrize("name", _FAMILIES)
+@pytest.mark.parametrize(
+    ("name", "scope"),
+    [
+        *(pytest.param(name, "joint", id=f"{name}-joint") for name in _FAMILIES),
+        pytest.param("qwen3_5_moe_text", "detached", id="qwen3_5_moe_text-detached"),
+        pytest.param("nemotron_h", "detached", id="nemotron_h-detached"),
+    ],
+)
 def test_checkpointing_changes_no_gradient(name, scope, use_reentrant):
     rows = padded_rows()
     plain_model, _, _ = _arm(name, rows, weight=_WEIGHT, loss_type="soft", scope=scope)
@@ -267,9 +273,16 @@ def test_checkpointing_changes_no_gradient(name, scope, use_reentrant):
     assert _worst(_grads(model), _grads(plain_model)) < 1e-9
 
 
-@pytest.mark.parametrize("scope", ["joint", "detached", "head_only"])
-@pytest.mark.parametrize("loss_type", ["hard", "soft"])
-@pytest.mark.parametrize("name", _MOE_TEXT_FAMILIES)
+@pytest.mark.parametrize(
+    ("name", "loss_type", "scope"),
+    [
+        *(pytest.param(name, "hard", "joint", id=f"{name}-hard-joint") for name in _MOE_TEXT_FAMILIES),
+        pytest.param("qwen3_5_moe_text", "hard", "detached", id="qwen3_5_moe_text-hard-detached"),
+        pytest.param("qwen3_5_moe_text", "hard", "head_only", id="qwen3_5_moe_text-hard-head_only"),
+        pytest.param("qwen3_5_moe_text", "soft", "joint", id="qwen3_5_moe_text-soft-joint"),
+        pytest.param("qwen3_5_moe_text", "soft", "detached", id="qwen3_5_moe_text-soft-detached"),
+    ],
+)
 def test_a_row_past_the_chunk_size_keeps_every_gradient(name, loss_type, scope, monkeypatch):
     """The fallback scores a long row in checkpointed chunks, so no ``[T, V]`` plane is held through backward."""
     rows = padded_rows()

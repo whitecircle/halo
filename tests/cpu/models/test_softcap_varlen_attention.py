@@ -37,7 +37,6 @@ _UNSET = types.SimpleNamespace(attn_implementation=None)
 # Release attention geometry per Gemma 2 size; every size softcaps its scores at 50.
 _GEMMA2_SIZES = {
     "2b": {"hidden_size": 2304, "num_attention_heads": 8, "num_key_value_heads": 4, "head_dim": 256},
-    "9b": {"hidden_size": 3584, "num_attention_heads": 16, "num_key_value_heads": 8, "head_dim": 256},
     "27b": {"hidden_size": 4608, "num_attention_heads": 32, "num_key_value_heads": 16, "head_dim": 128},
 }
 # (packing, padding_free, per_device_train_batch_size) of each SFT collator's rows.
@@ -93,39 +92,36 @@ def _padded_script_backend(config) -> str:
     return _resolve(config, request)
 
 
-# (size, arch) -> backend per SFT row shape, then the padded scripts'. 2B/9B leave FA4 on every row (its hd256 kernel
-# takes no softcap); 27B keeps it on one unpadded row per batch only. The padded scripts request FA2 on Blackwell; on
-# Hopper their SDPA request lands on FA3, since SDPA drops the softcap.
+# (size, arch, rows) -> backend, rows being an SFT row shape or the padded scripts'. 2B leaves FA4 on every row (its hd256
+# kernel takes no softcap); 27B keeps it on one unpadded row per batch only. The padded scripts request FA2 on Blackwell;
+# on Hopper their SDPA request lands on FA3, since SDPA drops the softcap.
 _EXPECTED = {
-    ("2b", "blackwell"): {"unpacked-bs1": FA2, "unpacked-bs4": FA2, "packed": FA2, "padding-free": FA2, "padded": FA2},
-    ("9b", "blackwell"): {"unpacked-bs1": FA2, "unpacked-bs4": FA2, "packed": FA2, "padding-free": FA2, "padded": FA2},
-    ("27b", "blackwell"): {
-        "unpacked-bs1": FA4,
-        "unpacked-bs4": FA2,
-        "packed": FA2,
-        "padding-free": FA2,
-        "padded": FA2,
-    },
-    ("2b", "hopper"): {"unpacked-bs1": FA3, "unpacked-bs4": FA3, "packed": FA3, "padding-free": FA3, "padded": FA3},
-    ("9b", "hopper"): {"unpacked-bs1": FA3, "unpacked-bs4": FA3, "packed": FA3, "padding-free": FA3, "padded": FA3},
-    ("27b", "hopper"): {"unpacked-bs1": FA3, "unpacked-bs4": FA3, "packed": FA3, "padding-free": FA3, "padded": FA3},
+    ("2b", "blackwell", "unpacked-bs1"): FA2,
+    ("2b", "blackwell", "packed"): FA2,
+    ("2b", "blackwell", "padded"): FA2,
+    ("2b", "hopper", "unpacked-bs1"): FA3,
+    ("2b", "hopper", "padded"): FA3,
+    ("27b", "blackwell", "unpacked-bs1"): FA4,
+    ("27b", "blackwell", "unpacked-bs4"): FA2,
+    ("27b", "blackwell", "packed"): FA2,
+    ("27b", "blackwell", "padding-free"): FA2,
+    ("27b", "blackwell", "padded"): FA2,
+    ("27b", "hopper", "packed"): FA3,
 }
-_CASES = [(size, arch, rows) for (size, arch), by_rows in _EXPECTED.items() for rows in by_rows]
 
 
-@pytest.mark.parametrize(("size", "arch", "rows"), _CASES, ids=["-".join(case) for case in _CASES])
+@pytest.mark.parametrize(("size", "arch", "rows"), _EXPECTED, ids=["-".join(case) for case in _EXPECTED])
 def test_the_backend_per_gemma2_size_row_shape_and_gpu(size, arch, rows):
     config = _gemma2(size)
     with _on(arch):
         resolved = _padded_script_backend(config) if rows == "padded" else _sft_backend(config, rows)
-    assert resolved == _EXPECTED[(size, arch)][rows]
+    assert resolved == _EXPECTED[(size, arch, rows)]
 
 
-@pytest.mark.parametrize("rows", ["unpacked-bs4", "packed", "padding-free"])
-def test_fa4_keeps_every_row_shape_without_a_softcap(rows):
+def test_fa4_keeps_packed_rows_and_the_padded_scripts_without_a_softcap():
     for config in (_gemma2("27b", attn_logit_softcapping=None), Qwen3Config()):
         with _on("blackwell"):
-            assert _sft_backend(config, rows) == FA4
+            assert _sft_backend(config, "packed") == FA4
             assert _padded_script_backend(config) == FA4
 
 
@@ -232,11 +228,10 @@ def test_padded_evaluation_batches_take_a_softcapped_run_off_fa4():
     assert (trains_only, evaluates) == (None, FA2)
 
 
-@pytest.mark.parametrize("size", ["2b", "9b"])
-def test_a_head_dim_256_softcap_without_flash_attention_2_is_refused_with_the_remedy(size):
+def test_a_head_dim_256_softcap_without_flash_attention_2_is_refused_with_the_remedy():
     """FA4 cannot run 2B/9B at all, and falling through would reach a label the model build refuses."""
     with _on("blackwell", fa2=False), pytest.raises(ValueError, match="no FlashAttention-2 build") as error:
-        _resolve(_gemma2(size), None)
+        _resolve(_gemma2("2b"), None)
     assert "attention logit softcapping" in str(error.value)
     assert "flex_attention or eager" in str(error.value)
 

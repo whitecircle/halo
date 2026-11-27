@@ -12,7 +12,7 @@ from torch import nn
 
 from halo.kernels.histogram import accumulate_bincount
 from halo.models.attention.packed_position_ids import get_stashed_position_ids, install_packed_position_ids_injection
-from halo.models.gradient_checkpointing import counts_toward_expert_load
+from halo.models.gradient_checkpointing import counts_toward_expert_load, patch_layer_forward
 from halo.models.introspection.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR
 from halo.models.segment_markers import document_ids, document_starts
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
@@ -83,7 +83,7 @@ def patch_zaya_router_load_recording() -> None:
         return outputs
 
     forward._halo_load_recording = True
-    router_cls.forward = forward
+    patch_layer_forward(router_cls, forward)
     if is_global_main_process():
         logger.info("Patched ZayaRouter with expert-load recording (bias-update balancing)")
 
@@ -201,7 +201,7 @@ def _install_document_isolated_cca(projection_cls) -> None:
         return query, key, value
 
     setattr(forward, _DOCUMENT_ISOLATED_ATTR, True)
-    projection_cls.forward = forward
+    patch_layer_forward(projection_cls, forward)
 
 
 def is_zaya_cca_document_isolated() -> bool:

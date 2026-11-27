@@ -46,6 +46,8 @@ Once your PR path is approved, the normal bar applies:
   maintainer adds once the change is approved.
 - **Tests ship with behavior and must not be slop**: see the
   [test conventions](agent-docs/contributing/README.md#tests).
+- **Write the PR, its commits and any page for people in plain sentences**, as the
+  [`voice` skill](skills/voice/SKILL.md) asks: the fact first, then what you ran.
 - **[Proof of value](agent-docs/contributing/README.md#proof-of-value)** for every change; the PR
   template has a checkbox per case.
 - **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred, so split it.

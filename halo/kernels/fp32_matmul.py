@@ -4,7 +4,7 @@ import torch
 
 # Dtypes whose CUDA GEMM runs on the tensor cores and can return an fp32 result.
 _TENSOR_CORE_DTYPES = (torch.float16, torch.bfloat16)
-# A bf16 GEMM runs 3-7x slower when either dimension of its second operand is off a multiple of this; fp32 is flat.
+# A bf16 GEMM runs 4-9x slower when either dimension of its second operand is off a multiple of this; fp32 is flat.
 GEMM_ALIGNMENT = 8
 
 

@@ -1,0 +1,389 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Scaling laws</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --ideal: var(--secondary);
+    --gustafson: var(--halo-blue);
+    --amdahl: var(--halo-violet);
+    --recorded: var(--text);
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* The key names the three lines and the recorded points in a row above the two plots. */
+  .key {
+    display: grid;
+    grid-template-columns: 0.6fr 0.95fr 0.95fr 1.35fr;
+    column-gap: 44px;
+    align-items: start;
+  }
+
+  .key .name {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  .key .name i {
+    flex: none;
+    width: 34px;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--hue);
+  }
+
+  .key .name i.dot {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+  }
+
+  .key p {
+    margin-top: 8px;
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .key p.formula { color: var(--body); }
+
+  .panels {
+    display: flex;
+    justify-content: space-between;
+    margin-top: var(--group-gap);
+  }
+
+  .panel h2 {
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    font-variant-numeric: lining-nums;
+    white-space: nowrap;
+  }
+
+  svg.chart {
+    display: block;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+  svg .end { font-size: 22px; fill: var(--body); }
+
+  svg .point { font-size: 22px; fill: var(--text); }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+    <div class="panels" id="panels"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">The lines are computed from the two formulas at f = {f}, where f is the fraction of a step that speeds up with more GPUs.</span>
+      <span class="s">The white points are recorded runs of {model} with plain data parallelism on B300 GPUs: the tokens/s of all GPUs divided by the {baseRate} tokens/s of one GPU.</span>
+      <span class="s">Per GPU they run at {perGpu} of that rate.</span>
+      <span class="s">Each added GPU brought its own batch and the runs used different batch shapes, so the points are indicative and follow neither law.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * Every number on the canvas is drawn from these two structures.
+   * The laws and the fraction f = 0.95 are the lecture's worked case (the section "Why N GPUs are not N times
+   * faster"): Amdahl 1 / ((1 − f) + f / R) for fixed work, Gustafson (1 − f) + f × R for work that grows.
+   */
+  const SETUP = {
+    f: 0.95,
+    /** GPU counts whose values the key prints. */
+    marks: [8, 64],
+    /** One plot per entry: GPUs from 0 to maxR, both axes on the same range, ticks as listed. */
+    panels: [
+      { heading: "To {maxR} GPUs", maxR: 64, xTicks: [1, 8, 16, 32, 48, 64], yTicks: [0, 16, 32, 48, 64], recorded: false },
+      { heading: "The first {maxR} GPUs, with the recorded runs", maxR: 16, xTicks: [1, 4, 8, 12, 16], yTicks: [0, 4, 8, 12, 16], recorded: true },
+    ],
+  };
+  /**
+   * Recorded Qwen3-8B runs under plain data parallelism on B300 GPUs, tokens/s per GPU, each at its own batch shape:
+   * 1 GPU    agent-docs/optimization/throughput-benchmarks.md, single-GPU table, best shape (16 rows of 2,048 tokens)
+   * 8 GPUs   agent-docs/parallelism/pipeline-parallelism.md, "One 8-GPU machine", `dp8`
+   * 16 GPUs  the same page, "Two 8-GPU machines, fast link", `dp16`, and "A slow link", `dp16` on TCP sockets
+   */
+  const RECORDED = {
+    model: "Qwen3-8B",
+    runs: [
+      { gpus: 1, rate: 25569, where: "1 GPU" },
+      { gpus: 8, rate: 21359, where: "8 GPUs, one node" },
+      { gpus: 16, rate: 18337, where: "16 GPUs, two nodes over EFA" },
+      { gpus: 16, rate: 1117, where: "16 GPUs, two nodes on TCP sockets" },
+    ],
+  };
+  /** The three computed lines. `digits` are the decimals the lecture prints for that law. */
+  const LAWS = [
+    { id: "ideal", name: "Ideal", hue: "var(--ideal)", width: 2, digits: 0, speedup: (R) => R },
+    { id: "gustafson", name: "Gustafson’s law", hue: "var(--gustafson)", width: 3, digits: 2, speedup: (R, f) => 1 - f + f * R },
+    { id: "amdahl", name: "Amdahl’s law", hue: "var(--amdahl)", width: 3, digits: 1, speedup: (R, f) => 1 / (1 - f + f / R) },
+  ];
+  const PLOT_HEIGHT = 520;
+  /** Plot-area insets inside each SVG: the y title and ticks, the end labels, and the x ticks and title. */
+  const PAD = { l: 96, r: 96, t: 16, b: 84 };
+  /** The space between the two plots. */
+  const PANEL_GAP = 64;
+  const TICK = 8;
+  const DOT = 7;
+
+  const { f } = SETUP;
+  const fmt = (v, digits = 0) => v.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const law = (id) => LAWS.find((l) => l.id === id);
+  const at = (id, R) => fmt(law(id).speedup(R, f), law(id).digits);
+  const limit = 1 / (1 - f);
+  const baseRate = RECORDED.runs.find((run) => run.gpus === 1).rate;
+  const runs = RECORDED.runs.map((run) => ({ ...run, perGpu: run.rate / baseRate, speedup: (run.gpus * run.rate) / baseRate }));
+  const base = runs.find((run) => run.gpus === 1);
+  const others = runs.filter((run) => run !== base);
+  const list = (items) => `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+  const [low, high] = SETUP.marks;
+
+  if (Math.abs(limit - Math.round(limit)) > 1e-9) {
+    throw new Error("the limit 1 / (1 − f) prints as a whole number: choose f so that it is one");
+  }
+
+  if (others.some((run) => run.speedup > run.gpus)) {
+    throw new Error("a recorded run above the ideal line: check its rate");
+  }
+
+  document.getElementById("title").textContent =
+    `At f = ${f}, ${high} GPUs finish fixed work ${at("amdahl", high)} times sooner, or do ${at("gustafson", high)} times the work in the same time`;
+
+  fillValues({
+    f: String(f),
+    model: RECORDED.model,
+    baseRate: fmt(base.rate),
+    perGpu: list(others.map((run) => fmt(run.perGpu, 2))),
+  }, document.querySelector("footer"));
+
+  // The key: one entry per line, then the recorded points.
+  const key = document.getElementById("key");
+  const marked = (id) => `${at(id, low)} on ${low} GPUs, ${at(id, high)} on ${high}`;
+  const KEY = [
+    { law: "ideal", lines: [["", "R times on R GPUs"]] },
+    { law: "gustafson", lines: [["", "The work grows with the GPUs"], ["formula", "(1 − f) + f × R"], ["", marked("gustafson")]] },
+    {
+      law: "amdahl",
+      lines: [
+        ["", "The work stays fixed"],
+        ["formula", "1 / ((1 − f) + f / R)"],
+        ["", marked("amdahl")],
+        ["", `Never above 1 / (1 − f) = ${fmt(limit)}`],
+      ],
+    },
+  ];
+
+  for (const entry of KEY) {
+    const column = el("div");
+    const name = el("div", "name");
+    const swatch = el("i");
+    swatch.style.setProperty("--hue", law(entry.law).hue);
+    name.append(swatch, law(entry.law).name);
+    column.append(name, ...entry.lines.map(([cls, text]) => el("p", cls, text)));
+    key.append(column);
+  }
+
+  const recordedKey = el("div");
+  const recordedName = el("div", "name");
+  const dot = el("i", "dot");
+  dot.style.setProperty("--hue", "var(--recorded)");
+  recordedName.append(dot, "Recorded runs");
+  recordedKey.append(
+    recordedName,
+    el("p", "", `${RECORDED.model}, plain data parallel`),
+    ...others.map((run) => el("p", "", `${run.where}: ${fmt(run.speedup, 1)}`)),
+  );
+
+  key.append(recordedKey);
+
+  // The two plots share one plot-area size.
+  const panels = document.getElementById("panels");
+  const total = panels.getBoundingClientRect().width;
+  const plotWidth = (total - PANEL_GAP - SETUP.panels.length * (PAD.l + PAD.r)) / SETUP.panels.length;
+
+  /** True when the segment a–b passes through the box, grown by `margin`. */
+  function segmentHitsBox([ax, ay], [bx, by], box, margin) {
+    const l = box.x - margin;
+    const r = box.x + box.width + margin;
+    const t = box.y - margin;
+    const b = box.y + box.height + margin;
+    let t0 = 0;
+    let t1 = 1;
+
+    for (const [p, q] of [[ax - bx, ax - l], [bx - ax, r - ax], [ay - by, ay - t], [by - ay, b - ay]]) {
+      if (p === 0) {
+        if (q < 0) {
+          return false;
+        }
+
+        continue;
+      }
+
+      const step = q / p;
+
+      if (p < 0) {
+        t0 = Math.max(t0, step);
+      } else {
+        t1 = Math.min(t1, step);
+      }
+
+      if (t0 > t1) {
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  const boxesOverlap = (a, b, margin) =>
+    a.x - margin < b.x + b.width && b.x - margin < a.x + a.width && a.y - margin < b.y + b.height && b.y - margin < a.y + a.height;
+
+  for (const panel of SETUP.panels) {
+    const { maxR } = panel;
+    const wrap = el("div", "panel");
+    wrap.append(el("h2", undefined, panel.heading.replace("{maxR}", maxR)));
+    const width = PAD.l + plotWidth + PAD.r;
+    const height = PAD.t + PLOT_HEIGHT + PAD.b;
+    const chart = svgEl("svg", { class: "chart", width, height, viewBox: `0 0 ${width} ${height}` });
+    wrap.append(chart);
+    panels.append(wrap);
+
+    const plot = { l: PAD.l, r: PAD.l + plotWidth, t: PAD.t, b: PAD.t + PLOT_HEIGHT };
+    const sx = (R) => plot.l + (R / maxR) * plotWidth;
+    const sy = (s) => plot.b - (s / maxR) * PLOT_HEIGHT;
+    const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+    /** Every drawn segment and dot, for placing the point labels clear of them. */
+    const segments = [];
+    const boxes = [];
+    const line = (x1, y1, x2, y2, stroke, strokeWidth) => {
+      add("line", { x1, y1, x2, y2, stroke, "stroke-width": strokeWidth, "stroke-linecap": "round" });
+      segments.push([[x1, y1], [x2, y2]]);
+    };
+
+    // Axes: a tick mark outside each axis, no gridlines, since labels sit on the plot.
+    line(plot.l, plot.b, plot.r, plot.b, "var(--secondary)", 1);
+    line(plot.l, plot.t, plot.l, plot.b, "var(--secondary)", 1);
+
+    for (const R of panel.xTicks) {
+      add("line", { x1: sx(R), x2: sx(R), y1: plot.b, y2: plot.b + TICK, stroke: "var(--secondary)", "stroke-width": 1 });
+      add("text", { class: "tick", x: sx(R), y: plot.b + 34, "text-anchor": "middle" }, fmt(R));
+    }
+
+    for (const s of panel.yTicks) {
+      add("line", { x1: plot.l - TICK, x2: plot.l, y1: sy(s), y2: sy(s), stroke: "var(--secondary)", "stroke-width": 1 });
+      add("text", { class: "tick", x: plot.l - TICK - 10, y: sy(s), "text-anchor": "end", "dominant-baseline": "central" }, fmt(s));
+    }
+
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: height - 8, "text-anchor": "middle" }, "GPUs, R");
+    add(
+      "text",
+      { class: "axis", transform: `translate(16 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" },
+      "Speedup over one GPU",
+    );
+
+    // Amdahl's limit, where the plot reaches it.
+    const ends = [];
+
+    if (limit <= maxR) {
+      line(plot.l, sy(limit), plot.r, sy(limit), "var(--tertiary)", 1.5);
+      ends.push({ y: sy(limit), text: `limit ${fmt(limit)}` });
+    }
+
+    // Each law from one GPU to the plot's last, a straight segment per added GPU.
+    for (const l of LAWS) {
+      for (let R = 1; R < maxR; R += 1) {
+        line(sx(R), sy(l.speedup(R, f)), sx(R + 1), sy(l.speedup(R + 1, f)), l.hue, l.width);
+      }
+
+      ends.push({ y: sy(l.speedup(maxR, f)), text: fmt(l.speedup(maxR, f), l.digits) });
+    }
+
+    // The value each line ends on, right of the plot.
+    for (const end of ends) {
+      add("text", { class: "end", x: plot.r + 14, y: end.y, "dominant-baseline": "central" }, end.text);
+    }
+
+    if (!panel.recorded) {
+      continue;
+    }
+
+    if (runs.some((run) => run.gpus > maxR)) {
+      throw new Error("a recorded run lies past this plot’s last GPU");
+    }
+
+    for (const run of runs) {
+      const cx = sx(run.gpus);
+      const cy = sy(run.speedup);
+      add("circle", { cx, cy, r: DOT, fill: "var(--recorded)", stroke: "var(--bg)", "stroke-width": 2 });
+      boxes.push({ x: cx - DOT, y: cy - DOT, width: 2 * DOT, height: 2 * DOT });
+    }
+
+    // A point's value sits on the first side of its dot that no line, dot or other label comes near.
+    const endBoxes = [...chart.querySelectorAll("text.end")].map((node) => node.getBBox());
+    const reach = DOT + 9;
+    const sides = [
+      [reach, 0, "start"], [reach, -20, "start"], [reach, 20, "start"], [-reach, 0, "end"], [-reach, -20, "end"],
+      [-reach, 20, "end"], [0, -reach - 12, "middle"], [0, reach + 12, "middle"], [reach, 14, "start"], [reach, -14, "start"],
+    ];
+
+    for (const run of runs) {
+      const cx = sx(run.gpus);
+      const cy = sy(run.speedup);
+      const label = add("text", { class: "point", "dominant-baseline": "central" }, fmt(run.speedup, run === base ? 0 : 1));
+      const clear = sides.find(([dx, dy, anchor]) => {
+        label.setAttribute("x", cx + dx);
+        label.setAttribute("y", cy + dy);
+        label.setAttribute("text-anchor", anchor);
+        const raw = label.getBBox();
+        // The glyphs' own height, without the line box's leading above and below.
+        const box = { x: raw.x, y: raw.y + 0.16 * 22, width: raw.width, height: raw.height - 0.32 * 22 };
+
+        return (
+          segments.every(([a, b]) => !segmentHitsBox(a, b, box, 4)) &&
+          [...boxes, ...endBoxes].every((other) => !boxesOverlap(box, other, 4))
+        );
+      });
+
+      if (clear === undefined) {
+        throw new Error(`no clear side for the label of the ${run.where} run: enlarge the plot`);
+      }
+
+      boxes.push(label.getBBox());
+    }
+  }
+</script>
+</body>
+</html>

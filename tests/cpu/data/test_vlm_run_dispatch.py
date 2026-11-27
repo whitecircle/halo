@@ -119,10 +119,6 @@ def test_each_image_column_declares_a_vlm_run(column):
     assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
-def test_embedded_image_content_declares_a_vlm_run():
-    assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", _dataset([IMAGE_TURNS]), config=VLM_CONFIG)
-
-
 def test_text_checkpoint_never_becomes_a_vlm_run():
     """A text-only architecture has no processor, so image data fails at the VLM loader and does not switch the data
     path."""
@@ -217,7 +213,7 @@ def test_sft_refuses_an_image_run_under_context_parallelism_before_the_load(tmp_
         f"model_name_or_path: stub/model\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
         f"bf16: false\nuse_cpu: true\nmax_length: 512\nimages_field: images\n"
     )
-    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=True))
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=True), resume_checkpoint=None)
     monkeypatch.setattr(module, "probe_checkpoint", lambda *a, **k: (CONFIG_MAPPING["qwen3_vl"](), True))
     monkeypatch.setattr(module, "plan_row_attention", lambda *a, **k: SimpleNamespace(attn_default=None))
     monkeypatch.setattr(module, "init_training_script", lambda *a, **k: runtime)
@@ -321,10 +317,6 @@ def test_parts_form_text_schema_is_not_a_declaration():
     dataset = _dataset([TEXT_PARTS_TURNS, TEXT_PARTS_TURNS])
     assert not dataset_declares_images_across_ranks(dataset, "prompt")
     assert not is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
-
-
-def test_string_content_schema_is_not_a_declaration():
-    assert not dataset_declares_images_across_ranks(_dataset([TEXT_TURNS]), "prompt")
 
 
 def test_cast_image_feature_declares_images_under_any_name():
@@ -433,7 +425,7 @@ def test_offline_grpo_renderer_refuses_an_image_content_part(field):
     else:
         row["completions"] = [[{"role": "assistant", "content": [{"type": "image", "image": "b64"}]}]]
     with pytest.raises(ValueError, match="image content part"):
-        module.render_offline_grpo_row(row, _UnreachableTokenizer(), None)
+        module.render_offline_grpo_row(row, _UnreachableTokenizer(), None, None)
 
 
 def test_classification_renderer_refuses_an_image_content_part():

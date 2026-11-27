@@ -17,7 +17,6 @@ import torch
 from huggingface_hub import constants as hub_constants
 from huggingface_hub.file_download import repo_folder_name
 from transformers import PreTrainedModel
-from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from halo.checkpoint.reading import load_full_state_dict
 from halo.distributed import rank_uniform_env
@@ -25,6 +24,7 @@ from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_mode
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime import load_coordination
 from tests.common.collective_recorder import CollectiveTrace, rebind_everywhere, recording_rank
+from tests.common.distributed import apply_hf_tensor_parallelism
 from tests.common.goldens import regen_main
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import (
@@ -171,7 +171,7 @@ def cpu_model_builds(trace: CollectiveTrace) -> Iterator[None]:
             loaded = real_from_pretrained(cls, *args, **kwargs)
             if distributed_config is not None:
                 _, _, meshes = cls.prepare_distribute_model(distributed_config)
-                apply_tensor_parallelism(loaded[0] if isinstance(loaded, tuple) else loaded, meshes.get_mesh("tp"))
+                apply_hf_tensor_parallelism(loaded[0] if isinstance(loaded, tuple) else loaded, meshes.get_mesh("tp"))
         return loaded
 
     def from_config(cls, *args, **kwargs):

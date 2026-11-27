@@ -5,6 +5,7 @@ argparse's help path exits; every tool flag carries help text with no hardcoded 
 
 import argparse
 import asyncio
+import contextlib
 import importlib
 import inspect
 import logging
@@ -52,15 +53,17 @@ def test_script_help_exits_zero(script: pathlib.Path):
     assert "--output_dir" in result.stdout, f"{script.relative_to(_SCRIPTS_DIR)} --help printed no flag list"
 
 
-@pytest.fixture
-def pristine_root_logging():
+@contextlib.contextmanager
+def _pristine_root_logging():
     """A tool's entry point configures the root logger before it parses (``configure_cli_logging``,
     ``force=True``), which would otherwise strip pytest's own handlers for the rest of the worker."""
     root = logging.getLogger()
     handlers, level = root.handlers[:], root.level
-    yield
-    root.handlers[:] = handlers
-    root.setLevel(level)
+    try:
+        yield
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)
 
 
 class _ParserBuilt(Exception):
@@ -104,28 +107,30 @@ def _parsers(parser: argparse.ArgumentParser) -> list[argparse.ArgumentParser]:
     return [parser, *(nested for sub in subparsers for nested in _parsers(sub))]
 
 
-@pytest.mark.parametrize("tool", _TOOLS, ids=[str(p.relative_to(_SCRIPTS_DIR)) for p in _TOOLS])
-def test_every_tool_help_renders_and_documents_every_flag(tool: pathlib.Path, pristine_root_logging):
+def test_every_tool_help_renders_and_documents_every_flag(subtests):
     """No other test drives these tools end to end, so a moved module or an unformattable help string breaks one
     silently."""
-    for parser in _parsers(_tool_parser(tool)):
-        help_text = parser.format_help()
-        assert help_text.startswith("usage:"), help_text[:200]
-        undocumented = [
-            "/".join(action.option_strings) or action.dest
-            for action in parser._actions
-            if not isinstance(action, argparse._HelpAction | argparse._SubParsersAction) and not action.help
-        ]
-        assert not undocumented, f"{tool.relative_to(_SCRIPTS_DIR)}: {undocumented} carry no help text"
-        assert "/mnt" not in help_text, (
-            f"{tool.relative_to(_SCRIPTS_DIR)} hardcodes a /mnt path in --help; /mnt is not guaranteed large, so "
-            f"name the large volume as a placeholder instead"
-        )
+    assert _TOOLS, "no argparse tool found under scripts/"
+    for tool in _TOOLS:
+        with subtests.test(str(tool.relative_to(_SCRIPTS_DIR))), _pristine_root_logging():
+            for parser in _parsers(_tool_parser(tool)):
+                help_text = parser.format_help()
+                assert help_text.startswith("usage:"), help_text[:200]
+                undocumented = [
+                    "/".join(action.option_strings) or action.dest
+                    for action in parser._actions
+                    if not isinstance(action, argparse._HelpAction | argparse._SubParsersAction) and not action.help
+                ]
+                assert not undocumented, f"{tool.relative_to(_SCRIPTS_DIR)}: {undocumented} carry no help text"
+                assert "/mnt" not in help_text, (
+                    f"{tool.relative_to(_SCRIPTS_DIR)} hardcodes a /mnt path in --help; /mnt is not guaranteed large, "
+                    f"so name the large volume as a placeholder instead"
+                )
 
 
 def test_the_script_scan_is_not_vacuous():
-    """Both parametrizations come from a tree scan, so a scan matching nothing would report green while covering no
-    script."""
+    """Both rosters come from a tree scan, so a scan that stopped matching would skip the per-script cases or leave
+    the tool sweep covering a few tools, and still report green."""
     assert len(_SCRIPTS) >= 10, f"only {len(_SCRIPTS)} parse_script_args scripts found under {_SCRIPTS_DIR}"
     assert len(_TOOLS) >= 20, f"only {len(_TOOLS)} argparse tools found under {_SCRIPTS_DIR}"
 

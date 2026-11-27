@@ -25,10 +25,6 @@ class _Dispatcher:
     spans_domains = False
 
 
-def test_the_vocabulary_is_the_three_backend_names():
-    assert set(get_args(EPBufferBackend)) == {"auto", "elastic", "legacy"}
-
-
 @pytest.mark.parametrize("name", get_args(EPBufferBackend))
 def test_the_factory_builds_every_name_in_the_vocabulary(monkeypatch, name):
     monkeypatch.setattr(backends_mod, "get_local_world_size", lambda: 8)

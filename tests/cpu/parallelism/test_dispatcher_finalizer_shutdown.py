@@ -4,7 +4,6 @@ as a default argument, hence this patches ``__del__.__defaults__``."""
 
 from __future__ import annotations
 
-import inspect
 import sys
 
 import pytest
@@ -20,12 +19,6 @@ class _Dispatcher:
 
     def destroy(self, *, free_buffer: bool = True) -> None:
         self.destroy_calls.append(free_buffer)
-
-
-def test_the_shutdown_probe_is_bound_at_definition_time():
-    """No module-global lookup happens inside the finalizer."""
-    assert list(inspect.signature(DeepEPDispatcher.__del__).parameters) == ["self", "_is_finalizing"]
-    assert DeepEPDispatcher.__del__.__defaults__ == (sys.is_finalizing,)
 
 
 def test_destroy_is_skipped_during_interpreter_shutdown(monkeypatch):

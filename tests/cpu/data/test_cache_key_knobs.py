@@ -35,7 +35,8 @@ def _ds() -> Dataset:
 
 def _name_for(**proc_kwargs) -> str:
     tok = _MockTokenizer()
-    proc = build_chat_row_processor(tok, max_length=512, **{"conversation_field": "messages", **proc_kwargs})
+    knobs = {"conversation_field": "messages", "eos_token_ids": frozenset(), **proc_kwargs}
+    proc = build_chat_row_processor(tok, max_length=512, **knobs)
     return map_cache_file_name("map", proc, _ds(), "tokenize", {})
 
 
@@ -62,17 +63,21 @@ def test_add_generation_prompt_changes_cache_name():
 
 def test_max_length_changes_cache_name():
     tok = _MockTokenizer()
-    proc_512 = build_chat_row_processor(tok, max_length=512, conversation_field="messages")
-    proc_4096 = build_chat_row_processor(tok, max_length=4096, conversation_field="messages")
+    knobs = {"conversation_field": "messages", "eos_token_ids": frozenset()}
+    proc_512 = build_chat_row_processor(tok, max_length=512, **knobs)
+    proc_4096 = build_chat_row_processor(tok, max_length=4096, **knobs)
     name_512 = map_cache_file_name("map", proc_512, _ds(), "tokenize", {})
     name_4096 = map_cache_file_name("map", proc_4096, _ds(), "tokenize", {})
     assert name_512 != name_4096, "max_length change did not change the cache name"
 
 
-def test_identical_knobs_same_cache_name():
-    name_a = _name_for(conversation_field="messages", system_prompt="sys")
-    name_b = _name_for(conversation_field="messages", system_prompt="sys")
-    assert name_a == name_b, "identical processor knobs produced different cache names (no reuse)"
+def test_eos_token_ids_change_cache_name():
+    """The terminators decide whether a row's last turn is closed, so two models on one tokenizer that list
+    different ones tokenize a corpus differently."""
+    name_eos_only = _name_for(eos_token_ids=frozenset({2}))
+    name_with_role_marker = _name_for(eos_token_ids=frozenset({2, 5}))
+    assert name_eos_only != name_with_role_marker, "eos_token_ids change did not change the cache name"
+    assert name_eos_only == _name_for(eos_token_ids=frozenset({2})), "one terminator set produced two cache names"
 
 
 def test_irrelevant_captured_object_does_not_change_cache_name():

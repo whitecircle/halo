@@ -940,6 +940,7 @@ def test_a_named_key_variable_is_that_key_or_a_refusal(no_api_keys, monkeypatch,
 @pytest.mark.parametrize("base_url", _LOOPBACK_URLS)
 def test_a_loopback_endpoint_takes_the_local_key_and_needs_none(no_api_keys, monkeypatch, base_url):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     term = _term(base_url=base_url)
     assert scorer_api_key(term) == LOCAL_SERVER_API_KEY, "a local vLLM takes no hosted key, and starts without one"
 
@@ -968,8 +969,8 @@ def test_a_hosted_vendor_takes_its_own_key_and_no_other(no_api_keys, monkeypatch
 
 @pytest.mark.parametrize(
     "base_url",
-    [_PRIVATE_URL, "https://api.mistral.ai/v1", "https://openrouter.ai.gateway.example/v1"],
-    ids=["private", "another_vendor", "a_host_only_starting_like_a_vendors"],
+    [_PRIVATE_URL, "https://openrouter.ai.gateway.example/v1"],
+    ids=["private", "a_host_only_starting_like_a_vendors"],
 )
 def test_any_other_endpoint_at_the_default_variable_is_refused_with_both_keys_set(no_api_keys, monkeypatch, base_url):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")

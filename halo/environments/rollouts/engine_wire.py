@@ -168,14 +168,20 @@ async def with_cut_call_as_written(
     detokenize: Callable[[list[int]], Awaitable[str]],
     log_prefix: str,
 ) -> TurnGeneration:
-    """``gen`` with the cut call as the policy wrote it: the decoded ids past the reasoning close replace the arguments
-    vLLM's parser salvaged. The salvage stands where no single-token close splits the ids or the decode fails."""
+    """``gen`` with the cut call as the policy wrote it: the decoded ids past the reasoning close (all of them where the
+    run samples without thinking), less the turn's visible message, replace the arguments vLLM's parser salvaged for
+    the turn's last call, the one being written; calls before it keep their parsed arguments, and the cut call's text
+    still holds them as written. The salvage stands where no single-token close splits a thinking turn's ids or the
+    decode fails."""
     ids, end = gen.token_ids, config.reasoning_end_token_id
     cut_in_call = gen.finish_reason == FINISH_REASON_LENGTH and gen.tool_calls and ids
-    if not cut_in_call or config.backend != VLLM_BACKEND or end is None or end not in ids:
+    if not cut_in_call or config.backend != VLLM_BACKEND:
         return gen
+    if config.thinking and (end is None or end not in ids):
+        return gen
+    start = len(ids) - ids[::-1].index(end) if config.thinking else 0
     try:
-        written = await detokenize(ids[len(ids) - ids[::-1].index(end) :])
+        written = await detokenize(ids[start:])
     except Exception as e:  # what a judge reads of a cut call never fails the episode
         warn_once(
             logger,
@@ -186,8 +192,9 @@ async def with_cut_call_as_written(
             describe_exception(e),
         )
         return gen
-    first = gen.tool_calls[0]
-    return replace(gen, tool_calls=[{**first, "function": {**first.get("function", {}), "arguments": written}}])
+    written = written.lstrip().removeprefix(gen.text.strip()).lstrip()
+    *done, cut = gen.tool_calls
+    return replace(gen, tool_calls=[*done, {**cut, "function": {**cut.get("function", {}), "arguments": written}}])
 
 
 def _sampler_fields(config: RolloutConfig) -> dict[str, Any]:

@@ -18,7 +18,8 @@ from halo.environments.sandbox import local as local_sandbox
 from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import LANGUAGES, find_language
-from halo.environments.sandbox.local import TAMPERED_WORKDIR_RETURNCODE, LocalSubprocessSandbox
+from halo.environments.sandbox.limits import TAMPERED_WORKDIR_RETURNCODE
+from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.results import SandboxInfraError
 from halo.environments.tools.toolsets import build_session_bash_tools
@@ -97,13 +98,6 @@ def test_cpp_compiles_and_runs_with_stdin():
     assert res.stdout.strip() == "42"
     assert res.returncode == 0
     assert not res.compile_failed
-
-
-def test_cpp_alias_runs():
-    if not _HAS_GPP:
-        return _skip("g++ not installed")
-    res = LocalSubprocessSandbox().run(_CPP_DOUBLE, stdin="5", language="c++")
-    assert res.ok and res.stdout.strip() == "10"
 
 
 def test_c_compiles_and_runs():

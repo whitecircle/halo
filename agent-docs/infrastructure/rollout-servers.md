@@ -3,7 +3,8 @@
 A rollout server is a **separate inference container**, vLLM 0.32.0 or SGLang 0.5.22, that generates
 the rollouts during RL. The trainer sends prompts over HTTP and pushes updated weights back over a
 per-server NCCL group through the clients in `halo/weight_sync/`; it never imports either engine
-(ABI-incompatible stacks). [Online GRPO](../training-methods/grpo/online.md) is vLLM-only;
+(ABI-incompatible stacks). Inkling 2 is served from a second vLLM tag, `halo:vllm-0.1.dev25249`, and
+takes adapters by path in place of a weight push ([Adapter sync](#adapter-sync)). [Online GRPO](../training-methods/grpo/online.md) is vLLM-only;
 [Async GRPO with Environments](../training-methods/async-grpo/README.md) selects the engine with
 `rollout_backend`. Every other server knob is engine-neutral:
 
@@ -44,8 +45,9 @@ Use vLLM unless a run needs SGLang specifically.
 
 ## Weight sync
 
-Both engines receive the **full model** every sync: merged LoRA touches ~95% of bytes, so there is no
-delta path (~42 GB at 20B), unless a LoRA run serves its adapter apart ([Adapter sync](#adapter-sync)).
+Both engines receive the **full model** every sync, a merged LoRA included, unless a LoRA run serves its
+adapter apart ([Adapter sync](#adapter-sync)). There is no delta path, so a bf16 sync of gpt-oss-20b
+moves 41.8 GB.
 Re-assembling the sharded weights is a collective every rank joins.
 
 One rank owns the clients and sends: the **forwarding rank** (global main; TP rank 0 under TP). A
@@ -247,11 +249,18 @@ one server and has no such field. The default `per_server` is unchanged. Both en
 ### Adapter sync
 
 `rollout_adapter_sync: true` serves a LoRA policy as an adapter beside the frozen base instead of pushing it folded
-into the weights. SGLang only: vLLM loads an adapter from a directory both containers mount, and its decode with an
-adapter served ran over 5% slower than merged weights on the model measured.
+into the weights. SGLang takes each version in the request body or from `rollout_adapter_dir`, a directory the trainer
+and every server mount at the same path. vLLM loads it only from `rollout_adapter_dir` and serves an adapter only for
+Inkling 2, the one family validated on it (`adapter_sync_backends` on the family spec).
 
 - **First sync.** The base goes out as above, adapters left out (`fold_adapters=False`), then the adapter loads. A
-  restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines.
+  restarted trainer first retires the `halo-adapter-*` versions its predecessor left on the engines and removes every
+  `halo-adapter-*` directory under `rollout_adapter_dir`, including those of versions no engine lists any more (a
+  server restarted since, or an eviction), and the `.halo-adapter-*` stage of a write a killed trainer cut short. The
+  servers and the directory therefore belong to one run at a time: a second live run sharing the servers has its
+  versions unloaded, and one sharing the directory has its version directories removed, a version it is writing
+  included. Adapters and directories under other names are someone else's and stay, `halo-adapters-*` among them: the
+  dash is part of the prefix.
 - **Each later sync.** The adapter is gathered whole on the forwarding rank, B is multiplied by `lora_alpha / r` (or
   `/ sqrt(r)` under rsLoRA) in fp32 and rounded to bf16 once, and the adapter loads under a new name with
   `lora_alpha = r`, so the engine's own scaling is exactly 1. No pause and no session: rounds in flight keep running.
@@ -259,40 +268,80 @@ adapter served ran over 5% slower than merged weights on the model measured.
   parallel rank. The route's own `ForkingPickler` form hands CPU tensors over by file descriptor and CUDA tensors by
   IPC handle, which works on one host only. A per-version directory needs the same mount in the trainer and every
   engine and cannot be used where containers forbid bind mounts. A path load of a 7 to 27 MB adapter took 0.03 to
-  0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row.
+  0.04 s on Qwen3.5-35B-A3B; the tensors route is timed by the GPU row. With `rollout_adapter_dir` set, rank 0 writes
+  each version there as a PEFT directory (staged beside it as `.<version>.<random>`, then renamed; readable by every user) and the servers load it by path:
+  `/load_lora_adapter` on SGLang, `/v1/load_lora_adapter` on vLLM, which needs `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`: the preflight refuses a vLLM server that reports the variable off, whose load route would answer 404.
+  A version's directory is removed when the version leaves the servers: at its retirement, when a load fails on any
+  server, and at the first sync of a `train()` (**First sync**). A load a server refuses names
+  `rollout_adapter_dir` and the mount beside the engine's answer.
 - **Selection.** Every episode leases the newest version for its whole length and its requests send
-  `model: <model_name>:<version>`, so a multi-turn episode and a prefetched round keep the version they started on.
-  A request with no version published raises, since the engine would serve the base. The `isr_engine_reference`
-  re-score sends `lora_path` with the newest version.
+  `model: <model_name>:<version>` on SGLang and `model: <version>` on vLLM, so a multi-turn episode and a prefetched
+  round keep the version they started on. A request with no version published raises, since the engine would serve the
+  base. The `isr_engine_reference` re-score names the newest version the same way.
+- **Base no push carries.** A family whose `weight_sync_refusal` is set is never pushed, and runs only on a backend
+  its spec lists in `adapter_sync_backends`: Inkling 2 (frozen NVFP4/MXFP8 experts; attention LoRA, with or without expert LoRA) on vLLM. Every
+  server must serve the trainer's launch base from the start, by the match under **Restart**; the preflight skips its
+  quantization and MoE-runner checks, and the trainer forms no weight-sync group. A server that serves another base
+  fails the sync.
 - **Retirement.** After each load the ranks join the versions their episodes still hold, and rank 0 unloads the
-  others. An episode cancelled at its deadline can outlive its lease; the engine's unload then waits for its request.
+  others. An episode cancelled at its deadline can outlive its lease; SGLang's unload then waits for its request.
+  On SGLang an unload frees the adapter's slot and its host copy, and GPU memory stays flat, since the adapter pool is
+  allocated at launch (86,103 MiB through ten load and unload cycles of Qwen3-0.6B on SGLang 0.5.22). vLLM's
+  `/v1/unload_lora_adapter` only drops the name in the API server: the workers keep the adapter until `--max-cpu-loras`
+  evicts it. SGLang loads an
+  unregistered name back from its recorded path when a request names it, which is how an adapter evicted past
+  `--max-loaded-loras` returns; upstream 0.5.22 does so for an explicitly unloaded adapter too and serves it again.
+  The toolkit's image forgets the name on an explicit unload (`lora_unload_forgets_name` on `/server_info`), so such
+  a request answers 400 "never been loaded". On either image a retired version has no directory to load from, and a
+  tensors-route version no path.
 - **Restart.** Every step that is not a sync probes each server's `/v1/models` (a refused connection is retried for
   about a second and logged once per outage). A server that lacks the newest version has restarted, and an episode is
   routed only to servers that hold the version it leased: one that lacks it is skipped, and one that answers "not
   loaded" is excluded for that version and the episode replayed on another. If the restarted server launched with the
-  trainer's base (its `/server_info` `served_model_name` equals the `model_name` its requests name, and its `model_path`
-  names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache, or the same
-  real path; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
+  trainer's base (its served model name equals the `model_name` its requests name, and its model path
+  names the same hub-cache snapshot, repo and commit, as the trainer's hub id resolved through its cache at the commit
+  the trainer loaded, or the same real path; SGLang reports both on `/server_info` as `served_model_name` and `model_path`, vLLM the name on
+  `/v1/models` and the path as `model_config.model` on `/server_info`; a reported `revision` must equal the commit; no grown vocabulary), the newest version loads on it
   at once, with no base push. Any other restarted server stays out of routing until the next sync pushes the base and
   the adapter again, after its weight-sync client reconnects (its old communicator has no peer, and a push into it
   would wait out the broadcast deadline). The old client is dropped without a destroy, probe or request to the vanished
-  peer. Under `single_group` the group re-forms itself. A server that is down at a sync
-  fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
+  peer. That base push retires a predecessor's versions and directories as the first sync does and spares this run's:
+  a server that kept its adapters keeps each version an episode still leases until the first sync after the episode
+  ends. Under `single_group` the group re-forms itself. A server that is
+  down at a sync fails it with the server named. A hub model needs `--revision <commit>` on the engine for the match; an engine without
   it takes the full push.
-- **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). The startup preflight refuses a server whose rank, module list or loaded
+- **Launch flags.** `SGLANG_LORA_MAX_RANK` turns the compose flags on ([variables](#sglang)). On vLLM the server needs `--enable-lora`,
+  `--max-lora-rank` of at least `lora_r`, `--max-loras` of at least 2, `--max-cpu-loras` of at least `prefetch_depth` + 2
+  and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` (set in the Inkling 2 image). The startup preflight refuses a server whose rank, module list or loaded
   limit is too small for the run (`prefetch_depth` + 2 versions are live at once), one with speculative decoding
   (its draft runs without the adapter), a quantized base or data-parallel replicas. A module outside
-  `--lora-target-modules` is dropped by the engine without a trace, hence the module check.
+  `--lora-target-modules` is dropped by the engine without a trace, hence the module check (SGLang only).
+  SGLang answers a load past `--max-loaded-loras` with success and unloads its least recently used adapter, and one
+  loaded by tensors cannot come back: its requests answer 400 "Failed to implicitly load", which no route reads as a
+  missing adapter. The preflight therefore also counts against the limit every adapter an SGLang server lists under a
+  name outside `halo-adapter-*`; one loaded after the preflight is not counted. vLLM lists every registered adapter
+  and `--max-cpu-loras` sizes a cache it refills from an adapter's directory, so adapters registered there are not
+  counted.
 - **Cost.** On Qwen3.5-35B-A3B, SGLang 0.5.22 decoded 2.6% slower with `--enable-lora` and no adapter against a warm
-  base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar.
+  base, and 3.0 to 4.6% slower with an adapter selected; vLLM missed the 5% bar, so it serves an adapter only where
+  no merged push exists (Inkling 2).
 
-Refused at construction, with the reason in the message: a backend other than SGLang, `routing_replay: rollout`, a
-`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA, DoRA, `lora_bias`,
+Refused at construction, with the reason in the message: vLLM for any family but Inkling 2, vLLM without
+`rollout_adapter_dir`, a `weight_sync_refusal` family on a backend outside its `adapter_sync_backends`,
+`routing_replay: rollout`, a
+`model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA (served on Inkling 2's experts
+alone, by `halo:vllm-0.1.dev25249`, at the attention adapters' rank and scaling:
+[Inkling 2](../models/inkling2.md#rollouts)), DoRA, `lora_bias`,
 `modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
 (`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is
-already refused by every weight sync. Run it with the GPU rows in
-`tests/gpu/trainers/grpo/test_adapter_sync_e2e.py`, which decide whether it stays.
+already refused by every weight sync. `tests/gpu/trainers/grpo/test_adapter_sync_e2e.py` runs the SGLang path on
+the pinned 0.5.22, Qwen3-0.6B, on a server that already holds someone else's adapter and a dead trainer's version: over
+four runs the served adapter's log-probs sat 0.0001 to 0.0007 nats (mean) from the trainer's, the served base 0.03 from
+the trainer's base, and a merged push 0.0004 to 0.04 from the served adapter.
+
+A saved adapter takes the same form offline: `export_engine_adapter.py` writes the version directory a sync would
+publish for it and refuses what the engine cannot serve ([Scripts](../reference/scripts-reference.md#post-training-scripts)).
 
 ### Served weights stay in checkpoint layout
 
@@ -379,8 +428,8 @@ at 256 x 1,024 on one B300, and rollouts on the two-server EFA run above took 7.
 
 ### vLLM server patches
 
-The image applies six runtime patches through `sitecustomize` in the API server and every engine-core
-worker (`docker/vllm/patches/`), and every one is asserted at build:
+The release image applies six runtime patches through `sitecustomize` in the API server and every engine-core
+worker (`docker/vllm/patches/`; the Inkling 2 tag five, without the split top-p guard), and every one is asserted at build:
 
 - **Layerwise reload** (`vllm_layerwise_reload_patch.py`). vLLM's reload moves each layer to the meta
   device and wraps its `weight_loader`s; model code that writes with a direct `param.copy_()` (gpt-oss
@@ -406,11 +455,13 @@ worker (`docker/vllm/patches/`), and every one is asserted at build:
 - **Split top-p guard** (`vllm_topp_split_guard_patch.py`) adds the monolithic kernel's logit-space
   no-mask check to the split top-p pipeline vLLM runs for the top-k-off rows of a batch of at most 64.
   Without it a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the whole row,
-  and the engine samples token 0 and reports a NaN log-prob.
+  and the engine samples token 0 and reports a NaN log-prob. It ships on `halo:vllm-0.32.0` alone: the Inkling 2
+  build's pipeline keeps the forced token, which that tag's build asserts.
 
-- **Image identity** (`vllm_image_identity_patch.py`) lists these patches as `VLLM_HALO_PATCHES` on `/server_info`,
-  where the trainer refuses a server without it ([Startup preflight](#startup-preflight)). It lands only where
-  `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
+- **Image identity** (`vllm_image_identity_patch.py`) lists the engine build and these patches as `VLLM_HALO_PATCHES`
+  on `/server_info` (`<vllm.__version__>|<patch>,<patch>,...`), where the trainer refuses a server without it, or
+  with a build other than the one its family's tag pins ([Startup preflight](#startup-preflight)). It lands only
+  where `sitecustomize` ran, so a `PYTHONPATH` override loses it with the patches.
 
 **Build-time source edits** (`docker/vllm/patches/patch_vllm_source.py`, through
 `docker/engine_source_patch.py`, the patcher the SGLang image shares) turn vLLM's harmony pipeline off
@@ -418,18 +469,22 @@ for gpt-oss, point the server log at stderr and move FlashInfer CUTLASS to the b
 MoE backends. Each edit asserts its pre- and post-image; `python3 /opt/halo/patch_vllm_source.py
 --verify` re-checks a running container.
 
-**Model Runner V2** is pinned (`VLLM_USE_V2_MODEL_RUNNER=1`): it enforces thinking budgets, is the only
+**Model Runner V2** is pinned on `halo:vllm-0.32.0` (`VLLM_USE_V2_MODEL_RUNNER=1`) and is the only runner the
+Inkling 2 build ships: it enforces thinking budgets, is the only
 runner R3 capture starts on, and computes prompt log-probs before the drafter under speculative
 decoding (the V1 runner's drafter graph overwrites the target's hidden states, so prompt log-probs come
 back garbage, [vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). The
 `isr_engine_reference` startup probe refuses a server whose prompt log-probs do not follow from its
 tokens, whatever the cause ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 
-**Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/patches/verify_topp_split_guard.py`,
-`docker/vllm/plugins/verify_gptoss_plugins.py`) assert the patches, the transformers/tokenizers pins,
+**Build gates** (`docker/vllm/verify_image.py`, `docker/vllm/patches/verify_topp_split_guard.py` on
+`halo:vllm-0.32.0` and `docker/vllm/verify_topp_budget_cut.py` on the Inkling 2 tag,
+`docker/vllm/plugins/verify_gptoss_plugins.py`) assert the engine build each tag pins (`vllm.__version__`), that
+Model Runner V2 is the runner the engine starts (the switch on `halo:vllm-0.32.0`; no V1 runner on the Inkling 2
+tag), the patches, the transformers/tokenizers pins,
 the `ncclUniqueId` pickle shim, the weight-transfer wire (init and update request fields, the packed
 chunk boundary, the routes), that `/pause` accepts `mode=keep` and resets the prefix cache under it,
-that the split top-p guard keeps a budget-cut row whole while masking an ordinary row as upstream does,
+that split top-p keeps a budget-cut row whole while masking an ordinary row as upstream does,
 that the gpt-oss parser plugins drive Model Runner V2's budget, that `EngineArgs` carries
 `weight_transfer_config` / `enable_return_routed_experts` and `KernelConfig.moe_backend`, and the
 per-family [config-schema parity](#config-schema-parity). A green build is what proves the server can
@@ -504,8 +559,9 @@ model load and the server preflights:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
-  Inkling (no engine run has validated its sync), Qwen3-Next, Nemotron-H (no engine run has validated its sync)
-  and Cohere2 MoE carry on both engines.
+  Inkling and Inkling 2 (no engine run has validated their sync), Qwen3-Next, Nemotron-H (no engine run has validated its sync)
+  and Cohere2 MoE carry on both engines. `rollout_adapter_sync` lifts it on the backends the spec lists in
+  `adapter_sync_backends` ([Adapter sync](#adapter-sync)).
 - **A stock module tree no engine layout covers**, in three cases. A family with an EP layer but no live
   one (`use_grouped_gemm: false` at `ep_size: 1`): the experts ship in the layout the EP layer's gather
   emits, and the stock tree's fused tensors under module names are dropped by the engine's loader with no
@@ -544,7 +600,8 @@ server that does not answer is logged as unread.
 
 | Refused | Because |
 |---|---|
-| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, no `halo_patches` names on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A server off the toolkit's image (no `VLLM_HALO_PATCHES` in `vllm_env`, or one naming a build neither vLLM tag pins; no `halo_patches` on SGLang) | Upstream takes the same routes at the same version, with none of the patches: experts revert behind a `200`. Each client also refuses it at group formation; serving-only use without a sync stays free |
+| A vLLM server on the other tag: Inkling 2 on `halo:vllm-0.32.0`, any other family on `halo:vllm-0.1.dev25249` (`FAMILY_IMAGES` on the client) | The release has no Inkling 2 model, and no other family has run on the Inkling 2 build. The refusal names the tag and the `make` target that serve the family |
 | A server whose image lacks a patch the served family needs (`REQUIRED_PATCHES` on the client against the `halo_patches` names; an image that reports only its identity has none) | A push is acknowledged and part of the model keeps serving launch weights |
 | A MoE on a backend other than `triton` | The auto backends repack expert weights and a push corrupts them |
 | A quantized server under a bf16 run, or a server not serving `fp8` under `rollout_weight_precision: fp8_block` (SGLang's format read as in [FP8 rollouts](#fp8-rollouts); an unreadable one passes a bf16 run and refuses an fp8 one) | A push lands in tensors of another format, transformed or dropped, behind a `200` |
@@ -558,6 +615,7 @@ server that does not answer is logged as unread.
 | `score_centering_top_k` and a server whose one-token probe does not return that many candidates, as a distribution holding the sampled token (an SGLang image without the flat arrays) | No candidates, or the wrong ones, reach the objective ([Candidate log-probs](#candidate-log-probs)) |
 | A server that, timed on a 64-token completion (the better of two, one idle sequence), would need over twice `request_timeout` to decode a full `rollout_max_tokens` turn (`verify_turn_deadline`); over half of it only warns, since a loaded server decodes slower per sequence | A timed-out episode trains as a masked row, so the batch keeps only the episodes that finished fast ([Monitoring](../training-methods/async-grpo/monitoring.md#halts)) |
 | A server whose prompt does not move with the reasoning level, where the trainer's does (`verify_server_chat_template`) | Its template ignores the level, and the reasoning terms charge for a contract the model never read ([Chat template](../training-methods/async-grpo/episodes.md#chat-template)) |
+| With `rollout_thinking: false`, a server whose generation prompt differs from the trainer's at any probed level, that does not answer the probe (a busy server timing it out), or whose reply to it carries no prompt ids (`verify_server_chat_template`) | Its template differs or goes unchecked, and one that ignores `enable_thinking` samples a reasoning block the trainer's render closes ([Thinking off](../training-methods/async-grpo/reasoning.md#thinking-off)) |
 
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry: a
 family's `export_key_renames`, then transformers' own save-side revert of what the load converted
@@ -613,11 +671,16 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Laguna (`laguna`) | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Inkling, Qwen3-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
-family spec ([construction gates](#construction-gates)). These sync on both, expert distribution included:
+Inkling, Inkling 2, Qwen3-Next, Nemotron-H and Cohere2 MoE are refused on both engines by their
+family spec ([construction gates](#construction-gates)); Inkling 2 runs on vLLM under [adapter sync](#adapter-sync)
+alone. These sync on both, expert distribution included:
 dense families (not a dense checkpoint under a MoE family's spelling), GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE,
 GLM-4 MoE Lite, GLM-5 Next ([RL weight sync](../models/glm5-next.md#rl-weight-sync)), Gemma 4, Ling 2.0, LFM-2 MoE; Qwen3.8-Flash-Next ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)); on SGLang only through an image carrying the mix-up patch below. A MoE with no family spec is refused on both. Per-family server
 flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm), [Nemotron-H](../models/nemotron-h.md#checkpoints-and-serving), [GLM-5 Next](../models/glm5-next.md#rl-weight-sync).
+
+The vLLM column is `halo:vllm-0.32.0`. The Inkling 2 tag (`halo:vllm-0.1.dev25249`) serves Inkling 2 alone, as an
+adapter over its release ([Inkling 2](../models/inkling2.md#rollouts)): no other family has run on it, and none
+is served from it.
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
 narrows its slice, and under `--ep-size` the loader keeps its local experts. An expert name that
@@ -658,13 +721,24 @@ a process resolves, and `VLLM_NCCL_SO_PATH` points pynccl at that wheel so the b
 system copy never wins. A skew fails or hangs `ncclCommInitRank` at `/init_weight_transfer_engine`;
 rebuild the image after any bump of the pin.
 
-The client reads `GET /version` and refuses a server older than 0.32.0 or one that reports no version:
-the packed-transfer geometry (`packed`, `packed_buffer_size_bytes`, `packed_num_buffers`) rides
-`/init_weight_transfer_engine`, which older engines refuse. No newer release is validated.
+The same Dockerfile builds a second tag, `halo:vllm-0.1.dev25249` (`make build-vllm-inkling2`,
+`--build-arg VLLM_ENGINE=inkling2`), from vLLM's Inkling 2 build
+([Rollout server images](docker.md#rollout-server-images)). It adds Inkling 2's source edits
+(`docker/vllm/patches/patch_vllm_inkling2.py`: its tensor-parallel all-reduce, its `config.json` as the release
+ships it, LoRA on its NVFP4/MXFP8 experts) and sets `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`; it carries no split
+top-p guard and no runner pin. Every other family is served from `halo:vllm-0.32.0`.
+
+The client takes a server as the toolkit's image where its identity row names the engine build one of the two tags
+pins (`IMAGE`, `FAMILY_IMAGES` on `VLLMWeightSyncClient`; each build asserts its own). A weight-sync group forms
+only with `halo:vllm-0.32.0`: a row naming another build, the Inkling 2 tag's among them, is refused before any
+join, and Inkling 2 forms no group. A server with no such row is read through `GET /version` first, and the client
+refuses one older than 0.32.0 or one that reports no version: the packed-transfer geometry (`packed`,
+`packed_buffer_size_bytes`, `packed_num_buffers`) rides `/init_weight_transfer_engine`, which older engines refuse.
+No other engine build is validated. A toolkit image whose row names its patches and no engine build is refused with the image remedy: build or pull the current tags.
 
 ### Config-schema parity
 
-The server parses every checkpoint with its own transformers, the base image's 5.19.0
+The server parses every checkpoint with its own transformers, the base image's 5.19.0 (5.22.2 on the Inkling 2 tag)
 (`Dockerfile.vllm` asserts it sits inside vLLM's declared range). `docker/vllm/parity/check.py` runs at
 image build: vLLM's `ModelConfig` must resolve what the toolkit exports, to a per-layer attention
 geometry, for every family whose EP layer admits weight sync and the vLLM client does not list as
@@ -710,7 +784,7 @@ docker run --gpus all --network=host --ipc=host \
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `VLLM_IMAGE` | `halo:vllm-0.32.0` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.32.0` |
+| `VLLM_IMAGE` | `halo:vllm-0.32.0` | The image compose runs; set it to the prebuilt `public.ecr.aws/whitecircle/halo:vllm-0.32.0`, or to `halo:vllm-0.1.dev25249` for Inkling 2 (`make up-vllm-inkling2` sets it) |
 | `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint |
 | `VLLM_PORT` | `8000` | Bound on the host; drives the serve command, the healthcheck, the container's `VLLM_SERVER_URL` and the Makefile's |
 | `VLLM_CUDA_DEVICES` | `7` | Server GPUs, disjoint from `TRAINER_CUDA_DEVICES` (default `0,1,2,3,4,5,6`; a rank cannot broadcast to itself). Selected via `CUDA_VISIBLE_DEVICES` in a container that sees every GPU: hiding devices instead (`--gpus device=N`) breaks the cross-container P2P import and `/init_weight_transfer_engine` fails with `unhandled cuda error` |
@@ -725,7 +799,7 @@ docker run --gpus all --network=host --ipc=host \
 | `VLLM_TOOL_PARSER` | `hermes` | `--tool-call-parser`; per-family values below |
 | `VLLM_TOOL_CALLING_FLAGS` | `--enable-auto-tool-choice --tool-call-parser $VLLM_TOOL_PARSER` | Set empty (`VLLM_TOOL_CALLING_FLAGS=`) to serve with no tool parser, as the ReAct recipes do |
 | `VLLM_TOOL_PARSER_PLUGIN` / `VLLM_REASONING_PARSER_PLUGIN` | *(unset)* | Parser plugin paths (gpt-oss: the baked `/opt/gpt_oss_text_tool_parser.py`, `/opt/gpt_oss_reasoning_parser.py`) |
-| `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`): without one vLLM answers every request carrying `thinking_token_budget` with a 400 |
+| `VLLM_REASONING_PARSER` | *(unset)* | Required whenever a turn can carry a reasoning cap (`rollout_max_thinking_tokens`, or `rollout_max_tokens` less `rollout_max_answer_tokens`): without one vLLM answers every request carrying `thinking_token_budget` with a 400. Leave it unset for a checkpoint that does not think: on Qwen3-30B-A3B-Instruct-2507, vLLM 0.32.0's `qwen3` parser returned the plain answer after a tool result as reasoning, and the turn's content came back empty |
 | `VLLM_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer's `chat_template:` uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `VLLM_TRUST_REMOTE_CODE` | *(unset)* | Any value adds `--trust-remote-code`, which the Bailing (Ling 2.0) and Step-3.7 repos need |
 | `VLLM_EXTRA_ARGS` | *(unset)* | Further flags, appended last, such as `--served-model-name` when the server's path differs from the trainer's model id |
@@ -757,7 +831,8 @@ it (the worst-case multi-turn budget only warns).
 `VLLM_USE_V2_MODEL_RUNNER` is an env var the compose file passes through bare, so unset keeps the
 image's `1`. `0` falls back to the V1 runner, where R3 refuses to start and the gpt-oss budget loses
 its patches; vLLM reads it with `int()`, so `false` or an empty value (an empty key in `.env` counts)
-kills the server with a bare `ValueError`.
+kills the server with a bare `ValueError`. The Inkling 2 build has no V1 runner and does not declare the variable; it checks the name itself and raises
+`ValueError` ("Model Runner V1 has been removed") at startup for any value but `1`.
 
 **Tool parsers are per family.** For native-tool environments (`code_contests`, `swe`, `mcp`,
 `qa_search`, open-book `exam_qa`) a missing or wrong parser leaves calls as text with no `tool_calls`, so every
@@ -800,6 +875,8 @@ upstream leaves the offset behind, so each later request in the batch reads anot
 log-probs and the `isr_engine_reference` re-score is silently wrong. The build asserts the weight-sync
 routes, request schemas, rendezvous convention and expert loader layouts the client relies on
 (`docker/sglang/verify_image.py`) and drives the patched loop on a retracted request.
+An explicit `/unload_lora_adapter` also forgets the adapter's name, which upstream keeps and serves again from its path
+([Adapter sync](#adapter-sync)).
 
 The server keeps SGLang's own transformers (5.19.0) and torch. Serving-only use can run upstream
 (`SGLANG_IMAGE=lmsysorg/sglang:v0.5.22`); weight sync needs this image, which names itself on `/server_info`
@@ -824,7 +901,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | Keep `triton` for MoE RL and R3 |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any value adds `--enable-return-routed-experts` |
 | `SGLANG_LORA_MAX_RANK` | *(unset)* | At least the run's `lora_r`; adds `--enable-lora --max-lora-rank` and the three rows below for `rollout_adapter_sync` ([Adapter sync](#adapter-sync)) |
-| `SGLANG_LORA_TARGET_MODULES` / `SGLANG_MAX_LOADED_LORAS` / `SGLANG_MAX_LORAS_PER_BATCH` | `q_proj k_proj v_proj o_proj` / `8` / `3` | `--lora-target-modules` (every adapted projection), `--max-loaded-loras` (`prefetch_depth` + 2 or more), `--max-loras-per-batch` (2 or more) |
+| `SGLANG_LORA_TARGET_MODULES` / `SGLANG_MAX_LOADED_LORAS` / `SGLANG_MAX_LORAS_PER_BATCH` | `q_proj k_proj v_proj o_proj` / `8` / `3` | `--lora-target-modules` (every adapted projection), `--max-loaded-loras` (`prefetch_depth` + 2 or more, plus the adapters loaded outside the run), `--max-loras-per-batch` (2 or more) |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) |
 | `SGLANG_CHAT_TEMPLATE` | *(unset)* | The same `.jinja` the trainer uses, visible inside the container, where compose mounts the repo's `jinja-templates/` at `/jinja-templates` |
 | `SGLANG_ATTENTION_BACKEND` | *(unset)* | `triton` for GLM-4 MoE Lite on Blackwell: its MLA head size has no kernel in the default backend (`Unsupported head dimensions`) |
@@ -899,7 +976,7 @@ the default process group and DeepEP pick too. It is not a group-address knob.
 
 ## Servers on other nodes (EFA)
 
-The weight-sync group rides the fabric when both containers can drive it. All three images install one
+The weight-sync group rides the fabric when both containers can drive it. Every image installs one
 EFA userspace whole (`docker/efa/install_efa_userspace.sh`: rdma-core, AWS libfabric and one
 `aws-ofi-nccl` build; inventory on [Docker](docker.md#rdma-networking-infiniband-and-efa)). The stack
 is wire-sensitive down to rdma-core: at init the plugin probes libfabric for in-order RDMA writes and
@@ -1034,20 +1111,20 @@ but serve at ≤ 0.80, or with a smaller `--max-num-batched-tokens`, under `isr_
 `prompt_logprobs` re-scores allocate outside the engine's memory profile. Do not pass
 `--enforce-eager`: the in-place sync keeps captured CUDA graphs valid, and graph decode is several-fold
 faster on long generations. On B200 pin `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer
-JIT-fails on SM 10.0.
+JIT-fails on compute capability 10.0.
 
 **Sync cadence.** `sync_weights_every_n_steps: 2–4` for slow environments
 ([Async GRPO](../training-methods/async-grpo/setup.md#weight-synchronization)).
 
 ## Coverage
 
-What passed against a live server on this release, on one node with each server at TP=1 unless a row says otherwise.
+What passed against a live server on Halo 1.2.0, and on 1.3.0rc2 where a row says so, on one node with each server at TP=1 unless a row says otherwise.
 A dash is a shape the code admits with no row on that engine.
 
-**Weight push** (`test_weight_push_exact.py`, 40 rows). A push of the unchanged checkpoint leaves every served
+**Weight push** (`test_weight_push_exact.py`). A push of the unchanged checkpoint leaves every served
 log-prob bit-identical: dense Qwen3-0.6B plain and at TP=2;
-gpt-oss-20b, every checkpoint of the second table below and Step-3.7 at `ep1` and EP=2, on each engine that takes the
-family. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
+gpt-oss-20b, every full fine-tuning checkpoint of the second table below and Step-3.7 at `ep1` and `ep2`, on each engine that takes the
+family; on 1.3.0rc2 the tiny Qwen3.8-Flash-Next composite at two ranks on both engines. The Step-3.7 release passes at EP=2 against a vLLM server at TP=2.
 
 **Async GRPO, full fine-tuning**: vLLM on Qwen3-30B-A3B at 2 ranks and gpt-oss-20b at 4, SGLang on gpt-oss-20b at 2 and
 4, dense rows on Qwen3-0.6B.
@@ -1084,6 +1161,7 @@ Other checkpoints, async GRPO at 2 ranks:
 | Gemma 4 26B-A4B | `ep1`, EP=2, `ep1` attention LoRA | `ep1`, EP=2, `ep1` attention LoRA |
 | Laguna-XS-2.1 | `ep1`, EP=2, R2 and R3 at EP=2 | refused |
 | Ling-mini-2.0 | `ep1`, EP=2, R2 and R3 at EP=2 | R2 and R3 at EP=2 |
+| Inkling-2-Small | on 1.3.0rc2: attention and expert LoRA at EP=2 through adapter sync, on `halo:vllm-0.1.dev25249` at TP=2 | refused |
 
 Online GRPO and SDPG ran on Qwen3-30B-A3B (`ep1`, EP=2, EP=2 × DP=2, EP=2 on two simulated domains, EP=2 + TP=2, EP=2 +
 ETP=2, attention and expert LoRA) and Qwen3-0.6B (FSDP2, one rank, TP=2, TP=2 × DP=2, ZeRO-3, HSDP on two simulated
@@ -1105,7 +1183,7 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 | Symptom | Cause → fix |
 |---|---|
 | Every completion hangs after a trainer died mid-sync, with vLLM's `/health` still 200 and SGLang's hanging too | SIGKILL (`docker rm -f`) skipped the client's `atexit` resume, so the engine stays paused. The next trainer refuses it at startup (`is PAUSED`, or `paused or wedged` after a 60 s probe on SGLang, which has no pause route) → POST `/resume` (vLLM) or `/continue_generation` (SGLang), or restart it if that sync had already streamed part of the model. vLLM's update session unloads the model when it opens, and `/resume` then takes the engine down: restart it |
-| A server dies mid-run and the trainer goes on for minutes | Rollouts and the sync run out their timeouts first: a killed engine (`docker kill`, one server) raises after about 4 minutes on either engine, naming the server, and a frozen one (`docker pause`, SGLang at 2 ranks) after about 20 → let it raise or stop the run, then restart the server |
+| A server dies mid-run and the trainer goes on for minutes | Rollouts and the sync run out their timeouts first: a killed engine (`docker kill`, one server) raises 253–258 s after the fault on either engine at `rollout_connection_timeout: 180`, naming the server, and a frozen one (`docker pause`, SGLang at 2 ranks) after about 20 minutes → let it raise or stop the run, then restart the server |
 | Group formation times out, "1/2 clients joined" | A bridge network hides the rendezvous port → `network_mode: host` on both containers |
 | First sync takes minutes, `/health` unanswered | One-time NCCL group init per server; the engine pauses mid-update → wait |
 | 400 on every rollout (vLLM) | A reasoning cap without a reasoning parser → set `VLLM_REASONING_PARSER`; otherwise rollouts return zero tokens and the run trains on all-masked batches |
@@ -1113,3 +1191,4 @@ mismatch, SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooti
 | Log-ratio drifts on SGLang while the server log stays clean | The MoE loaders skip unmapped expert names without a warning → a clean log proves nothing; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild (`make build-vllm`) |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → a stranded communicator per connection; rebuild and recreate the container |
+| After a refused adapter load or a failed weight-sync call, the next one answers 500 with the earlier call's error (vLLM at tensor-parallel size above 1, either tag) | vLLM's multiprocess executor raises at the first failed reply and leaves the later workers' replies queued: until the server restarts, every later call that all workers answer (an adapter load, `/init_weight_transfer_engine`, `/pause`, `/update_weights`, the session open and close) reads those workers' replies to an earlier one, and one only a later worker refuses can answer 200 → restart the server after a refused call; the trainer's error for a refused adapter load says so |

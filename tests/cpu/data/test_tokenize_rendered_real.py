@@ -6,6 +6,7 @@ import pytest
 
 from halo.data.chat_render import probe_tokenizer_specials, tokenize_rendered
 from halo.data.pipeline.text_rows import build_chat_row_processor
+from halo.data.turn_markers import resolve_eos_token_ids
 from tests.common.models import GEMMA3_4B_IT, GEMMA4_31B_QAT, GLM4_FLASH, GPT_OSS_20B_OPENAI, QWEN3_0_6B, ZAYA_8B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -108,8 +109,12 @@ def test_zaya_max_length_boundary_never_doubles_the_terminator():
     assert baseline.count(eos_id) >= 1 and baseline[-2] == eos_id, "precondition: the render terminates its last turn"
 
     row = {"messages": MESSAGES}
+    eos_token_ids = resolve_eos_token_ids(tok)
     for max_length in range(len(baseline) - 1, len(baseline) + 4):
-        ids = build_chat_row_processor(tok, max_length=max_length, conversation_field="messages")(row)["input_ids"]
+        processor = build_chat_row_processor(
+            tok, max_length=max_length, conversation_field="messages", eos_token_ids=eos_token_ids
+        )
+        ids = processor(row)["input_ids"]
         if len(ids) <= 1:
             continue  # rejection sentinel: the row does not fit this budget at all
         assert ids.count(eos_id) == baseline.count(eos_id), (
@@ -132,6 +137,7 @@ def test_zaya_exact_fit_row_keeps_its_last_token(add_generation_prompt):
         max_length=len(expected["input_ids"]),
         conversation_field="messages",
         add_generation_prompt=add_generation_prompt,
+        eos_token_ids=resolve_eos_token_ids(tok),
     )
 
     ids = processor({"messages": MESSAGES})["input_ids"]

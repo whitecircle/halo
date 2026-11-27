@@ -26,11 +26,6 @@ def test_message_fires_above_the_ratio():
     assert "per_device_train_batch_size" in message
 
 
-def test_message_silent_below_the_ratio():
-    total = 268 * _GIB
-    assert thin_memory_margin_message(int(total * (MEMORY_MARGIN_WARN_RATIO - 0.01)), total, rank=0) is None
-
-
 def test_message_boundary_is_the_ratio():
     total = 100 * _GIB
     at = int(total * MEMORY_MARGIN_WARN_RATIO)

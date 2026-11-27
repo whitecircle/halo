@@ -393,14 +393,13 @@ class ModeSetupMixin:
 
     def _register_output_capturing_for_fsdp(self) -> None:
         """transformers keys output capture on ``str(self.__class__)``, and FSDP2's dynamic subclasses are absent from
-        its registry."""
+        its registry, which takes the module and derives that key itself."""
         model = self._backbone_model()
         for sub in model.modules():
-            cls_str = str(sub.__class__)
-            if cls_str not in _CAN_RECORD_REGISTRY:
+            if str(sub.__class__) not in _CAN_RECORD_REGISTRY:
                 record_outputs = getattr(sub, "_can_record_outputs", None)
                 if record_outputs:
-                    _CAN_RECORD_REGISTRY[cls_str] = record_outputs
+                    _CAN_RECORD_REGISTRY[sub] = record_outputs
                     if is_global_main_process():
                         logger.info(
                             f"  Registered output capturing for {sub.__class__.__name__} "

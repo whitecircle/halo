@@ -24,6 +24,19 @@ def resolve_reasoning_effort(effort: str | None) -> str | None:
     return effort
 
 
+def _row_reasoning_effort(context: dict[str, Any] | None) -> str | None:
+    """The level a row's ``reasoning_effort`` cell sets, ``None`` for a null cell. Any other cell raises: ``random`` is
+    the environment's setting, drawn once per generation group, and a row's draw would differ across the group."""
+    level = (context or {}).get("reasoning_effort")
+    if level is not None and level not in VALID_REASONING_EFFORTS:
+        raise ValueError(
+            f"A row's reasoning_effort cell reads {level!r}, but a row's level must be one of "
+            f"{list(VALID_REASONING_EFFORTS)}, or null to keep the environment's reasoning_effort. For a drawn level, "
+            f"set reasoning_effort: {RANDOM_REASONING_EFFORT} in environment_kwargs and leave the cells null."
+        )
+    return level
+
+
 def stable_reasoning_effort(task: str | list[dict[str, Any]]) -> str:
     """A level drawn from the task alone, the same in every process and run, so an evaluation scores each problem at
     one level from checkpoint to checkpoint."""
@@ -67,7 +80,7 @@ class EffortProfilesMixin:
 
     def effort_level_at_reset(self, context: dict[str, Any] | None) -> str | None:
         """The level when concrete at reset, else ``None``: a ``random`` draw resolves once, actor-side, later."""
-        level = (context or {}).get("reasoning_effort") or self.reasoning_effort
+        level = _row_reasoning_effort(context) or self.reasoning_effort
         return level if level in VALID_REASONING_EFFORTS else None
 
     def _merge_effort_profiles(
@@ -169,10 +182,11 @@ def bind_episode_effort(
     max_episode_tokens: int | None = None,
     max_answer_tokens: int | None = None,
 ) -> EpisodeEffort:
-    """Resolve one episode's level (a context stamp over the env setting; call once per episode) and bind the run's
-    token caps. The engine closes reasoning at ``max_thinking_tokens``, else where only ``max_answer_tokens`` is left
-    of the turn; a level's profile budget is the reward's reference, never an engine cap."""
-    level = resolve_reasoning_effort((context or {}).get("reasoning_effort") or env.reasoning_effort)
+    """Resolve one episode's level (a context stamp over the env setting, raising on one outside the levels; call once
+    per episode) and bind the run's token caps. The engine closes reasoning at ``max_thinking_tokens``, else where only
+    ``max_answer_tokens`` is left of the turn; a level's profile budget is the reward's reference, never an engine
+    cap."""
+    level = resolve_reasoning_effort(_row_reasoning_effort(context) or env.reasoning_effort)
     thinking_cap = max_thinking_tokens
     if thinking_cap is None and max_answer_tokens is not None:
         thinking_cap = max_tokens - max_answer_tokens

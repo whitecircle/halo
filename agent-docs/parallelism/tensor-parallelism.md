@@ -5,7 +5,7 @@ HF-native load places each rank's shard as it reads, while plain FSDP2 and DDP l
 onto every GPU first ([Data Parallelism](data-parallelism.md#fsdp2-strategy-by-mode)).
 `data_parallel_size = world_size / tp_size`; all ranks participate in gradient sync
 (`ParallelismConfig`, `halo/distributed/parallelism_config.py`). Why its all-reduce has to stay on
-NVLink: [GPU Training Theory §9](../reference/gpu-training-theory.md#collectives).
+NVLink: [GPU Training Theory → Tensor parallelism](../reference/gpu-training-theory.md#tensor-parallelism).
 
 > [!WARNING]
 > **TP buys little memory on a fine-grained MoE**
@@ -29,7 +29,7 @@ rather than through DTensor dispatch: [Local-shard linears](#local-shard-linears
 ## Supported models
 
 **Native HF TP** (dense models with `base_model_tp_plan`, via `tp_plan="auto"` — shards attention,
-MLP, and the vocab dim of a [tied embedding/head pair](#tied-embeddings-under-hf-native-tp)): Llama,
+MLP, and the head's vocab dim, with the embedding's when the [pair is tied](#tied-embeddings-under-hf-native-tp)): Llama,
 Mistral, Qwen3, Qwen3.5/3.6 dense, any dense HF model declaring the plan.
 
 **Selective TP** (attention only, `apply_tp_to_attention_only()`; MoE handled by EP,
@@ -74,8 +74,9 @@ Hand-sliced params (`register_hand_sliced`, `halo/distributed/tensor_parallel/pl
 
 ### Tied embeddings under HF-native TP
 
-`load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. A tied config
-injects `embed_tokens: embedding_rowwise` into the backbone `base_model_tp_plan`, the ForCausalLM's
+`load_tp_model` shards a tied embedding/head pair as **one vocab-parallel weight**. transformers
+plans a backbone's `embed_tokens` as `embedding_rowwise` whenever the backbone carries a TP plan that does
+not name it, the ForCausalLM's
 `lm_head: colwise_gather_output` agrees with it on `Shard(0)` of the vocab dim, and transformers
 shards module by module and ties *afterwards* — so both ends land on the same DTensor: one weight,
 one gradient, one exported key, and half the embedding + head memory per rank at `tp_size=2`.
@@ -90,8 +91,14 @@ An architecture planning only **one** end of the pair (a multimodal wrapper clas
 `lm_head` entry; a backbone shipping no `base_model_tp_plan`) cannot do that: the tie would hand the
 unplanned end a weight of the other kind and the first forward dies on mixed plain/DTensor operands.
 
-`consistent_tied_tp_plan` (`halo/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
-the load so the pair stays replicated instead, warning that those weights cost a full copy per rank.
+`toolkit_tp_plan` (`halo/distributed/tensor_parallel/hf_plan.py`) drops that lone entry for
+the load so the pair stays replicated, warning that those weights cost a full copy per rank. It also
+names an untied `embed_tokens` under the no-op `replicate` style whenever the backbone plan leaves it
+out: transformers would otherwise vocab-shard it, and DTensor's embedding backward returns a replicated
+gradient beside the shard, which AdamWBF16 refuses and the norm clip counts `tp_size` times. A tied
+pair keeps both ends sharded, since its head use returns the gradient sharded. An untied `embed_tokens`
+is whole on every TP rank at any `tp_size`: `vocab_size × hidden_size × 2` bytes in bf16 (1.16 GiB for a
+151,936 × 4,096 table), plus a gradient and each of AdamWBF16's two moments at the same size.
 `validate_tied_pair_consistent` then fails the
 load loud if the loaded pair is untied, or if its sharding disagrees with the applied plan.
 
@@ -143,12 +150,12 @@ gradient is already summed over the TP group. The rope half of their `kv_a_proj_
 output bypasses `kv_b_proj`, so a forward hook (`register_mla_rope_grad_reduction`) sums its
 gradient over the TP group.
 
-Transformers' own `ReplicatedWithGradAllReduce` is deliberately **not** used: its
-`full_backward_hook` re-reduces whatever sits in `.grad` on every backward, so under gradient
-accumulation each earlier micro-batch's contribution is multiplied by `tp_size` again per
-micro-step. On the HF-native `tp_plan="auto"` path `retarget_hf_replicated_grad_hooks` strips those
-hooks into the same step-time SUM, and raises if the plan asks for that reduction and no hook is
-found. Guarded by `tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py`.
+Transformers' own `ReplicatedWithGradAllReduce` is deliberately **not** used: its forward wrapper
+registers a post-accumulate-grad hook that re-reduces whatever sits in `.grad` on every backward, so
+under gradient accumulation each earlier micro-batch's contribution is multiplied by `tp_size` again
+per micro-step. On the HF-native `tp_plan="auto"` path `retarget_hf_replicated_grad_hooks` removes
+that wrapper before the first forward and registers the norms for the same step-time SUM; it raises if
+the plan asks for that reduction and no wrapper is found. Guarded by `tests/gpu/parallelism/tp/test_tp_attention_norm_grad.py`.
 
 MoE layers are never in this plan. In EP+TP the experts belong to EP; in pure-TP MoE they stay
 replicated.
@@ -157,8 +164,10 @@ replicated.
 
 Every TP rank must call `model.forward` with **identical** `input_ids` / `attention_mask` shapes
 *and* values — column/row-parallel collectives assume each rank computes a partial result for the
-same hidden states. Mismatched inputs do not error early; they deadlock at the first `o_proj`
-all-reduce (visible in py-spy as ranks stuck at different sub-modules of one forward).
+same hidden states. Mismatched inputs do not error. Inputs of different shapes stop the job at the
+first all-reduce of the forward until the NCCL watchdog ends it (visible in py-spy as ranks stuck at
+different sub-modules of one forward); inputs of the same shape complete every all-reduce and sum partial
+results of different inputs, so the run is wrong with no error.
 
 This affects trainers pulling per-rank data from an external service. `DistributedOnlineGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
@@ -218,7 +227,8 @@ with plain `dist.all_reduce` or DDP — FSDP2's `fully_shard` understands DTenso
 loader builds the mesh and attaches it to the model; the trainer wraps over the DP dimension via
 `apply_fsdp2_for_tp` (`halo/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
 point with its EP modules as `ignored_params`. Pure TP (DP=1)
-skips FSDP. Prefer `tp_size = world_size` when the model fits the TP group's memory.
+skips FSDP. TP ranks share one batch, so each TP group is one replica and raising `tp_size` divides the
+number of replicas ([GPU Training Theory → Tensor parallelism](../reference/gpu-training-theory.md#tensor-parallelism)).
 
 ## Gradient sync and the grad norm
 

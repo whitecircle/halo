@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Collectives by message size</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* Each panel's key sits in a column left of its plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: var(--group-gap);
+    align-items: start;
+  }
+
+  .key h3 {
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
+  }
+
+  .key p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
+    color: var(--body);
+  }
+
+  .key p.mark svg { margin-top: 3px; }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="time-key"></div>
+    <svg class="chart" id="time"></svg>
+    <div class="key" id="rate-key"></div>
+    <svg class="chart" id="rate"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each point is the median of 7 samples of back-to-back calls, timed on the slowest rank.</span>
+      <span class="s">The time includes PyTorch’s own cost of making the call.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on GPUs of one B300 node, joined by NVLink through NVSwitch, by
+  // tests/gpu/profiling/benchmark_collectives.py under torchrun: NCCL collectives through torch.distributed on
+  // bf16 buffers. collectives-2.json and collectives-4.json (world_size 2 and 4), rows[] by collective,
+  // in order of bytes: seconds_summary.median in µs, the median of 7 samples, each the slowest rank's time over
+  // back-to-back calls. The files' busbw_bytes_per_s is bytes / median × 2 × (R − 1)/R for an all-reduce and
+  // × (R − 1)/R for the others, which the script recomputes.
+  const SIZES = [4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864, 268435456, 1073741824, 4294967296];
+  const MICROSECONDS = {
+    2: {
+      all_reduce: [19.34, 21.03, 29.25, 20.49, 20.57, 36.56, 53.07, 149.2, 525, 1867, 7020],
+      all_gather: [16.98, 17.9, 26.23, 23.91, 27.23, 29.45, 36.73, 95.3, 320, 1153, 4385],
+      reduce_scatter: [23.28, 24.82, 26.5, 24.44, 28.18, 29.7, 46, 99.91, 340.6, 1228, 4552],
+      all_to_all: [25.05, 24.84, 26.84, 23.82, 27.29, 30.16, 47.57, 123.5, 412.4, 1227, 4835],
+    },
+    4: {
+      all_reduce: [27.19, 26.59, 27.28, 27.99, 29.46, 44.66, 96.75, 181, 672.7, 2478, 9543],
+      all_gather: [25.26, 23.97, 26.2, 26.02, 28.18, 33.27, 47.33, 108.4, 373.7, 1377, 5182],
+      reduce_scatter: [21.46, 25.82, 29.76, 19.33, 28.96, 32.1, 46.58, 108.2, 392, 1375, 5186],
+      all_to_all: [19.36, 28.72, 22.52, 30.45, 27.69, 32.42, 52.06, 124.8, 420.7, 1483, 5299],
+    },
+  };
+  /** NVLink 5 per GPU and per direction, GB/s: NVIDIA's specification, 18 links of 50 GB/s. */
+  const NVLINK_SPEC = 900;
+  /** The collective the figure follows, drawn in colour for each group size. The others are drawn grey. */
+  const LEAD = "all_reduce";
+  const NAMES = { all_reduce: "all-reduce", all_gather: "all-gather", reduce_scatter: "reduce-scatter", all_to_all: "all-to-all" };
+  const HUES = { 2: "var(--halo-blue)", 4: "var(--halo-violet)" };
+  /** A message counts as costing its latency alone while its time stays within this factor of the series' fastest. */
+  const FLAT = 1.6;
+
+  /** NCCL's bus bandwidth in GB/s: the message over the time, scaled by what each rank moves. */
+  const bus = (name, ranks, bytes, microseconds) => ((bytes / (microseconds * 1e-6)) * ((name === LEAD ? 2 : 1) * (ranks - 1))) / ranks / 1e9;
+  const series = Object.entries(MICROSECONDS).flatMap(([ranks, byName]) =>
+    Object.entries(byName).map(([name, times]) => ({
+      ranks: Number(ranks),
+      name,
+      points: times.map((time, i) => ({ bytes: SIZES[i], time, bus: bus(name, Number(ranks), SIZES[i], time) })),
+    })));
+  const lead = series.filter((s) => s.name === LEAD);
+  const others = series.filter((s) => s.name !== LEAD);
+  /** The last size up to which a series stays within FLAT of its fastest call. */
+  const flatUpTo = (s) => {
+    const fastest = Math.min(...s.points.map((p) => p.time));
+
+    return s.points[s.points.findIndex((p) => p.time > FLAT * fastest) - 1].bytes;
+  };
+  const flat = Math.min(...lead.map(flatUpTo));
+  const size = (bytes) => {
+    const power = Math.log2(bytes);
+    const unit = Math.floor(power / 10);
+
+    return `${2 ** (power - 10 * unit)} ${["bytes", "KiB", "MiB", "GiB"][unit]}`;
+  };
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const range = (values) => [Math.min(...values), Math.max(...values)];
+  const span = (values, unit) => `${range(values).map(fmt).join(" to ")} ${unit}`;
+  const flatTimes = (set) => set.flatMap((s) => s.points.filter((p) => p.bytes <= flat).map((p) => p.time));
+  const largest = (set) => set.map((s) => s.points.at(-1).bus);
+  /** The first size at which a series reaches half its bus bandwidth at the largest message. */
+  const halfway = (s) => s.points.find((p) => p.bus >= s.points.at(-1).bus / 2).bytes;
+
+  document.getElementById("title").textContent = `Up to ${size(flat)} an ${NAMES[LEAD]} takes ${span(flatTimes(lead), "µs")} whatever the size`;
+
+  /** A key swatch: a 36 × 24 drawing of the mark. */
+  const swatch = (draw) => {
+    const svg = svgEl("svg", { viewBox: "0 0 36 24", "aria-hidden": "true" });
+    draw(svg);
+
+    return svg;
+  };
+  const rule = (attrs) => (svg) => svg.append(svgEl("line", { x1: 2, y1: 12, x2: 34, y2: 12, ...attrs }));
+  const SWATCHES = {
+    2: rule({ stroke: HUES[2], "stroke-width": 3, "stroke-linecap": "round" }),
+    4: rule({ stroke: HUES[4], "stroke-width": 3, "stroke-linecap": "round" }),
+    others: rule({ stroke: "var(--tertiary)", "stroke-width": 1.5 }),
+    flat: (svg) => svg.append(svgEl("line", { x1: 18, y1: 1, x2: 18, y2: 23, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" })),
+    spec: rule({ stroke: "var(--secondary)", "stroke-width": 1.5 }),
+  };
+
+  /** Fills a key column: its heading, plain lines, then one line per mark. */
+  function fillKey(id, { name, lines, marks }) {
+    const key = document.getElementById(id);
+    key.append(el("h3", undefined, name));
+
+    for (const line of lines) {
+      key.append(el("p", undefined, line));
+    }
+
+    for (const [kind, text] of marks) {
+      const p = el("p", "mark");
+      p.append(swatch(SWATCHES[kind]), el("span", undefined, text));
+      key.append(p);
+    }
+  }
+
+  const capital = (text) => `${text[0].toUpperCase()}${text.slice(1)}`;
+  const otherNames = [...new Set(others.map((s) => NAMES[s.name]))];
+  fillKey("time-key", {
+    name: "Time per call",
+    lines: ["NCCL collectives called from PyTorch on GPUs of one B300 node, joined by NVLink, on bf16 messages"],
+    marks: [
+      ...lead.map((s) => [s.ranks, `${capital(NAMES[LEAD])} on ${s.ranks} GPUs`]),
+      ["others", `${capital(otherNames.slice(0, -1).join(", "))} and ${otherNames.at(-1)} on the same GPUs: ${span(flatTimes(others), "µs")} up to ${size(flat)}`],
+      ["flat", `${size(flat)}: up to here the ${NAMES[LEAD]} stays within ${FLAT} times its fastest call`],
+    ],
+  });
+  fillKey("rate-key", {
+    name: "Bus bandwidth",
+    lines: [
+      "The message over the time, times the share of it each rank moves: NCCL’s measure of the rate on the links",
+      `At ${size(SIZES.at(-1))} the ${NAMES[LEAD]} reaches ${span(largest(lead), "GB/s")} and the others ${span(largest(others), "GB/s")}`,
+      `Half of that is reached by ${lead.map((s) => `${size(halfway(s))} on ${s.ranks} GPUs`).join(" and ")}`,
+    ],
+    marks: [["spec", `${fmt(NVLINK_SPEC)} GB/s: NVLink 5 per GPU and per direction, as specified`]],
+  });
+
+  /** Plot-area insets inside each SVG: room for the y title and ticks on the left. */
+  const PAD = { l: 118, r: 24 };
+  const first = Math.log2(SIZES[0]);
+  const last = Math.log2(SIZES.at(-1));
+  /** Every other measured size carries a label. */
+  const labelled = SIZES.filter((_, i) => i % 2 === 0);
+
+  /** Sets up one panel's SVG and returns its plot box, x scale and an element adder. */
+  function panel(id, height, top, bottom) {
+    const chart = document.getElementById(id);
+    const width = chart.getBoundingClientRect().width;
+    chart.setAttribute("height", height);
+    chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const plot = { l: PAD.l, r: width - PAD.r, t: top, b: height - bottom };
+    // The size axis is logarithmic, with room at each end for the first and last mark.
+    const sx = (bytes) => plot.l + 24 + ((Math.log2(bytes) - first) / (last - first)) * (plot.r - plot.l - 48);
+    const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+
+    return { plot, sx, add, height };
+  }
+
+  /** Draws a panel's frame: gridlines and labels at the y ticks, x tick marks, its axis lines and its rotated title. */
+  function frame({ plot, sx, add }, ticks, sy, title) {
+    for (const v of ticks) {
+      if (sy(v) < plot.b - 0.5) {
+        add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+
+      add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, v.toLocaleString("en-US"));
+    }
+
+    for (const bytes of SIZES) {
+      add("line", { x1: sx(bytes), x2: sx(bytes), y1: plot.b, y2: plot.b + (labelled.includes(bytes) ? 8 : 5), stroke: "var(--secondary)", "stroke-width": 1 });
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, title);
+    add("line", { x1: sx(flat), x2: sx(flat), y1: plot.t, y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+  }
+
+  /** Draws every series of a panel: the others thin and grey, then the lead ones in colour with their points. */
+  function draw({ sx, add }, sy, field) {
+    const path = (s) => s.points.map((p) => `${sx(p.bytes)},${sy(p[field])}`).join(" ");
+
+    for (const s of others) {
+      add("polyline", { points: path(s), fill: "none", stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-linejoin": "round" });
+    }
+
+    for (const s of lead) {
+      add("polyline", { points: path(s), fill: "none", stroke: HUES[s.ranks], "stroke-width": 3, "stroke-linejoin": "round", "stroke-linecap": "round" });
+
+      for (const p of s.points) {
+        add("circle", { cx: sx(p.bytes), cy: sy(p[field]), r: 5, fill: HUES[s.ranks] });
+      }
+    }
+  }
+
+  // The time panel: a log axis over whole decades.
+  {
+    const p = panel("time", 400, 8, 8);
+    const { plot } = p;
+    const times = series.flatMap((s) => s.points.map((q) => q.time));
+    const low = Math.floor(Math.log10(Math.min(...times)) + 1e-9);
+    const high = Math.ceil(Math.log10(Math.max(...times)) - 1e-9);
+    const sy = (v) => plot.b - ((Math.log10(v) - low) / (high - low)) * (plot.b - plot.t);
+    frame(p, Array.from({ length: high - low + 1 }, (_, i) => 10 ** (low + i)), sy, "Time per call, µs");
+    draw(p, sy, "time");
+  }
+
+  // The bus bandwidth panel: a linear axis from zero, on the same size axis, which it labels.
+  {
+    const p = panel("rate", 420, 8, 84);
+    const { plot, sx, add, height } = p;
+    const axis = niceAxis(NVLINK_SPEC * 1.06, undefined, { most: 5 });
+    const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
+    frame(p, axis.ticks, sy, "Bus bandwidth, GB/s");
+
+    for (const bytes of labelled) {
+      add("text", { class: "tick", x: sx(bytes), y: plot.b + 34, "text-anchor": "middle" }, size(bytes));
+    }
+
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: height - 6, "text-anchor": "middle" }, "Message size");
+    add("line", { x1: plot.l, x2: plot.r, y1: sy(NVLINK_SPEC), y2: sy(NVLINK_SPEC), stroke: "var(--secondary)", "stroke-width": 1.5 });
+    draw(p, sy, "bus");
+  }
+</script>
+</body>
+</html>

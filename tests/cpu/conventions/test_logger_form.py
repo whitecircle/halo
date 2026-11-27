@@ -73,9 +73,8 @@ def test_the_sweep_sees_the_module_loggers():
     assert _MODULE_LOGGER_COUNT > 150, f"only {_MODULE_LOGGER_COUNT} module loggers found"
 
 
-@pytest.mark.parametrize(
-    ("source", "offence"),
-    [
+def test_each_break_of_the_logger_form_is_flagged(subtests):
+    breaks = [
         ("from accelerate.logging import get_logger\n", "imports ['accelerate.logging']"),
         ("from transformers.utils import logging\n", "imports ['transformers.utils.logging']"),
         ("import accelerate.logging\n", "imports ['accelerate.logging']"),
@@ -83,10 +82,10 @@ def test_the_sweep_sees_the_module_loggers():
         ("log = logging.getLogger(__name__)\n", "module logger log = logging.getLogger(__name__)"),
         ("_tee_logger = logging.getLogger(__name__)\n", "module logger _tee_logger = logging.getLogger(__name__)"),
         ("logger.info('x', main_process_only=False)\n", "passes main_process_only="),
-    ],
-)
-def test_each_break_of_the_logger_form_is_flagged(source, offence):
-    assert _logger_form_offences(ast.parse(source)) == [f"line 1: {offence}"]
+    ]
+    for source, offence in breaks:
+        with subtests.test(repr(source)):
+            assert _logger_form_offences(ast.parse(source)) == [f"line 1: {offence}"]
 
 
 def test_the_stdlib_forms_pass():

@@ -87,7 +87,7 @@ GIN-plugin prerequisites and the measured B300 EFA numbers: [DeepEP → Expert p
 
 ### NVL72 racks (GB200/GB300)
 
-On NVL72 the NVLink domain spans the rack (72 GPUs across ~18 OS nodes), so node-local grouping should target the rack: set `NVLINK_DOMAIN_SIZE: "72"` and `EXPERT_PARALLEL_SCOPE: "node"` in `envs`. Standard 8-GPU hosts need no change — the default reads `gpus_per_node`. See [Multi-Node → NVL72](../parallelism/multi-node.md#gb200gb300-nvl72-multi-node-nvlink). The published images are x86_64-only, so the rack's Grace (aarch64) hosts need an arm64 build first ([Docker](docker.md)).
+On NVL72 the NVLink domain spans the rack (72 GPUs across 18 OS nodes), so node-local grouping should target the rack: set `NVLINK_DOMAIN_SIZE: "72"` and `EXPERT_PARALLEL_SCOPE: "node"` in `envs`. Standard 8-GPU hosts need no change — the default reads `gpus_per_node`. See [Multi-Node → NVL72](../parallelism/multi-node.md#gb200gb300-nvl72-multi-node-nvlink). The published images are x86_64-only, so the rack's Grace (aarch64) hosts need an arm64 build first ([Docker](docker.md)).
 
 ### NCCL collective timeout
 

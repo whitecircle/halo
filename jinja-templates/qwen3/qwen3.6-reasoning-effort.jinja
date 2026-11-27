@@ -1,9 +1,10 @@
 {#- Qwen3.6 for text-only tool-use RL: the hub template cut to what the rollouts use, plus the episode's
-    reasoning effort stated in the system block. Thinking is always on; an assistant turn renders whatever
+    reasoning effort stated in the system block. Thinking is on by default; enable_thinking: false closes
+    the block in the generation prompt, as the hub template does. An assistant turn renders whatever
     reasoning_content it carries (the hub's preserve_thinking=true branch); tool calls and tool responses
-    keep the hub spellings the server's qwen3_xml parser reads. Variable: reasoning_effort (the request's
-    top-level field, merged in by the server). The line names the level and what it asks for, never a
-    token count. -#}
+    keep the hub spellings the server's qwen3_xml parser reads. Variables: reasoning_effort (the request's
+    top-level field, merged in by the server) and enable_thinking. The line names the level and what it asks
+    for, never a token count. -#}
 {%- macro render_content(content) %}
     {%- if content is string %}
         {{- content }}
@@ -126,5 +127,10 @@
     {%- endif %}
 {%- endfor %}
 {%- if add_generation_prompt %}
-    {{- '<|im_start|>assistant\n<think>\n' }}
+    {{- '<|im_start|>assistant\n' }}
+    {%- if enable_thinking is defined and enable_thinking is false %}
+        {{- '<think>\n\n</think>\n\n' }}
+    {%- else %}
+        {{- '<think>\n' }}
+    {%- endif %}
 {%- endif %}

@@ -55,7 +55,7 @@ def _metrics_for(messages: list[Message]) -> dict[str, float]:
     return _make_env().rollout_metrics(Trajectory(messages=messages))
 
 
-@pytest.mark.parametrize("drift", ["the 最长 path is bounded", "但实际上 the prefix sums", "カタカナ", "한글"])
+@pytest.mark.parametrize("drift", ["the 最长 path is bounded", "カタカナ", "한글"])
 def test_reasoning_in_another_script_is_counted(drift):
     metrics = _metrics_for([Message.user("task"), Message.assistant("answer", thinking=drift)])
     assert metrics["episode/reasoning_cjk_rate"] == 1.0

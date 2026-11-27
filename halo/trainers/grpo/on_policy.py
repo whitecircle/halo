@@ -95,6 +95,8 @@ class OnPolicyGRPOInitMixin:
     GENERATION_SHAPED_ROWS = True
     # What the weight push stores on the rollout servers; the trainer's own weights stay bf16.
     _rollout_weight_precision: RolloutWeightPrecision = "bf16"
+    # Set by a trainer that serves its policy as an adapter beside the launch base, which pushes no base.
+    _rollout_adapter_sync = False
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Returns ``(config, kwargs)``. TRL's Liger flag must go off before ``_init_distributed_config``, and
@@ -174,7 +176,12 @@ class OnPolicyGRPOInitMixin:
         self._validate_held_reference_model()
         self._reject_unreproducible_chunked_head()
         self._verify_full_logits_fit(self._loss_logits_width())
-        reject_unsyncable_model(self.model, self._rollout_backend, self._rollout_weight_precision)
+        reject_unsyncable_model(
+            self.model,
+            self._rollout_backend,
+            self._rollout_weight_precision,
+            adapter_sync=self._rollout_adapter_sync,
+        )
         self._install_weight_sync()
         self._disable_dropout_for_onpolicy()
 

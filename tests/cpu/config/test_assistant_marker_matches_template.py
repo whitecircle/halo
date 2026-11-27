@@ -105,49 +105,44 @@ def test_a_doc_fence_pairing_is_held_to_the_contract():
     assert pairings == [("page.md#yaml[0]", _GPT_OSS_TEMPLATE, _GPT_OSS_MARKER)]
 
 
-@pytest.mark.parametrize("tree", _DOC_TREES)
-def test_the_scan_reads_each_doc_tree(tree):
+def test_the_scan_reads_each_doc_tree(subtests):
     """Counted per tree: ``rglob`` on a missing or renamed root yields nothing, so one dead root would
     otherwise hide behind the other's fences."""
-    assert (REPO_ROOT / tree).is_dir(), f"{tree} is not a directory — that half of the scan is dead"
-    assert any(source.startswith(f"{tree}/") for source, _ in _DOC_FENCES), (
-        f"no ```yaml fence found under {tree} — that half of the scan is dead"
-    )
+    for tree in _DOC_TREES:
+        with subtests.test(tree):
+            assert (REPO_ROOT / tree).is_dir(), f"{tree} is not a directory — that half of the scan is dead"
+            assert any(source.startswith(f"{tree}/") for source, _ in _DOC_FENCES), (
+                f"no ```yaml fence found under {tree} — that half of the scan is dead"
+            )
 
 
-@pytest.mark.parametrize(
-    ("source", "template", "marker"),
-    _MARKER_CONFIGS,
-    ids=[_case_id(s) for s, _, _ in _MARKER_CONFIGS],
-)
-def test_assistant_marker_occurs_in_its_rendered_template(source, template, marker):
-    rendered = _render(template, _CONVERSATION)
-    assert marker in rendered, (
-        f"{source} sets assistant_message_template={marker!r}, which does not occur in the rendered "
-        f"{template}. train_on_completions_only would mask every row and the run would train on "
-        f"nothing (loss 0). Rendered: {rendered!r}"
-    )
+def test_assistant_marker_occurs_in_its_rendered_template(subtests):
+    for source, template, marker in _MARKER_CONFIGS:
+        with subtests.test(_case_id(source)):
+            rendered = _render(template, _CONVERSATION)
+            assert marker in rendered, (
+                f"{source} sets assistant_message_template={marker!r}, which does not occur in the rendered "
+                f"{template}. train_on_completions_only would mask every row and the run would train on "
+                f"nothing (loss 0). Rendered: {rendered!r}"
+            )
 
 
-@pytest.mark.parametrize(
-    ("source", "template", "marker"),
-    _MARKER_CONFIGS,
-    ids=[_case_id(s) for s, _, _ in _MARKER_CONFIGS],
-)
-def test_every_assistant_turn_of_a_multi_turn_row_carries_the_marker(source, template, marker):
+def test_every_assistant_turn_of_a_multi_turn_row_carries_the_marker(subtests):
     """A marker matching only the last assistant turn masks every earlier one. A template whose own guard refuses
     multi-turn data is exempt, since its render raises."""
-    try:
-        rendered = _render(template, _MULTI_TURN)
-    except TemplateError as e:
-        if _SINGLE_TURN_REFUSAL not in str(e):
-            raise
-        pytest.skip(f"{template} refuses multi-turn data by design ({e})")
-    assert rendered.count(marker) == _TURNS, (
-        f"{source}: {template} renders the marker {rendered.count(marker)}x on a {_TURNS}-turn row, "
-        f"so completion-only masking trains {rendered.count(marker)} of {_TURNS} assistant turns and "
-        f"silently drops the rest. Rendered: {rendered!r}"
-    )
+    for source, template, marker in _MARKER_CONFIGS:
+        with subtests.test(_case_id(source)):
+            try:
+                rendered = _render(template, _MULTI_TURN)
+            except TemplateError as e:
+                if _SINGLE_TURN_REFUSAL not in str(e):
+                    raise
+                pytest.skip(f"{template} refuses multi-turn data by design ({e})")
+            assert rendered.count(marker) == _TURNS, (
+                f"{source}: {template} renders the marker {rendered.count(marker)}x on a {_TURNS}-turn row, "
+                f"so completion-only masking trains {rendered.count(marker)} of {_TURNS} assistant turns and "
+                f"silently drops the rest. Rendered: {rendered!r}"
+            )
 
 
 def test_gpt_oss_multiturn_terminates_every_assistant_turn():

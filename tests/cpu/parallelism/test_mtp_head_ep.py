@@ -97,19 +97,24 @@ def test_checkpointing_replays_the_heads_dispatch_and_soft_issues_the_ops_of_har
     assert ops["soft"] == ops["hard"]
 
 
+_TOO_SHORT = {"input_ids": padded_rows()["input_ids"][:, :2], "labels": padded_rows()["input_ids"][:, :2]}
+_ALL_MASKED = {
+    "input_ids": padded_rows()["input_ids"],
+    "labels": torch.full_like(padded_rows()["input_ids"], LABEL_IGNORE_INDEX),
+}
+
+
 @pytest.mark.parametrize(
-    "rows",
+    ("rows", "scope", "loss_type"),
     [
-        {"input_ids": padded_rows()["input_ids"][:, :2], "labels": padded_rows()["input_ids"][:, :2]},
-        {
-            "input_ids": padded_rows()["input_ids"],
-            "labels": torch.full_like(padded_rows()["input_ids"], LABEL_IGNORE_INDEX),
-        },
+        pytest.param(_TOO_SHORT, "joint", "hard", id="hard-joint-too_short"),
+        pytest.param(_ALL_MASKED, "joint", "soft", id="soft-joint-all_masked"),
+        pytest.param(_TOO_SHORT, "detached", "soft", id="soft-detached-too_short"),
+        pytest.param(_ALL_MASKED, "detached", "hard", id="hard-detached-all_masked"),
+        pytest.param(_TOO_SHORT, "head_only", "hard", id="hard-head_only-too_short"),
+        pytest.param(_ALL_MASKED, "head_only", "soft", id="soft-head_only-all_masked"),
     ],
-    ids=["too_short", "all_masked"],
 )
-@pytest.mark.parametrize("scope", ["joint", "detached", "head_only"])
-@pytest.mark.parametrize("loss_type", ["hard", "soft"])
 def test_a_row_with_no_head_target_keeps_the_heads_ops(rows, scope, loss_type, tmp_path, loopback_transport):
     """Its peers' combines and dispatches wait on this rank's, so an empty rank must walk the head's graph too."""
     log: list = []

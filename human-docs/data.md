@@ -20,15 +20,20 @@ record:
 | Classification | `prompt` or `text_field`, `label` | `List[Dict]`/`str`, a label or a list of labels (strings or ints) |
 | Online GRPO | `prompt`, `answer` | `str`/`List[Dict]`, `str` |
 | Async GRPO with environments | `prompt` (+ `answer` where the environment grades one) | `str`/`List[Dict]`, `str` |
+| Teacher distillation | `messages` | `List[Dict]` |
+| Self-distillation | `prompt`, `answer` | `List[Dict]`, `str` |
 
-These column names can be renamed in the config:
+You can rename these columns in the config:
 
 - SFT: `conversation_field`
 - Classification: `text_field`
 - KTO: `completion_field`, `label_field`
 - Online and async GRPO: `prompt_field`, `answer_field`
+- Teacher and self-distillation: `conversation_field`, plus `sdpg_answer_field`
+  for self-distillation's answer
 
-The `prompt`/`chosen`/`rejected` and offline GRPO column names are fixed. A
+The preference and reward columns (`prompt`, `chosen`, `rejected`) and the
+offline GRPO ones are fixed. A
 preference pair without a `prompt` column gets the turns both sides share
 extracted as the prompt.
 
@@ -59,9 +64,11 @@ Mixing sources has side effects:
 
 - Only columns common to every source survive. Every source must carry the
   conversation column your config names, or the load raises naming the source.
-  The tools column it names is null-filled where a source lacks it.
+  The tools and reasoning-effort columns it names are null-filled where a source
+  lacks them or holds only nulls.
 - Columns whose types differ between sources are dropped. This is the usual
-  reason a field goes missing.
+  reason a field goes missing. The conversation, tools or reasoning-effort column
+  your config names is refused instead.
 - A list loads fully on every rank. A sharded entry loads whole on every rank,
   and a pre-processed dataset is detected only at a single path. Point `dataset`
   at a single path to use either.
@@ -76,7 +83,7 @@ halo run prepare-dataset -- --help
 ```
 
 The tool tokenizes, optionally packs (`--pack_sequences`), and shards the
-corpus, and can push the result to the Hub or S3. Four rules decide whether the
+corpus, and can push the result to the Hub or S3. Five rules decide whether the
 output trains:
 
 - `--max_length` is stored with the data and must equal the training config's
@@ -88,15 +95,48 @@ output trains:
 - The training run must end with the template the rows were rendered with, since
   the checkpoint exports the run's: after a `--chat_template` bake, set the same
   `chat_template` plus `force_chat_template: true`, or the load raises.
+- The training tokenizer must have as many tokens as the one that baked the rows,
+  or the load raises: with another vocabulary the ids mean other text. A run that
+  adds tokens bakes from a checkpoint that already holds them (`patch_vocab.py`).
 
 `--tokenizer_backend gigatoken` swaps in a faster Rust encoder whose IDs are
 checked against the HF tokenizer at startup; training configs take the same
 choice through `tokenizer_backend`. Every flag and the packing strategies:
 [Pre-Processing](../agent-docs/data/dataset-preparation.md#parameters) ↗.
 
+## Train on datatrove token folders
+
+If you tokenize with datatrove, you can train on its output folders directly
+and mix them by weight, with no preprocessing step:
+
+```yaml
+token_sources:
+  - {name: web, path: s3://my-bucket/tok/fineweb-edu, weight: 7}
+  - {name: code, path: /mnt/data/tok/code, weight: 3}
+max_steps: 50000
+packing: true
+train_sampling_strategy: sequential
+train_on_completions_only: false
+```
+
+Halo reads the files and never runs datatrove, so you tokenize in your own
+environment with `DocumentTokenizer`. Use the model's tokenizer for every
+folder, and pass `DocumentTokenizer` an `eos_token` and a `seed`. Without the
+seed, a second tokenizer run writes the documents in another order, and a
+resume onto that folder stops as a changed mix.
+
+Every 4,096 samples hold the weights exactly, and a single step stays within
+about two samples of them. A source weighted past its size is read again in a
+new order. Every token after a document's first trains, the end-of-document
+token included. Each checkpoint records the mix and the rows per step, so a
+resume with other sources, weights, files, `max_length`, seed or global batch
+stops and names what changed. The recipe, the rules and what is refused:
+[Pre-training](../agent-docs/training-methods/pretraining.md#training-from-datatrove-token-folders) ↗.
+
 ## Data for the RL environments
 
-The code-contests environment reads a prepared pool, not a plain dataset:
+The code-contests environment reads a prepared pool, not a plain dataset. You
+build the pool in two steps:
 
 1. `halo run compact-code-tests` compacts a test corpus into one row per
    problem, capping the tests in each suite.

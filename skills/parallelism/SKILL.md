@@ -37,19 +37,23 @@ section before a verdict on any non-trivial combo:
 
 The code is the **ultimate** authority: `halo/distributed/parallelism_rules.py` (`reject_unsupported_axes`,
 then `reject_invalid_composition` and its `_reject_*`), and `parallelism_config_from_args`
-(`halo/configs/parallelism_arguments.py`: `lowp_*` or `init_from_scratch` outside SFT, a trainer's
+(`halo/configs/parallelism_arguments.py`: `lowp_*` on a trainer without `SUPPORTS_LOWP_PRECISION`, `init_from_scratch` outside SFT, a trainer's
 `SUPPORTS_CP` / `PP_REFUSAL`). When a doc, this skill or memory disagrees, read those files before
 advising.
 
 ## How to pick a mode
 
 1. **Dense (non-MoE) model?** EP/ETP do nothing — use **TP** (memory/large hidden),
-   **CP** (long seq) or **PP** across nodes (step 5), else plain FSDP2 DDP (`dp_size = world_size`).
-2. **MoE model?** Start with **EP** (orthogonal to DP, keeps full DP). For finer
+   **CP** (long seq, where the family and trainer admit it) or **PP** across nodes (step 5), else plain FSDP2 DDP (`dp_size = world_size`).
+2. **MoE model?** Use plain FSDP2 (`ep1`, experts sharded) when the run fits in memory, because it has no all-to-all
+   ([Maximizing achieved TFLOPS](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
+   Otherwise start with **EP** (orthogonal to DP, keeps full DP). For finer
    expert sharding add **ETP** (EP+ETP); EP+TP shards attention only, and TP+ETP is rejected.
    For long sequences on MoE use **EP+CP** (node-local EP only).
 3. **Long sequence, OOM on activations?** add **CP** (Ulysses, node-local). CP
-   reduces DP by `cp_size`.
+   reduces DP by `cp_size`. Dense Qwen3.5/3.6 hybrid layers only support CP2
+   for unpacked, full-fine-tuning SFT on the text tower; adapters, QLoRA and
+   packing are refused ([dense hybrid SFT](../../agent-docs/parallelism/context-parallelism.md#dense-hybrid-sft)).
 4. **Weights/attention too big for one GPU?** **TP** (node-local DTensor). Plain FSDP2/DDP
    loads the whole model onto every GPU before sharding, so it cannot take a dense model past
    one GPU ([Data Parallelism](../../agent-docs/parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).

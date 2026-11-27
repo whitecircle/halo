@@ -13,6 +13,7 @@ from halo.checkpoint.tools.offline_export import ADAPTER_TASKS
 from halo.log import configure_cli_logging
 from halo.model_loading.dtype import DTYPE_BY_NAME
 from scripts.cli_arguments import (
+    add_base_revision_arg,
     add_device_map_arg,
     add_dtype_arg,
     add_max_shard_size_arg,
@@ -75,6 +76,7 @@ Examples:
     )
     add_max_shard_size_arg(parser)
     add_trust_remote_code_arg(parser, default=None)
+    add_base_revision_arg(parser)
     parser.add_argument(
         "--fp32_norms",
         action="store_true",
@@ -108,6 +110,7 @@ Examples:
         trust_remote_code=args.trust_remote_code,
         fp32_norms=args.fp32_norms,
         streaming=args.streaming,
+        base_revision=args.base_revision,
         verbose=not args.quiet,
     )
 

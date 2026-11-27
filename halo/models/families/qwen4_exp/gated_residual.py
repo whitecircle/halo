@@ -16,6 +16,7 @@ from halo.env import env_flag
 from halo.kernels.gated_residual import gate_mix, grouped_rms_norm, warm_gated_residual_kernels
 from halo.kernels.hyper_connection import inject_streams
 from halo.log import warn_once
+from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.upstream.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
@@ -124,7 +125,7 @@ def patch_qwen4_exp_gated_residual() -> None:
     patch = "patch_qwen4_exp_gated_residual"
     verify_upstream_parameters(residual_cls.__init__, ("self", "config", "use_combine"), patch)
     verify_upstream_parameters(residual_cls.forward, ("self", "hyper_input"), patch)
-    residual_cls.forward = _build_forward(residual_cls.forward)
+    patch_layer_forward(residual_cls, _build_forward(residual_cls.forward))
 
 
 def inject_block(hyper_input: torch.Tensor, out: torch.Tensor, gates: torch.Tensor) -> torch.Tensor:

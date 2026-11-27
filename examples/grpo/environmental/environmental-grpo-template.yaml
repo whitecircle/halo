@@ -67,6 +67,7 @@ rollout_max_tokens: 8192
 # rollout_max_thinking_tokens: null   # per-turn reasoning-token cap for every level; vLLM only (else rollout_max_tokens less rollout_max_answer_tokens)
 # rollout_max_episode_tokens: null    # the most an episode may sample over all its turns, reasoning and visible output together
 # rollout_chat_template_kwargs: {}    # chat-template variables sent with every rollout request
+# rollout_thinking: true              # false: no reasoning block per turn (needs a template that reads enable_thinking)
 # rollout_stop_tokens: []             # special-token strings that end a turn (e.g. gpt-oss "<|call|>")
 # train_on_sampled_tokens: true       # the engine's sampled token ids (vLLM needs --return-tokens-as-token-ids)
 # max_train_row_tokens: null          # longest training row a rank takes; null = no cap beyond the context check
@@ -107,6 +108,7 @@ scale_rewards: batch     # global batch std; a per-group std divides by ~0 on a 
 # --- Advantage shaping (AdvantageShapingArguments; agent-docs/training-methods/async-grpo/objective.md#advantages) ---
 # scale_rewards_std_floor: 0.0      # floor on the std divisor in advantage scaling; 0 = off
 # balance_token_mass: false         # cancel each round's net token-weighted push; needs loss_type: cispo, dapo or dr_grpo
+# use_maxrl: false                  # MaxRL: divide by the group's mean reward, not a std; needs non-negative rewards and scale_rewards: none
 # --- IS trust region (engine<->trainer ratio; every knob: agent-docs/training-methods/async-grpo/objective.md#trust-region-masks) ---
 # isr_geo_band_min: null            # trajectory band on exp(mean log-ratio); arms only when both bounds are set
 # isr_geo_band_max: null

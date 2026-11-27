@@ -1,8 +1,10 @@
 # Supervised Fine-Tuning (SFT)
 
-Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and is the only method that accepts `lowp_precision` QAT. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
+Cross-entropy on conversation data — the step before preference optimization ([DPO/SMPO](preference/README.md)) or RL ([GRPO](grpo/README.md)). Trainer `DistributedSFTTrainer`, script `scripts/training/sft.py`. It takes text and vision-language checkpoints and accepts `lowp_precision` QAT, as does [teacher distillation](distillation/teacher-distillation.md#quantization-aware-distillation) on its student. Raw-text corpora and random-init runs use the same trainer — see [Pre-training](pretraining.md).
 
 ## Dataset
+
+Dense hybrid Qwen3.5/3.6 text towers have a restricted [CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft).
 
 Conversations under `conversation_field` (default `prompt`):
 
@@ -35,7 +37,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/sft-qwen3-4b
 ```
 
-`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) takes a higher learning rate than a full fine-tune: the shipped SFT LoRA recipes run `1e-4` ([PEFT](../optimization/peft.md#hyperparameters)). `lowp_precision` runs fp8/fp4 matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)).
+`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) takes a higher learning rate than a full fine-tune: the shipped SFT LoRA recipes run `1e-4` ([PEFT](../optimization/peft.md#hyperparameters)). `lowp_precision` simulates fp8/fp4 matmuls over bf16 masters (quantize, dequantize, bf16 matmul; [QAT](../optimization/low-precision-moe-kernels.md)).
 
 Refused at startup:
 
@@ -58,7 +60,8 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --expert_parallel_size=8
 
 # the same through the CLI
-halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
+halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml --nproc 8 \
+    --expert_parallel_size=8
 
 # single GPU / LoRA
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
@@ -115,7 +118,7 @@ The VLM render applies a chat template, so a PaliGemma checkpoint whose processo
 
 ## Parallelism
 
-Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP. Plain FSDP2 and DDP load the whole model onto every GPU before sharding, so a dense model must fit on one GPU; TP is the route past that ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
+Axis sizes are CLI flags: `--expert_parallel_size`, `--context_parallel_size`, `--tensor_parallel_size`, `--expert_tensor_parallel_size`, `--pipeline_parallel_size`. EP+CP, EP+TP, EP+ETP, PP+EP and PP+ETP compose; TP+CP, ETP+CP and EP+TP+ETP are rejected at config time, as is every other unlisted combination ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md) composes with the expert axes only). Pure ETP is `--expert_parallel_size=1 --expert_tensor_parallel_size=N` (attention TP and expert TP are mutually exclusive), and LoRA is rejected under TP and EP+TP. Plain FSDP2 and DDP load the whole model onto every GPU before sharding, so a dense model must fit on one GPU; TP, or PP across NVLink domains, is the route past that ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 Under CP a batch whose length is not a multiple of `cp_size` is right-padded in `compute_loss`, and a tokenizer with no `pad_token_id` raises there rather than padding with vocabulary token 0. The loss normalizes over the CP group's tokens; metrics come off the local chunk. With `fused_linear_cross_entropy` on, the CP wrapper scores each chunk without a logits plane ([CP fused head loss](../parallelism/context-parallelism.md#fused-head-loss)). In every mode the metrics are reduced once per log, not per micro-batch ([details](../reference/trainer-architecture.md#sft-loss-and-metrics)).
 

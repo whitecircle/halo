@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 """The phase timers' accounting (exclusive spans, the unaccounted remainder), the optimizer-side callback, the trainer
-mixin's report over the ranks, and the efficiency callback's use of the moved boundary marks."""
+mixin's report over the ranks."""
 
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from halo.callbacks import efficiency
 from halo.callbacks.phase_timer_callback import MICRO_STEP_END, PhaseTimerCallback
 from halo.diagnostics import phase_timers
 from halo.diagnostics.phase_timers import UNACCOUNTED, Phase, PhaseTimers
@@ -127,11 +126,6 @@ def test_the_callback_times_the_reduce_and_the_optimizer_between_the_micro_steps
     assert report["reduce"] == 1.5
     assert report["optimizer"] == 4.0
     assert report[UNACCOUNTED] == 9.0 - 5.5
-
-
-def test_efficiency_reads_the_shared_boundary_marks():
-    assert efficiency.mark_boundary is phase_timers.mark_boundary
-    assert efficiency.seconds_between is phase_timers.seconds_between
 
 
 class _Loop:

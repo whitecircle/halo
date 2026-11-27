@@ -1,0 +1,531 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>GEMM kernel selection</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* Each panel's key sits in a column left of its plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: var(--group-gap);
+    align-items: start;
+  }
+
+  .key h3 {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
+  }
+
+  .key p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
+    color: var(--body);
+  }
+
+  .key p.mark svg { margin-top: 3px; }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+  svg .tile { font-size: 20px; fill: var(--body); }
+
+  svg .point { font-size: 21px; fill: var(--text); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="rate-key"></div>
+    <svg class="chart" id="rate"></svg>
+    <div class="key" id="clock-key"></div>
+    <svg class="chart" id="clock"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Each point is the median of 7 samples of back-to-back calls, timed on the device.</span>
+      <span class="s">A change is a different cuBLAS kernel name from one M to the next.</span>
+      <span class="s">The tile is read from that name.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_roofline.py: bf16 torch.mm(x, w) with x [M, 2880] and
+  // w [2880, 2880], the weight read from HBM on every call, back to back.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections sweep --sweep_shapes 2880x2880 4096x4096
+  //     --sweep_m 8:2048:8 2112:16384:64 16640:40960:256 --kernel_shapes --repeat_seconds 0.02 --output
+  //     msweep-fine.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --output roofline.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections peaks --peak_dims 8192 16384 --peak_dtypes bf16
+  //     --repeat_seconds 0.5 --repeats 10 --output peaks-sustained.json
+  // msweep-fine.json, sections.sweep[] with k = n = 2880, one row per M:
+  // [m, graph.tflops_median, state.sm_clock_mhz, state.clock_event_reasons, index into KERNELS of the one key
+  // of kernels]. graph is the calls replayed from one CUDA graph (the time on the device), median of 7 samples.
+  // The clock and the clock-event reasons (4 is the driver's software power cap) are NVML's readings right after
+  // the point.
+  const SWEEP = [
+    [8, 16.29, 2032, 0, 0], [16, 31.99, 2032, 0, 0], [24, 69.76, 2032, 0, 0], [32, 92.82, 2032, 0, 0],
+    [40, 117, 2032, 0, 1], [48, 139.9, 2032, 0, 1], [56, 158.3, 2032, 0, 2], [64, 179.1, 2032, 0, 2],
+    [72, 205.6, 2032, 0, 3], [80, 228.4, 2032, 0, 3], [88, 251.2, 2032, 0, 3], [96, 273, 2032, 0, 3],
+    [104, 282.1, 2032, 0, 4], [112, 303.4, 2032, 0, 4], [120, 324, 2032, 0, 4], [128, 345, 2032, 0, 4],
+    [136, 376.6, 2032, 0, 5], [144, 398.3, 2032, 0, 5], [152, 418.1, 2032, 0, 6], [160, 437.7, 2032, 0, 6],
+    [168, 460.6, 2032, 0, 6], [176, 481.7, 2025, 4, 6], [184, 499.9, 2032, 4, 6], [192, 521.4, 2025, 4, 6],
+    [200, 533.2, 1995, 4, 7], [208, 557.3, 2032, 4, 7], [216, 574.6, 2032, 4, 7], [224, 599.5, 2010, 4, 7],
+    [232, 611.9, 2032, 4, 7], [240, 633.7, 2032, 4, 7], [248, 597.1, 2002, 4, 8], [256, 615.8, 2032, 4, 8],
+    [264, 676.7, 2032, 4, 9], [272, 703.1, 1995, 4, 9], [280, 712.4, 1957, 4, 9], [288, 747.9, 1920, 4, 9],
+    [296, 698.4, 1800, 0, 10], [304, 709.6, 2032, 0, 10], [312, 636.2, 2032, 0, 11], [320, 647.3, 2032, 0, 11],
+    [328, 749, 2032, 0, 10], [336, 769.2, 2032, 4, 10], [344, 800.8, 1927, 4, 12], [352, 829.5, 1950, 4, 12],
+    [360, 788, 1717, 4, 12], [368, 814, 1657, 4, 12], [376, 821.3, 2032, 0, 12], [384, 856.4, 2032, 4, 12],
+    [392, 818.7, 1717, 4, 13], [400, 828.1, 1642, 4, 13], [408, 709.4, 1897, 4, 14], [416, 721.8, 1890, 4, 14],
+    [424, 871.7, 2032, 0, 13], [432, 893.1, 2032, 4, 13], [440, 767, 1905, 4, 14], [448, 762.6, 1897, 4, 14],
+    [456, 776.7, 1852, 4, 14], [464, 792.4, 1815, 4, 14], [472, 794.2, 1762, 4, 14], [480, 803.4, 1777, 4, 14],
+    [488, 774.5, 1987, 4, 15], [496, 809.8, 1987, 4, 15], [504, 804.1, 1852, 4, 15], [512, 816.3, 1800, 4, 15],
+    [520, 848.4, 1920, 4, 16], [528, 829.6, 1800, 4, 16], [536, 831.1, 1747, 4, 17], [544, 826.5, 1717, 4, 17],
+    [552, 837.8, 1980, 4, 17], [560, 850.6, 1897, 4, 17], [568, 862.1, 1762, 4, 17], [576, 872.1, 1747, 4, 17],
+    [584, 853.6, 1702, 4, 18], [592, 854.1, 1665, 4, 18], [600, 877.1, 1905, 4, 19], [608, 884.1, 1552, 4, 19],
+    [616, 895.4, 1702, 4, 18], [624, 905.8, 1680, 4, 18], [632, 914.7, 1680, 4, 20], [640, 910.3, 1965, 4, 20],
+    [648, 932.7, 1575, 4, 19], [656, 936.7, 1500, 4, 19], [664, 943.9, 1500, 4, 19], [672, 953.2, 1800, 4, 19],
+    [680, 909.9, 1897, 4, 21], [688, 920.2, 1762, 4, 21], [696, 930.8, 1552, 4, 22], [704, 941.8, 1515, 4, 22],
+    [712, 952.1, 1650, 4, 21], [720, 961.8, 1665, 4, 21], [728, 973.8, 1492, 4, 22], [736, 982.2, 1545, 4, 22],
+    [744, 993.5, 1477, 4, 22], [752, 1005, 1462, 4, 22], [760, 1012, 1477, 4, 22], [768, 1022, 1792, 4, 22],
+    [776, 963.6, 1912, 4, 23], [784, 971.2, 1650, 4, 23], [792, 956.7, 1552, 4, 24], [800, 964.8, 1552, 4, 24],
+    [808, 979.2, 1590, 4, 23], [816, 983.9, 1560, 4, 23], [824, 944.4, 1545, 4, 25], [832, 953.6, 1560, 4, 25],
+    [840, 997.6, 1492, 4, 24], [848, 1008, 1515, 4, 24], [856, 1007, 1492, 4, 24], [864, 1017, 1485, 4, 24],
+    [872, 932.5, 1680, 4, 26], [880, 939.1, 1702, 4, 26], [888, 990.2, 1500, 4, 25], [896, 999.1, 1507, 4, 25],
+    [904, 991, 1492, 4, 25], [912, 1013, 1537, 4, 25], [920, 1013, 1492, 4, 25], [928, 1020, 1500, 4, 25],
+    [936, 1025, 1500, 4, 25], [944, 1029, 1485, 4, 25], [952, 1037, 1477, 4, 25], [960, 1045, 1500, 4, 25],
+    [968, 969.2, 1650, 4, 27], [976, 975.7, 1650, 4, 27], [984, 985.5, 1702, 4, 27], [992, 987.2, 1612, 4, 27],
+    [1000, 996.9, 1627, 4, 27], [1008, 1002, 1612, 4, 27], [1016, 1010, 1612, 4, 27], [1024, 986.2, 1650, 4, 27],
+    [1032, 1038, 1852, 4, 28], [1040, 1047, 1822, 4, 28], [1048, 1055, 1800, 4, 28], [1056, 1062, 1507, 4, 28],
+    [1064, 1021, 1522, 4, 29], [1072, 1026, 1507, 4, 29], [1080, 1033, 1507, 4, 29], [1088, 1043, 1635, 4, 29],
+    [1096, 1026, 1500, 4, 29], [1104, 1044, 1552, 4, 29], [1112, 1034, 1515, 4, 29], [1120, 1057, 1522, 4, 29],
+    [1128, 1046, 1492, 4, 29], [1136, 1054, 1477, 4, 29], [1144, 1061, 1492, 4, 29], [1152, 1082, 1500, 4, 29],
+    [1160, 1029, 1537, 4, 30], [1168, 1036, 1552, 4, 30], [1176, 1045, 1515, 4, 30], [1184, 1034, 1507, 4, 30],
+    [1192, 1050, 1515, 4, 30], [1200, 1046, 1485, 4, 30], [1208, 973.8, 1680, 4, 31], [1216, 980.8, 1672, 4, 31],
+    [1224, 1092, 1522, 4, 30], [1232, 1078, 1792, 4, 30], [1240, 1088, 1515, 4, 30], [1248, 1090, 1492, 4, 30],
+    [1256, 1013, 1597, 4, 32], [1264, 1019, 1597, 4, 32], [1272, 1017, 1650, 4, 31], [1280, 1028, 1642, 4, 31],
+    [1288, 1039, 1462, 4, 33], [1296, 1044, 1500, 4, 33], [1304, 1070, 1522, 4, 34], [1312, 1061, 1462, 4, 34],
+    [1320, 1075, 1500, 4, 34], [1328, 1073, 1500, 4, 34], [1336, 1005, 1507, 4, 35], [1344, 1020, 1507, 4, 35],
+    [1352, 1020, 1620, 4, 36], [1360, 1032, 1612, 4, 36], [1368, 1027, 1507, 4, 35], [1376, 1034, 1485, 4, 35],
+    [1384, 1049, 1612, 4, 36], [1392, 1041, 1627, 4, 36], [1400, 1052, 1485, 4, 35], [1408, 1057, 1522, 4, 35],
+    [1416, 1062, 1485, 4, 35], [1424, 1067, 1477, 4, 35], [1432, 1073, 1500, 4, 35], [1440, 1079, 1462, 4, 35],
+    [1448, 1084, 1470, 4, 35], [1456, 1089, 1477, 4, 35], [1464, 1095, 1477, 4, 35], [1472, 1099, 1477, 4, 35],
+    [1480, 1089, 1455, 4, 35], [1488, 1092, 1642, 4, 35], [1496, 1098, 1455, 4, 35], [1504, 1104, 1447, 4, 35],
+    [1512, 1109, 1485, 4, 35], [1520, 1114, 1447, 4, 35], [1528, 1121, 1447, 4, 35], [1536, 1126, 1447, 4, 35],
+    [1544, 1091, 1507, 4, 37], [1552, 1095, 1477, 4, 37], [1560, 1009, 1597, 4, 38], [1568, 1014, 1612, 4, 38],
+    [1576, 1110, 1485, 4, 37], [1584, 1107, 1462, 4, 37], [1592, 1054, 1575, 4, 38], [1600, 1057, 1597, 4, 38],
+    [1608, 1082, 1432, 4, 39], [1616, 1088, 1522, 4, 39], [1624, 1006, 1552, 4, 40], [1632, 1004, 1500, 4, 40],
+    [1640, 1006, 1507, 4, 40], [1648, 1012, 1515, 4, 40], [1656, 1012, 1500, 4, 40], [1664, 1018, 1507, 4, 40],
+    [1672, 1023, 1500, 4, 40], [1680, 1029, 1485, 4, 40], [1688, 1034, 1500, 4, 40], [1696, 1040, 1477, 4, 40],
+    [1704, 1045, 1477, 4, 40], [1712, 1049, 1462, 4, 40], [1720, 1054, 1470, 4, 40], [1728, 1059, 1492, 4, 40],
+    [1736, 1063, 1462, 4, 40], [1744, 1068, 1462, 4, 40], [1752, 1075, 1470, 4, 40], [1760, 1068, 1470, 4, 40],
+    [1768, 1046, 1410, 4, 25], [1776, 1048, 1402, 4, 25], [1784, 1051, 1395, 4, 25], [1792, 1047, 1417, 4, 25],
+    [1800, 1056, 1417, 4, 25], [1808, 1062, 1410, 4, 25], [1816, 1056, 1395, 4, 25], [1824, 1056, 1410, 4, 25],
+    [1832, 1063, 1395, 4, 25], [1840, 1069, 1395, 4, 25], [1848, 1073, 1387, 4, 25], [1856, 1078, 1395, 4, 25],
+    [1864, 1082, 1387, 4, 25], [1872, 1086, 1395, 4, 25], [1880, 1092, 1455, 4, 25], [1888, 1096, 1387, 4, 25],
+    [1896, 1099, 1380, 4, 25], [1904, 1106, 1380, 4, 25], [1912, 1109, 1372, 4, 25], [1920, 1113, 1372, 4, 25],
+    [1928, 1036, 1545, 4, 41], [1936, 1034, 1530, 4, 41], [1944, 1057, 1530, 4, 27], [1952, 1030, 1567, 4, 27],
+    [1960, 1057, 1552, 4, 41], [1968, 1061, 1522, 4, 41], [1976, 1060, 1560, 4, 27], [1984, 1055, 1567, 4, 27],
+    [1992, 1074, 1515, 4, 41], [2000, 1071, 1515, 4, 41], [2008, 1065, 1552, 4, 27], [2016, 1069, 1567, 4, 27],
+    [2024, 1074, 1507, 4, 41], [2032, 1090, 1507, 4, 41], [2040, 1070, 1560, 4, 27], [2048, 1075, 1575, 4, 27],
+    [2112, 1120, 1470, 4, 41], [2176, 1115, 1432, 4, 29], [2240, 1140, 1380, 4, 29], [2304, 1165, 1350, 4, 29],
+    [2368, 1030, 1665, 4, 42], [2432, 1050, 1657, 4, 42], [2496, 1069, 1650, 4, 42], [2560, 1091, 1612, 4, 42],
+    [2624, 1063, 1552, 4, 43], [2688, 1088, 1545, 4, 43], [2752, 1107, 1500, 4, 43], [2816, 1132, 1492, 4, 43],
+    [2880, 1167, 1410, 4, 44], [2944, 1176, 1410, 4, 44], [3008, 1200, 1417, 4, 44], [3072, 1239, 1395, 4, 44],
+    [3136, 1144, 1372, 4, 29], [3200, 1174, 1395, 4, 29], [3264, 1182, 1395, 4, 29], [3328, 1195, 1357, 4, 29],
+    [3392, 1185, 1335, 4, 29], [3456, 1207, 1335, 4, 29], [3520, 1129, 1425, 4, 45], [3584, 1081, 1560, 4, 46],
+    [3648, 1101, 1552, 4, 46], [3712, 1113, 1530, 4, 46], [3776, 1129, 1522, 4, 46], [3840, 1098, 1560, 4, 43],
+    [3904, 1128, 1515, 4, 43], [3968, 1126, 1507, 4, 43], [4032, 1140, 1492, 4, 43], [4096, 1150, 1470, 4, 43],
+    [4160, 1180, 1432, 4, 47], [4224, 1195, 1417, 4, 47], [4288, 1212, 1410, 4, 44], [4352, 1211, 1410, 4, 44],
+    [4416, 1205, 1410, 4, 44], [4480, 1235, 1357, 4, 44], [4544, 1247, 1365, 4, 44], [4608, 1256, 1357, 4, 44],
+    [4672, 1206, 1320, 4, 48], [4736, 1209, 1312, 4, 48], [4800, 1215, 1320, 4, 49], [4864, 1217, 1312, 4, 49],
+    [4928, 1120, 1575, 4, 42], [4992, 1132, 1582, 4, 42], [5056, 1144, 1560, 4, 42], [5120, 1155, 1552, 4, 42],
+    [5184, 1123, 1507, 4, 43], [5248, 1135, 1485, 4, 43], [5312, 1143, 1477, 4, 43], [5376, 1153, 1470, 4, 43],
+    [5440, 1155, 1447, 4, 43], [5504, 1167, 1447, 4, 43], [5568, 1173, 1432, 4, 43], [5632, 1184, 1425, 4, 43],
+    [5696, 1215, 1395, 4, 44], [5760, 1229, 1357, 4, 44], [5824, 1242, 1387, 4, 44], [5888, 1256, 1372, 4, 44],
+    [5952, 1251, 1342, 4, 44], [6016, 1264, 1342, 4, 44], [6080, 1281, 1350, 4, 44], [6144, 1267, 1305, 4, 44],
+    [6208, 1205, 1297, 4, 48], [6272, 1218, 1297, 4, 48], [6336, 1221, 1387, 4, 41], [6400, 1215, 1275, 4, 49],
+    [6464, 1209, 1350, 4, 29], [6528, 1220, 1350, 4, 29], [6592, 1161, 1447, 4, 43], [6656, 1170, 1447, 4, 43],
+    [6720, 1179, 1410, 4, 43], [6784, 1185, 1402, 4, 43], [6848, 1174, 1402, 4, 43], [6912, 1194, 1402, 4, 43],
+    [6976, 1236, 1260, 4, 29], [7040, 1252, 1252, 4, 29], [7104, 1260, 1260, 4, 29], [7168, 1260, 1372, 4, 44],
+    [7232, 1233, 1350, 4, 44], [7296, 1245, 1350, 4, 44], [7360, 1256, 1350, 4, 44], [7424, 1265, 1342, 4, 44],
+    [7488, 1258, 1312, 4, 44], [7552, 1268, 1312, 4, 44], [7616, 1279, 1305, 4, 44], [7680, 1288, 1297, 4, 44],
+    [7744, 1212, 1260, 4, 48], [7808, 1220, 1267, 4, 48], [7872, 1203, 1260, 4, 50], [7936, 1201, 1245, 4, 50],
+    [8000, 1205, 1222, 4, 50], [8064, 1212, 1215, 4, 50], [8128, 1222, 1230, 4, 50], [8192, 1208, 1207, 4, 50],
+    [8256, 1187, 1395, 4, 43], [8320, 1188, 1372, 4, 43], [8384, 1194, 1365, 4, 43], [8448, 1202, 1357, 4, 43],
+    [8512, 1232, 1357, 4, 44], [8576, 1241, 1350, 4, 44], [8640, 1251, 1350, 4, 44], [8704, 1259, 1350, 4, 44],
+    [8768, 1265, 1327, 4, 44], [8832, 1273, 1312, 4, 44], [8896, 1259, 1312, 4, 44], [8960, 1268, 1312, 4, 44],
+    [9024, 1263, 1282, 4, 44], [9088, 1273, 1297, 4, 44], [9152, 1281, 1290, 4, 44], [9216, 1290, 1282, 4, 44],
+    [9280, 1296, 1267, 4, 44], [9344, 1284, 1267, 4, 44], [9408, 1297, 1260, 4, 44], [9472, 1304, 1260, 4, 44],
+    [9536, 1209, 1357, 4, 51], [9600, 1217, 1357, 4, 51], [9664, 1189, 1357, 4, 43], [9728, 1196, 1357, 4, 43],
+    [9792, 1115, 1395, 4, 52], [9856, 1119, 1395, 4, 52], [9920, 1123, 1387, 4, 52], [9984, 1134, 1395, 4, 52],
+    [10048, 1257, 1335, 4, 44], [10112, 1258, 1312, 4, 44], [10176, 1268, 1312, 4, 44], [10240, 1273, 1320, 4, 44],
+    [10304, 1262, 1305, 4, 44], [10368, 1271, 1312, 4, 44], [10432, 1279, 1312, 4, 44], [10496, 1285, 1297, 4, 44],
+    [10560, 1285, 1290, 4, 44], [10624, 1291, 1275, 4, 44], [10688, 1288, 1267, 4, 44], [10752, 1292, 1260, 4, 44],
+    [10816, 1287, 1267, 4, 44], [10880, 1291, 1260, 4, 44], [10944, 1297, 1260, 4, 44], [11008, 1302, 1260, 4, 44],
+    [11072, 1215, 1350, 4, 51], [11136, 1221, 1327, 4, 51], [11200, 1227, 1327, 4, 51], [11264, 1200, 1342, 4, 43],
+    [11328, 1248, 1320, 4, 44], [11392, 1256, 1312, 4, 44], [11456, 1264, 1312, 4, 44], [11520, 1270, 1312, 4, 44],
+    [11584, 1270, 1312, 4, 44], [11648, 1275, 1305, 4, 44], [11712, 1280, 1305, 4, 44], [11776, 1279, 1297, 4, 44],
+    [11840, 1272, 1297, 4, 44], [11904, 1275, 1297, 4, 44], [11968, 1280, 1275, 4, 44], [12032, 1288, 1275, 4, 44],
+    [12096, 1286, 1260, 4, 44], [12160, 1286, 1260, 4, 44], [12224, 1289, 1260, 4, 44], [12288, 1293, 1267, 4, 44],
+    [12352, 1287, 1245, 4, 44], [12416, 1293, 1252, 4, 44], [12480, 1300, 1260, 4, 44], [12544, 1303, 1252, 4, 44],
+    [12608, 1175, 1200, 4, 50], [12672, 1180, 1200, 4, 50], [12736, 1186, 1207, 4, 50], [12800, 1189, 1192, 4, 50],
+    [12864, 1256, 1207, 4, 29], [12928, 1263, 1305, 4, 44], [12992, 1284, 1312, 4, 44], [13056, 1291, 1312, 4, 44],
+    [13120, 1283, 1305, 4, 44], [13184, 1279, 1297, 4, 44], [13248, 1286, 1297, 4, 44], [13312, 1291, 1297, 4, 44],
+    [13376, 1289, 1290, 4, 44], [13440, 1293, 1290, 4, 44], [13504, 1295, 1282, 4, 44], [13568, 1302, 1267, 4, 44],
+    [13632, 1314, 1282, 4, 44], [13696, 1303, 1267, 4, 44], [13760, 1315, 1267, 4, 44], [13824, 1312, 1260, 4, 44],
+    [13888, 1302, 1260, 4, 44], [13952, 1299, 1267, 4, 44], [14016, 1296, 1260, 4, 44], [14080, 1296, 1260, 4, 44],
+    [14144, 1240, 1222, 4, 48], [14208, 1247, 1215, 4, 48], [14272, 1185, 1185, 4, 50], [14336, 1191, 1192, 4, 50],
+    [14400, 1286, 1297, 4, 44], [14464, 1289, 1312, 4, 44], [14528, 1283, 1297, 4, 44], [14592, 1288, 1297, 4, 44],
+    [14656, 1234, 1290, 4, 43], [14720, 1239, 1282, 4, 43], [14784, 1225, 1267, 4, 43], [14848, 1241, 1282, 4, 43],
+    [14912, 1283, 1267, 4, 44], [14976, 1296, 1275, 4, 44], [15040, 1301, 1282, 4, 44], [15104, 1311, 1267, 4, 44],
+    [15168, 1295, 1275, 4, 44], [15232, 1310, 1260, 4, 44], [15296, 1295, 1267, 4, 44], [15360, 1306, 1260, 4, 44],
+    [15424, 1302, 1260, 4, 44], [15488, 1301, 1245, 4, 44], [15552, 1299, 1260, 4, 44], [15616, 1301, 1245, 4, 44],
+    [15680, 1245, 1222, 4, 48], [15744, 1253, 1222, 4, 48], [15808, 1176, 1162, 4, 50], [15872, 1177, 1162, 4, 50],
+    [15936, 1162, 1155, 4, 50], [16000, 1162, 1147, 4, 50], [16064, 1164, 1147, 4, 50], [16128, 1165, 1147, 4, 50],
+    [16192, 1167, 1147, 4, 50], [16256, 1175, 1155, 4, 50], [16320, 1180, 1155, 4, 50], [16384, 1191, 1140, 4, 50],
+    [16640, 1329, 1290, 4, 44], [16896, 1316, 1260, 4, 44], [17152, 1313, 1260, 4, 44], [17408, 1177, 1185, 4, 50],
+    [17664, 1266, 1305, 4, 43], [17920, 1314, 1297, 4, 44], [18176, 1246, 1260, 4, 43], [18432, 1342, 1282, 4, 44],
+    [18688, 1322, 1275, 4, 44], [18944, 1324, 1252, 4, 44], [19200, 1251, 1275, 4, 43], [19456, 1252, 1275, 4, 43],
+    [19712, 1239, 1260, 4, 43], [19968, 1313, 1267, 4, 44], [20224, 1315, 1252, 4, 44], [20480, 1313, 1237, 4, 44],
+    [20736, 1246, 1260, 4, 43], [20992, 1257, 1252, 4, 43], [21248, 1325, 1260, 4, 44], [21504, 1211, 1267, 4, 53],
+    [21760, 1317, 1252, 4, 44], [22016, 1315, 1245, 4, 44], [22272, 1253, 1260, 4, 43], [22528, 1256, 1252, 4, 43],
+    [22784, 1342, 1290, 4, 44], [23040, 1301, 1237, 4, 44], [23296, 1320, 1260, 4, 44], [23552, 1346, 1252, 4, 44],
+    [23808, 1253, 1252, 4, 43], [24064, 1319, 1252, 4, 44], [24320, 1305, 1252, 4, 44], [24576, 1317, 1260, 4, 44],
+    [24832, 1317, 1245, 4, 44], [25088, 1323, 1245, 4, 44], [25344, 1331, 1290, 4, 54], [25600, 1317, 1245, 4, 44],
+    [25856, 1313, 1245, 4, 44], [26112, 1320, 1260, 4, 44], [26368, 1213, 1245, 4, 53], [26624, 1325, 1245, 4, 44],
+    [26880, 1288, 1215, 4, 29], [27136, 1319, 1252, 4, 44], [27392, 1317, 1245, 4, 44], [27648, 1316, 1252, 4, 44],
+    [27904, 1322, 1252, 4, 44], [28160, 1330, 1245, 4, 44], [28416, 1331, 1215, 4, 44], [28672, 1318, 1252, 4, 44],
+    [28928, 1318, 1230, 4, 44], [29184, 1320, 1252, 4, 44], [29440, 1323, 1252, 4, 44], [29696, 1222, 1245, 4, 53],
+    [29952, 1331, 1237, 4, 44], [30208, 1262, 1230, 4, 43], [30464, 1322, 1245, 4, 44], [30720, 1327, 1245, 4, 44],
+    [30976, 1325, 1237, 4, 44], [31232, 1328, 1237, 4, 44], [31488, 1332, 1222, 4, 44], [31744, 1259, 1245, 4, 43],
+    [32000, 1314, 1245, 4, 44], [32256, 1326, 1252, 4, 44], [32512, 1323, 1245, 4, 44], [32768, 1329, 1230, 4, 44],
+    [33024, 1329, 1245, 4, 44], [33280, 1259, 1245, 4, 43], [33536, 1325, 1245, 4, 44], [33792, 1321, 1245, 4, 44],
+    [34048, 1326, 1245, 4, 44], [34304, 1333, 1245, 4, 44], [34560, 1334, 1237, 4, 44], [34816, 1260, 1237, 4, 43],
+    [35072, 1321, 1245, 4, 44], [35328, 1324, 1245, 4, 44], [35584, 1326, 1245, 4, 44], [35840, 1332, 1245, 4, 44],
+    [36096, 1338, 1230, 4, 44], [36352, 1282, 1215, 4, 51], [36608, 1260, 1230, 4, 43], [36864, 1325, 1245, 4, 44],
+    [37120, 1330, 1245, 4, 44], [37376, 1333, 1237, 4, 44], [37632, 1338, 1237, 4, 44], [37888, 1338, 1237, 4, 44],
+    [38144, 1320, 1245, 4, 44], [38400, 1329, 1245, 4, 44], [38656, 1332, 1245, 4, 44], [38912, 1333, 1237, 4, 44],
+    [39168, 1333, 1237, 4, 44], [39424, 1333, 1237, 4, 44], [39680, 1324, 1245, 4, 44], [39936, 1329, 1245, 4, 44],
+    [40192, 1329, 1245, 4, 44], [40448, 1332, 1237, 4, 44], [40704, 1336, 1230, 4, 44], [40960, 1339, 1245, 4, 44],
+  ];
+  /** The cuBLAS kernel names the profiler reported, in order of first use. */
+  const KERNELS = [
+    "nvjet_sm103_tst_32x64_64x16_4x1_v_bz_NNN",
+    "nvjet_sm103_tst_64x16_64x16_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x32_64x16_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_64x32_64x16_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x64_64x16_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_64x48_64x16_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x64_64x16_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x80_64x16_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_96x64_64x13_2x2_2cta_h_bz_NNN",
+    "nvjet_sm103_tst_64x96_64x15_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x112_64x14_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x64_64x10_4x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x128_64x13_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_64x144_64x12_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x80_64x8_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_160x64_64x9_1x2_2cta_h_bz_NNN",
+    "nvjet_sm103_tst_128x88_64x7_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x96_64x7_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x104_64x7_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x112_64x9_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x128_64x8_4x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x120_64x6_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x128_64x8_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x136_64x6_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x144_64x8_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x160_64x8_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_192x112_64x6_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_192x128_64x6_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_128x176_64x7_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x192_64x7_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x208_64x7_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_256x128_64x5_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_192x160_64x6_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_192x144_64x6_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x224_64x7_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_160x192_64x5_1x2_2cta_h_bz_NNN",
+    "nvjet_sm103_tst_192x176_64x6_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_192x176_64x6_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x160_64x8_2x2_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_128x272_64x4_2x1_v_bz_NNT",
+    "nvjet_sm103_tst_128x160_64x8_4x1f_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x192_64x7_4x1f_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_256x128_64x5_2x4f_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_256x128_64x5_2x2f_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_128x256_64x6_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x160_64x8_2x2f_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_160x192_64x5_2x2f_2cta_h_bz_NNN",
+    "nvjet_sm103_tst_128x192_64x7_2x2f_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_256x128_64x5_2x1_2cta_v_bz_NNT",
+    "nvjet_sm103_tst_128x256_64x4_1x1_h_bz_NNT",
+    "nvjet_sm103_tst_128x256_64x4_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x256_64x6_2x2f_2cta_h_bz_NNT",
+    "nvjet_sm103_tst_192x128_64x5_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_256x128_64x4_1x2_h_bz_NNT",
+    "nvjet_sm103_tst_128x256_64x6_4x1f_2cta_v_bz_NNT",
+  ];
+  /** msweep-fine.json, gpu.max_sm_clock_mhz. */
+  const MAX_CLOCK = 2032;
+  /** roofline.json, sections.bandwidth[], pattern "copy" at 64 GiB, tb_per_s_median: read plus write, TB/s. */
+  const COPY_TB_PER_S = 6.652;
+  /** peaks-sustained.json, the 8192³ bf16 row, eager.tflops_median: ten samples of 0.5 s back to back. */
+  const SUSTAINED_PEAK = 1388;
+  /** The weight's two dimensions in this sweep. */
+  const K = 2880;
+  const N = 2880;
+  /** A fall in rate from one M to the next counts as a drop from this share on. */
+  const DROP = 0.08;
+  /** The values of M that carry a tick label: powers of four, with a small tick at the powers of two between. */
+  const MAJOR_EVERY = 2;
+
+  // cuBLAS hands the product to its column-major kernels transposed, so in a name `tst_AxB` the tile spans A of
+  // the lecture's N (the output's columns) and B of its M (the rows): with K = N = 4096 the launch grid equals
+  // ceil(N / A) × ceil(M / B) at 570 of the 576 points of the same sweep.
+  const tileOf = (name) => {
+    const [, columns, rows] = name.match(/tst_(\d+)x(\d+)_/).map(Number);
+
+    return { rows, columns };
+  };
+  /** NVML's clock-event reason for the driver's software power cap. */
+  const POWER_CAP = 4;
+  const points = SWEEP.map(([m, rate, clock, reasons, kernel]) => ({ m, rate, clock, capped: reasons === POWER_CAP, kernel, tile: tileOf(KERNELS[kernel]) }));
+  const pairs = points.slice(1).map((p, i) => ({ from: points[i], to: p }));
+  const changes = pairs.filter(({ from, to }) => from.kernel !== to.kernel);
+  const drops = pairs.filter(({ from, to }) => to.rate <= from.rate * (1 - DROP));
+  const dropsAtChange = drops.filter(({ from, to }) => from.kernel !== to.kernel).length;
+  const ridge = SUSTAINED_PEAK / COPY_TB_PER_S;
+  /** Where a square-weight GEMM's arithmetic intensity M × K / (K + 2M) reaches the ridge. */
+  const crossover = (ridge * K) / (K - 2 * ridge);
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const dropPercent = Math.round(100 * DROP);
+
+  document.getElementById("title").textContent =
+    dropsAtChange === drops.length
+      ? "Each sharp drop in a GEMM’s rate falls where cuBLAS changes kernel"
+      : `${dropsAtChange} of ${drops.length} sharp drops in a GEMM’s rate fall where cuBLAS changes kernel`;
+
+  const HUES = { rate: "var(--halo-blue)", clock: "var(--halo-indigo)" };
+  /** A key swatch: a 36 × 24 drawing of the mark. */
+  const swatch = (draw) => {
+    const svg = svgEl("svg", { viewBox: "0 0 36 24", "aria-hidden": "true" });
+    draw(svg);
+
+    return svg;
+  };
+  const SWATCHES = {
+    rate: (svg) => svg.append(svgEl("line", { x1: 2, y1: 12, x2: 34, y2: 12, stroke: HUES.rate, "stroke-width": 3, "stroke-linecap": "round" })),
+    clock: (svg) => [8, 18, 28].forEach((x) => svg.append(svgEl("circle", { cx: x, cy: 12, r: 2.5, fill: HUES.clock }))),
+    change: (svg) => [6, 14, 18, 30].forEach((x) => svg.append(svgEl("line", { x1: x, y1: 4, x2: x, y2: 18, stroke: "var(--secondary)", "stroke-width": 1 }))),
+    drop: (svg) => svg.append(svgEl("line", { x1: 18, y1: 1, x2: 18, y2: 23, stroke: "var(--text)", "stroke-width": 1.25 })),
+    crossover: (svg) => svg.append(svgEl("line", { x1: 18, y1: 1, x2: 18, y2: 23, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" })),
+  };
+
+  /** Fills a key column: its heading with a swatch, plain lines, then one line per mark. */
+  function fillKey(id, { name, mark, lines, marks = [] }) {
+    const key = document.getElementById(id);
+    const heading = el("h3");
+    heading.append(swatch(SWATCHES[mark]), name);
+    key.append(heading);
+
+    for (const line of lines) {
+      key.append(el("p", undefined, line));
+    }
+
+    for (const [kind, text] of marks) {
+      const p = el("p", "mark");
+      p.append(swatch(SWATCHES[kind]), el("span", undefined, text));
+      key.append(p);
+    }
+  }
+
+  fillKey("rate-key", {
+    name: "Rate on the device",
+    mark: "rate",
+    lines: [
+      `A bf16 GEMM [M, ${K}] @ [${K}, ${N}] on one B300, the weight read from HBM on every call, at ${points.length} values of M`,
+      "Above the plot: the output tile of one block at that M, rows\u00a0×\u00a0columns",
+    ],
+    marks: [
+      ["change", `cuBLAS changes kernel, ${changes.length} times in all`],
+      ["drop", `A drop of ${dropPercent}% or more from one M to the next: ${drops.length} of them`],
+      ["crossover", `Crossover M, ${fmt(crossover)}: the GEMM’s arithmetic intensity reaches the ridge`],
+    ],
+  });
+  const slowed = points.filter((p) => p.clock < MAX_CLOCK);
+  /** The first M after the last point that read the full clock. */
+  const slowFrom = points[points.indexOf(points.filter((p) => p.clock >= MAX_CLOCK).at(-1)) + 1];
+  fillKey("clock-key", {
+    name: "SM clock",
+    mark: "clock",
+    lines: [
+      `Read after each point. It first reads below its ${fmt(MAX_CLOCK)}\u00a0MHz maximum at M\u00a0=\u00a0${fmt(slowed[0].m)}, and stays below from M\u00a0=\u00a0${fmt(slowFrom.m)} on`,
+      `At ${slowed.filter((p) => p.capped).length} of the ${slowed.length} points below it the driver reports a power cap`,
+    ],
+  });
+
+  /** Plot-area insets inside each SVG: room for the y title and ticks on the left. */
+  const PAD = { l: 118, r: 24 };
+  /** Height of the kernel-change ticks hanging from the top of the rate plot. */
+  const RUG = 16;
+  const first = Math.log2(points[0].m);
+  const last = Math.log2(points.at(-1).m);
+
+  /** Sets up one panel's SVG and returns its plot box, x scale and an element adder. */
+  function panel(id, height, top, bottom) {
+    const chart = document.getElementById(id);
+    const width = chart.getBoundingClientRect().width;
+    chart.setAttribute("height", height);
+    chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const plot = { l: PAD.l, r: width - PAD.r, t: top, b: height - bottom };
+    // The M axis is logarithmic, from the first M of the sweep to the last, with a little room at each end.
+    const sx = (m) => plot.l + 10 + ((Math.log2(m) - first) / (last - first)) * (plot.r - plot.l - 20);
+    const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+
+    return { chart, plot, sx, add, height };
+  }
+
+  /** Draws a panel's frame: gridlines and labels at the y ticks, its axis lines and its rotated title. */
+  function frame({ plot, add }, axis, sy, title) {
+    for (const v of axis.ticks) {
+      if (v > 0) {
+        add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+
+      add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, v.toLocaleString("en-US"));
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, title);
+  }
+
+  /** The powers of two the sweep spans, each with whether it carries a label. */
+  const powers = Array.from({ length: Math.floor(last + 1e-9) - Math.ceil(first - 1e-9) + 1 }, (_, i) => {
+    const exponent = Math.ceil(first - 1e-9) + i;
+
+    return { m: 2 ** exponent, major: (exponent - Math.ceil(first - 1e-9)) % MAJOR_EVERY === 0 };
+  });
+
+  // The rate panel: the tile labels above it, the kernel changes hanging from its top, the curve under them.
+  {
+    const p = panel("rate", 520, 44, 8);
+    const { plot, sx, add } = p;
+    const top = Math.max(...points.map((q) => q.rate));
+    const axis = niceAxis(top * 1.02);
+    // The curve stays below the kernel-change ticks.
+    const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t - RUG - 8);
+    frame(p, axis, sy, "Rate, TFLOP/s");
+
+    for (const { m, major } of powers) {
+      add("line", { x1: sx(m), x2: sx(m), y1: plot.b, y2: plot.b + (major ? 8 : 5), stroke: "var(--secondary)", "stroke-width": 1 });
+
+      if (major) {
+        const { rows, columns } = points.find((q) => q.m === m).tile;
+        add("text", { class: "tile", x: sx(m), y: plot.t - 16, "text-anchor": "middle" }, `${rows} × ${columns}`);
+      }
+    }
+
+    // The row's name sits left of its first label, which is centred on the axis's first tick.
+    const firstTile = p.chart.querySelector("text.tile").getBBox();
+    add("text", { class: "tick", x: firstTile.x - 16, y: plot.t - 16, "text-anchor": "end" }, "Tile");
+
+    // A change falls between two measured values of M: the tick sits midway on the axis.
+    const between = ({ from, to }) => (sx(from.m) + sx(to.m)) / 2;
+
+    for (const pair of changes) {
+      add("line", { x1: between(pair), x2: between(pair), y1: plot.t, y2: plot.t + RUG, stroke: "var(--secondary)", "stroke-width": 1 });
+    }
+
+    for (const pair of drops) {
+      add("line", { x1: between(pair), x2: between(pair), y1: plot.t, y2: sy(pair.to.rate), stroke: "var(--text)", "stroke-width": 1.25 });
+    }
+
+    add("line", { x1: sx(crossover), x2: sx(crossover), y1: plot.t + RUG + 8, y2: plot.b, stroke: "var(--tertiary)", "stroke-width": 1.5, "stroke-dasharray": "5 4" });
+    add("polyline", {
+      points: points.map((q) => `${sx(q.m)},${sy(q.rate)}`).join(" "),
+      fill: "none",
+      stroke: HUES.rate,
+      "stroke-width": 2.5,
+      "stroke-linejoin": "round",
+      "stroke-linecap": "round",
+    });
+  }
+
+  // The clock panel, on the same M axis, which it labels.
+  {
+    const p = panel("clock", 292, 8, 84);
+    const { plot, sx, add, height } = p;
+    const axis = niceAxis(MAX_CLOCK, undefined, { most: 2 });
+    const sy = (v) => plot.b - (v / axis.max) * (plot.b - plot.t);
+    frame(p, axis, sy, "Clock, MHz");
+
+    for (const { m, major } of powers) {
+      add("line", { x1: sx(m), x2: sx(m), y1: plot.b, y2: plot.b + (major ? 8 : 5), stroke: "var(--secondary)", "stroke-width": 1 });
+
+      if (major) {
+        add("text", { class: "tick", x: sx(m), y: plot.b + 34, "text-anchor": "middle" }, m.toLocaleString("en-US"));
+      }
+    }
+
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: height - 6, "text-anchor": "middle" }, "M, rows of the GEMM");
+
+    for (const q of points) {
+      add("circle", { cx: sx(q.m), cy: sy(q.clock), r: 2.5, fill: HUES.clock });
+    }
+  }
+</script>
+</body>
+</html>
