@@ -85,6 +85,40 @@ def test_the_chunked_scorer_matches_the_full_logits_one(layout, lora_bias):
         torch.testing.assert_close(grads[name], grad, **_TOL, msg=name)
 
 
+def _logps(host, model, ids, mask, keep) -> torch.Tensor:
+    logps, _, _ = host._get_per_token_logps_and_entropies(model, ids, mask, keep)
+    return logps.detach()
+
+
+@pytest.mark.parametrize("scope", ["no-grad", "adapter-disabled"])
+@pytest.mark.parametrize("layout", list(_LAYOUTS))
+def test_scoring_outside_the_loss_forward_matches_the_full_logits_one(layout, scope):
+    """The old-policy and eval passes score under ``torch.no_grad()`` and read the adapted head; the reference pass
+    scores under ``disable_adapter()`` and reads the base head. Each scope runs alone, so one cannot hide the other."""
+    batch_size, packed = _LAYOUTS[layout]
+    model = _adapted(["q_proj", "lm_head"])
+    ids, mask, keep = _round()
+    completion = mask[:, -keep:].bool()
+    full, chunked = (
+        _host(model, chunked=False, batch_size=batch_size),
+        _host(model, batch_size=batch_size, packed=packed),
+    )
+    with torch.no_grad():
+        adapted = _logps(full, model, ids, mask, keep)
+        with model.disable_adapter():
+            base = _logps(full, model, ids, mask, keep)
+    assert (adapted - base)[completion].abs().max() > 1e-2, "the adapters must move the log-probs"
+    if scope == "no-grad":
+        with torch.no_grad():
+            got = _logps(chunked, model, ids, mask, keep)
+        want = adapted
+    else:
+        with model.disable_adapter():
+            got = _logps(chunked, model, ids, mask, keep)
+        want = base
+    torch.testing.assert_close(got[completion], want[completion], **_TOL)
+
+
 @pytest.mark.parametrize("layout", ["padded", "dense"])
 def test_candidate_ids_score_under_the_adapted_head(layout):
     """Each position's sampled token and candidates share the adapted head's one ``log Z``."""

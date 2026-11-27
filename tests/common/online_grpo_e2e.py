@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import torch
+from peft.tuners.tuners_utils import BaseTunerLayer
 from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
@@ -17,6 +18,7 @@ from trl import GRPOConfig
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.trainers.distillation.divergences import token_divergence
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
@@ -104,6 +106,7 @@ MODES = {
     "lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="lora"),
     "expert_lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="expert_lora"),
     "lora_etp2": _Mode("moe", PolicyLayout(expert_tp_size=2), adapter="lora", rejects_expert_lora=True),
+    "lora_head_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="lora", adapts_head=True),
     # ep1: the experts in the FSDP2 shard as DTensors, or kept whole and FSDP-ignored.
     "full_ep1": _Mode("moe", checkpoint_optimizer=False),
     "full_ep1_unsharded": _Mode("moe", PolicyLayout(shard_ep1_experts=False), checkpoint_optimizer=False),
@@ -116,7 +119,10 @@ MODES = {
     "lora_tp2_rejected": _Mode("dense", PolicyLayout(tp_size=2), adapter="lora", refuses_lora_under_tp=True),
     "full_fsdp_kl": _Mode("dense", beta=0.01),
     "full_fsdp_zero3": _Mode("dense", PolicyLayout(reshard_after_forward=True)),
-    "lora_head_fsdp_zero3": _Mode("dense", PolicyLayout(reshard_after_forward=True), adapter="lora", adapts_head=True),
+    # An untied checkpoint: a tied one's sync pushes the adapted head as the input embedding too.
+    "lora_head_fsdp_zero3": _Mode(
+        "untied_dense", PolicyLayout(reshard_after_forward=True), adapter="lora", adapts_head=True
+    ),
     "full_tp2_dp2": _Mode("dense", PolicyLayout(tp_size=2), world_size=4),
     # Two simulated NVLink domains of two, sharded within each and replicated across them.
     "full_hsdp": _Mode("dense", PolicyLayout(use_hsdp=True, gpus_per_node=2), world_size=4),
@@ -619,6 +625,12 @@ def run_online_grpo_e2e(
         ok, detail = check_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  frozen base: {detail}")
+    if spec.adapts_head:
+        base = base_transformers_model(unwrap(trainer.model))
+        head = base.get_output_embeddings()
+        head = head.get_base_layer() if isinstance(head, BaseTunerLayer) else head
+        checks["policy_head_untied"] = head.weight is not base.get_input_embeddings().weight
+        log(f"  lm_head untied from embed_tokens: {checks['policy_head_untied']}")
 
     trainer.train()
     log("  training completed")

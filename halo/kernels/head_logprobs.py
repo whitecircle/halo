@@ -392,6 +392,26 @@ class _HeadLogprobFunction(torch.autograd.Function):
         )
 
 
+def _validate_low_rank(hidden: torch.Tensor, weight: torch.Tensor, low_rank: Sequence[LowRankDelta]) -> None:
+    """Raises on a delta whose shapes do not match the head: the sweep slices ``inputs`` by row and ``up`` by vocab
+    tile, so extra rows would otherwise be dropped without a word."""
+    for index, delta in enumerate(low_rank):
+        rank = delta.down.shape[0]
+        expected = {
+            "inputs": (tuple(delta.inputs.shape), tuple(hidden.shape)),
+            "down": (tuple(delta.down.shape), (rank, hidden.shape[-1])),
+            "up": (tuple(delta.up.shape), (weight.shape[0], rank)),
+        }
+        wrong = {name: shapes for name, shapes in expected.items() if shapes[0] != shapes[1]}
+        if wrong:
+            detail = ", ".join(f"{name} {got}, expected {want}" for name, (got, want) in wrong.items())
+            raise ValueError(
+                f"low_rank[{index}] does not match the head (hidden {tuple(hidden.shape)}, weight "
+                f"{tuple(weight.shape)}): {detail}. Pass each adapter's input shaped like hidden, lora_A as [r, H] and "
+                f"lora_B as [V, r], cut to the same vocabulary as weight."
+            )
+
+
 def chunked_head_logprobs(
     hidden: torch.Tensor,
     weight: torch.Tensor,
@@ -410,7 +430,8 @@ def chunked_head_logprobs(
     ``m`` per position sharing its one ``log Z``: column 0 the sampled token, the rest candidate ids; an id below 0 is
     masked, its log-prob ``-inf`` and its gradient zero. ``logps`` is shaped like ``targets``, ``entropy`` like one
     target per position. The ``(..., m)`` form compiles a pair of tile graphs of its own, so a run's first call in each
-    form is its warm-up."""
+    form is its warm-up. Raises ``ValueError`` on a ``low_rank`` delta whose shapes do not match the head."""
+    _validate_low_rank(hidden, weight, low_rank)
     multi = targets.dim() > 1 and targets.shape[:-1] == hidden.shape[:-1]
     flat_targets = targets.reshape(-1, targets.shape[-1]) if multi else targets.reshape(-1)
     low_rank_tensors = [

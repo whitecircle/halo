@@ -145,5 +145,23 @@ def test_frozen_adapters_take_no_gradient():
     torch.testing.assert_close(deltas[0].inputs.grad, want, rtol=1e-5, atol=1e-5)
 
 
+@pytest.mark.parametrize(
+    ("field", "shape"),
+    [
+        ("inputs", (ROWS + 1, HIDDEN)),
+        ("down", (RANKS[0], HIDDEN + 1)),
+        ("up", (VOCAB + 1, RANKS[0])),
+        ("up", (VOCAB, 2)),
+    ],
+    ids=["extra-input-rows", "down-wider-than-hidden", "extra-vocab-rows", "rank-mismatch"],
+)
+def test_a_delta_that_does_not_match_the_head_raises(field, shape):
+    """The sweep slices ``inputs`` by row and ``up`` by vocab tile, so a larger tensor would lose its extra rows."""
+    hidden, weight, bias, deltas = _operands()
+    deltas[0] = LowRankDelta(**{**vars(deltas[0]), field: _leaf(*shape)})
+    with pytest.raises(ValueError, match=f"low_rank\\[0\\].*{field}"):
+        _swept(hidden, weight, bias, deltas, _targets(False))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
