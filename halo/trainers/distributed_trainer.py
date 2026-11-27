@@ -88,6 +88,7 @@ from halo.trainers.parallelism.adapter_rules import (
     reject_expert_lora_peft_conflicts,
     reject_lora_under_tp,
     reject_peft_lora_in_ep_layers,
+    reject_unexportable_tied_embedding_lora,
     reject_unmergeable_expert_lora_save,
     reject_unrealized_expert_lora,
     reject_unsaved_grown_vocabulary,
@@ -532,6 +533,8 @@ class DistributedTrainerMixin(
             if model_has_expert_lora(self.model):
                 install_ep_aware_disable_adapter(peft_model)
             install_fsdp2_safe_disable_adapter(peft_model, self.model)
+        # Ahead of the merged-save gate, whose fold refusal names no export path for this mix.
+        reject_unexportable_tied_embedding_lora(self.model)
         reject_unmergeable_expert_lora_save(
             self.model,
             merge_expert_lora_on_save=config.merge_expert_lora_on_save,
