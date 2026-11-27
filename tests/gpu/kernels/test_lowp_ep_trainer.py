@@ -20,6 +20,7 @@ from halo.hardware import is_blackwell_gpu
 from halo.kernels import expert_gemm
 from halo.kernels.lowp import deepgemm, quantization
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
+from halo.model_loading.parallel import lowp_compute
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.trainers.sft import DistributedSFTTrainer
@@ -49,6 +50,7 @@ parser.add_argument(
     "--backward", choices=("bf16", "fp8"), default="bf16", help="lowp_backward_precision under --native"
 )
 parser.add_argument("--ep-size", type=int, choices=(1, 2), default=2, help="1 trains FSDP2-managed experts")
+parser.add_argument("--checkpointing", action="store_true", help="Train under gradient checkpointing")
 ARGS = parser.parse_args()
 QUANT_FORMAT = LOWP_RECIPES[ARGS.precision].quant_format
 # Expert weights are stored ``[E, K, N]``.
@@ -63,7 +65,7 @@ def _simulated_entry_is_current(weight: torch.Tensor) -> bool | None:
 
 
 def _native_entry_is_current(weight: torch.Tensor) -> bool | None:
-    entry = deepgemm._weight_cache.get(weight, (weight._version, QUANT_FORMAT))
+    entry = deepgemm._weight_caches[QUANT_FORMAT].get(weight, weight._version)
     if entry is None:
         return None
     fresh = deepgemm._quant_weight(weight, QUANT_FORMAT, cacheable=False)
@@ -114,7 +116,7 @@ def _record_cached_casts() -> list[int]:
 
     def recorded(*args, **kwargs):
         operand = real(*args, **kwargs)
-        cached.append(len(deepgemm._weight_cache))
+        cached.append(sum(map(len, deepgemm._weight_caches.values())))
         return operand
 
     deepgemm._quant_weight = recorded
@@ -129,6 +131,22 @@ class _CallsBeforeTheLastStep(TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         self.count = self.calls[0]
+
+
+class _CallsPerForward(TrainerCallback):
+    """How many of ``calls`` each forward of the last EP layer made, and how many forwards the trained model ran. Under
+    gradient checkpointing the backward runs that layer again."""
+
+    def __init__(self, calls: list[int]):
+        self.calls, self.per_forward, self.model_forwards, self._seen = calls, [], 0, 0
+
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        model.register_forward_hook(lambda *_: setattr(self, "model_forwards", self.model_forwards + 1))
+        ep_layers(model)[-1].register_forward_hook(self._record)
+
+    def _record(self, *_):
+        self.per_forward.append(self.calls[0] - self._seen)
+        self._seen = self.calls[0]
 
 
 def _train(
@@ -150,7 +168,7 @@ def _train(
             lr_scheduler_type="constant",
             max_length=128,
             bf16=True,
-            gradient_checkpointing=False,
+            gradient_checkpointing=ARGS.checkpointing,
             use_liger_kernel=False,
             logging_steps=1,
             save_strategy="no",
@@ -235,31 +253,48 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     native_calls = _count_calls(deepgemm, "_deepgemm_forward")
     wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
     simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
+    flag_reads = _count_calls(lowp_compute, "verify_finite_mxfp4_weights")
     cached_casts = _record_cached_casts()
-    warmed = _CallsBeforeTheLastStep(wgrad_calls)
+    warmed, forwards = _CallsBeforeTheLastStep(wgrad_calls), _CallsPerForward(flag_reads)
     losses, versions, adamw_bf16 = _train(
-        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed,)
+        ctx,
+        checkpoint,
+        tokenizer,
+        output_dir,
+        _native_entry_is_current,
+        lowp,
+        callbacks=(warmed, forwards),
     )
 
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
+    # The MXFP4 weight cast only flags a NaN weight on the device: one read a forward of the last converted layer, which
+    # a checkpointed step runs twice, and none under fp8.
+    checks["mxfp4_reads_its_non_finite_flag_once_a_forward"] = world_all(
+        forwards.model_forwards >= 2 * TOTAL_STEPS
+        and len(forwards.per_forward) == forwards.model_forwards * (1 + ARGS.checkpointing)
+        and set(forwards.per_forward) == {int(ARGS.precision == "mxfp4")}
+        and flag_reads[0] == sum(forwards.per_forward)
+    )
     # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM, and the cache drops an entry with
-    # its weight; so the cache is read as each cast returns, and must be empty at every one.
+    # its weight; so the caches are read as each cast returns, and must be empty at every one.
     checks["fsdp2_managed_experts_cache_no_cast"] = world_all(
         bool(cached_casts) and (max(cached_casts) == 0) == (ARGS.ep_size == 1)
     )
     checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
     log(
         f"  {ARGS.precision} native backward={ARGS.backward}: {losses}; {native_calls[0]} kernel, "
-        f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated"
+        f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated, {flag_reads[0]} flag reads over "
+        f"{forwards.model_forwards} forwards"
     )
     return {"checks": checks, "metrics": {"native_calls": native_calls[0], "fp8_wgrad_calls": wgrad_calls[0]}}
 
 
 @gpu_test_main(
     exact_world_size=2,
-    prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}_ep{ARGS.ep_size}",
+    prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}_ep{ARGS.ep_size}"
+    f"{'_checkpointed' if ARGS.checkpointing else ''}",
 )
 def run(ctx):
     torch.cuda.set_device(ctx.device)

@@ -193,6 +193,33 @@ def test_native_reaches_the_layer_with_its_backward(family, backward, monkeypatc
     assert model.layers[0].mlp._lowp is lowp
 
 
+@pytest.mark.parametrize(("precision", "hooked"), [("mxfp4", True), ("fp8", False)])
+def test_native_mxfp4_reads_its_non_finite_weight_flag_after_the_last_converted_layer(precision, hooked, monkeypatch):
+    """The device-side cast only sets a flag, which must be read where a wrapper cannot skip it: PEFT's ``BaseTuner``
+    calls the model's ``forward`` directly, so a hook on the model itself never runs under attention LoRA."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (SimpleNamespace(__version__="2.8.2"), object()))
+    family = next(iter(FAMILIES))
+    model = _Model(*(_layer(family, ALIGNED_M, grouped=True) for _ in range(3)))
+    lowp = LowpSpec(precision=precision, backend="native", apply_dense_mlp=False, keep_last_blocks=1)
+    for _ in range(2):  # a second apply replaces the hook
+        apply_lowp_compute(model, lowp, expert_weight_cacheable=False)
+    hooks = [len(block.mlp._forward_hooks) for block in model.layers]
+    assert hooks == ([0, 1, 0] if hooked else [0, 0, 0]) and not model._forward_hooks
+    if not hooked:
+        return
+    flag = deepgemm._nonfinite_weight.setdefault(torch.device("cpu"), torch.zeros(1, dtype=torch.int32))
+    last = model.layers[1].mlp
+    monkeypatch.setattr(type(last), "forward", lambda self: None)
+    last()
+    name, weight = model.layers[0].mlp.expert_named_params()[0]
+    with torch.no_grad():
+        weight.view(-1)[0] = float("nan")
+    flag.fill_(1)
+    with pytest.raises(ValueError, match=rf"Non-finite expert weight layers\.0\.mlp\.{name}: .*lower learning rate"):
+        last()
+    last()
+
+
 @pytest.mark.parametrize("family", list(FAMILIES))
 def test_the_refusal_guards_a_forward_that_fails(family):
     """The premise: past the load, the first grouped forward fails inside the quantizer."""
