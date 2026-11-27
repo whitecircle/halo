@@ -340,7 +340,7 @@ def _assert_scores_match(got, want):
     torch.testing.assert_close(got, want, atol=2e-6, rtol=2e-5)
 
 
-def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bounded: bool):
+def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bounded: bool, oracle_head: bool = True):
     pc = ParallelismConfig(
         ep_size=2 if family == "qwen3_moe" else 1,
         bf16_optimizer=False,
@@ -354,7 +354,7 @@ def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bou
         attn_implementation="sdpa",
         use_liger_kernel=False,
     )
-    if not bounded:
+    if not bounded and oracle_head:
         head = base_transformers_model(model).get_output_embeddings()
         head.forward = MethodType(_fp32_head, head)
     hidden_dtypes = []
@@ -369,7 +369,7 @@ def _build_trainer(ctx, checkpoint: str, *, family: str, dtype: torch.dtype, bou
             {"prompt": "t21", "chosen": "t22 t23 t24", "rejected": "t25 t26"},
         ]
     )
-    trainer_class = DistributedDPOTrainer if bounded else _FullHeadDPOTrainer
+    trainer_class = _FullHeadDPOTrainer if not bounded and oracle_head else DistributedDPOTrainer
     trainer = trainer_class(
         model=model,
         args=DPOConfig(
@@ -551,9 +551,10 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
         got, got_entropy = bounded._chunked_dpo_logps(bounded.model, batch, compute_entropy=True)
     with torch.no_grad(), full.accelerator.autocast():
         want, want_entropy = _full_scores(full, batch)
-    _assert_scores_match(got, want)
-    torch.testing.assert_close(got_entropy, want_entropy, atol=1e-4, rtol=2e-4)
-    _assert_scores_match(got.sum(1, dtype=torch.float64), want.sum(1, dtype=torch.float64))
+    with barrier_on_exit("DPO per-token scores and entropy checks"):
+        _assert_scores_match(got, want)
+        torch.testing.assert_close(got_entropy, want_entropy, atol=1e-4, rtol=2e-4)
+        _assert_scores_match(got.sum(1, dtype=torch.float64), want.sum(1, dtype=torch.float64))
     checks["per_token_logps_entropy_and_fp64_parity_sums_match"] = True
     for index, (key, values) in enumerate(
         zip(bounded.REFERENCE_COLUMNS, got.sum(1, dtype=torch.float32).chunk(2), strict=True)
@@ -562,7 +563,8 @@ def run_dpo_scoring_equivalence(ctx, *, family: str, dtype_name: str) -> dict:
         batch[key] = values + torch.tensor(offsets, device=ctx.device)
     parity = _parity_loss(got, batch, beta=bounded.beta, weight=bounded.loss_weights[0])
     full_parity = _parity_loss(want, batch, beta=full.beta, weight=full.loss_weights[0])
-    assert_dpo_loss_matches(parity, full_parity)
+    with barrier_on_exit("DPO fp64 objective parity check"):
+        assert_dpo_loss_matches(parity, full_parity)
     checks["fp64_objective_parity_both_arms"] = True
     initial = _local_snapshot(bounded, gradients=False)
     initial_full = _local_snapshot(full, gradients=False)

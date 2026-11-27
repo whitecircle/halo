@@ -7,6 +7,8 @@ import time
 import torch
 import torch.distributed as dist
 
+from halo.runtime.dtensor import to_local
+from tests.common.distributed import world_all
 from tests.common.dpo_scoring import _build_trainer
 from tests.common.harness import gpu_test_main
 from tests.common.tiny_models import TINY_DENSE_FAMILY, shared_tiny_family_checkpoint, word_level_tokenizer
@@ -40,7 +42,12 @@ def run(ctx):
     )
     start = time.perf_counter()
     trainer, _ = _build_trainer(
-        ctx, checkpoint, family="dense", dtype=torch.bfloat16, bounded=ARGS.scorer == "bounded"
+        ctx,
+        checkpoint,
+        family="dense",
+        dtype=torch.bfloat16,
+        bounded=ARGS.scorer == "bounded",
+        oracle_head=False,
     )
     startup = _world_max(time.perf_counter() - start, ctx.device)
     trainer.model.train()
@@ -67,13 +74,21 @@ def run(ctx):
             loss = trainer.compute_loss(trainer.model, batch)
         trainer.accelerator.backward(loss)
         trainer._finish_fsdp2_backward(trainer.model)
-        trainer._get_grad_norm(trainer.model)
+        grad_norm = trainer._get_grad_norm(trainer.model)
+        local_norm = to_local(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm
+        finite = bool(loss.isfinite()) and local_norm is not None and bool(
+            torch.isfinite(torch.as_tensor(local_norm)).all()
+        )
+        if not world_all(finite, ctx.device):
+            raise AssertionError("DPO benchmark loss or gradient norm is nonfinite on at least one rank")
         trainer.optimizer.step()
         torch.cuda.synchronize(ctx.device)
         elapsed = _world_max(time.perf_counter() - start, ctx.device)
         peak = _world_max(torch.cuda.max_memory_allocated(ctx.device) / 2**30, ctx.device)
-        if not bool(loss.isfinite()):
-            raise AssertionError("DPO benchmark loss is nonfinite")
+        with torch.no_grad():
+            finite_weights = all(bool(torch.isfinite(to_local(param)).all()) for param in trainer.model.parameters())
+        if not world_all(finite_weights, ctx.device):
+            raise AssertionError("DPO benchmark stored weights are nonfinite on at least one rank")
         if step:
             timings.append(elapsed)
             peaks.append(peak)
@@ -84,7 +99,7 @@ def run(ctx):
             "length": ARGS.length,
             "vocab": VOCAB,
             "pairs_per_step_global": 4,
-            "reference_startup_and_trainer_init_s": startup,
+            "trainer_init_and_reference_sweep_at_32_tokens_s": startup,
             "mean_step_s_after_warmup": sum(timings) / len(timings),
             "pairs_per_s_after_warmup": 4 * len(timings) / sum(timings),
             "max_rank_peak_allocated_gib": max(peaks),

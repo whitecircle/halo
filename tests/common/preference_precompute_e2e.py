@@ -18,6 +18,7 @@ from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
+from halo.runtime.consensus import barrier_on_exit
 from tests.common.adapters import load_peft_model
 from tests.common.checkpoint_io import loading_problems, model_save_checks, safetensors_state_dict
 from tests.common.distributed import shared_scratch_dir
@@ -262,26 +263,27 @@ def run_precompute_resume(
         exported = os.path.join(shared, "export")
         built.save_model(exported)
         ctx.barrier()
-        export_checks = model_save_checks(exported, ctx.rank)
-        if ctx.rank == 0:
-            stock, info = tiny.load_class.from_pretrained(
-                exported, dtype=torch.float32, attn_implementation="eager", output_loading_info=True
-            )
-            base = tiny.load_class.from_pretrained(tiny_dir, dtype=torch.bfloat16).state_dict()
-            export_checks["bounded_export_loads_with_stock_hf"] = not loading_problems(info)
-            weights = safetensors_state_dict(exported)
-            trained = safetensors_state_dict(os.path.join(train_out, f"checkpoint-{TOTAL_STEPS}"))
-            export_checks["bounded_export_contains_trained_weights"] = bool(weights) and any(
-                not torch.equal(value, base[name].to(value.dtype)) for name, value in weights.items()
-            )
-            export_checks["bounded_export_matches_final_checkpoint"] = weights.keys() == trained.keys() and all(
-                torch.equal(value, trained[name].to(value.dtype)) for name, value in weights.items()
-            )
-            with torch.no_grad():
-                export_checks["bounded_export_forward_is_finite"] = bool(
-                    stock(input_ids=torch.ones(1, 4, dtype=torch.long), use_cache=False).logits.isfinite().all()
+        with barrier_on_exit("DPO exported-model artifact and stock HF checks"):
+            export_checks = model_save_checks(exported, ctx.rank)
+            if ctx.rank == 0:
+                stock, info = tiny.load_class.from_pretrained(
+                    exported, dtype=torch.float32, attn_implementation="eager", output_loading_info=True
                 )
-            del stock, base, weights, trained
+                base = tiny.load_class.from_pretrained(tiny_dir, dtype=torch.bfloat16).state_dict()
+                export_checks["bounded_export_loads_with_stock_hf"] = not loading_problems(info)
+                weights = safetensors_state_dict(exported)
+                trained = safetensors_state_dict(os.path.join(train_out, f"checkpoint-{TOTAL_STEPS}"))
+                export_checks["bounded_export_contains_trained_weights"] = bool(weights) and any(
+                    not torch.equal(value, base[name].to(value.dtype)) for name, value in weights.items()
+                )
+                export_checks["bounded_export_matches_final_checkpoint"] = weights.keys() == trained.keys() and all(
+                    torch.equal(value, trained[name].to(value.dtype)) for name, value in weights.items()
+                )
+                with torch.no_grad():
+                    export_checks["bounded_export_forward_is_finite"] = bool(
+                        stock(input_ids=torch.ones(1, 4, dtype=torch.long), use_cache=False).logits.isfinite().all()
+                    )
+                del stock, base, weights, trained
         checks |= ctx.broadcast_checks(export_checks)
     checks |= dp_layout_checks(
         built.model,
