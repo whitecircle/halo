@@ -127,7 +127,7 @@ def _row_layout(offs: torch.Tensor, num_tokens: int, num_experts: int) -> _RowLa
         )
     segments = padded_group_rows((b - a for a, b in zip([0, *ends[:-1]], ends, strict=True)), GROUP_ROW_ALIGN)
     counts = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
-    segments_dev = _align_up(counts, GROUP_ROW_ALIGN)
+    segments_dev = torch.tensor(segments, device=offs.device)
     expert = torch.repeat_interleave(torch.arange(num_experts, device=offs.device), counts, output_size=num_tokens)
     shift = (segments_dev.cumsum(0) - segments_dev) - (counts.cumsum(0) - counts)
     dst = torch.arange(num_tokens, device=offs.device) + shift[expert]
