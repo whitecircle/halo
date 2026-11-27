@@ -53,7 +53,8 @@ from halo.runtime.collectives import all_gather_cat
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin
+from halo.trainers.full_logits_memory import LogitsWidth
+from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS
 from halo.trainers.grpo.objective.offline_loss import (
     LOSS_TYPES,
@@ -192,7 +193,12 @@ class OfflineGRPOTrainer(
             "Set it explicitly in your OfflineGRPOConfig.",
         )
         train_dataset, eval_dataset = tokenize_offline_splits(
-            train_dataset, eval_dataset, args, processing_class, getattr(model, "config", None)
+            train_dataset,
+            eval_dataset,
+            args,
+            processing_class,
+            getattr(model, "config", None),
+            getattr(model, "generation_config", None),
         )
 
         self.ref_model = self._kl_reference(model, ref_model, self.beta, self.parallelism_config, peft_config)

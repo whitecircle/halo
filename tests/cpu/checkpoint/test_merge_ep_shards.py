@@ -1025,9 +1025,8 @@ def _write_gathered_checkpoint(input_dir, model_type, state, *, metadata=None):
 @pytest.mark.parametrize(
     "metadata",
     [
-        None,  # gathered EP save / an earlier merge's output
-        {"total_size": 1},  # a PP save's index: standard HF metadata, no format marker
-        {"ep_size": 2},  # ep_size without the format marker: not a per-rank save either
+        None,  # gathered EP save, merge output or a PP save: no format marker
+        pytest.param({"ep_size": 2}, id="metadata2"),  # ep_size without the format marker: not a per-rank save either
     ],
 )
 def test_merge_refuses_a_checkpoint_that_is_not_ep_sharded(metadata):

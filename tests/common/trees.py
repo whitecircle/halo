@@ -150,27 +150,42 @@ def checkpointing_gaps(
     model: torch.nn.Module, step: Callable[[], torch.Tensor], *, use_reentrant: bool
 ) -> tuple[float, float]:
     """``(logit gap, gradient gap)`` between one step without GC and the same step with it; it must re-run every
-    decoder layer, or they compare nothing."""
+    decoder layer, or they compare nothing. transformers checkpoints a layer's ``forward`` inside its module hooks, so
+    the recompute is counted inside each layer's installed checkpoint function, which runs it twice."""
     layers = [module for module in model.modules() if isinstance(module, GradientCheckpointingLayer)]
-    passes = []
-    hooks = [layer.register_forward_pre_hook(lambda *_: passes.append(None)) for layer in layers]
+    layer_calls, checkpointed_runs = [], []
+
+    def counting(checkpoint: Callable) -> Callable:
+        def run(function: Callable, *args, **kwargs):
+            def counted(*call_args, **call_kwargs):
+                checkpointed_runs.append(None)
+                return function(*call_args, **call_kwargs)
+
+            return checkpoint(counted, *args, **kwargs)
+
+        return run
+
+    hooks = [layer.register_forward_pre_hook(lambda *_: layer_calls.append(None)) for layer in layers]
     runs = []
     model.train()
     try:
         for checkpointing in (False, True):
             if checkpointing:
-                model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
-            passes.clear()
+                model.activation_checkpointing_enable(activation_checkpointing_kwargs={"use_reentrant": use_reentrant})
+                for layer in layers:
+                    layer._gradient_checkpointing_func = counting(layer._gradient_checkpointing_func)
+            layer_calls.clear()
             model.zero_grad(set_to_none=True)
             logits = step()
             grads = {name: p.grad.clone() for name, p in model.named_parameters() if p.grad is not None}
-            runs.append((logits, grads, len(passes)))
+            runs.append((logits, grads, len(layer_calls)))
     finally:
-        model.gradient_checkpointing_disable()
+        model.activation_checkpointing_disable()
         for hook in hooks:
             hook.remove()
-    (logits, grads, plain_passes), (checkpointed_logits, checkpointed_grads, checkpointed_passes) = runs
-    assert layers and checkpointed_passes == 2 * plain_passes, "the checkpointed step recomputed no decoder layer"
+    (logits, grads, plain_calls), (checkpointed_logits, checkpointed_grads, checkpointed_calls) = runs
+    assert layers and checkpointed_calls == plain_calls > 0, "the checkpointed step skipped a decoder layer"
+    assert len(checkpointed_runs) == 2 * plain_calls, "the checkpointed step recomputed no decoder layer"
     assert checkpointed_grads.keys() == grads.keys()
     gradient_gap = max((checkpointed_grads[name] - grad).abs().max().item() for name, grad in grads.items())
     return (checkpointed_logits - logits).abs().max().item(), gradient_gap

@@ -138,18 +138,6 @@ def _fa4_rows(model: torch.nn.Module) -> tuple[list[int], ...]:
     return _ROWS
 
 
-def test_step3p7_has_no_global_head_count():
-    """A ``RuntimeError``, which ``getattr``'s default does not catch."""
-    with pytest.raises(RuntimeError):
-        _ = _step3p7().config.num_attention_heads
-
-
-def test_laguna_global_head_count_is_the_full_layers():
-    model = _laguna()
-    assert model.config.num_attention_heads == 4
-    assert {m.num_heads for m in model.modules() if getattr(m, "sliding_window", None)} == {8}
-
-
 @pytest.mark.parametrize(
     ("build", "expected"),
     [

@@ -120,6 +120,35 @@ def test_same_shape_different_content_changes_cache_key():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _conversation(i: int, version: str) -> list[dict]:
+    return [
+        {"role": "user", "content": f"{version} question {i}"},
+        {"role": "assistant", "content": f"{version} answer {i}"},
+    ]
+
+
+def test_an_in_place_resave_of_as_many_rows_refilters_its_empty_conversations(tmp_path):
+    """The empty-conversation filter runs before the load's stamp, so its cache must key on content: the file paths and
+    the row count stay the same across a re-save and would serve the previous version's kept rows."""
+    path = str(tmp_path / "ds")
+
+    def _save(rows: list[list[dict]]) -> None:
+        shutil.rmtree(path, ignore_errors=True)
+        splits = {"train": Dataset.from_dict({"messages": rows}), "test": Dataset.from_dict({"messages": rows[:4]})}
+        DatasetDict(splits).save_to_disk(path)
+
+    first = [_conversation(i, "v1") for i in range(20)]
+    first[5] = first[11] = []
+    _save(first)
+    assert len(load_datasets(path, None, None, conversation_field="messages")["train"]) == 18
+
+    _save([_conversation(i, "v2") for i in range(20)])
+    kept = load_datasets(path, None, None, conversation_field="messages")["train"]["messages"]
+    assert [row[0]["content"] for row in kept] == [f"v2 question {i}" for i in range(20)], (
+        "a stale filter dropped rows"
+    )
+
+
 def test_an_aliased_split_keys_apart_from_its_source():
     """``datasets`` deep-copies the stamp onto a renamed split unchanged. A TRL preparation renders the
     aliased ``tools`` column and ignores the unaliased one, so the two must not share a cache key."""

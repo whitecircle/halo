@@ -8,48 +8,44 @@ The MoE expert step sorts tokens by expert (contiguous per-expert blocks), build
 
 Every figure on this page is from Halo 1.1.0 or earlier, except the 1.2.0 rows that open this section and Nemotron-H's backward below.
 
-**Routing sort (1.2.0).** The counting sort against the torch construction, which runs about 31 small aten ops per MoE layer pass. On 8× B300 at the [1.2.0 comparison's shapes](throughput-benchmarks.md#120-against-110), three rounds, peaks equal, step-1 loss bitwise: gpt-oss-20b ep8 × cp2 **+10.6%**, Qwen3.5-35B-A3B ep8 +9.0%, gpt-oss-20b ep2 +6.8%, ep8 × tp2 +5.7%, ep8 +2.2%.
+**Routing sort (1.2.0).** The counting sort against the torch construction, which runs about 31 small aten ops per MoE layer pass. On 8× B300 at the [1.2.0 comparison's shapes](throughput-benchmarks.md#120-against-110), three rounds, peaks equal, step-1 loss bitwise: gpt-oss-20b `ep8 × cp2` **+10.6%**, Qwen3.5-35B-A3B `ep8` +9.0%, gpt-oss-20b `ep2` +6.8%, `ep8 × tp2` +5.7%, `ep8` +2.2%.
 
-**No multiple-of-8 cliff (1.2.0).** A plain bf16 GEMM off a multiple of 8 runs [3–10× slower](../reference/gpu-training-theory.md#4-how-a-matmul-runs-tiles-kernels-launches); expert row counts off one cost grouped GEMM at most 1.23×, on GLM-5.3-Flash's 4096-wide `gate_up` product.
+**Row counts off a multiple of 8 (1.2.0).** A plain bf16 GEMM runs [4 to 9 times slower](../reference/gpu-training-theory.md#multiples-of-8) when `K` or `N` is off a multiple of 8 and is not slowed by its row count; expert row counts off one cost grouped GEMM at most 1.23×, on GLM-5.3-Flash's 4096-wide `gate_up` product.
 
-**Receive counts (1.2.0).** Expert compute sized from DeepEP's host-side receive counts, with no device read-back, on the same shapes: gpt-oss-20b ep4 × etp2 +6.6%, Qwen3.5-35B-A3B ep8 +2.4%, every other row within 0.5%.
+**Receive counts (1.2.0).** Expert compute sized from DeepEP's host-side receive counts, with no device read-back, on the same shapes: gpt-oss-20b `ep4 × etp2` +6.6%, Qwen3.5-35B-A3B `ep8` +2.4%, every other row within 0.5%.
 
-**Isolated kernel** — 1× B300 (SM103, PyTorch 2.11), Blackwell image, Qwen3-30B-A3B dims (hidden 2048, moe_intermediate 768), 128 experts / 4K tokens, median over 50 iters: the forward runs **≈10.2×** the per-expert loop, 1.12 ms → 0.11 ms (achieved TFLOPS 11.51 → 117.42). `benchmark_grouped_mm.py` reports the raw `grouped_mm` backward as unavailable and estimates its fwd+bwd row from the forward ratio, so there is no measured fwd+bwd figure. The ratio scales with expert count (more launches saved). These are launch-dominated; end-to-end is far smaller.
+**Isolated kernel** — 1× B300 (compute capability 10.3, PyTorch 2.11), Blackwell image, Qwen3-30B-A3B dims (hidden 2048, moe_intermediate 768), 128 experts, 4,096 routed rows (32 per expert), one projection, median over 50 iters: the forward runs **≈10.2×** the per-expert loop, 1.12 ms → 0.11 ms (achieved TFLOPS 11.51 → 117.42). `benchmark_grouped_mm.py` reports the raw `grouped_mm` backward as unavailable and estimates its fwd+bwd row from the forward ratio, so there is no measured fwd+bwd figure. The ratio scales with expert count (more launches saved). The loop is overhead-bound (paced by its launches); end-to-end the gain is far smaller.
 
-**End-to-end** the launch saving is worth most at small batch and narrows as per-expert GEMMs grow (the Qwen3-30B EP=2 row below).
+**End-to-end** the launch saving is worth most at small batch and narrows as per-expert GEMMs grow (the Qwen3-30B `ep2` row below).
 
 ### Why grouped GEMM also saves memory
 
 The launch saving (one kernel vs many) and the memory saving come from different mechanisms. A real MoE layer runs `E × P` matmuls in the loop (`P=2` for fused gate_up families, `P=3` for separate-projection families — see [Supported models](#supported-models)), each creating an autograd node that pins its saved forward activations (input slice + weight) alive across forward→backward.
 
-Grouped collapses those to `P` nodes (Qwen3.6: 256×2=512 → 2), so far fewer saved-tensor buffers and less allocator fragmentation. The saving scales with `expert_count × projections` — largest on fine-grained 256-expert models, smallest on 32-expert GPT-OSS-20B.
+Grouped collapses those to `P` nodes (Qwen3.6: 256×2=512 → 2), so far fewer saved-tensor buffers and less allocator fragmentation. The bytes those buffers hold are about the same either way, and the memory effect was not measured.
 
 ## Grouped vs the loop path
 
 `use_grouped_gemm: false` runs the per-expert loop. Grouped wins every measured cell below; what narrows its lead:
 
-**1. Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving. Few (high EP) → a smaller one, since the loop's per-shape CUTLASS tile fits each expert's actual per-expert `M`.
+**Few local experts per rank (primary lever).** Grouped's advantage is fusing launches across a rank's `num_experts / ep_size` local experts. Many (low EP) → large saving. Few (high EP) → a smaller one, since in the loop cuBLAS picks a kernel for each expert's actual per-expert `M`.
 
-Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one shared ~128-wide M tile for all groups, so its edge is largest at small M and erodes as M grows.
+Per-expert `M = ep_size × tokens_per_rank × top_k / num_experts`: tokens pool across the dispatch group, so per-rank rows `tokens_per_rank × top_k` are EP-invariant and M grows with `ep_size`. M modulates the trend: `grouped_mm` runs one tile for all groups, picked from their mean rows and the output width ([Tile selection](#tile-selection)), so its edge is largest at small M and erodes as M grows.
 
-gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop, plus Qwen3-30B-A3B (128 experts, ep2 → 64 local/rank; 2× B300, seq 8192, GC on: 15,587 vs 3,798 tok/s/GPU at b1, 18,710 vs 7,646 at b4) as the high-local-count anchor. Measured on the Blackwell image; the gpt-oss-20b ep8 row (median of 2) and the Qwen3.5 row each come from a separate run set:
+gpt-oss-20b (32 experts, top-4, seq 8192, 8× B300, FA4, GC on), grouped vs loop, plus Qwen3-30B-A3B (128 experts, `ep2` → 64 local/rank; 2× B300, seq 8192, GC on: 15,587 vs 3,798 tok/s/GPU at b1, 18,710 vs 7,646 at b4) as the high-local-count anchor. Measured on the Blackwell image; the gpt-oss-20b `ep8` row (median of 2) and the Qwen3.5 row each come from a separate run set:
 
 | Model | EP | local experts/rank | b1 | b2 | b4 |
 |---|----|:------------------:|:---:|:---:|:---:|
-| gpt-oss-20b | ep2 | 16 | grouped +78% | — | +41% |
-| gpt-oss-20b | ep8 | 4 | grouped +34% | +34% | +31% |
-| Qwen3-30B | ep2 | 64 | grouped +310% | — | +145% |
-| Qwen3.5-35B | ep2 | 128 | — | — | grouped +137% |
+| gpt-oss-20b | `ep2` | 16 | grouped +78% | — | +41% |
+| gpt-oss-20b | `ep8` | 4 | grouped +34% | +34% | +31% |
+| Qwen3-30B | `ep2` | 64 | grouped +310% | — | +145% |
+| Qwen3.5-35B | `ep2` | 128 | — | — | grouped +137% |
 
-Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap is smallest at high EP with large batches (+31% at ep8 b4).** The roofline reasoning is in [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
+Local-expert *count* is the primary lever; batch (per-expert M) shrinks the margin. **Rule: keep grouped (the default); at these shapes the loop is never faster, and the gap is smallest at high EP with large batches (+31% at `ep8` b4).** The roofline reasoning is in [GPU Training Theory → Why a small M is slow](../reference/gpu-training-theory.md#why-a-small-m-is-slow).
 
 The 288-expert rosters (GLM-5.3-Flash, Step-3.7-Flash; top-8) sit inside the grouped-wins regime too, between the measured anchors: `ep8` holds 36 local experts at per-expert M = 1,820 (8192 tokens/rank) to 7,282 (32k), `ep16` 18 at 3,641 (8192 — the cross-node ceiling). Derived from the table, not measured. Nemotron 3.5 Super (512 experts, top-22, `ep8`) holds 64 local experts at per-expert M = 2,816 (8192) to 11,264 (32k), derived the same way, and its gateless experts take two grouped calls per layer instead of three; measured at 8192 tokens on one layer of the release, its backward takes 14 ms grouped against 2.0 s for the loop.
 
-**2. Square experts with K not tile-aligned.** If `hidden == intermediate` (no 4× expansion) and `hidden % 128 != 0`, the CUTLASS K-tail epilogue runs on both projections; the loop picks a per-matmul tile and absorbs the misalignment.
-
-**3. Hardware ↔ CUTLASS tuning gap.** `F.grouped_mm` selects kernels by SM major version, so a kernel tuned for one SKU may underuse occupancy/L2 on a sibling. The loop is more forgiving (cuBLAS/CUTLASS picks per-shape). Only visible in measurement.
-
-**Diagnose with power, not `nvidia-smi` util %.** Util % means "any SM had work," not "SMs did arithmetic." Power draw is honest: near TDP = compute-bound (kernel good); ~50–70% TDP at high util = memory/launch-bound; <40% TDP at high util = wrong kernel for this shape/SKU. A/B one config flip over 10 steady-state steps and sample `nvidia-smi --query-gpu=power.draw`.
+**Diagnose with power, utilization and the SM clock together.** `utilization.gpu` is the share of time during which "one or more kernels was executing", so a kernel waiting on memory or on another GPU counts as busy. On one B300 a loop over 128 experts reads 59% utilization at 34% of the 1,100 W board power limit, and memory- and compute-bound loops read 100% at 80 to 99% of it; only the compute-bound loop runs its SM clock below the 2,032 MHz maximum, held down by the power limit. On a whole step these readings rule out an overhead-bound step and a waiting rank, and they do not separate a compute-bound step from a memory-bound one ([GPU Training Theory → Power and utilization](../reference/gpu-training-theory.md#power-and-utilization)). A/B one config flip over 10 steady-state steps and sample `nvidia-smi --query-gpu=power.draw,power.limit,utilization.gpu,clocks.current.sm,clocks_event_reasons.sw_power_cap --format=csv -l 1`.
 
 ## The duplicate-index gather trap
 
@@ -65,19 +61,19 @@ On that gpt-oss-20b EP step the atomic-free path runs ≈5× faster than the def
 
 ### The atomic-free gather-reduce permute
 
-The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `halo/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at EP8) measures the scatter-back `index_add_` at ~32% of the step, 4.3 ms per call.
+The token permute/unpermute (`MoEGatherPermute`, `MoEWeightedUnpermute`, `halo/kernels/moe_permute.py`) is the larger lever for high-top_k MoE. Qwen3.6 (top-8, 256 experts, 32 local/rank at `ep8`) measures the scatter-back `index_add_` at ~32% of the step, 4.3 ms per call.
 
 The permute expresses both directions with no atomics via a precomputed `inv_map` (`[recv_N, top_k]` of sorted positions feeding each recv token, sentinel-padded, written by the routing sort's placement kernel on CUDA and by `build_inv_map` off CUDA), turning the scatter into gather + reduction. It matches `index_add_` to rounding, not bit for bit: the kernels accumulate in fp32, and the unpermute skips the bf16 rounding of each weighted row (checked fwd+bwd against a float64 `index_add_`).
 
-It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`_sort_tokens_for_grouped_mm`; the EP warm-up compiles it with the routing sort's kernels). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b EP8: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b EP8 runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b EP8 runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b EP8; the permute alone is +24% there.
+It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`_sort_tokens_for_grouped_mm`; the EP warm-up compiles it with the routing sort's kernels). Even where a received token lands on few local rows (gpt-oss top-4 at `ep8`), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b `ep8`: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b `ep8` runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b `ep8` runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b `ep8`; the permute alone is +24% there.
 
 The per-expert loop (`use_grouped_gemm: false`) does not use it: it gathers each expert's tokens with `index_select` and scatters the weighted outputs back with a bf16 atomic `index_add_`. At `ep_size > 1` it sizes each expert's slot read off the dispatch's receive count, so it does not sync the host either.
 
 Both reductions run as one Triton kernel (`halo/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernel (`GluCombine.packed` in `halo/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
 
-The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free permute in its padded-gather form (the `halo_padded_gather` baseline below), on Qwen3.6-35B-A3B at EP=8; compare within it only (tuned absolute figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
+The Qwen3.6 table is a same-session A/B of `index_add_` against the atomic-free permute in its padded-gather form (the `halo_padded_gather` baseline below), on Qwen3.6-35B-A3B at `ep8`; compare within it only (tuned absolute figures: [Throughput Benchmarks](throughput-benchmarks.md#ep-scaling-seq-4096)).
 
-| Qwen3.6-35b EP=8 | `index_add_` | atomic-free (padded gather) | win |
+| Qwen3.6-35b `ep8` | `index_add_` | atomic-free (padded gather) | win |
 |---|---|---|---|
 | seq 4096  | 2,736 tok/s/GPU | 3,231 | +18% |
 | seq 16384 | 2,465 tok/s/GPU | 4,056 | +65% |
@@ -86,19 +82,19 @@ The win grows with sequence length (larger recv buffers → worse contention).
 
 The fused kernels against that padded-gather permute (a separate routing-weight multiply, a padded `[N, top_k, H]` gather-sum each way, the same sort), on the Gemma 4 26B-A4B expert block (hidden 2816, intermediate 704, 128 experts, top-8), fwd+bwd on one B300 (Blackwell image): 2.19 / 3.42 / 10.87 ms at 2k / 8k / 32k tokens, against 2.41 / 4.95 / 16.51 ms, and peak transient memory of 3.7 against 6.5 GiB at 32k (`tests/gpu/profiling/benchmark_moe_block.py`, rows `halo` and `halo_padded_gather`).
 
-End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip run Gemma 4 26B-A4B full SFT at 2,048 tokens at 11,152 cluster tok/s against 8,984 without them (1.24×, most of it from the optimizer; 2× B300, EP2, peak memory unchanged); at 4,096 tokens gpt-oss-20b gains 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
+End to end, these kernels together with the fused GLU, torch's fused RMSNorm on four families and AdamWBF16's folded gradient clip run Gemma 4 26B-A4B full SFT at 2,048 tokens at 11,152 cluster tok/s against 8,984 without them (1.24×, most of it from the optimizer; 2× B300, `ep2`, peak memory unchanged); at 4,096 tokens gpt-oss-20b gains 1.25×, Qwen3-30B-A3B 1.12×, GLM-4.7-Flash 1.09×.
 
 ## Throughput tuning beyond the kernel
 
-The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, permute, attention, optimizer). The general sequence/batch playbook is in [Throughput Benchmarks](throughput-benchmarks.md#maximizing-throughput-sequence--batch); the kernel-side levers, measured on 8× B300 (SM 10.3, PyTorch 2.11+cu130, FA4, bf16):
+The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, permute, attention, optimizer). The general sequence/batch playbook is in [Throughput Benchmarks](throughput-benchmarks.md#maximizing-throughput-sequence--batch); the kernel-side levers, measured on 8× B300 (compute capability 10.3, PyTorch 2.11+cu130, FA4, bf16):
 
-1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and reaches higher achieved TFLOPS, at a high memory cost; use EP only when FSDP OOMs ([Maximizing achieved TFLOPS](throughput-benchmarks.md#maximizing-achieved-tflops)).
-2. **Smallest EP degree that fits the experts.** Fewer ranks = larger per-rank GEMMs and less wait at the combine ([the split](throughput-benchmarks.md#where-the-ep-steps-time-goes)).
-3. **GC off when the batch fits** ([the feature A/B](throughput-benchmarks.md#where-the-ep-steps-time-goes)).
-4. **Atomic-free expert permute** (above) — always on the grouped path; +18% (seq 4k) to +65% (seq 16k) on qwen3.6 EP8, +24% on gpt-oss-20b EP8.
+1. **Pick parallelism by fit.** If it fits FSDP2, FSDP has no all-to-all and runs more tokens/s per GPU, at a high memory cost; use EP only when FSDP OOMs ([Maximizing achieved TFLOPS](throughput-benchmarks.md#maximizing-achieved-tflops)).
+2. **Smallest EP degree that fits the experts.** Fewer ranks = more local experts per grouped launch and less wait at the combine ([the split](throughput-benchmarks.md#where-the-ep-steps-time-goes)).
+3. **GC off when the batch fits.** At equal batch it runs 1.29× faster (gpt-oss-20b `ep8` b4, [the feature A/B](throughput-benchmarks.md#where-the-ep-steps-time-goes)); the largest batch that fits with GC on can beat the largest that fits without it ([GPU Training Theory → Gradient checkpointing](../reference/gpu-training-theory.md#gradient-checkpointing)).
+4. **Atomic-free expert permute** (above) — always on the grouped path; +18% (seq 4k) to +65% (seq 16k) on qwen3.6 `ep8`, +24% on gpt-oss-20b `ep8`.
 5. **Leave `lowp_precision` off for throughput**; Halo's fp8/fp4 paths are for QAT. See [Low-Precision Kernels](low-precision-moe-kernels.md).
 
-Compute–comm overlap has little left to hide, since dispatch is 9–13% of the EP phases. One narrow form ships opt-in: `HALO_EP_SHARED_OVERLAP=1` runs the shared-expert FFN on a side stream concurrent with the dispatch all-to-all, on the families that have one (see [DeepEP](../infrastructure/deepep.md)). The larger term at ep8 is the wait for the busiest rank, which routing balance acts on and overlap does not.
+Compute–comm overlap has little left to hide, since dispatch is 9–13% of the EP phases. One narrow form ships opt-in: `HALO_EP_SHARED_OVERLAP=1` runs the shared-expert FFN on a side stream concurrent with the dispatch all-to-all, on the families that have one (see [DeepEP](../infrastructure/deepep.md)). The larger term at `ep8` is the wait for the busiest rank, which routing balance acts on and overlap does not.
 
 ## Low precision
 
@@ -118,7 +114,7 @@ An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 
 
 ### Tile selection
 
-On SM 9.x and 10.x, torch's bf16 grouped GEMM runs a CUTLASS kernel per operand layout (the forward, the input gradient and the weight gradient each have their own) at one of two tiles (`aten/src/ATen/native/cuda/GroupMM.cu`): the small one where the rows per group or the output width is 128 or fewer, the large one past both (on SM10x a 1-SM 128×256 tile and a 2-SM 256×256 one, on SM90 a ping-pong 64×128 and a cooperative 128×256). For the forward and the input gradient the rows per group are the received rows over the local expert count (their mean, not any one expert's), which change with every receive: under EP with the routing, at `ep_size` 1 with the micro-batch's token count. The weight gradient is ragged along its contraction, so its tile follows the weight's shape alone. Other dtypes and other architectures take a per-group matmul loop that reads the offsets back to the host. CUDA loads a kernel on its first launch, so the EP warm-up runs the expert FFN on both sides of the switch before the first dispatch ([Expert Parallelism](../parallelism/expert-parallelism.md#kernels)).
+On compute capability 9.x and 10.x, torch's bf16 grouped GEMM runs a CUTLASS kernel per operand layout (the forward, the input gradient and the weight gradient each have their own) at one of two tiles (`aten/src/ATen/native/cuda/GroupMM.cu`): the small one where the rows per group or the output width is 128 or fewer, the large one past both (on SM10x a 1-SM 128×256 tile and a 2-SM 256×256 one, on SM90 a ping-pong 64×128 and a cooperative 128×256). For the forward and the input gradient the rows per group are the received rows over the local expert count (their mean, not any one expert's), which change with every receive: under EP with the routing, at `ep_size` 1 with the micro-batch's token count. The weight gradient is ragged along its contraction, so its tile follows the weight's shape alone. Other dtypes and other architectures take a per-group matmul loop that reads the offsets back to the host. CUDA loads a kernel on its first launch, so the EP warm-up runs the expert FFN on both sides of the switch before the first dispatch ([Expert Parallelism](../parallelism/expert-parallelism.md#kernels)).
 
 ### Detection and disabling
 
@@ -152,9 +148,9 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
     --expert_parallel_size=1 --use_grouped_gemm=true --fp32_non_ep_params=false
 ```
 
-The EP layer keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: a MoE whose family has an EP layer class, with `use_grouped_gemm: true` under any `accelerate launch`, is rejected at load (the EP layers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.
+The EP layer keeps the packed-3D layout used at `ep_size > 1`, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: a MoE whose family has an EP layer class, with `use_grouped_gemm: true` under any `accelerate launch`, is rejected at load (the EP layers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.
 
-Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under the EP layer (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no EP layer is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp--pp-behavior).
+Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under the EP layer (`ep1` included), which replaces the very module the swap targets, and is kept off wherever no EP layer is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp--pp-behavior).
 
 ## Weight layout
 

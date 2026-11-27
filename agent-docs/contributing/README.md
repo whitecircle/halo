@@ -86,10 +86,14 @@ Each server tier runs **one pass per served model**: the tests broadcast the tra
 the served model and assert the served policy moved, so server and trainer hold the same checkpoint.
 `SERVER_TIER` defaults to `not moe` (serve `Qwen/Qwen3-0.6B`); the MoE passes restart the vLLM server on
 `Qwen/Qwen3-30B-A3B-Instruct-2507` for `SERVER_TIER='moe and not gptoss'` and on
-`unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE tests are gpt-oss only
-(`SERVER_TIER=moe`). The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
+`unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE pass serves gpt-oss alone
+(`SERVER_TIER=moe`). On either engine the `moe` marker also selects the per-family rows of
+`trainers/grpo/test_weight_push_exact.py`, which skip unless `HALO_TEST_PUSH_EXACT_FRESH` is set and the
+server serves the row's checkpoint. The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
 per-effort CoT budget, which draws a 400 without a reasoning parser (the target's health guard prints
-the compose line).
+the compose line). The env-GRPO rows on `Qwen/Qwen3-30B-A3B-Instruct-2507` need a server launched without
+it: that checkpoint does not think, and on vLLM 0.32.0 the `qwen3` parser returns its plain answer after a
+tool result as reasoning, so the turn comes back empty and `test_env_grpo_e2e.py` fails on tied rewards.
 
 The env-GRPO rows train on a native tool call, so the vLLM server also needs the served family's tool
 parser ([Tool parsers are per family](../infrastructure/rollout-servers.md#running-it)). The compose
@@ -99,8 +103,8 @@ compose line), and they replace the `qwen3` reasoning parser. A per-family pass
 (`HALO_TEST_ENV_GRPO_MODEL`) takes its family's row of that table. Under a wrong parser every call stays
 text, so each env-GRPO row on the draw task (all but the one-process `react_math` rows, which send no tool schema)
 raises by its second round.
-SGLang's default parser (`auto`) reads it off the chat template where it can and disables it elsewhere: the
-Qwen3-30B pass needs `SGLANG_TOOL_PARSER=qwen25`
+SGLang's default parser (`auto`) reads it off the chat template where it can and disables it elsewhere: a per-family
+Qwen3-30B pass (`HALO_TEST_ENV_GRPO_SGLANG_MODEL`) needs `SGLANG_TOOL_PARSER=qwen25`
 ([Tool parsers on SGLang](../infrastructure/rollout-servers.md#tool-parsers-on-sglang)).
 
 ```bash
@@ -139,7 +143,8 @@ leaves `checkpoints/`, where every example writes its run.
 ## AI-assisted contributions
 
 AI-assisted contributions are welcome on the terms in [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-one-rule);
-`CLAUDE.md` and `AGENTS.md` bind agents and humans alike.
+`CLAUDE.md` and `AGENTS.md` bind agents and humans alike. PR and issue text, commit messages and
+release notes follow the `voice` skill, `skills/voice/SKILL.md`.
 
 ## Tests
 
@@ -156,6 +161,11 @@ are enforced by `tests/cpu/conventions/`.
   other entry, a hand-listed runner or a printed pass/fail summary.
 - **The `cpu` marker is applied by path.** `tests/conftest.py` marks every item under `tests/cpu/`, so no
   file re-declares it in `pytestmark`.
+- **A sweep over files, recipes or registry rows is one test.** It loops over the rows and wraps each one in
+  `subtests.test(<row id>)`, pytest's built-in fixture, so a failing row is reported by its id with its
+  assertion and the other rows still run. Assert that the row list is not empty, in the sweep or in one guard
+  test of the module that reads the same row source: an empty loop passes. One parametrized case per row is
+  for rows that build a model, run a step or start a process.
 - **Imports resolve from the image, not from `sys.path` surgery.** `PYTHONPATH=/workspace` is baked in
   and `tests/conftest.py` puts the repo root on the path, so `from halo...` / `from tests.common...` work
   under `pytest` and a standalone `torchrun`. A tool's driver lives in `halo/` and a test imports it from
@@ -204,6 +214,17 @@ are enforced by `tests/cpu/conventions/`.
   weights sit on their device: transformers 5 leaves a remote-code family's rotary table as uninitialized memory,
   and a bare oracle reads that noise as the parallel run's error. `tests/cpu/model_loading/test_load_finalization.py`
   fails a load by a family's own `trust_remote_code` in a module that runs a forward without it.
+- **A bf16 MoE oracle compares only rows whose routing outlasts kernel noise.** Where a router's top-k
+  margin sits inside bf16 noise, the trainer and the oracle can pick different experts, and later layers
+  then move far past any tolerance. `routing_clear_rows` (`tests/common/offline_grpo.py`) clears a row
+  where a bf16 oracle holds fp32's choices and every router's fp32 margin beats twice the largest
+  bf16-vs-fp32 logit difference at each position a scored log-prob reads. That bar covers only the
+  oracle's own kernels, and the trainer's go unmeasured, so a comparison takes only rows whose margin is
+  also `ROUTING_HEADROOM` times that difference. The KL batch takes two of them: rows with twice that
+  headroom first, then the most completion tokens. Scan the policy the check compares: doubling a tied head moves the routers. The
+  offline-GRPO KL suites train beside a random-word pool so enough rows qualify, and fail
+  `kl_rows_clear_routing_noise` (the KL batch) or `reference_rows_clear_routing_noise` (the CP suite's
+  unsharded reference rows) when too few do.
 - **Deterministic, seeded data.** GPU tests generate synthetic problems from a fixed seed; only rank 0
   prints. A seed alone does not fix a chat-templated batch, because `strftime_now` stamps the live date
   (gpt-oss's harmony system message), so build fixed batches through
@@ -283,7 +304,7 @@ the script:
 | `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of that e2e: MoE rows `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP), dense rows `Qwen/Qwen3-0.6B` (TP, FSDP2-DP, one-process); the server must serve the same one |
 | `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and steps (default `2`; a `--prefetch-depth N` row runs `N + 2`: its `N` cold rounds, then two that pop a prefetched one) of the two-rank vLLM rows of the Environmental-GRPO e2e (`tests/common/env_grpo_e2e.py`) |
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` / `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoints of the SGLang rows and of the four-rank vLLM rows (EP+ETP, EP+TP, ep4) of `trainers/grpo/test_env_grpo_e2e.py`, both default `unsloth/gpt-oss-20b-BF16` |
-| `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` / `HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE` | Per-family overrides for that e2e: the policy's `attn_implementation` (unset: auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset: the attention projections read off the index; needed where they do not end in `_proj`, such as Ling's `query_key_value,dense`) The last (default on) is off for Step-3.7, whose `auto_map` is for the server: its trainer takes the native class. |
+| `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` / `HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE` | Per-family overrides for that e2e: the policy's `attn_implementation` (unset: auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset: the attention projections read off the index; needed where they do not end in `_proj`, such as Ling's `query_key_value,dense`). `HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE` defaults on; set it to `0` for Step-3.7, whose `auto_map` is for the server: its trainer takes the native class. |
 | `HALO_TEST_PUSH_EXACT_FRESH` / `HALO_TEST_PUSH_EXACT_MODEL` | `trainers/grpo/test_weight_push_exact.py`: the first states the server has taken no other suite's push, without which the suite skips, since a server another push moved cannot be told from one this push moved; the second is a local path standing in for the row's checkpoint on both sides (the script header has the server launch) |
 | `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` / `HALO_TEST_VLLM_SERVER_GPU` | Checkpoint (default `Qwen/Qwen3-0.6B`), connect/sync/disconnect cycles (default `12`, enough for a stranded communicator to overshoot the 1 GiB growth budget) and the server's `nvidia-smi` index (unset: every GPU the trainer does not own) for `trainers/grpo/test_weight_transfer_reinit.py --backend vllm`; the pool-reconnect suite reads the same checkpoint knob |
 | `HALO_TEST_SGLANG_REINIT_MODEL` / `HALO_TEST_SGLANG_REINIT_CYCLES` / `HALO_TEST_SGLANG_SERVER_GPU` | The same three for `--backend sglang`, against `SGLANG_SERVER_URL` |
@@ -374,8 +395,8 @@ measured with, and the metrics of at least five repeats. `make bench BAND=1` hol
   S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
 - **The corpus.** Every row trains on `create_benchmark_dataset` (`tests/common/datasets.py`): seeded
   uniform token ids no model can fit, so an MoE row's routing, and the hottest EP rank's step time and
-  peak, stay put (EP8, EP8 × TP2 and EP4 × ETP2 repeat within 1% in throughput and 0.02 GB in peak; on a
-  corpus the model fits, EP8 moved 4% and 1.2 GB between runs).
+  peak, stay put (the five baseline repeats of EP8, EP8 × TP2 and EP4 × ETP2 spread at most 2% in
+  throughput and 0.04 GiB in peak).
 - **A quiet host.** A row sharing the host with another job's CPU or network load runs 4–17% slow;
   recording refuses that repeat and a band run that meets one fails.
 - **Flags.** Each training line carries its rank's mean and median step time (`mean_step_time_ms`,
@@ -416,6 +437,7 @@ python -m tests.common.goldens.<name> --regen  # rewrites it from today's code
 | `weight_sync_wire` | The vLLM weight-transfer bootstrap: the rendezvous `TCPStore` arguments, its one write (the pickled `ncclUniqueId` under `broadcast_from/0/0`), the id the communicator initializes with, and the class's module, qualname and fields | `tests/cpu/weight_sync/test_wire_pins.py` |
 | `weight_sync_transcript` | What each engine's client sends through its public lifecycle in twelve scenarios per engine (dense and MoE syncs, formation and finish failures, aborts before and mid-stream, an unusable client at exit): every request with its route, body, timeout and retry policy, what went on the NCCL wire, and the at-exit hooks left | `tests/cpu/weight_sync/test_request_transcript.py` |
 | `registry_order` | What each toolkit registry holds, in its own order: the EP layer classes and their claims, the CP, PP and head claims, the weight-sync clients, the Liger and MoE family specs, the sequence-classification heads, the named optimizers and the environment types | `tests/cpu/conventions/test_registry_order.py` |
+| `token_mix_stream` | The source and window each of the first 12,288 samples of a fixed weighted mix over two task files of the recorded 4-byte datatrove folder reads, and a digest of their rows | `tests/cpu/data/test_token_mix.py` |
 
 The grid (`tests/common/goldens/shape_grid.py`) is every shape `ParallelismConfig` accepts with a pipeline
 stage of at most 32 ranks, at every NVLink domain dividing the stage, plus the same sweep at 64, 72, 128,
@@ -439,6 +461,12 @@ per shape plus the full record of a readable subset, so a failure reads as a dif
   the class, and move the shim with it.
 - **`weight_sync_transcript`.** The clients run against `FakeVLLMServer` and `FakeSGLangServer`
   (`tests/common/fake_engines.py`) with NCCL and CUDA faked on the CPU.
+- **`token_mix_stream`.** A checkpoint resumes by sample index, so a change to the order resumes runs onto other
+  rows and comes with a raised `ORDER_VERSION` (`halo/data/sources/token_mix.py`). Its two sources are the two task
+  files of the 4-byte source in `tests/common/datatrove_shards.json`, since a mix holds one token width. That record
+  is the files datatrove 0.10.1 wrote for two sources (2- and 4-byte ids) beside each document tokenized apart from
+  datatrove. No image ships datatrove, so that record is re-written by hand with it
+  importable: `python -m tests.common.datatrove_shards --write`.
 - **`registry_order`.** The check renders in a fresh interpreter, so the order is the one the code and
   the generator's imports produce, and classes are recorded by name, so a move that keeps each name and
   its order leaves the file unchanged.
@@ -507,7 +535,7 @@ a change that adds, drops or renames a family still compares the rest against it
 out is logged by the tree whose roster lacks it and listed under `skipped`
 (`tests/cpu/conventions/test_harness_family_rosters.py`). Every verdict also fails on an unexpected raise.
 The EP, CP and efficiency harnesses run a negative control: the head tree reruns one case with a
-deliberate perturbation, and the verdict fails when that record matches its base or raised.
+planted perturbation, and the verdict fails when that record matches its base or raised.
 
 - **Checkpoint artifacts** (`make verify-artifacts`, `tests/common/equivalence/checkpoint_artifacts.py`)
   saves a tiny model of every family (the dense roster, every EP family and its multimodal wrappers) at
@@ -564,7 +592,7 @@ link, anchor and code-reference check that blocks a merge
 ([Continuous Integration → Hosted tier](../infrastructure/ci.md#hosted-tier)). Each figure under
 `agent-docs/assets/` is rendered from the HTML page beside it, which holds its data and draws it in the
 `visuals` skill's style (`skills/visuals/SKILL.md`). Every page links the skill's shared kit
-(`skills/visuals/kit/`: the colour tokens, type scale and page skeleton, and the element, arrow and axis
+(`skills/visuals/kit/`: the color tokens, type scale and page skeleton, and the element, arrow and axis
 helpers), so a change there reaches every figure on the next render. Edit the page or the kit, run
 `make diagrams` on a host with Chrome, the skill's fonts and OptiPNG, and commit the page, the PNG,
 `agent-docs/assets/figures.sha256` and any alt-text change together. Every render is optimized
@@ -595,7 +623,7 @@ too, with the reason.
 
 ## Where to look next
 
-- [Development Environment](development-environment.md) — host `.venv`, dev container, env vars
-- [Trainer Architecture](../reference/trainer-architecture.md) — how trainers compose with the mixin
+- [Development Environment](development-environment.md): host `.venv`, dev container, env vars
+- [Trainer Architecture](../reference/trainer-architecture.md): how trainers compose with the mixin
 - [Troubleshooting](../reference/troubleshooting.md) · [Debugging](../reference/debugging.md)
 - [Adding a New Model](../models/adding-a-model.md)

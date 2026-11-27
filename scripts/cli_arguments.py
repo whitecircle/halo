@@ -63,6 +63,20 @@ def add_hub_source_args(
     return parser
 
 
+def add_base_revision_arg(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    """``--base_revision`` for a tool reading the base an adapter names."""
+    parser.add_argument(
+        "--base_revision",
+        type=str,
+        default=None,
+        help="Hub revision to read the base at, in place of the commit adapter_config.json records. For an adapter "
+        "that records none (stock PEFT writes none unless asked) whose run did not train on the base's default "
+        "branch; ignored for a local base. Give a commit hash: a branch name is resolved again by each read of the "
+        "base.",
+    )
+    return parser
+
+
 def add_trust_remote_code_arg(
     parser: argparse.ArgumentParser, *, default: bool | None = True
 ) -> argparse.ArgumentParser:

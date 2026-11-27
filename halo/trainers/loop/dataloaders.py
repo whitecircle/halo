@@ -293,10 +293,13 @@ class DataParallelLoaderMixin:
 
     def _get_train_sampler(self, *args, **kwargs):
         """An empty generator slot shuffles off the rank's own torch RNG, which pipeline stages and EP ranks consume
-        differently, and accelerate's seedable sampler never wraps HF's group-by-length sampler."""
+        differently, and accelerate's seedable sampler never wraps HF's group-by-length sampler. Each epoch's stamp
+        reseeds it with the seed plus the epoch: a resumed process would otherwise draw the first epoch's order."""
         sampler = super()._get_train_sampler(*args, **kwargs)
         if getattr(sampler, "generator", _UNSET) is None:
-            sampler.generator = torch.Generator().manual_seed(resolve_data_seed(self.args))
+            seed = resolve_data_seed(self.args)
+            sampler.generator = torch.Generator().manual_seed(seed)
+            sampler.set_epoch = lambda epoch: sampler.generator.manual_seed(seed + epoch)
         return sampler
 
     def _prepare_dataloader(

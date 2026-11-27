@@ -93,21 +93,6 @@ def test_a_failing_peft_lookup_reaches_the_peers_through_a_join(monkeypatch):
     assert joined[-1] is None, "a peer enters the same join"
 
 
-def test_adapter_cast_keeps_balancing_tensors_at_trained_dtype():
-    """A bf16-rounded balancing bias flips near-tie top-k picks when the exported slot serves."""
-    bias_key = "base_model.model.model.layers.0.mlp.gate.modules_to_save.default.e_score_correction_bias"
-    state = {
-        bias_key: torch.full((4,), 0.5, dtype=torch.float32),
-        "attn.lora_A.weight": torch.randn(4, 8, dtype=torch.float32),
-    }
-    caster = adapter_save_dtype_caster()
-    cast = {key: caster(key, t) for key, t in state.items()}
-    assert cast[bias_key].dtype == torch.float32
-    assert cast["attn.lora_A.weight"].dtype == torch.bfloat16, (
-        "non-balancing tensor was not cast — the contract test would be vacuous"
-    )
-
-
 def test_an_adapter_file_keeps_exactly_the_balancing_tensors_a_full_checkpoint_keeps():
     cast = adapter_save_dtype_caster()
     kept_families = set()

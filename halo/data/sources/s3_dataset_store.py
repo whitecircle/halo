@@ -214,8 +214,7 @@ def _promote_pushed_dataset(client: S3Client, push_key: str, full_key: str) -> N
         _copy_one(rel)
     if _DATASET_DICT_GATE in gate_set:
         _copy_one(_DATASET_DICT_GATE)
-    for rel in sorted(existing - set(new_files)):
-        client.boto_client.delete_object(Bucket=client.bucket, Key=f"{dest_prefix}{rel}")
+    client.delete_keys([f"{dest_prefix}{rel}" for rel in sorted(existing - set(new_files))])
     _delete_pending_pushes(client, full_key)
 
 

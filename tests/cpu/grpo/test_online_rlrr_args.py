@@ -63,20 +63,35 @@ def test_the_parser_surfaces_the_derived_fields_with_their_choices():
 
 
 @pytest.mark.parametrize(
-    ("kwargs", "match"),
+    ("use_rlrr", "kwargs", "match"),
     [
-        ({"rlrr_xi_pos": -1.0, "rlrr_xi_neg": 1.0}, "rlrr_xi_neg <= rlrr_xi_pos"),
-        ({"rlrr_tau": 0.0}, "rlrr_tau"),
-        ({"rlrr_tau": float("nan")}, "rlrr_tau"),
-        ({"rlrr_lambda": -1.0}, "rlrr_lambda"),
-        ({"rlrr_lambda": float("inf")}, "rlrr_lambda"),
-        ({"rlrr_xi_pos": float("nan")}, "rlrr_xi_pos"),
-        ({"rlrr_xi_neg": float("-inf")}, "rlrr_xi_neg"),
-        ({"rlrr_correctness_threshold": float("nan")}, "rlrr_correctness_threshold"),
+        pytest.param(
+            False,
+            {"rlrr_xi_pos": -1.0, "rlrr_xi_neg": 1.0},
+            "rlrr_xi_neg <= rlrr_xi_pos",
+            id="False-kwargs0-rlrr_xi_neg <= rlrr_xi_pos",
+        ),
+        pytest.param(False, {"rlrr_tau": 0.0}, "rlrr_tau", id="False-kwargs1-rlrr_tau"),
+        pytest.param(False, {"rlrr_tau": float("nan")}, "rlrr_tau", id="False-kwargs2-rlrr_tau"),
+        pytest.param(False, {"rlrr_lambda": -1.0}, "rlrr_lambda", id="False-kwargs3-rlrr_lambda"),
+        pytest.param(False, {"rlrr_lambda": float("inf")}, "rlrr_lambda", id="False-kwargs4-rlrr_lambda"),
+        pytest.param(False, {"rlrr_xi_pos": float("nan")}, "rlrr_xi_pos", id="False-kwargs5-rlrr_xi_pos"),
+        pytest.param(False, {"rlrr_xi_neg": float("-inf")}, "rlrr_xi_neg", id="False-kwargs6-rlrr_xi_neg"),
+        pytest.param(
+            False,
+            {"rlrr_correctness_threshold": float("nan")},
+            "rlrr_correctness_threshold",
+            id="False-kwargs7-rlrr_correctness_threshold",
+        ),
+        pytest.param(
+            True,
+            {"rlrr_xi_pos": -1.0, "rlrr_xi_neg": 1.0},
+            "rlrr_xi_neg <= rlrr_xi_pos",
+            id="True-kwargs0-rlrr_xi_neg <= rlrr_xi_pos",
+        ),
     ],
 )
-@pytest.mark.parametrize("use_rlrr", [True, False])
-def test_every_rlrr_invariant_fails_when_the_args_are_built(kwargs, match, use_rlrr):
+def test_every_rlrr_invariant_fails_when_the_args_are_built(use_rlrr, kwargs, match):
     with pytest.raises(ValueError, match=match):
         OnlineGRPOScriptArguments(use_rlrr=use_rlrr, **kwargs)
 

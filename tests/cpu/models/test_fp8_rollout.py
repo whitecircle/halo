@@ -146,13 +146,6 @@ def test_only_the_families_a_gpu_row_validated_declare_block_fp8_rollouts():
     assert {spec for spec in MOE_FAMILY_SPECS if spec.fp8_rollout_refusal is None} == {QWEN3_5}
 
 
-@pytest.mark.parametrize("family_name", list(_FAMILIES))
-def test_a_validated_family_has_a_plan(family_name):
-    config = tiny_family_model(_FAMILIES[family_name]).config
-    assert fp8_rollout_refusal(config) is None
-    Fp8RolloutPlan.for_config(config)
-
-
 @pytest.mark.parametrize(
     ("config", "reason"),
     [

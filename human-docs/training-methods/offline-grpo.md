@@ -19,7 +19,12 @@ trains nothing).
 `completions` holds one message list per completion (usually 4–16) and `rewards` one float per
 completion, in the same order. The method is text-only. No dataset yet?
 `halo run inference/reward-model/rejection-sample --output_format offline_grpo` generates candidates
-against a served model, scores them with a reward model, and writes this shape.
+against a served model, scores them with a reward model, and writes this shape. Rows with completions
+but no rewards: `halo run score-offline-grpo <yaml> --input rows.jsonl --output scored.jsonl --answer_field answer`
+scores them with the YAML's `rewards` list ([GRPO Rewards](rewards.md)). `--answer_field` names the
+ground-truth column; without it an `accuracy` term is refused before anything is sent, and a judge
+grades with no reference. The command does not resume, so a rerun scores every row again
+([Offline GRPO scoring](../../agent-docs/training-methods/grpo/rewards/whitecircle.md#offline-grpo) ↗).
 
 ## Run
 
@@ -27,9 +32,11 @@ against a served model, scores them with a reward model, and writes this shape.
 halo launch grpo/offline examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml -n 8
 ```
 
-Nothing else has to run, so the families online RL refuses for weight sync still train here (on
-Qwen3.8-Flash-Next this path is CPU-tested only). `examples/grpo/offline/` also holds the GPT-OSS,
-Gemma 4 and Nemotron versions. Test a config first with `--max_steps=10 --save_strategy=no` on a slice of the data.
+Point the recipe's `dataset:` at your file before you launch; it holds a placeholder path. Nothing else
+has to run, so the families online RL refuses for weight sync still train here. On Qwen3.8-Flash-Next,
+offline GRPO is CPU-tested only. `examples/grpo/offline/` also holds the GPT-OSS, Gemma 4 and Nemotron
+versions, with the same placeholder. Test a config first with `--max_steps=10 --save_strategy=no` on a
+slice of the data.
 
 Context and pipeline parallelism take full fine-tuning only, and pipeline parallelism needs
 `max_prompt_length` and `max_completion_length` set.
@@ -47,8 +54,8 @@ Context and pipeline parallelism take full fine-tuning only, and pipeline parall
 - `positive/logps_mean` should hold steady or rise, and `negative/logps_mean` fall.
 - `positive/pg_objective_mean` falling through training means the policy drifted from the distribution
   the data was collected under: set `kl_beta: 0.05` or lower the learning rate.
-- A loss that goes NaN comes from low-probability tokens on negative-advantage rows: tighten
-  `initial_min_log_prob` and set `max_grad_norm: 1.0`.
+- A loss that goes NaN usually comes from low-probability tokens on negative-advantage rows: raise
+  `min_log_prob` toward 0 (default `-3.0`) or lower `max_grad_norm` below its `1.0` default.
 
 Every knob, the advantage formulas and the reference-model rules:
 [Offline GRPO reference](../../agent-docs/training-methods/grpo/offline.md) ↗.

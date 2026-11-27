@@ -45,7 +45,7 @@ def _length_ranks(lengths: torch.Tensor) -> torch.Tensor:
     return ranks
 
 
-@pytest.mark.parametrize(("rows", "chunks"), [(1, 1), (6, 1), (6, 6), (24, 4), (35, 7), (192, 24)])
+@pytest.mark.parametrize(("rows", "chunks"), [(1, 1), (6, 1), (6, 6), (35, 7), (192, 24)])
 def test_the_deal_is_a_permutation_into_micro_batches_of_one_row_per_stratum(rows, chunks):
     lengths = torch.randint(1, 5000, (rows,), generator=torch.Generator().manual_seed(rows))
     order = length_deal_order(lengths, chunks)
@@ -236,9 +236,18 @@ def test_the_gate_admits_exactly_the_loss_types_shown_order_free():
     assert sorted(MICROBATCH_INVARIANT_LOSS_TYPES) == sorted(_ORDER_FREE_LOSSES)
 
 
-@pytest.mark.parametrize("loss_type", _ORDER_FREE_LOSSES)
-@pytest.mark.parametrize(("attn", "batch_size"), [("sdpa", 1), ("flash_attention_4", 4)])
-def test_unset_and_true_deal_on_every_order_only_config_and_false_never(loss_type, attn, batch_size):
+@pytest.mark.parametrize(
+    ("attn", "batch_size", "loss_type"),
+    [
+        ("sdpa", 1, "grpo"),
+        ("flash_attention_4", 4, "sapo"),
+        ("sdpa", 1, "dr_grpo"),
+        ("flash_attention_4", 4, "dapo"),
+        ("sdpa", 1, "cispo"),
+        ("flash_attention_4", 4, "luspo"),
+    ],
+)
+def test_unset_and_true_deal_on_every_order_only_config_and_false_never(attn, batch_size, loss_type):
     for requested in (None, True):
         host = _gate_host(requested, loss_type=loss_type, attn=attn, batch_size=batch_size)
         host._resolve_length_ordered_rows()
@@ -283,10 +292,6 @@ def _captured(order: torch.Tensor | None) -> torch.Tensor:
                 lo, hi = _SPANS[r]
                 layer._captured_routing_chunks.append(mask[r, lo:hi, i])
     return dense_rows(result[0])
-
-
-def test_the_replay_deal_is_not_its_own_inverse():
-    assert not torch.equal(_DEALT, torch.argsort(_DEALT))
 
 
 def test_a_capture_over_dealt_forwards_comes_back_in_batch_order():

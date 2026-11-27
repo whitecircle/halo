@@ -179,8 +179,7 @@ def test_every_family_of_the_roster_is_measured(family):
 
 
 @pytest.mark.parametrize("model_type", ["bart", "opt", "biogpt", "gpt_neo", "moshi"])
-@pytest.mark.parametrize("mode", ["packing", "padding_free"])
-def test_a_family_outside_the_table_is_warned_about(model_type, mode):
+def test_a_family_outside_the_table_is_warned_about(model_type):
     with mock.patch.object(collator_rules.logger, "warning") as warning:
         collator_rules._warn_unmeasured_multi_document_family(CONFIG_MAPPING[model_type](), multi_document=True)
     assert warning.call_count == 1

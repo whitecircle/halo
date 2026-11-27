@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """classification.py validates its input columns and labels before the model load; a missing column would otherwise
 surface as a per-row ``KeyError`` deep in the dataset map. A single-label ``-1`` row is refused in a split the
-run reads, and that split is left untokenized when the run never reads it."""
+run reads, and that split is left untokenized when the run never reads it. The map renders each row's level."""
 
 import contextlib
 import sys
@@ -12,14 +12,16 @@ import pytest
 from datasets import Dataset, DatasetDict
 
 from halo.configs.classification import ClassificationConfig
+from tests.common.effort_templates import QWEN3_6_EFFORT_TEMPLATE
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import word_level_tokenizer
 
 _CPU_OK = {"output_dir": "/tmp/test_classification_metric_knobs", "bf16": False, "use_cpu": True}
 _TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 
 
 class _ReachedTokenization(Exception):
-    """Raised by the stubbed map: the labels were accepted, and it carries the splits handed to it."""
+    """Raised by the stubbed map: the labels were accepted, and it carries the splits and ``fn_kwargs`` handed to it."""
 
 
 @pytest.fixture(scope="module")
@@ -113,10 +115,17 @@ def _labeled_split(labels: list | None, rows: int = 2) -> Dataset:
 
 
 def _run_to_tokenization(
-    classification, tmp_path, eval_strategy: str, test_labels: list | None, extra: str = "", train_labels=(0, 1)
-) -> list[str]:
-    """Run ``main()`` over a single-label dataset to its tokenization map; returns the splits it maps. ``None`` labels
-    leave the split without a ``label`` column."""
+    classification,
+    tmp_path,
+    eval_strategy: str,
+    test_labels: list | None,
+    extra: str = "",
+    train_labels=(0, 1),
+    tokenizer=None,
+) -> tuple[list[str], dict]:
+    """Run ``main()`` over a single-label dataset to its tokenization map, ``tokenizer`` being the loaded one; returns
+    the splits it maps and the ``fn_kwargs`` it maps them with. ``None`` labels leave the split without a ``label``
+    column."""
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: stub/qwen3-4b\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
@@ -127,8 +136,8 @@ def _run_to_tokenization(
     runtime = types.SimpleNamespace(parallelism_config=types.SimpleNamespace(), model_source="stub/qwen3-4b")
     model = types.SimpleNamespace(config=types.SimpleNamespace())
 
-    def _map(dataset, *args, **kwargs):
-        raise _ReachedTokenization(sorted(dataset))
+    def _map(dataset, *args, fn_kwargs, **kwargs):
+        raise _ReachedTokenization(sorted(dataset), fn_kwargs)
 
     patches = [
         mock.patch.object(classification, "init_training_script", return_value=runtime),
@@ -136,7 +145,7 @@ def _run_to_tokenization(
             classification, "load_script_datasets", return_value=(DatasetDict({"train": train, "test": test}), False)
         ),
         mock.patch.object(classification, "reject_multimodal_model_without_seq_cls_head"),
-        mock.patch.object(classification, "load_model_and_tokenizer", return_value=(model, object())),
+        mock.patch.object(classification, "load_model_and_tokenizer", return_value=(model, tokenizer or object())),
         mock.patch.object(classification, "apply_max_length", side_effect=lambda config, args, model, tok: tok),
         mock.patch.object(classification, "configure_adapter_training", return_value=None),
         mock.patch.object(classification, "log_model_info"),
@@ -150,7 +159,7 @@ def _run_to_tokenization(
         try:
             classification.main()
         except _ReachedTokenization as reached:
-            return reached.args[0]
+            return reached.args
     raise AssertionError("main() returned without reaching the tokenization map")
 
 
@@ -162,11 +171,11 @@ def test_main_refuses_a_metric_knob_the_dataset_kind_does_not_read(classificatio
 def test_main_refuses_a_class_weight_count_before_the_load(classification, tmp_path):
     with pytest.raises(ValueError, match="class_weights has 3 entries.*num_labels=2"):
         _run_to_tokenization(classification, tmp_path, "no", [0, 1], extra="class_weights: [1.0, 2.0, 3.0]\n")
-    assert _run_to_tokenization(classification, tmp_path, "no", [0, 1], extra="class_weights: [1.0, 2.0]\n")
+    assert _run_to_tokenization(classification, tmp_path, "no", [0, 1], extra="class_weights: [1.0, 2.0]\n")[0]
 
 
 def test_an_unlabeled_test_split_is_left_untokenized_when_the_run_does_not_evaluate(classification, tmp_path):
-    assert _run_to_tokenization(classification, tmp_path, "no", test_labels=[-1, -1]) == ["train"]
+    assert _run_to_tokenization(classification, tmp_path, "no", test_labels=[-1, -1])[0] == ["train"]
 
 
 def test_an_unlabeled_test_split_is_refused_when_the_run_evaluates(classification, tmp_path):
@@ -175,11 +184,11 @@ def test_an_unlabeled_test_split_is_refused_when_the_run_evaluates(classificatio
 
 
 def test_a_labeled_test_split_is_tokenized_when_the_run_evaluates(classification, tmp_path):
-    assert _run_to_tokenization(classification, tmp_path, "steps", test_labels=[0, 1]) == ["test", "train"]
+    assert _run_to_tokenization(classification, tmp_path, "steps", test_labels=[0, 1])[0] == ["test", "train"]
 
 
 def test_a_test_split_with_no_label_column_trains_when_the_run_does_not_evaluate(classification, tmp_path):
-    assert _run_to_tokenization(classification, tmp_path, "no", test_labels=None) == ["train"]
+    assert _run_to_tokenization(classification, tmp_path, "no", test_labels=None)[0] == ["train"]
 
 
 def test_a_test_split_with_no_label_column_is_refused_by_name_when_the_run_evaluates(classification, tmp_path):
@@ -190,6 +199,18 @@ def test_a_test_split_with_no_label_column_is_refused_by_name_when_the_run_evalu
 def test_a_train_split_with_no_label_column_is_refused_by_name(classification, tmp_path):
     with pytest.raises(ValueError, match=r"The 'train' split .*no 'label' column.*Add a 'label' column"):
         _run_to_tokenization(classification, tmp_path, "no", test_labels=[0, 1], train_labels=None)
+
+
+def test_the_map_renders_each_rows_level(classification, tmp_path):
+    """The level column reaches the template only through the map's ``fn_kwargs``."""
+    tokenizer = word_level_tokenizer(["high"])
+    tokenizer.chat_template = QWEN3_6_EFFORT_TEMPLATE.read_text()
+    _, fn_kwargs = _run_to_tokenization(
+        classification, tmp_path, "no", [0, 1], extra="reasoning_effort_field: effort\n", tokenizer=tokenizer
+    )
+    row = {"prompt": _TURNS, "label": 0, "effort": "high"}
+    rendered = classification.tokenize_classification_row(row, **fn_kwargs)
+    assert tokenizer.convert_tokens_to_ids("high") in rendered["input_ids"]
 
 
 def test_a_rowless_read_split_with_no_label_column_is_not_refused(classification):

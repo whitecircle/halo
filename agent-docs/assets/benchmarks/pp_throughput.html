@@ -261,7 +261,7 @@
     return [...document.querySelectorAll(".bar, .value")].every((node) => node.getBoundingClientRect().right <= right);
   });
 
-  drawAxis(tickRow, axis, (tick) => (tick === 0 ? "0 tok/s" : `${tick / 1000}k`));
+  drawAxis(tickRow, axis, (tick) => (tick === 0 ? "0 tok/s per GPU" : `${tick / 1000}k`));
 </script>
 </body>
 </html>

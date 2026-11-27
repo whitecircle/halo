@@ -1,6 +1,7 @@
 """Checkpoint save and resume orchestration. Rotation waits until the sidecars are on disk, and zero-arg ``super()``
 calls must resolve past every sibling mixin to the base Trainer."""
 
+import json
 import logging
 import os
 from contextlib import contextmanager
@@ -9,9 +10,10 @@ from functools import partial
 import torch.nn as nn
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, SaveStrategy, rotate_checkpoints
 
-from halo.checkpoint.atomic import apply_umask_mode
+from halo.callbacks.moe_metrics import MoELoadMetricsBase, read_run_counts
+from halo.checkpoint.atomic import apply_umask_mode, staged_file
 from halo.checkpoint.config_export import finalize_exported_config
-from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MOE_EXPERT_TOKEN_COUNTS_FILE
 from halo.checkpoint.hub_layout import save_pretrained_layout
 from halo.checkpoint.model_card import with_halo_tags
 from halo.checkpoint.parallel.adapters import save_resume_adapter
@@ -23,12 +25,13 @@ from halo.checkpoint.parallel.completeness import (
 from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
 from halo.checkpoint.parallel.disk_budget import verify_checkpoint_disk_space
 from halo.checkpoint.parallel.optimizer import OptimizerShardStore
+from halo.checkpoint.parallel.reading import consensus_read
 from halo.checkpoint.parallel.resume_source import resolve_resume_checkpoint
 from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.parallel.save import save_checkpoint
 from halo.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases, save_lr_scheduler
 from halo.checkpoint.parallel.writing import save_pretrained_on_save_rank
-from halo.checkpoint.weights_source import config_schema_source
+from halo.checkpoint.weights_source import config_schema_source, weights_read_at
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.dtype import resolve_training_dtype
@@ -36,7 +39,7 @@ from halo.model_loading.tokenizer_setup import pristine_model_max_length
 from halo.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
 from halo.models.introspection.config_access import config_export_ready, restore_config_fields
 from halo.models.introspection.unwrapping import base_transformers_model
-from halo.runtime.consensus import DeferredRankFailure
+from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
@@ -120,7 +123,29 @@ class CheckpointingMixin:
 
     def _restore_trainer_sidecars(self, checkpoint: str) -> None:
         """Read back :meth:`_persist_trainer_sidecars`' state on every rank of a resume (never a best-model load),
-        through :func:`~halo.checkpoint.parallel.reading.consensus_read`; no-op by default."""
+        through :func:`~halo.checkpoint.parallel.reading.consensus_read`. By default the MoE token counts: absent, the
+        count starts over at the resume."""
+        callback = self._moe_load_callback()
+        if callback is None:
+            return
+        record, _ = consensus_read(
+            os.path.join(checkpoint, MOE_EXPERT_TOKEN_COUNTS_FILE),
+            read_run_counts,
+            what=MOE_EXPERT_TOKEN_COUNTS_FILE,
+            checkpoint=checkpoint,
+            remedy=f" Or delete {MOE_EXPERT_TOKEN_COUNTS_FILE} to count from the resume instead.",
+        )
+        callback.restore_run_counts(record)
+
+    def _moe_load_callback(self) -> MoELoadMetricsBase | None:
+        """The run's one expert-load callback, which keeps the run's token counts."""
+        found = [cb for cb in self.callback_handler.callbacks if isinstance(cb, MoELoadMetricsBase)]
+        if len(found) > 1:
+            raise ValueError(
+                f"{len(found)} expert-load callbacks ({', '.join(type(cb).__name__ for cb in found)}) would each "
+                f"count the same routing into {MOE_EXPERT_TOKEN_COUNTS_FILE}; a run keeps one."
+            )
+        return found[0] if found else None
 
     def _load_optimizer_and_scheduler(self, checkpoint: str | None) -> None:
         with self._optimizer_state_materialization():
@@ -219,8 +244,19 @@ class CheckpointingMixin:
         save_resume_adapter(self._checkpoint_context(), checkpoint_dir)
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
-        """Write a trainer's own resume state on every rank, before rotation; no-op by default. An override fences its
-        write and reads it back in :meth:`_restore_trainer_sidecars`."""
+        """Write a trainer's own resume state on every rank, before rotation. An override fences its write and reads it
+        back in :meth:`_restore_trainer_sidecars`. By default the MoE token counts, which every rank joins gathering."""
+        callback = self._moe_load_callback()
+        if callback is None:
+            return
+        record = callback.run_counts_record(self.state.global_step, self.parallelism_config.router_token_replicas)
+        # The same on every rank, so all skip or all reach the barrier.
+        if record is None:
+            return
+        with barrier_on_exit(f"Writing {MOE_EXPERT_TOKEN_COUNTS_FILE} to {checkpoint_dir}"):
+            if is_fs_save_rank():
+                with staged_file(checkpoint_dir, MOE_EXPERT_TOKEN_COUNTS_FILE) as staged:
+                    staged.write_text(json.dumps(record))
 
     def _publish_checkpoint(self, checkpoint_dir: str, trial) -> None:
         """COLLECTIVE. Commit the trainer state, then push (which uploads the directory as it stands), then rotate."""
@@ -288,7 +324,12 @@ class CheckpointingMixin:
                 # The base save wrote ``processing_class``.
                 if self.export_processing_class is not None:
                     self.export_processing_class.save_pretrained(output_dir)
-                finalize_exported_config(ctx.model.config, output_dir, source=config_schema_source(ctx.model))
+                finalize_exported_config(
+                    ctx.model.config,
+                    output_dir,
+                    source=config_schema_source(ctx.model),
+                    revision=weights_read_at(ctx.model),
+                )
                 apply_umask_mode(output_dir)
 
     def _mark_model_save_collectives_done(self) -> None:

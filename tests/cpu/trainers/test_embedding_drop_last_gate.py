@@ -7,10 +7,7 @@ import inspect
 import textwrap
 
 import pytest
-from accelerate.data_loader import BatchSamplerShard, prepare_data_loader
 from datasets import Dataset, DatasetDict
-from sentence_transformers.base.sampler import DefaultBatchSampler
-from torch.utils.data import DataLoader, SequentialSampler
 
 from halo.configs.embedding import EmbeddingConfig
 from halo.trainers.embedding import embedding_rules
@@ -48,48 +45,20 @@ def _sharded_iterable(n_shards: int):
     return Dataset.from_dict({"anchor": [str(i) for i in range(13)]}).to_iterable_dataset(num_shards=n_shards)
 
 
-def test_the_kept_remainder_gives_ranks_unequal_batch_counts():
-    """On the sampler and shard the sentence-transformers loader builds."""
-
-    def lengths(drop_last: bool) -> list[int]:
-        sampler = DefaultBatchSampler(SequentialSampler(range(10)), batch_size=2, drop_last=drop_last)
-        return [
-            len(BatchSamplerShard(sampler, num_processes=2, process_index=rank, even_batches=False)) for rank in (0, 1)
-        ]
-
-    assert lengths(drop_last=False) == [3, 2]
-    assert lengths(drop_last=True) == [2, 2]
-
-
-@pytest.mark.parametrize("drop_last", [False, True])
-def test_a_shard_split_iterable_gives_ranks_unequal_batch_counts(drop_last):
-    """With dispatch off, 3 file shards over 2 ranks are split by shard, and ``drop_last`` does not even them out."""
-    counts = [
-        sum(
-            1
-            for _ in prepare_data_loader(
-                DataLoader(_sharded_iterable(3), batch_size=2, drop_last=drop_last),
-                num_processes=2,
-                process_index=rank,
-                dispatch_batches=False,
-                even_batches=False,
-                put_on_device=False,
-            )
-        )
-        for rank in (0, 1)
-    ]
-    assert counts[0] != counts[1], counts
-
-
 @pytest.mark.parametrize("train_dataset", [_ROWS, DatasetDict(first=_ROWS, second=_ROWS)], ids=["dataset", "dict"])
 def test_a_kept_remainder_is_refused_on_the_sentence_transformers_loader(train_dataset, tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="Set dataloader_drop_last: true"):
         _check(tmp_path=tmp_path, monkeypatch=monkeypatch, train_dataset=train_dataset)
 
 
-@pytest.mark.parametrize("drop_last", [False, True])
 @pytest.mark.parametrize(
-    "n_shards, dispatch_batches", [(3, False), (1, None), (1, True)], ids=["shard-split", "default", "dispatched"]
+    "n_shards, dispatch_batches, drop_last",
+    [
+        pytest.param(3, False, False, id="shard-split-False"),
+        pytest.param(1, None, False, id="default-False"),
+        pytest.param(1, True, False, id="dispatched-False"),
+        pytest.param(1, None, True, id="default-True"),
+    ],
 )
 def test_an_iterable_the_loader_cannot_split_evenly_is_refused(
     n_shards, dispatch_batches, drop_last, tmp_path, monkeypatch

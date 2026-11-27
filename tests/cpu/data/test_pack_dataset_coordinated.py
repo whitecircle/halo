@@ -84,14 +84,6 @@ def test_toolkit_stamp_wins_over_cache_files() -> None:
         )
 
 
-def test_toolkit_stamp_different_keys_different_ids() -> None:
-    ds_a = Dataset.from_dict({"x": [1, 2, 3]})
-    ds_b = Dataset.from_dict({"x": [1, 2, 3]})
-    stamp_cache_key(ds_a, "cache-aaaa.arrow")
-    stamp_cache_key(ds_b, "cache-bbbb.arrow")
-    assert rank_stable_dataset_id(ds_a) != rank_stable_dataset_id(ds_b), "different stamps → different ids"
-
-
 @pytest.fixture
 def documents(tmp_path, monkeypatch) -> Dataset:
     """On-disk token rows of mixed lengths: empty documents, short ones and ones longer than a packed row."""

@@ -2,6 +2,7 @@
 Assertions are on the served policy: a sync that gathered the wrong shard still returns a finite loss from
 ``train()``."""
 
+import functools
 import math
 import os
 from dataclasses import dataclass
@@ -16,11 +17,12 @@ from trl import GRPOConfig
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.trainers.distillation.divergences import token_divergence
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.adapters import check_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
-from tests.common.distributed import ensure_model_downloaded, shared_output_dir
+from tests.common.distributed import ensure_model_downloaded, shared_output_dir, world_any, world_mean
 from tests.common.ep_reference import ep_layers
 from tests.common.memory import cleanup_memory
 from tests.common.on_policy_e2e import (
@@ -38,6 +40,7 @@ from tests.common.on_policy_e2e import (
     qa_dataset,
     record_adapter_training,
     record_dp_layout,
+    record_maxrl_logged,
     record_optimizer_restore,
     record_parallelism_engaged,
     record_resume_continuity,
@@ -52,6 +55,12 @@ from tests.common.weight_sync import moved_parameters
 
 # Short because every step is a full engine round-trip, and neither a landed sync nor a resume push needs convergence.
 MAX_STEPS = 3
+# Against TRL's full-logits path: padded rows match bit for bit in bf16, while the dense rows FA4 forces run each row
+# trimmed, measured up to 5.8e-3 apart on Qwen3-0.6B over 4 seeds. MoE routing flips are not measured.
+FULL_LOGITS_OPD_RTOL = 2e-2
+# Against the same forward with the term projected unchunked: only the chunking and the checkpoint differ, and the two
+# were bit-identical on Qwen3-0.6B in bf16 over 4 seeds, padded and dense rows.
+SAME_FORWARD_OPD_RTOL = 1e-4
 NUM_TRAIN_SAMPLES = 16
 # Large, since the sync has to move the served weights measurably within a few steps.
 FULL_LEARNING_RATE = 1e-4
@@ -117,7 +126,14 @@ def reward_len(completions, **kwargs):
     return [-abs(len(str(completion)) - 32) / 32.0 for completion in completions]
 
 
-def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, save_steps) -> GRPOConfig:
+def reward_len_positive(completions, **kwargs):
+    """``reward_len`` mapped into (0, 1]: MaxRL divides by the group mean and refuses a negative reward."""
+    return [1.0 / (1.0 + abs(len(str(completion)) - 32) / 32.0) for completion in completions]
+
+
+def _grpo_config(
+    spec: _Mode, *, output_dir, server_url, group_port, max_steps, save_steps, maxrl: bool = False
+) -> GRPOConfig:
     parsed = urlparse(server_url)
     return GRPOConfig(
         output_dir=output_dir,
@@ -145,6 +161,7 @@ def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, 
         beta=spec.beta,
         generation_kwargs={"temperature": 0.7},
         remove_unused_columns=False,
+        **({"scale_rewards": "none"} if maxrl else {}),
     )
 
 
@@ -160,14 +177,17 @@ def _build_trainer(
     max_steps: int,
     save_steps: int,
     weights_source: str | None = None,
+    maxrl: bool = False,
+    chunked: bool = False,
 ):
     """Construct the row's trainer; returns ``(trainer, parallelism_config)``. ``weights_source`` is a hub id or a
-    resume checkpoint."""
+    resume checkpoint. ``maxrl`` turns on ``use_maxrl`` with ``scale_rewards: none`` and a non-negative reward;
+    ``chunked`` turns on ``use_chunked_grpo_logprobs``."""
     parallelism_config = spec.layout.parallelism_config()
     model, peft_config = load_policy(weights_source or model_name, parallelism_config, spec.adapter)
     kwargs = {
         "model": model,
-        "reward_funcs": [reward_len],
+        "reward_funcs": [reward_len_positive if maxrl else reward_len],
         "args": _grpo_config(
             spec,
             output_dir=output_dir,
@@ -175,11 +195,13 @@ def _build_trainer(
             group_port=group_port,
             max_steps=max_steps,
             save_steps=save_steps,
+            maxrl=maxrl,
         ),
         "train_dataset": qa_dataset(NUM_TRAIN_SAMPLES),
         "processing_class": tokenizer,
         "parallelism_config": parallelism_config,
         "peft_config": peft_config,
+        "use_chunked_grpo_logprobs": chunked,
     }
     if spec.beta and not spec.adapter:
         kwargs["ref_model"] = load_frozen_auxiliary_model(
@@ -194,7 +216,7 @@ def _build_trainer(
             sdpg_beta_base=1.0,
         )
     else:
-        trainer = DistributedOnlineGRPOTrainer(**kwargs)
+        trainer = DistributedOnlineGRPOTrainer(**kwargs, use_maxrl=maxrl)
     return trainer, parallelism_config
 
 
@@ -456,12 +478,79 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
     }
 
 
+def _unchunked_opd_scores(trainer, teacher_hidden, head, student, positions):
+    """SDPG's ``_opd_scores`` with both sides projected in one ``[N, V]`` matmul, outside any checkpoint."""
+    teacher = head.project(teacher_hidden.flatten(0, 1).index_select(0, positions))
+    return token_divergence(trainer.sdpg_loss_fn, head.project(student), teacher, trainer.sdpg.sdpg_temperature)
+
+
+class _FirstGatedStepOPD:
+    """Wraps SDPG's ``_compute_loss``: until a batch's OPD term is non-zero on some rank, each batch first runs two
+    no-grad references, recording each ``opd_loss`` in place of storing it: the chunked scorer with the term projected
+    unchunked (``same_forward``), and TRL's full-logits path (``full_logits``). A batch of tied groups gates the term
+    off on every row, so the first batch can carry none. Collective, so every rank runs them."""
+
+    def __init__(self, trainer, device):
+        self.trainer = trainer
+        self.device = device
+        self.compute_loss = trainer._compute_loss
+        self.steps_seen = 0
+        self.step: int | None = None
+        self.references: dict[str, float] = {"same_forward": 0.0, "full_logits": 0.0}
+
+    def __call__(self, model, inputs):
+        if self.step is None:
+            references = {
+                "same_forward": self._reference(model, inputs, chunked=True),
+                "full_logits": self._reference(model, inputs, chunked=False),
+            }
+            if world_any(references["full_logits"] > 0, self.device):
+                self.step, self.references = self.steps_seen, references
+            torch.manual_seed(0)
+        self.steps_seen += 1
+        return self.compute_loss(model, inputs)
+
+    def _reference(self, model, inputs, *, chunked: bool) -> float:
+        trainer = self.trainer
+        store, recorded = trainer.store_batch_metrics, []
+        trainer.store_batch_metrics = lambda metrics, *args: recorded.append(float(metrics["opd_loss"]))
+        trainer._use_chunked_grpo_logprobs = chunked
+        if chunked:
+            trainer._opd_scores = functools.partial(_unchunked_opd_scores, trainer)
+        try:
+            torch.manual_seed(0)
+            with torch.no_grad():
+                self.compute_loss(model, dict(inputs))
+        finally:
+            trainer._use_chunked_grpo_logprobs, trainer.store_batch_metrics = True, store
+            vars(trainer).pop("_opd_scores", None)
+        (opd,) = recorded
+        return opd
+
+
 def run_online_grpo_e2e(
-    ctx, *, trainer_kind: str, mode: str, resume: bool, server_url: str, group_port: int, model_name: str
+    ctx,
+    *,
+    trainer_kind: str,
+    mode: str,
+    resume: bool,
+    server_url: str,
+    group_port: int,
+    model_name: str,
+    maxrl: bool = False,
+    chunked: bool = False,
 ) -> dict:
+    """``chunked`` runs ``use_chunked_grpo_logprobs``; an SDPG row then also checks its first step's ``opd_loss``
+    against the full-logits path on the same batch."""
+    if resume and maxrl:
+        # Before any load: the resume body builds both phases' trainers without MaxRL and skips its metric check.
+        raise ValueError("maxrl has no resume row: the resume phases would train and pass without MaxRL")
     spec = MODES[mode]
     checks: dict[str, bool] = {}
-    log(f"\n  row: trainer={trainer_kind} mode={mode} resume={resume} model={model_name} server={server_url}")
+    log(
+        f"\n  row: trainer={trainer_kind} mode={mode} resume={resume} maxrl={maxrl} model={model_name} "
+        f"server={server_url}"
+    )
 
     if spec.rejects_expert_lora:
         refusal = expert_lora_under_etp_refusal(spec.layout.expert_tp_size)
@@ -502,8 +591,11 @@ def run_online_grpo_e2e(
             checks=checks,
         )
 
-    trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0)
+    trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0, maxrl=maxrl, chunked=chunked)
     ctx.on_teardown(lambda: _release(trainer))
+    gated_step = None
+    if chunked and trainer_kind == "sdpg":
+        gated_step = trainer._compute_loss = _FirstGatedStepOPD(trainer, ctx.device)
     record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
     adapters_before, base_before = {}, {}
@@ -517,6 +609,8 @@ def run_online_grpo_e2e(
     trainer.train()
     log("  training completed")
     losses, trained = record_step_losses(trainer, checks)
+    if maxrl:
+        record_maxrl_logged(trainer, checks)
     reshard_fsdp2_modules(unwrap(trainer.model))
 
     if spec.adapter:
@@ -547,6 +641,18 @@ def run_online_grpo_e2e(
 
     if trainer_kind == "sdpg":
         _sdpg_checks(trainer, checks)
+    if gated_step is not None:
+        # One loss call per logged step: ``gradient_accumulation_steps`` and ``logging_steps`` are both 1.
+        logged = [float(e["opd_loss"]) for e in trainer.state.log_history if "opd_beta" in e]
+        step = gated_step.step
+        chunked_opd = logged[step] if step is not None and step < len(logged) else None
+        for name, rtol in (("same_forward", SAME_FORWARD_OPD_RTOL), ("full_logits", FULL_LOGITS_OPD_RTOL)):
+            # The logged metric is the world mean of each rank's value, so the reference is reduced the same way.
+            reference = world_mean(gated_step.references[name], ctx.device)
+            checks[f"sdpg_gated_step_opd_matches_{name}"] = (
+                chunked_opd is not None and reference > 0 and abs(chunked_opd - reference) <= rtol * reference
+            )
+            log(f"  step-{step} opd_loss: chunked {chunked_opd!r}, {name} {reference!r}")
     if spec.beta:
         _kl_checks(trainer, checks)
 

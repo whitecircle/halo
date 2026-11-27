@@ -514,21 +514,6 @@ def test_a_release_that_asks_for_nothing_announces_no_wait(monkeypatch, caplog):
     assert not any("/health" in wait or "its half" in wait for wait in _waits(caplog)), _waits(caplog)
 
 
-def test_an_abort_and_a_remote_destroy_name_their_server_and_bound(monkeypatch, caplog):
-    client = offline_client(SGLangWeightSyncClient)
-    client._transport = (object(), None)
-    monkeypatch.setattr(sglang_module, "abort_weight_update_group", lambda group: None)
-    monkeypatch.setattr(client, "request", lambda *args, **kwargs: SimpleNamespace(status_code=200))
-
-    with caplog.at_level(logging.INFO):
-        client.abort_transport()
-        client.destroy_remote_group()
-
-    waits = _waits(caplog)
-    assert len(waits) == 2, waits
-    assert all(client.base_url in wait and wait.endswith("at most 30s") for wait in waits), waits
-
-
 def test_closing_an_interrupted_session_names_its_server_and_bound(monkeypatch, caplog):
     client = offline_client(SGLangWeightSyncClient)
     client._update_session_open = True

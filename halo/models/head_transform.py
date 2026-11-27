@@ -8,7 +8,6 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from halo.models.introspection.config_access import get_config_field, text_config
@@ -35,20 +34,15 @@ class HeadTransform:
             return weight, bias
         return weight[: self.vocab_size], None if bias is None else bias[: self.vocab_size]
 
-    def project(
-        self,
-        head: nn.Module,
-        hidden: torch.Tensor,
-        *,
-        weight: torch.Tensor | None = None,
-        bias: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Logits of ``hidden``; ``weight`` and ``bias`` stand in for ``head``'s own parameters, for a caller holding
-        gathered values while the module's are sharded."""
-        scaled = self.scale_hidden(hidden)
-        logits = head(scaled) if weight is None else F.linear(scaled, weight, bias)
+    def project(self, head: nn.Module, hidden: torch.Tensor) -> torch.Tensor:
+        """Logits of ``hidden``."""
+        logits = head(self.scale_hidden(hidden))
         if self.vocab_size is not None:
             logits = logits[..., : self.vocab_size]
+        return self.scale_logits(logits)
+
+    def scale_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """The output embedding's ``logits`` through the logit scale, then the softcap."""
         if self.logit_scale is not None:
             logits = logits * self.logit_scale
         if self.softcap is not None:
@@ -79,6 +73,17 @@ class InklingHeadTransform(HeadTransformSpec):
     def transform(cls, config) -> HeadTransform:
         text = text_config(config)
         return HeadTransform(hidden_scale=1.0 / text.logits_mup_width_multiplier, vocab_size=text.unpadded_vocab_size)
+
+
+class Inkling2HeadTransform(HeadTransformSpec):
+    """``final_logit_softcapping`` caps the logits; the padded vocabulary columns are cut off."""
+
+    HF_MODULE_NAMES = ("Inkling2ForCausalLM", "Inkling2ForConditionalGeneration")
+
+    @classmethod
+    def transform(cls, config) -> HeadTransform:
+        text = text_config(config)
+        return HeadTransform(softcap=text.final_logit_softcapping, vocab_size=text.unpadded_vocab_size)
 
 
 class CohereHeadTransform(HeadTransformSpec):
@@ -208,8 +213,8 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
     except Exception as e:
         raise ValueError(
             f"Could not verify the head path of {model_class.__name__} ({type(e).__name__}: {e}). The "
-            f"hidden-state head paths (use_chunked_grpo_logprobs, the last pipeline stage) need that "
-            f"verdict; run without them."
+            f"hidden-state head paths (use_chunked_grpo_logprobs, use_chunked_distillation_loss, the last pipeline "
+            f"stage) need that verdict; run without them."
         ) from e
     if probe is None:
         return IDENTITY_HEAD_TRANSFORM
@@ -230,8 +235,8 @@ def verify_head_transform(model_class: type, config) -> HeadTransform:
         raise ValueError(
             f"{model_class.__name__}'s forward transforms its head path beyond what is declared for it "
             f"({declared}; {deviation} on the head-path probe). The hidden-state head paths "
-            f"(use_chunked_grpo_logprobs, the last pipeline stage) would score a different "
-            f"distribution than the model's own forward. Declare the family's transform on a "
+            f"(use_chunked_grpo_logprobs, use_chunked_distillation_loss, the last pipeline stage) would score a "
+            f"different distribution than the model's own forward. Declare the family's transform on a "
             f"HeadTransformSpec, or run without those paths."
         )
     return declared

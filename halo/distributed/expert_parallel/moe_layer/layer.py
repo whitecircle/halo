@@ -51,6 +51,10 @@ class EPMoELayerBase(
     # HF class name(s) of the MoE block this EP layer replaces; ``roster.MOE_LAYER_MAP`` claims them.
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
+    # Whether the layer adopts a container the frozen loader filled per ``FAMILY.frozen_expert_slots`` as frozen
+    # quantized banks; ``roster.frozen_bank_families`` unions the families that do.
+    SUPPORTS_FROZEN_BANKS: ClassVar[bool] = False
+
     # The family's checkpoint name, which becomes the export key in ``replicated_named_params``; resolved per instance
     # from ``FAMILY.shared_expert_attrs`` for a family that declares one.
     _shared_expert_attr: str = "shared_experts"
@@ -85,6 +89,10 @@ class EPMoELayerBase(
         ``num_experts``."""
         experts = cls._find_experts_container(layer)
         return len(experts) if isinstance(experts, nn.ModuleList) else experts.num_experts
+
+    def frozen_bank_weight_count(self) -> int:
+        """Weights of this rank's experts held in frozen banks: buffers, so no parameter count includes them."""
+        return 0
 
     def expert_named_params(self) -> list:
         """``(name, param)`` for this rank's expert weights, then its expert LoRA adapters; a family's layout is

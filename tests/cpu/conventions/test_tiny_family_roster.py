@@ -225,6 +225,12 @@ def test_ring_is_refused_for_its_own_linear_attention_class():
         reject_unsupported_ulysses_model(tiny_family_model(TINY_BAILING_RING_FAMILY), 2)
 
 
+def test_inkling2_cp_is_refused_naming_its_short_convolutions():
+    """Without its own entry the refusal is the generic no-wrapper one, which hides why no wrapper can exist."""
+    with pytest.raises(CPConfigError, match="Inkling2(Dynamic)?ShortConvolution"):
+        reject_unsupported_ulysses_model(tiny_family_model(TINY_MOE_FAMILIES["inkling2_text"]), 2)
+
+
 @pytest.mark.parametrize("suite", CP_SUITES)
 def test_the_cp_rows_run_every_cp_roster_family_once(suite):
     families = [shlex.split(args)[1] for args, _ in MANIFEST[suite].launches()]

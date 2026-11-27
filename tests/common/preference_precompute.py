@@ -120,6 +120,7 @@ def precompute_trainer(
     trainer.data_collator = collate_token_sums
     trainer.compute_ref_log_probs = StubReference(kind, weights, calculate_kl)
     trainer.data_parallel_sweep = contextlib.nullcontext
+    trainer.callback_handler = SimpleNamespace(callbacks=())
     return trainer
 
 

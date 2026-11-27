@@ -81,7 +81,7 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 ## Limits
 
 - No online RL. Neither vLLM 0.32.0 nor SGLang 0.5.22 has a `mistral4` model class, so Halo refuses
-  online and async GRPO when it builds the trainer.
+  online and async GRPO at startup, before it loads the model.
 - Neither pinned engine serves a Halo export. vLLM serves the public repo only through its
   Mistral-native `params.json` layout, which a Halo export does not have. vLLM's generic transformers
   backend (`--model-impl transformers`) is untested here.

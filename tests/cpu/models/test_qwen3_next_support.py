@@ -198,7 +198,8 @@ def test_the_lazy_ep_load_matches_from_pretrained(tmp_path, monkeypatch, ep_size
     local = slice(0, E // ep_size)
     fused = ("experts.gate_up_proj", "experts.down_proj")
     expected = {key: t[local] if key.endswith(fused) else t for key, t in reference.items()}
-    stale = [key for key, tensor in lazy.items() if not torch.equal(tensor, expected[key])]
+    # The lazy loader places weights on the current CUDA device when one is visible.
+    stale = [key for key, tensor in lazy.items() if not torch.equal(tensor.cpu(), expected[key])]
     assert not stale, f"{len(stale)} tensors differ from from_pretrained: {stale[:5]}"
 
 

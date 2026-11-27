@@ -8,6 +8,7 @@ from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer  # noq
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer  # noqa: F401
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer  # noqa: F401
@@ -20,7 +21,7 @@ from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer 
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.introspection.config_access import config_model_types
-from halo.models.moe.family_specs import find_moe_family_spec
+from halo.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec
 from halo.subclass_registry import build_class_claim_map, iter_subclasses
 
 # Walks the subclass tree the imports above populate; raises on an HF class name two families claim.
@@ -36,3 +37,8 @@ def ep_layer_classes_for_config(config) -> list[type[EPMoELayerBase]]:
     without a live layer."""
     specs = {spec for model_type in config_model_types(config) if (spec := find_moe_family_spec(model_type))}
     return [cls for cls in ep_layer_classes() if vars(cls).get("FAMILY") in specs]
+
+
+def frozen_bank_families() -> tuple[MoEFamilySpec, ...]:
+    """The families whose EP layer holds frozen quantized expert banks (``SUPPORTS_FROZEN_BANKS``)."""
+    return tuple(dict.fromkeys(cls.FAMILY for cls in ep_layer_classes() if cls.SUPPORTS_FROZEN_BANKS))

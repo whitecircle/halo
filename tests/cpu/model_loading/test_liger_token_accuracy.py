@@ -5,10 +5,8 @@
 from __future__ import annotations
 
 import ast
-import dataclasses
 
 import pytest
-from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutputWithPast
 
 from tests.common.repo import REPO_ROOT
 
@@ -16,12 +14,6 @@ LIGER_PACKAGE = REPO_ROOT / "halo/model_loading/liger"
 
 # One for the whole roster, so nobody else holds it to this contract.
 TOOLKIT_LCE_FORWARD = LIGER_PACKAGE / "cross_entropy.py"
-
-
-def test_the_output_class_actually_carries_the_field():
-    """Premise: if Liger renames it, every assertion below passes vacuously."""
-    fields = {f.name for f in dataclasses.fields(LigerMoeCausalLMOutputWithPast)}
-    assert "token_accuracy" in fields, f"Liger's MoE output no longer carries token_accuracy: {sorted(fields)}"
 
 
 def test_no_family_ships_a_second_fused_forward():

@@ -14,7 +14,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -88,7 +87,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -160,7 +158,6 @@
         "step": "init_communicator",
         "outcome": "HTTPError",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -193,7 +190,6 @@
         "step": "init_communicator",
         "outcome": "HTTPError",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -229,7 +225,6 @@
         "step": "init_communicator",
         "outcome": "RuntimeError",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -262,7 +257,6 @@
         "step": "init_communicator",
         "outcome": "RuntimeError",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -295,7 +289,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -354,7 +347,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -413,7 +405,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -479,7 +470,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -547,7 +537,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",
@@ -608,7 +597,6 @@
         "step": "init_communicator",
         "outcome": "ok",
         "requests": [
-          "GET /version timeout=10 single-shot retry(total=0,read=False)",
           "GET /server_info?config_format=json timeout=60 single-shot retry(total=0,read=False)",
           "GET /is_paused timeout=10 single-shot retry(total=0,read=False)",
           "GET /v1/models timeout=10 session retry(total=5,connect=5,read=5,status=3,allowed_methods=[GET,POST],status_forcelist=[500,502,503],backoff_factor=2)",

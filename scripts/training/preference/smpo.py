@@ -9,6 +9,7 @@ from halo.config_validation import reject_non_default_args, reject_unsupported_a
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import SMPOConfig, SMPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import template_column_kwargs
 from halo.entrypoints.data_setup import (
     apply_vision_options,
     load_script_datasets,
@@ -56,9 +57,9 @@ def main():
     if dist_args.pipeline_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Pipeline Parallelism — drop --pipeline_parallel_size.")
     if is_vlm:
-        # The trainer's VLM row render (tokenize_vlm_preference_row) templates the prompt without
-        # `tools=`, so a declared tools column would render toolless.
-        reject_unsupported_args("SMPO VLM mode", tools_field=args.tools_field)
+        # The trainer's VLM row render (tokenize_vlm_preference_row) templates the prompt with no template column, so a
+        # declared one would never reach the template.
+        reject_unsupported_args("SMPO VLM mode", **template_column_kwargs(args))
         # The VLM collator refuses an over-length prompt instead of cutting one.
         reject_non_default_args("SMPO VLM mode", smpo_config, "truncation_mode")
 

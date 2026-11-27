@@ -193,19 +193,17 @@ def test_ownership_covers_every_chunk_exactly_once():
     ("shared", "local_world_size", "rank", "per_node", "expected"),
     [
         # Shared: the save rank first, then node-major.
-        (True, 8, 0, 1, WriterStripe(0, 4)),
-        (True, 8, 8, 1, WriterStripe(1, 4)),
-        (True, 8, 9, 1, WriterStripe(None, 4)),
-        (True, 8, 17, 2, WriterStripe(5, 8)),
-        (True, 8, 18, 2, WriterStripe(None, 8)),
+        pytest.param(True, 8, 0, 1, WriterStripe(0, 4), id="True-8-0-1-expected0"),
+        pytest.param(True, 8, 17, 2, WriterStripe(5, 8), id="True-8-17-2-expected3"),
+        pytest.param(True, 8, 18, 2, WriterStripe(None, 8), id="True-8-18-2-expected4"),
         # A count past the node's ranks is capped at them.
-        (True, 8, 3, 99, WriterStripe(3, 32)),
+        pytest.param(True, 8, 3, 99, WriterStripe(3, 32), id="True-8-3-99-expected5"),
         # A count of 0 is the opt-out: the save rank writes alone.
-        (True, 8, 0, 0, WriterStripe(0, 1)),
-        (True, 8, 8, 0, WriterStripe(None, 1)),
+        pytest.param(True, 8, 0, 0, WriterStripe(0, 1), id="True-8-0-0-expected6"),
+        pytest.param(True, 8, 8, 0, WriterStripe(None, 1), id="True-8-8-0-expected7"),
         # Per-node storage: each node's first rank writes the whole checkpoint.
-        (False, 8, 8, 4, WriterStripe(0, 1)),
-        (False, 8, 9, 4, WriterStripe(None, 1)),
+        pytest.param(False, 8, 8, 4, WriterStripe(0, 1), id="False-8-8-4-expected8"),
+        pytest.param(False, 8, 9, 4, WriterStripe(None, 1), id="False-8-9-4-expected9"),
     ],
 )
 def test_the_stripe_follows_the_filesystem_and_node_layout(

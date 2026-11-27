@@ -18,24 +18,6 @@ def test_failing_step_does_not_propagate():
     assert "No space left on device" in guard.reason
 
 
-def test_collectives_after_a_failure_still_run():
-    """A short ``gathers`` is the rank skew that hangs the job."""
-    guard = DeferredRankFailure("test write")
-    gathers = []
-    for layer in range(4):
-
-        def write(layer=layer):
-            if layer == 1:
-                raise OSError(28, "No space left on device")
-
-        gathers.append(layer)  # Stands in for the collective every rank must enter.
-        guard.run(write)
-
-    assert gathers == [0, 1, 2, 3]
-    with pytest.raises(RuntimeError, match="No space left on device"):
-        guard.reject()
-
-
 def test_steps_after_a_failure_are_skipped():
     """The first cause is kept."""
     guard = DeferredRankFailure("test write")

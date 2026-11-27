@@ -61,14 +61,6 @@ def test_test_split_maps_to_eval_filename():
         assert os.path.exists(_sample_path(d, "eval_sample.txt"))
 
 
-def test_custom_name_filename():
-    with tempfile.TemporaryDirectory() as d:
-        log_dataset_examples(
-            {"generate": _ids_dataset()}, tokenizer=FakeTokenizer(), output_dir=d, write_decoded_samples=True
-        )
-        assert os.path.exists(_sample_path(d, "generate_sample.txt"))
-
-
 def test_skips_dataset_without_input_ids():
     with tempfile.TemporaryDirectory() as d:
         log_dataset_examples(

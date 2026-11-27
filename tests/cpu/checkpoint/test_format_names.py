@@ -36,16 +36,23 @@ GOLDEN = {
     "PROCESSOR_FILES": ("processor_config.json", "preprocessor_config.json", "video_preprocessor_config.json"),
     "RESUME_ADAPTER_DIR": "resume_adapter",
     "RESUME_ADAPTER_MARKER_FILE": "resume_adapter.json",
-    "UNSUFFIXED_RESUME_ENTRIES": ("trainer_state.json", "resume_adapter", "resume_adapter.json"),
+    "UNSUFFIXED_RESUME_ENTRIES": (
+        "trainer_state.json",
+        "resume_adapter",
+        "resume_adapter.json",
+        "moe_expert_token_counts.json",
+    ),
     "RESUME_SIDECAR_FILES": ("scheduler.pt", "router_balancing_biases.pt", "reference_logps.pt"),
     "RESUME_SIDECAR_PREFIXES": ("rng_state", "prefetch_pending"),
     "WEIGHT_DUMP_DIRS": ("original", "consolidated", "metal"),
 }
 
 
-@pytest.mark.parametrize("name", sorted(GOLDEN))
-def test_an_on_disk_name_keeps_its_spelling(name):
-    assert getattr(checkpoint_format, name) == GOLDEN[name]
+def test_an_on_disk_name_keeps_its_spelling(subtests):
+    assert GOLDEN, "the golden table holds no name"
+    for name in sorted(GOLDEN):
+        with subtests.test(name):
+            assert getattr(checkpoint_format, name) == GOLDEN[name]
 
 
 def test_the_hand_spelled_names_match_the_libraries_that_write_them():
@@ -65,22 +72,21 @@ def test_the_name_builders_spell_their_files():
     assert stream_part == "model-streaming-00002.safetensors"
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
+def test_a_ranks_own_resume_file_is_per_rank(subtests):
+    names = [
         checkpoint_format.optimizer_shard_filename(3),
         checkpoint_format.prefetch_pending_filename(1, 8),
         "rng_state_3.pth",
         "rng_state.pth",
-    ],
-)
-def test_a_ranks_own_resume_file_is_per_rank(name):
-    assert checkpoint_format.is_per_rank_resume_file(name)
+    ]
+    for name in names:
+        with subtests.test(name):
+            assert checkpoint_format.is_per_rank_resume_file(name)
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
+def test_a_file_of_the_whole_save_is_not_per_rank(subtests):
+    """None is a rank's resume state."""
+    names = [
         checkpoint_format.OPTIMIZER_META_FILE,
         *checkpoint_format.OPTIMIZER_STATE_FILES,
         checkpoint_format.SCHEDULER_STATE_FILE,
@@ -88,11 +94,10 @@ def test_a_ranks_own_resume_file_is_per_rank(name):
         checkpoint_format.REFERENCE_LOGPS_FILE,
         checkpoint_format.ROUTER_BALANCING_BIASES_FILE,
         checkpoint_format.ep_shard_filename(0, 2),
-    ],
-)
-def test_a_file_of_the_whole_save_is_not_per_rank(name):
-    """None is a rank's resume state."""
-    assert not checkpoint_format.is_per_rank_resume_file(name)
+    ]
+    for name in names:
+        with subtests.test(name):
+            assert not checkpoint_format.is_per_rank_resume_file(name)
 
 
 if __name__ == "__main__":

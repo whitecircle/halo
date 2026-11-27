@@ -39,6 +39,17 @@ def reject_unverified_carried_reasoning(env, rollout_backend: str) -> None:
         )
 
 
+def reject_whole_trajectory_render_of_rewritten_view(env, train_on_sampled_tokens: bool) -> None:
+    """An environment whose view rewrites earlier turns shows each turn a prompt that is no prefix of the next one's, so
+    one render of the whole trajectory would train turns on context the engine never sent."""
+    if env.rewrites_history_in_view and not train_on_sampled_tokens:
+        raise ValueError(
+            f"{type(env).__name__} rewrites earlier turns in each turn's prompt, so only per-turn training rows "
+            "match what the engine saw: set train_on_sampled_tokens: true (a vLLM server also needs "
+            "--return-tokens-as-token-ids)."
+        )
+
+
 def reject_straddling_train_groups(
     per_device_train_batch_size: int, steps_per_generation: int, num_generations: int
 ) -> None:
@@ -105,6 +116,23 @@ def reject_answerless_datasets(env, train_dataset, eval_dataset) -> None:
                 f"answer_field at the column holding the expected answer — it is carried into the "
                 f"row as {ANSWER_KEY!r} — or train this data on an environment that grades without one."
             )
+
+
+def reject_negative_reward_terms_under_maxrl(async_config, *, price_on: bool) -> None:
+    """Called only under ``use_maxrl``. MaxRL divides by the group mean reward, which assumes non-negative rewards. The reasoning price and floor
+    subtract from an episode's reward, so a priced or floored run can go negative by design; every step checks the
+    rewards anyway, and this catches the cases the config already decides."""
+    terms = [
+        name
+        for name, on in (("reasoning_price", price_on), ("reasoning_floor", async_config.reasoning_floor > 0))
+        if on
+    ]
+    if terms:
+        raise ValueError(
+            f"use_maxrl with {' and '.join(terms)} on: {'they subtract' if len(terms) > 1 else 'it subtracts'} from "
+            "the reward, which can make it negative, and MaxRL divides each advantage by the group's mean reward, "
+            "which needs non-negative rewards. Turn MaxRL off, or train without the reasoning terms."
+        )
 
 
 def reject_inert_reasoning_terms(

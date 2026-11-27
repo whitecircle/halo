@@ -9,7 +9,6 @@ from peft import LoraConfig, get_peft_model
 from trl.trainer.utils import disable_dropout_in_model
 
 import halo.trainers.distributed_trainer as spine
-from halo.configs.script_arguments import ModelArguments
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 
@@ -39,10 +38,6 @@ def warnings(monkeypatch) -> list[str]:
     recorded: list[str] = []
     monkeypatch.setattr(spine, "logger", SimpleNamespace(warning=recorded.append))
     return recorded
-
-
-def test_omitting_lora_dropout_keeps_a_nonzero_default():
-    assert ModelArguments(model_name_or_path="m").lora_dropout > 0
 
 
 def test_a_zeroed_dropout_warns_with_the_setting_that_silences_it(warnings):

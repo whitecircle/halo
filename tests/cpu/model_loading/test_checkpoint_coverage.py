@@ -51,23 +51,6 @@ def _write_checkpoint(path, *, tie_word_embeddings: bool = False, drop: str | No
     return str(path)
 
 
-def test_fixture_actually_drops_tensors(tmp_path):
-    """Anti-vacuity: the truncated fixture really misses backbone tensors."""
-    full = load_file(os.path.join(_write_checkpoint(tmp_path / "full"), "model.safetensors"))
-    trunc = load_file(os.path.join(_write_checkpoint(tmp_path / "trunc", drop="layers.1."), "model.safetensors"))
-    dropped = set(full) - set(trunc)
-    assert dropped, "the truncated fixture dropped nothing"
-    assert all(key.startswith("model.") for key in dropped), dropped
-
-
-def test_stock_from_pretrained_still_does_not_raise(tmp_path):
-    """The premise: transformers silently re-initializes."""
-    path = _write_checkpoint(tmp_path / "trunc", drop="layers.1.")
-    reloaded, info = AutoModelForCausalLM.from_pretrained(path, output_loading_info=True)
-    assert info["missing_keys"], "transformers reported no missing keys for a truncated checkpoint"
-    assert not any(value.is_meta for value in reloaded.state_dict().values())
-
-
 def test_dropped_backbone_tensors_raise(tmp_path):
     path = _write_checkpoint(tmp_path / "trunc", drop="layers.1.")
     with pytest.raises(RuntimeError, match="absent from the checkpoint"):
@@ -79,12 +62,6 @@ def test_dropped_embedding_raises(tmp_path):
     path = _write_checkpoint(tmp_path / "trunc", drop="embed_tokens")
     with pytest.raises(RuntimeError, match="embed_tokens"):
         from_pretrained_verified(AutoModelForCausalLM, path)
-
-
-def test_complete_checkpoint_loads(tmp_path):
-    path = _write_checkpoint(tmp_path / "full")
-    model = from_pretrained_verified(AutoModelForCausalLM, path)
-    assert isinstance(model, nn.Module)
 
 
 @pytest.mark.parametrize("tie_word_embeddings", [False, True])

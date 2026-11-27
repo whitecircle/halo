@@ -12,8 +12,8 @@ from halo.data.collators.padded import (
     DataCollatorForCompletionOnlyLM,
     DataCollatorForLanguageModelingWithVarlen,
 )
-from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, reject_untrainable_completions
-from halo.data.turn_markers import TEXT_PROBE_CONVERSATIONS, resolve_eos_token_ids
+from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, reject_untrainable_text_completions
+from halo.data.turn_markers import resolve_eos_token_ids
 from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.segment_markers import segment_markers_for
 from halo.runtime.ranks import is_global_main_process
@@ -32,6 +32,7 @@ def select_data_collator(
     use_context_parallel: bool = False,
     train_on_last_assistant_only: bool = False,
     model_config=None,
+    generation_config=None,
     per_device_train_batch_size: int = 1,
     keeps_packed_rows: bool = False,
     allow_cross_document_linear_attention: bool = False,
@@ -39,7 +40,8 @@ def select_data_collator(
     emit_varlen_one_document: bool = False,
 ):
     """The collator matching the config, ``None`` for TRL's own; raises on a combination no collator can serve.
-    ``model_config`` supplies the eos set that ends assistant turns (GLM-4's role-marker templates).
+    ``model_config`` and ``generation_config`` supply the eos set that ends assistant turns (GLM-4's role-marker
+    templates, gpt-oss's ``<|call|>``).
 
     ``emit_varlen_one_document`` hands a one-document batch its varlen set where the model takes it, outside PP (whose
     stages build their own) and the CP routes (Ulysses hands the kernel its own ``cu_seqlens``). Only for a caller
@@ -64,12 +66,10 @@ def select_data_collator(
         "response_prompt_template": assistant_message_template,
         "tokenizer": tokenizer,
         "train_on_last_assistant_only": train_on_last_assistant_only,
-        "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config),
+        "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config, generation_config),
     }
-    if train_on_completions_only and getattr(tokenizer, "chat_template", None):
-        reject_untrainable_completions(
-            lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
-            TEXT_PROBE_CONVERSATIONS,
+    if train_on_completions_only:
+        reject_untrainable_text_completions(
             tokenizer,
             assistant_message_template,
             completion_kwargs["eos_token_ids"],

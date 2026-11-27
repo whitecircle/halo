@@ -162,6 +162,7 @@ def run(ctx):
         processor,
         policy.tokenizer,
         model.config,
+        model.generation_config,
         desc=f"sft_vlm_images {ARGS.family} {ARGS.data}",
     )
     towers = tuple(f"{tower}." for tower in media_module_names(model))

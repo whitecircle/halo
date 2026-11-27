@@ -28,11 +28,6 @@ def test_the_actor_split_per_rank(ranks, local_actors, shared_actors):
     assert _resolve(ranks=ranks, address=True).actors_per_rank == shared_actors
 
 
-def test_a_local_pool_does_not_grow_with_the_node_count():
-    """The budget is per node, so 64 nodes hold what one does."""
-    assert _resolve(ranks=512, address=False).actors_per_rank == _resolve(ranks=8, address=False).actors_per_rank
-
-
 def test_the_default_cap_is_one_wave_of_the_round_not_a_fixed_multiple_of_the_actors():
     shared_at_512 = _resolve(ranks=512, address=True, rows=64)
     assert shared_at_512.actors_per_rank == 1

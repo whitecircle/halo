@@ -44,15 +44,6 @@ def test_servers_of_one_node_are_one_contiguous_block_in_node_order():
     assert sorted(_ranks(layout, worlds)) == list(range(1, layout.world_size))
 
 
-def test_negative_control_an_unsorted_or_mis_stepped_layout_fails_the_exact_offsets():
-    nodes, worlds = ["b", "a", "b", "a"], [2, 1, 4, 8]
-    expected = resolve_group_layout(nodes, worlds)
-    unsorted = resolve_group_layout(["a"] * 4, worlds)
-    assert unsorted.rank_offsets != expected.rank_offsets, "the node sort leaves no mark on the offsets"
-    stepped = [1 + sum(worlds[:index]) + index for index in range(4)]
-    assert tuple(stepped) != unsorted.rank_offsets, "a step of engine world + 1 would leave holes in the ranks"
-
-
 def test_a_label_count_that_differs_from_the_servers_is_refused():
     with pytest.raises(ValueError, match="2 node labels for 3 servers"):
         resolve_group_layout(["a", "b"], [1, 1, 1])

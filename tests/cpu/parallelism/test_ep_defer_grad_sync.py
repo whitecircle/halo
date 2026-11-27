@@ -137,24 +137,32 @@ _TOPOLOGIES = [
 ]
 
 
-@pytest.mark.parametrize(("world", "stage", "ep_size", "etp", "ep_scope", "managed"), _TOPOLOGIES)
-def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_size, etp, ep_scope, managed):
+def test_every_topology_with_expert_replicas_defers_their_sync(subtests):
     """The global norm sums expert shards within the dispatch group, right only if the sweep already made replicas
     identical."""
-    cfg = built_ep_config(_parallelism_config(world, stage, ep_size, etp, ep_scope, managed))
-    if cfg.num_ep_groups > 1:
-        assert cfg.sweep_reduces_across_replicas or cfg.experts_fsdp_managed, (
-            world,
-            stage,
-            ep_size,
-            etp,
-            ep_scope,
-            managed,
-        )
-    if cfg.experts_fsdp_managed:
-        assert cfg.ep_group_size == 1
-    # A reentrant recompute would repeat the divide on a hook.
-    assert cfg.runs_post_backward_sweep == (not cfg.experts_fsdp_managed), (world, stage, ep_size, etp, ep_scope)
+    assert _TOPOLOGIES, "the sweep found no admitted topology"
+    for world, stage, ep_size, etp, ep_scope, managed in _TOPOLOGIES:
+        with subtests.test(f"{world}-{stage}-{ep_size}-{etp}-{ep_scope}-{managed}"):
+            cfg = built_ep_config(_parallelism_config(world, stage, ep_size, etp, ep_scope, managed))
+            if cfg.num_ep_groups > 1:
+                assert cfg.sweep_reduces_across_replicas or cfg.experts_fsdp_managed, (
+                    world,
+                    stage,
+                    ep_size,
+                    etp,
+                    ep_scope,
+                    managed,
+                )
+            if cfg.experts_fsdp_managed:
+                assert cfg.ep_group_size == 1
+            # A reentrant recompute would repeat the divide on a hook.
+            assert cfg.runs_post_backward_sweep == (not cfg.experts_fsdp_managed), (
+                world,
+                stage,
+                ep_size,
+                etp,
+                ep_scope,
+            )
 
 
 @pytest.mark.parametrize("managed", [True, False])

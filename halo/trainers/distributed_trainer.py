@@ -63,6 +63,7 @@ from halo.trainers.construction.ctor_slots import get_ctor_model_and_config
 from halo.trainers.construction.optimizer_selection import build_optimizer, resolve_bf16_optimizer
 from halo.trainers.construction.trainer_rules import (
     INERT_AUX_LOSS_DETAIL,
+    reject_hybrid_cp_training,
     reject_inert_aux_loss_balancing,
     reject_reference_sinks_mismatch,
     reject_stock_adamw_on_mixed_params,
@@ -71,6 +72,7 @@ from halo.trainers.construction.trainer_rules import (
     reject_unreachable_mtp_term,
     reject_unreloadable_best_model,
     reject_unsaveable_external_tables,
+    verify_lowp_conversion,
 )
 from halo.trainers.construction.training_args_overrides import (
     align_save_on_each_node,
@@ -90,7 +92,7 @@ from halo.trainers.parallelism.adapter_rules import (
     reject_unrealized_expert_lora,
     reject_unsaved_grown_vocabulary,
 )
-from halo.trainers.parallelism.ep_layers import EPLayersMixin, resolve_use_reentrant
+from halo.trainers.parallelism.ep_layers import EPLayersMixin, apply_checkpointing_args, resolve_use_reentrant
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin, reject_unsynced_trainable_params
@@ -192,12 +194,15 @@ class DistributedTrainerMixin(
 
     # CP and PP are declare-to-enable: both fail silently on a loss nobody verified under them.
     SUPPORTS_CP: ClassVar[bool] = False
+    SUPPORTS_HYBRID_CP: ClassVar[bool] = False
     # Why this trainer refuses PP; None admits it.
     PP_REFUSAL: ClassVar[str | None] = (
         "a pipeline stage holds only a contiguous subset of the layers, so this trainer's "
         "loss cannot be expressed as a last-stage function of logits and labels"
     )
     SUPPORTS_LOWP_PRECISION: ClassVar[bool] = False
+    # ``lowp_backend: native``, the experts on DeepGEMM's kernels, beside ``SUPPORTS_LOWP_PRECISION``.
+    SUPPORTS_NATIVE_LOWP: ClassVar[bool] = False
     # Sequence rows one model call carries per dataset example; the EP dispatch gate multiplies by it.
     FORWARD_ROWS_PER_EXAMPLE: ClassVar[int] = 1
     # Rows come from generation, so the config has no ``max_length``: the bound is :meth:`declared_row_length`, and an
@@ -269,6 +274,14 @@ class DistributedTrainerMixin(
         model, ctor_training_args = get_ctor_model_and_config(ctor_args, kwargs, ctor_positions)
         if training_args is None:
             training_args = ctor_training_args
+        # A subclass must opt in itself: inheriting SFT's flag does not verify its loss under hybrid CP.
+        reject_hybrid_cp_training(
+            model,
+            training_args,
+            parallelism_config,
+            supported=vars(type(self)).get("SUPPORTS_HYBRID_CP", False),
+            peft_config=kwargs.get("peft_config"),
+        )
         model_config = getattr(model, "config", None)
         self._accelerate_manages_fsdp = accelerate_manages_fsdp(parallelism_config)
         self._accelerate_manages_ddp = accelerate_manages_ddp(parallelism_config)
@@ -349,7 +362,7 @@ class DistributedTrainerMixin(
             configured = gc_kwargs.get("use_reentrant")
             use_reentrant = resolve_use_reentrant(config, model_config, configured)
             if use_reentrant != configured:
-                training_args.gradient_checkpointing_kwargs = {**gc_kwargs, "use_reentrant": use_reentrant}
+                apply_checkpointing_args(training_args, {**gc_kwargs, "use_reentrant": use_reentrant})
 
     def _configure_distributed_modes(self) -> None:
         """COLLECTIVE. Wrap the model for its parallel mode and run the post-wrap gates; call after
@@ -385,6 +398,8 @@ class DistributedTrainerMixin(
             eval_rows_per_forward=self.args.per_device_eval_batch_size if uses_evaluation(self.args) else 1,
         )
         verify_qwen4_exp_patched(self._top_level_model())
+        # A model handed in, or built from an id, never passed the loader's lowp step.
+        verify_lowp_conversion(self._top_level_model(), config.lowp)
         reject_unreloadable_best_model(self.args, config, self.model)
         reject_unsaveable_external_tables(
             self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp

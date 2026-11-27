@@ -30,7 +30,8 @@ from halo.data.collators.self_distill import (
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.text_rows import text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
-from halo.data.render_columns import reject_missing_render_column
+from halo.data.render_columns import reject_missing_render_column, render_column_checks_across_ranks
+from halo.data.turn_markers import resolve_eos_token_ids
 from halo.entrypoints.data_setup import (
     apply_vision_options,
     disable_trl_dataset_prep,
@@ -57,6 +58,7 @@ from halo.entrypoints.script import (
 )
 from halo.model_loading.parallel.frozen_models import load_frozen_reference_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
@@ -133,7 +135,9 @@ def _audit_rows(collator, train_dataset, eval_dataset, num_proc) -> None:
             )
 
 
-def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_config, num_proc, hint_template):
+def _build_text_dataset_and_collator(
+    ds, args, tokenizer, max_length, model_config, generation_config, num_proc, hint_template
+):
     """Text path: the splits encoded once at prep, the confidence column kept for the collator's weights."""
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
@@ -149,6 +153,7 @@ def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_conf
         response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
         train_on_completions_only=args.train_on_completions_only,
         model_config=model_config,
+        generation_config=generation_config,
         **text_render_kwargs(args),
     )
     keep = (args.confidence_field,) if args.confidence_field else ()
@@ -159,7 +164,9 @@ def _build_text_dataset_and_collator(ds, args, tokenizer, max_length, model_conf
     )
 
 
-def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, num_proc, model_config, hint_template):
+def _build_vlm_dataset_and_collator(
+    ds, args, processor, tokenizer, max_length, num_proc, model_config, generation_config, hint_template
+):
     """The over-length filter measures the hinted teacher branch, the longer: a row whose hint pushes it over would
     otherwise raise in one rank's collator and hang its peers."""
     privileged = tuple(f for f in (args.sdpg_answer_field, args.privileged_solution_field, args.confidence_field) if f)
@@ -174,6 +181,7 @@ def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, 
         tokenizer,
         max_length,
         num_proc,
+        eos_token_ids=resolve_eos_token_ids(tokenizer, model_config, generation_config),
         keep=privileged,
         desc="Processing VLM self-distillation dataset",
         measured_history=measured_history,
@@ -189,6 +197,7 @@ def _build_vlm_dataset_and_collator(ds, args, processor, tokenizer, max_length, 
         confidence_power=args.confidence_power,
         confidence_normalizer=_confidence_normalizer(ds["train"], ds.get("test"), args),
         model_config=model_config,
+        generation_config=generation_config,
         **hint_kwargs,
     )
     _audit_rows(collator, ds["train"], ds.get("test"), num_proc)
@@ -313,7 +322,8 @@ def main():
             "dataset gives each data-parallel rank a different shard, so each would divide by its own. "
             "Load the raw dataset unsharded, or drop confidence_field."
         )
-    _require_privileged_columns(ds, args)
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        _require_privileged_columns(ds, args)
     # The data path follows the run: a multimodal student distilled on text-only rows is a text run. Decided before the
     # model load, which needs the checkpoint's processor for an image run.
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
@@ -326,6 +336,8 @@ def main():
     ).attn_default
     policy = load_policy_model(context, sft_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
     model = policy.model
+    if is_vlm:
+        mark_processor_rendered_rows(policy.tokenizer)
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)
@@ -338,11 +350,19 @@ def main():
     num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
     if is_vlm:
         train_dataset, eval_dataset, collator = _build_vlm_dataset_and_collator(
-            ds, args, processing_class, tokenizer, sft_config.max_length, num_proc, model.config, hint_template
+            ds,
+            args,
+            processing_class,
+            tokenizer,
+            sft_config.max_length,
+            num_proc,
+            model.config,
+            model.generation_config,
+            hint_template,
         )
     else:
         train_dataset, eval_dataset, collator = _build_text_dataset_and_collator(
-            ds, args, tokenizer, sft_config.max_length, model.config, num_proc, hint_template
+            ds, args, tokenizer, sft_config.max_length, model.config, model.generation_config, num_proc, hint_template
         )
 
     log_script_dataset_examples({"train": train_dataset, "test": eval_dataset}, tokenizer, args, sft_config)
@@ -378,6 +398,7 @@ def main():
         reference_kl_loss=args.reference_kl_loss,
         confidence_weight_opd=args.confidence_weight_opd,
         opd_exclude_eos=args.opd_exclude_eos,
+        use_chunked_distillation_loss=args.use_chunked_distillation_loss,
     )
     run_trainer(
         trainer,

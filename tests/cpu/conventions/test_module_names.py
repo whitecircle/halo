@@ -44,17 +44,16 @@ def _named_units(root: Path) -> list[Path]:
     return sorted(path for path in units if "__pycache__" not in path.parts)
 
 
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
+def test_banned_tokens_reads_whole_tokens(subtests):
+    rows = [
         ("utils", {"utils"}),
         ("io_helpers", {"helpers"}),
         ("model_wrapper", {"wrapper"}),
         ("shared_experts_layer", set()),
-    ],
-)
-def test_banned_tokens_reads_whole_tokens(name, expected):
-    assert _banned_tokens(name) == expected
+    ]
+    for name, expected in rows:
+        with subtests.test(name):
+            assert _banned_tokens(name) == expected
 
 
 @pytest.mark.parametrize("root", _ROOTS, ids=lambda root: str(root.relative_to(REPO_ROOT)))

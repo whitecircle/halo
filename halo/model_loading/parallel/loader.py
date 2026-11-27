@@ -4,12 +4,13 @@ the run's attention through the per-mode loader to the post-load policies."""
 from __future__ import annotations
 
 import logging
+import os
 from collections.abc import Callable
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
-from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.rank_uniform_env import agree_rank_uniform_env
@@ -144,8 +145,8 @@ def _resolve_run_attention(
         elif uses_gpt_oss_sinks(model_config) and sinks_policy is SinksPolicy.NEUTRALIZED:
             patch_flex_attention_compile("FSDP2 + GptOss sinks NaN gradient fix")
 
-    # Gemma 4 builds `sdpa_flex_sliding` for `sdpa`, whose FlexAttention graphs warm_attention_kernels
-    # compiles on every rank before training.
+    # Gemma 4 builds `sdpa_flex_sliding` for `sdpa` and Inkling 2 runs `inkling2_relative_flex`, whose FlexAttention
+    # graphs warm_attention_kernels compiles on every rank before training.
     return apply_family_patches(model_config, attn_implementation)
 
 
@@ -454,6 +455,9 @@ def load_distributed_model(
 
     # The weights' source, None for a random init, where ``_name_or_path`` survives; the resume's skip keys on this.
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, None if init_from_scratch else model_name_or_path)
+    # The commit every rank agreed on, which an adapter save records as its base's revision.
+    read_from_hub = not init_from_scratch and not os.path.isdir(model_name_or_path)
+    setattr(model, LOADED_WEIGHTS_REVISION_ATTR, source.revision if read_from_hub else None)
     apply_run_model_policies(
         model,
         model_config,

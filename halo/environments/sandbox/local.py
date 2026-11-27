@@ -19,6 +19,16 @@ from contextlib import contextmanager
 from halo.env import env_int
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor, SandboxSession
 from halo.environments.sandbox.languages import INTERPRETER_PLACEHOLDER, LanguageSpec, require_language, utf8_encodable
+from halo.environments.sandbox.limits import (
+    LOCAL_FSIZE_LIMIT,
+    LOCAL_NPROC_LIMIT,
+    RLIMIT_CPU_SLACK_SECONDS,
+    SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
+    SANDBOX_DEFAULT_COMPILE_TIMEOUT,
+    SANDBOX_DEFAULT_MEMORY_MB,
+    TAMPERED_WORKDIR_RETURNCODE,
+    build_program_env,
+)
 from halo.environments.sandbox.results import (
     COMMAND_NOT_FOUND_RETURNCODE,
     SandboxAgentFault,
@@ -34,28 +44,9 @@ _PYTHON_INTERPRETER = sys.executable or "python"
 # As tool descriptions name it (``CPython 3.12``).
 _PYTHON_RUNTIME = f"{platform.python_implementation()} {sys.version_info.major}.{sys.version_info.minor}"
 
-SANDBOX_DEFAULT_MEMORY_MB = 1024
-# Build-step wall-clock cap (seconds); bounds an #include bomb in untrusted source.
-_SANDBOX_DEFAULT_COMPILE_TIMEOUT = 30.0
-_SANDBOX_DEFAULT_COMPILE_MEMORY_MB = 2048
-# Bytes a child may write to one file; bounds disk fill and binary size.
-LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
-# RLIMIT_NPROC for the run step. The kernel exempts uid 0, so it binds every bubblewrap run (per user namespace) and
-# `local` only in a container run as another user, where it counts the whole trainer+Ray task set.
-LOCAL_NPROC_LIMIT = 4096
-# RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
-_RLIMIT_CPU_SLACK_SECONDS = 1.0
-
 # Seconds a launch (limit shell, bubblewrap's namespaces and mounts) may take to reach the program before the run
 # is lost to the host. The program's time limit starts where the launch ends.
 LAUNCH_TIMEOUT_SECONDS = 30.0
-
-# Host-sized math thread pools allocate per-thread buffers at load, which the address-space limit refuses; numpy's
-# OpenBLAS then aborts a correct program at import.
-_SINGLE_THREADED_MATH_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
-
-# A tampered working directory is the program's own runtime error; an infra fault would void the episode.
-TAMPERED_WORKDIR_RETURNCODE = 1
 
 # (language, source text, auxiliary file contents)
 _BuildKey = tuple[str, str, tuple[tuple[str, str], ...]]
@@ -158,8 +149,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
     def __init__(
         self,
         memory_limit_mb: int = SANDBOX_DEFAULT_MEMORY_MB,
-        compile_timeout: float = _SANDBOX_DEFAULT_COMPILE_TIMEOUT,
-        compile_memory_limit_mb: int = _SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
+        compile_timeout: float = SANDBOX_DEFAULT_COMPILE_TIMEOUT,
+        compile_memory_limit_mb: int = SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
     ):
         self.memory_limit_mb = memory_limit_mb
         self.compile_timeout = compile_timeout
@@ -262,14 +253,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
     @staticmethod
     def _child_env(workdir: str) -> dict[str, str]:
         """Minimal environment, with no inherited proxy or secrets."""
-        return {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "HOME": workdir,
-            "TMPDIR": workdir,
-            "LANG": os.environ.get("LANG", "C.UTF-8"),
-            "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
-            **_SINGLE_THREADED_MATH_ENV,
-        }
+        return {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), **build_program_env(workdir)}
 
     def _write_sources(
         self, workspace: Workspace, spec: LanguageSpec, code: str, files: dict[str, str] | None
@@ -278,9 +262,9 @@ class LocalSubprocessSandbox(SandboxExecutor):
         runtime-error verdict when the program replaced or locked a prepared entry (its own fault, never an infra
         error that could void its episode). A write refused after the restore means an escaped child locked it."""
         files = files or {}
-        for name in files:
-            if not SandboxSession.is_safe_member_name(name):
-                return SandboxResult(error=f"unsafe auxiliary file path: {name!r}")
+        refused = SandboxSession.refused_auxiliary_file(files)
+        if refused is not None:
+            return refused
         try:
             for name, content in files.items():
                 workspace.write(name, utf8_encodable(content))
@@ -295,7 +279,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
         compile_argv = self._wrap_command(list(spec.compile_argv), workdir)
         compile_argv = self._limit_wrap(
             compile_argv,
-            int(math.ceil(self.compile_timeout + _RLIMIT_CPU_SLACK_SECONDS)),
+            int(math.ceil(self.compile_timeout + RLIMIT_CPU_SLACK_SECONDS)),
             self.compile_memory_limit_mb,
         )
         with sandbox_execution_gate.slot():
@@ -322,7 +306,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
             # not: glibc sizes every thread's stack by that limit and each worker thread would take it.
             run_argv = self._limit_wrap(
                 run_argv,
-                int(math.ceil(timeout + _RLIMIT_CPU_SLACK_SECONDS)),
+                int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
                 self.memory_limit_mb,
                 nproc=LOCAL_NPROC_LIMIT,
                 stack_mb=self.memory_limit_mb if spec.is_compiled else None,

@@ -18,10 +18,12 @@ from halo.models.introspection.context_window import is_bounded_length
 from halo.models.introspection.unwrapping import unwrap_framework_wrappers
 from halo.trainers.construction.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.full_logits_memory import LogitsWidth
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
+    reject_negative_reward_terms_under_maxrl,
     reject_off_policy_mask_threshold,
     reject_open_ended_tool_turns,
     reject_straddling_eval_groups,
@@ -31,6 +33,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_unsupported_score_centering,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
+    reject_whole_trajectory_render_of_rewritten_view,
 )
 from halo.trainers.grpo.environmental.loss.centered_scoring import ScoreCenteringMixin
 from halo.trainers.grpo.environmental.loss.importance_sampling import ImportanceSamplingMixin
@@ -43,8 +46,12 @@ from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.tool_call_watch import ToolCallParserWatch, build_tool_call_watch
 from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
-from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
-from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
+from halo.trainers.grpo.grpo_rules import (
+    reject_conflicting_maxrl,
+    reject_inert_std_floor,
+    reject_unbalanceable_token_mass,
+)
+from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, ProtectedTokenEntropyMixin
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
 from halo.trainers.grpo.phase_timing import PhaseTimedMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
@@ -124,6 +131,9 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Read off the env instance, not the config dict: the class owns its defaults and validation.
         self._group_random_effort = self._rollout_env.reasoning_effort == RANDOM_REASONING_EFFORT
         reject_unverified_carried_reasoning(self._rollout_env, self.async_config.rollout_backend)
+        if not self.async_config.rollout_thinking:
+            self._rollout_env.reject_settings_without_thinking()
+        reject_whole_trajectory_render_of_rewritten_view(self._rollout_env, self.async_config.train_on_sampled_tokens)
         kwargs.setdefault("reward_funcs", placeholder_reward_func)
         with self._supplying_kl_reference():
             super().__init__(*args, **kwargs)
@@ -179,8 +189,13 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
     def _configure_rollout_state(self) -> None:
         cfg = self.async_config
+        if cfg.use_maxrl:
+            # First, since a floor beside MaxRL would also trip the inert-floor check, with a less direct message.
+            reject_conflicting_maxrl(self.args.scale_rewards, cfg.scale_rewards_std_floor)
+            reject_negative_reward_terms_under_maxrl(cfg, price_on=self._reasoning_price_on)
         self._rollout_backend = cfg.rollout_backend
         self._rollout_weight_precision = cfg.rollout_weight_precision
+        self._rollout_adapter_sync = cfg.rollout_adapter_sync
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
         reject_open_ended_tool_turns(
             self._rollout_env, unwrap_framework_wrappers(self.model), self._tokenizer, self._rollout_stop_token_ids

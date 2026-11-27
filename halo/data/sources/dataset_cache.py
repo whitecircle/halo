@@ -123,7 +123,9 @@ def publish_cached_download(
 ) -> bool:
     """Serve from cache or (re)download with ``fetch(tmp_path)`` and publish atomically; returns cache-hit. Writers
     serialize on ``lock_path``; ``live_fingerprint`` (``None`` serves unvalidated) invalidates a cache whose source
-    changed and upgrades a fingerprint-less marker. A raising fetch leaves no partial tree."""
+    changed and upgrades a fingerprint-less marker. The marker holds the fingerprint listed before the fetch (the one
+    listed after it when the first listing failed), and a source listed otherwise after it raises, since the tree may
+    hold either state. A raising fetch leaves no partial tree."""
     complete_marker = os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER)
     with filelock.FileLock(lock_path, timeout=_CACHE_LOCK_TIMEOUT_SECONDS):
         # Under the lock same-node writers are excluded; the age threshold covers cross-node ones.
@@ -144,12 +146,25 @@ def publish_cached_download(
             return True
 
         tmp_path = f"{cache_path}.tmp-{uuid.uuid4().hex}"
+        fingerprint = fresh_fingerprint()
         try:
             fetch(tmp_path)
+            # None when a listing fails, which proves nothing either way.
+            after = fresh_fingerprint()
+            if fingerprint is not None and after is not None and after != fingerprint:
+                raise RuntimeError(
+                    f"{source_uri} changed while it was downloaded, so the copy may hold files of both states. "
+                    f"Relaunch once its writer has finished."
+                )
         except BaseException:
             shutil.rmtree(tmp_path, ignore_errors=True)
             raise
-        _write_download_marker(os.path.join(tmp_path, DOWNLOAD_COMPLETE_MARKER), source_uri, fresh_fingerprint())
+        # Never a marker without a fingerprint while one is known: the next hit would stamp it with the live listing.
+        _write_download_marker(
+            os.path.join(tmp_path, DOWNLOAD_COMPLETE_MARKER),
+            source_uri,
+            fingerprint if fingerprint is not None else after,
+        )
         _publish_tree(tmp_path, cache_path)
         return False
 
@@ -162,18 +177,31 @@ def serve_cached_tree(
     *,
     stale_message: str,
     use_cache: bool = True,
+    replace_stale: bool = True,
 ) -> bool:
-    """Locked by ``<cache dir>/.lock``, validating a complete cache against ``fingerprint()``. Returns cache-hit."""
+    """Locked by ``<cache dir>/.lock``, validating a complete cache against ``fingerprint()``. Returns cache-hit. A
+    complete cache whose fingerprint matches, or cannot be listed, is served without the lock, so a pre-staged cache
+    on a read-only mount serves; one whose fingerprint differs is refused there with ``stale_message`` when
+    ``replace_stale`` is off, and downloaded again otherwise."""
     cache_dir = os.path.dirname(cache_path)
     os.makedirs(cache_dir, exist_ok=True)
+    marker = os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER)
     # Probed outside the lock (network I/O), and only for a cache that could be served.
-    complete = use_cache and os.path.exists(os.path.join(cache_path, DOWNLOAD_COMPLETE_MARKER))
+    complete = use_cache and os.path.exists(marker)
+    live = fingerprint() if complete else None
+    stored = _read_marker_fingerprint(marker) if complete else None
+    if complete and (live is None or live == stored):
+        # Outside the lock the age threshold alone spares a live writer's temp dir, as it does across nodes.
+        _cleanup_stale_publish_tmp_dirs(cache_path)
+        return True
+    if complete and stored is not None and not replace_stale:
+        raise ValueError(stale_message)
     return publish_cached_download(
         cache_path,
         os.path.join(cache_dir, ".lock"),
         source_uri,
         fetch,
-        fingerprint() if complete else None,
+        live,
         fingerprint,
         use_cache=use_cache,
         stale_message=stale_message,

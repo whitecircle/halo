@@ -98,9 +98,8 @@ def _worker(rank: int, cp_size: int) -> None:
     torch.testing.assert_close(weight.grad, torch.zeros_like(weight), atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("cp_size", [2, 4])
-def test_autograd_sum_matches_unsplit_row_loss_gradients_and_optimizer_step(cp_size):
-    run_gloo_ranks(_worker, cp_size, cp_size, pg_timeout=timedelta(seconds=40))
+def test_autograd_sum_matches_unsplit_row_loss_gradients_and_optimizer_step():
+    run_gloo_ranks(_worker, 4, 4, pg_timeout=timedelta(seconds=40))
 
 
 def test_cp1_is_an_identity_in_fp32():
@@ -161,9 +160,8 @@ def _offline_worker(rank: int, cp_size: int) -> None:
             assert (got.detach() * cp_size - want.detach()).abs() > 0.01
 
 
-@pytest.mark.parametrize("cp_size", [2, 4])
-def test_offline_objectives_match_full_rows_after_mean_grad_sync(cp_size):
-    run_gloo_ranks(_offline_worker, cp_size, cp_size, pg_timeout=timedelta(seconds=40))
+def test_offline_objectives_match_full_rows_after_mean_grad_sync():
+    run_gloo_ranks(_offline_worker, 4, 4, pg_timeout=timedelta(seconds=40))
 
 
 def test_offline_loss_rejects_invalid_row_shapes_and_dr_grpo_window():

@@ -6,6 +6,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from datetime import timedelta
 from typing import Any
 
@@ -367,6 +368,14 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
                 logger.warning("MCP close(): owning event loop already stopped; connection not unwound")
                 self._forget_servers()
         super().close()
+
+    async def _discover_tools_schema(self) -> list[dict[str, Any]]:
+        """Read a disposable discovery server's tools without opening an episode or retaining its session."""
+        try:
+            await self.connect()
+            return deepcopy(self.get_tools_schema())
+        finally:
+            await self.disconnect()
 
     def _forget_servers(self) -> None:
         for server in self._servers():

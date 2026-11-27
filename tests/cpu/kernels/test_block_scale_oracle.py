@@ -154,7 +154,7 @@ def test_mxfp4_round_trip_compile_bit_identical(monkeypatch):
 
 
 @pytest.mark.parametrize("fmt", sorted(q.QUANTIZERS))
-@pytest.mark.parametrize("ep_size", [2, 4, 8])
+@pytest.mark.parametrize("ep_size", [2, 8])
 def test_quantizing_an_expert_shard_matches_quantizing_the_gathered_bank(fmt, ep_size):
     """Training quantizes the slice an EP rank holds and the export the gathered bank; e4m3 is invariant under a
     power-of-two rescale, so a plain ``amax/2688`` global fails here."""

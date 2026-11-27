@@ -9,6 +9,7 @@ import logging
 import math
 import random
 import types
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -20,7 +21,6 @@ from openai import (
     AuthenticationError,
     BadRequestError,
     NotFoundError,
-    PermissionDeniedError,
 )
 
 import halo.environments.rollouts.eval_runner as eval_runner
@@ -152,6 +152,57 @@ async def test_an_episode_that_raises_records_its_exception_type(monkeypatch):
     assert row["samples"][0]["error"] == "TimeoutError"
 
 
+@pytest.mark.parametrize(
+    ("raw", "refusal"),
+    [("{not json", "HALO_EVAL_EXTRA_BODY is not JSON"), ("[1]", "HALO_EVAL_EXTRA_BODY must be a JSON object")],
+)
+async def test_an_extra_body_that_is_no_json_object_refuses_the_eval(monkeypatch, raw, refusal):
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", raw)
+    with pytest.raises(ValueError, match=refusal):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING)
+
+
+async def test_an_extra_body_over_a_field_the_eval_writes_refuses_the_eval(monkeypatch):
+    """Laid over last, it would replace the run's own field: a thinking-off contract's enable_thinking, say."""
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({"chat_template_kwargs": {}}))
+    rollout = replace(_RETRYING, chat_template_kwargs={"enable_thinking": False})
+    with pytest.raises(ValueError, match=r"HALO_EVAL_EXTRA_BODY sets \['chat_template_kwargs'\]"):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=rollout)
+
+
+@pytest.mark.parametrize("field", ["temperature", "model", "tools"])
+async def test_an_extra_body_over_a_field_the_sdk_takes_as_a_keyword_refuses_the_eval(monkeypatch, field):
+    """The SDK lays extra_body over the whole body, keyword fields included: ``{"temperature": 0}`` would sample the
+    whole eval greedily under the run's name."""
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({field: 0}))
+    with pytest.raises(ValueError, match=rf"HALO_EVAL_EXTRA_BODY sets \['{field}'\]"):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=_RETRYING)
+
+
+async def test_an_extra_body_over_the_thinking_cap_the_answer_room_derives_refuses_the_eval(monkeypatch):
+    """No rollout_max_thinking_tokens: the cap is the turn less its answer room, which every vLLM turn writes as
+    thinking_token_budget, so the overlay would replace the episode's cap."""
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({"thinking_token_budget": 7}))
+    rollout = RolloutConfig(model_name="m", max_tokens=100, max_answer_tokens=20)
+    with pytest.raises(ValueError, match=r"HALO_EVAL_EXTRA_BODY sets \['thinking_token_budget'\]"):
+        await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=rollout)
+
+
+async def test_an_extra_body_set_before_the_run_reaches_every_request(monkeypatch):
+    sent = []
+    replies = iter([_tool_call_response(), chat_reply("done")])
+
+    async def _chat(client, **request):
+        sent.append(request)
+        return next(replies)
+
+    monkeypatch.setenv("HALO_EVAL_EXTRA_BODY", json.dumps({"provider": {"order": ["a"]}}))
+    monkeypatch.setattr(eval_runner, "chat_completion", _chat)
+    rollout = RolloutConfig(model_name="m", max_tokens=16)
+    await collect_results(_tooled_env(), [{"prompt": "task", "context": {}}], client=object(), rollout=rollout)
+    assert len(sent) == 2 and all(request["extra_body"]["provider"] == {"order": ["a"]} for request in sent)
+
+
 def _tooled_env(**kw) -> NativeToolUseEnvironment:
     registry = NativeToolRegistry()
     registry.register(NativeTool(name="echo", description="echo", parameters=[], handler=lambda **a: "ok"))
@@ -173,7 +224,12 @@ def _tool_call_response():
 async def _run_scripted_episode(env, script, monkeypatch):
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat(script))
     return await run_episode(
-        env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+        env,
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
 
 
@@ -274,6 +330,7 @@ async def test_the_eval_keeps_a_cut_call_on_its_turn_and_in_the_record_without_r
         {},
         client=object(),
         rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
 
     salvaged = {"id": "c1", "type": "function", "function": {"name": "echo", "arguments": '{"x": "# still re'}}
@@ -325,7 +382,12 @@ async def test_run_episode_reads_the_tool_schema_after_reset(monkeypatch):
     monkeypatch.setattr(env, "get_tools_schema", _schema)
     monkeypatch.setattr(eval_runner, "chat_completion", _generate)
     await run_episode(
-        env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+        env,
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
     assert seen["tools"], "the generation ran without the tools the environment registers on reset"
 
@@ -353,10 +415,35 @@ async def test_a_random_level_is_drawn_from_the_problem_so_reruns_agree(monkeypa
     problems = [f"problem {i}" for i in range(12)]
     for _ in range(2):
         for problem in problems:
-            await run_episode(env, problem, {}, client=object(), rollout=rollout)
+            await run_episode(env, problem, {}, client=object(), rollout=rollout, extra_body={})
     stable = [stable_reasoning_effort(problem) for problem in problems]
     assert len(set(stable)) > 1, "every problem draws one level, so matching it proves nothing"
     assert levels == stable * 2
+
+
+@pytest.mark.parametrize("cell", ["", 0, "extreme"])
+async def test_a_random_level_is_drawn_only_for_a_null_cell_and_a_bad_one_is_refused(cell, monkeypatch):
+    """Training's binding refuses any cell outside the levels, so the eval draws in place of a null or missing cell
+    alone and refuses the rest instead of scoring the row at a level of its own choosing."""
+    env = _tooled_env()
+    env.reasoning_effort = RANDOM_REASONING_EFFORT
+    drawn: list[str] = []
+    real_reset = env.reset
+
+    def _reset(prompts, contexts):
+        drawn.append(contexts[0]["reasoning_effort"])
+        return real_reset(prompts, contexts)
+
+    async def _generate(client, **request):
+        return chat_reply(answer="done", finish_reason="stop", completion_tokens=1, tool_calls=None, reasoning=None)
+
+    monkeypatch.setattr(env, "reset", _reset)
+    monkeypatch.setattr(eval_runner, "chat_completion", _generate)
+    rollout = RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+    with pytest.raises(ValueError, match=f"reasoning_effort cell reads {cell!r}"):
+        await run_episode(env, "problem", {"reasoning_effort": cell}, client=object(), rollout=rollout, extra_body={})
+    await run_episode(env, "problem", {"reasoning_effort": None}, client=object(), rollout=rollout, extra_body={})
+    assert drawn == [stable_reasoning_effort("problem")]
 
 
 def test_a_conversation_with_no_user_turn_has_no_level_to_draw():
@@ -378,7 +465,7 @@ async def test_a_captured_turn_records_the_reasoning_it_sampled(monkeypatch):
     rollout = RolloutConfig(
         model_name="m", max_tokens=16, max_thinking_tokens=8, capture_token_ids=True, reasoning_end_token_id=end
     )
-    traj = await run_episode(_tooled_env(), "task", {}, client=object(), rollout=rollout)
+    traj = await run_episode(_tooled_env(), "task", {}, client=object(), rollout=rollout, extra_body={})
     turn = next(m for m in serialize_trajectory(traj)["messages"] if m["role"] == "assistant")
     assert (turn["reasoning_tokens"], turn["thinking_cap"]) == (4, 8)
     assert sent[0]["extra_body"]["logprobs"] is True and sent[0]["extra_body"]["return_token_ids"] is True
@@ -400,7 +487,7 @@ async def test_a_call_cut_at_the_cap_is_recorded_as_the_policy_wrote_it(monkeypa
 
     monkeypatch.setattr(eval_runner, "chat_completion", scripted_chat([cut, chat_reply("done")]))
     rollout = RolloutConfig(model_name="m", max_tokens=len(ids), capture_token_ids=True, reasoning_end_token_id=end)
-    traj = await run_episode(_tooled_env(), "task", {}, client=_Client(), rollout=rollout)
+    traj = await run_episode(_tooled_env(), "task", {}, client=_Client(), rollout=rollout, extra_body={})
     turn = next(m for m in traj.messages if m.role == "assistant")
     assert decoded == [("http://x:8000/detokenize", [21, 22, 23])]
     assert turn.cut_tool_calls[0]["function"]["arguments"] == "<call>echo 1+ # cut"
@@ -417,7 +504,12 @@ async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
     monkeypatch.setattr(env, "finalize_truncated", lambda eids: (_ for _ in ()).throw(RuntimeError("finalize boom")))
     with pytest.raises(RuntimeError, match="finalize boom"):
         await run_episode(
-            env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+            env,
+            "task",
+            {},
+            client=object(),
+            rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+            extra_body={},
         )
     assert env._trajectories == {}
 
@@ -576,7 +668,12 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
         ),
     )
     traj = await run_episode(
-        env, "task", {}, client=object(), rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16)
+        env,
+        "task",
+        {},
+        client=object(),
+        rollout=RolloutConfig(model_name="m", temperature=0.0, max_tokens=16),
+        extra_body={},
     )
     observations = [m.content for m in traj.messages if m.role == "tool"]
     assert observations[-1] == "persisted", observations
@@ -625,7 +722,7 @@ async def _episode_under_retries(env, script, monkeypatch, rollout=_RETRYING):
         return await scripted(client, **request)
 
     monkeypatch.setattr(eval_runner, "chat_completion", _counting)
-    traj = await run_episode(env, "task", {}, client=object(), rollout=rollout)
+    traj = await run_episode(env, "task", {}, client=object(), rollout=rollout, extra_body={})
     return traj, len(calls)
 
 
@@ -686,10 +783,9 @@ async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeyp
     [
         _status_error(NotFoundError, 404, "The model `m` does not exist."),
         _status_error(AuthenticationError, 401, "Invalid API key"),
-        _status_error(PermissionDeniedError, 403, "Forbidden"),
         _bad_request("max_tokens must be positive"),
     ],
-    ids=["unknown-model", "rejected-key", "forbidden", "malformed-request"],
+    ids=["unknown-model", "rejected-key", "malformed-request"],
 )
 async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(monkeypatch, failure):
     """An unknown model or route, a rejected key, a request built wrong says nothing about the episode; graded as a

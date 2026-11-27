@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""Semantic deduplication of a large dataset via sentence embeddings + FAISS: drops every row whose cosine similarity
-to an earlier row exceeds ``--similarity_threshold``."""
+"""Semantic deduplication of a dataset via sentence embeddings + FAISS: drops a row whose cosine similarity to an earlier
+row of the same search block exceeds ``--similarity_threshold``. Rows in different blocks are never compared, so the
+reshuffled passes catch a share of the duplicates that falls as the dataset outgrows ``--dedup_batch_size``."""
 
 import argparse
 import logging
@@ -99,7 +100,7 @@ def _add_search_args(parser: argparse.ArgumentParser) -> None:
         "--max_workers",
         type=int,
         default=None,
-        help="Worker threads for the similarity search (default: the CPUs the process may use).",
+        help="OpenMP threads for the similarity search (default: the CPUs the process may use).",
     )
 
 

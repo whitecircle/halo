@@ -11,8 +11,15 @@ from halo.data.collators.packing import (
 )
 from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
 from halo.data.completion_spans import build_training_labels
+from halo.data.pipeline.text_rows import build_chat_row_processor, tokenize_training_row
 from halo.data.turn_markers import resolve_eos_token_ids
-from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
+from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, INKLING_SMALL, QWEN3_0_6B, QWEN3_5_2B
+from tests.common.open_turn_templates import (
+    GLM_ANSWER_CLOSER,
+    GLM_CALL_CLOSER,
+    OPEN_FINAL_TURN_TEMPLATES,
+    load_open_turn_tokenizer,
+)
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
 
@@ -24,10 +31,31 @@ ASST_MARKERS = {  # the assistant generation marker per family (matches the prod
     GLM4_FLASH: "<|assistant|>",
     GEMMA3_4B_IT: "<start_of_turn>model\n",
 }
-# Families whose native template leaves the FINAL assistant turn unterminated need the SFT template,
-# or the completion collators cannot train that turn (Qwen3/Gemma terminate every turn natively).
+# Families whose native template leaves the FINAL assistant turn unterminated, rendered here outside the row
+# pipeline that closes it, take the SFT template, which writes the terminator itself (Qwen3/Gemma terminate every
+# turn natively).
 SFT_TEMPLATE_FILES = {
     GLM4_FLASH: "jinja-templates/glm/glm-chat.jinja",
+}
+TOOLS = [{"type": "function", "function": {"name": "add", "description": "Add.", "parameters": {"type": "object"}}}]
+TOOL_CALL_TURN = {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "add", "arguments": {"a": 2, "b": 2}}}],
+}
+TOOL_REPLY = {"role": "tool", "tool_call_id": "call_1", "content": "4"}
+# GLM's role markers in templates that leave a row's last answer open and whose probe names no closer: a newline, no
+# terminator, follows a turn; or the last turn renders otherwise than once followed, so the token at its end offset in
+# the followed render is no closer of it.
+NO_CLOSER_TEMPLATES = {
+    "newline-separated": (
+        "{%- for message in messages %}{% if not loop.first %}{{ '\\n' }}{% endif %}<|{{ message.role }}|>"
+        "{{ message.content }}{%- endfor %}"
+    ),
+    "last-turn-rewritten": (
+        "{%- for message in messages %}<|{{ message.role }}|>"
+        "{{ message.content | upper if loop.last else message.content }}{%- endfor %}"
+    ),
 }
 # Families whose assistant turns end in a token other than ``tokenizer.eos_token_id``, the ones a single-eos search
 # gets wrong.
@@ -51,14 +79,17 @@ CONVO = [
 ]
 
 
-def _load(model_id):
-    tok = load_cached_tokenizer(model_id, trust_remote_code=True)
-    cfg = load_cached_config(model_id, trust_remote_code=True)
+def _right_padded(tok):
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     # GLM-4.7-Flash/Gemma default to left padding, which the packing collator rejects.
     tok.padding_side = "right"
-    return tok, cfg
+    return tok
+
+
+def _load(model_id):
+    tok = load_cached_tokenizer(model_id, trust_remote_code=True)
+    return _right_padded(tok), load_cached_config(model_id, trust_remote_code=True)
 
 
 def _render_ids(tok, model_id):
@@ -148,6 +179,162 @@ def test_every_completion_collator_agrees_with_the_builder(model_id):
     fl_decoded = tok.decode(fl_keep)
     assert "bravo" in fl_decoded and "delta" in fl_decoded
     assert "alpha" not in fl_decoded and "charlie" not in fl_decoded
+
+
+def _load_open_template(name):
+    tok, cfg = load_open_turn_tokenizer(name)
+    return _right_padded(tok), resolve_eos_token_ids(tok, cfg)
+
+
+def _plain_ids(tok, conversation, **kwargs):
+    return tok(tok.apply_chat_template(conversation, tokenize=False, **kwargs), add_special_tokens=False)["input_ids"]
+
+
+def _last_turn_labels(collator, tok, examples):
+    batch = collator(examples)
+    kept = batch["input_ids"][0][batch["labels"][0] != -100]
+    return tok.decode(kept), kept.tolist()
+
+
+@pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
+def test_a_row_ending_on_an_open_assistant_turn_is_closed_and_trains_its_stop(name):
+    """The last answer closes with the ``<|user|>`` the template writes before a next user turn, as every earlier
+    answer of the row ends."""
+    tok, eos_set = _load_open_template(name)
+    marker = ASST_MARKERS[GLM4_FLASH]
+    closer = tok.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    plain = _plain_ids(tok, CONVO)
+    assert plain[-1] not in eos_set, "the template closes its last turn: this case tests nothing"
+    row = tokenize_training_row({"messages": CONVO}, tok, eos_set, conversation_field="messages")
+    assert row["input_ids"] == [*plain, closer]
+    assert row["attention_mask"] == [1] * len(row["input_ids"])
+
+    closed = {"input_ids": row["input_ids"], "attention_mask": row["attention_mask"]}
+    shorter = tokenize_training_row({"messages": CONVO[:2]}, tok, eos_set, conversation_field="messages")
+    shorter = {"input_ids": shorter["input_ids"], "attention_mask": shorter["attention_mask"]}
+    collators = {
+        "padded": DataCollatorForCompletionOnlyLM(
+            response_prompt_template=marker, tokenizer=tok, eos_token_ids=eos_set
+        ),
+        "padded, last turn only": DataCollatorForCompletionOnlyLM(
+            response_prompt_template=marker, tokenizer=tok, eos_token_ids=eos_set, train_on_last_assistant_only=True
+        ),
+        "packing": DataCollatorForCompletionOnlyLMWithPacking(
+            response_prompt_template=marker, tokenizer=tok, eos_token_ids=eos_set
+        ),
+    }
+    for label, collator in collators.items():
+        for examples in ([closed], [closed, shorter]):
+            if label == "packing" and len(examples) > 1:
+                continue
+            decoded, kept = _last_turn_labels(collator, tok, [dict(example) for example in examples])
+            assert "delta" in decoded and "charlie" not in decoded, f"{label}, batch of {len(examples)}: {decoded!r}"
+            assert kept[-1] == closer, f"{label}, batch of {len(examples)}: the stop is not trained"
+
+    # The same row as the template leaves it trains nothing of its last turn on a padded batch of one.
+    open_row = {"input_ids": plain, "attention_mask": [1] * len(plain)}
+    decoded, _ = _last_turn_labels(collators["padded, last turn only"], tok, [open_row])
+    assert "delta" not in decoded
+
+
+def _trained_runs(tok, eos_set, conversation, *, tools=None):
+    """The token runs each assistant turn of ``conversation``'s training row trains on a padded batch of one."""
+    row = {"messages": conversation, "tools": tools}
+    ids = tokenize_training_row(row, tok, eos_set, conversation_field="messages", tools_field="tools")["input_ids"]
+    collator = DataCollatorForCompletionOnlyLM(
+        response_prompt_template=ASST_MARKERS[GLM4_FLASH], tokenizer=tok, eos_token_ids=eos_set
+    )
+    labels = collator([{"input_ids": ids}])["labels"][0].tolist()
+    runs, run = [], []
+    for token, label in zip(ids, labels, strict=True):
+        if label != -100:
+            run.append(token)
+        elif run:
+            runs.append(run)
+            run = []
+    return [*runs, run] if run else runs
+
+
+@pytest.mark.parametrize("tools", [TOOLS, None], ids=["tools", "no-tools"])
+@pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
+def test_a_tool_call_turn_left_open_closes_as_the_turn_does_mid_row(name, tools):
+    """GLM ends a call where the tool reply's ``<|observation|>`` opens, which a served model stops at: a row ending on
+    the call trains that stop, the span its call trains mid-row, not the tokenizer's eos."""
+    tok, eos_set = _load_open_template(name)
+    closer = tok.convert_tokens_to_ids(GLM_CALL_CLOSER)
+    conversation = [CONVO[0], TOOL_CALL_TURN]
+    plain = _plain_ids(tok, conversation, **({"tools": tools} if tools else {}))
+    row = tokenize_training_row(
+        {"messages": conversation, "tools": tools}, tok, eos_set, conversation_field="messages", tools_field="tools"
+    )
+    assert row["input_ids"] == [*plain, closer]
+
+    (last_row_call,) = _trained_runs(tok, eos_set, conversation, tools=tools)
+    mid_row_call, answer = _trained_runs(tok, eos_set, [*conversation, TOOL_REPLY, CONVO[3]], tools=tools)
+    assert tok.decode(last_row_call).endswith(f"</tool_call>{GLM_CALL_CLOSER}"), tok.decode(last_row_call)
+    assert last_row_call == mid_row_call
+    assert tok.decode(answer).endswith(f"{A2}{GLM_ANSWER_CLOSER}"), tok.decode(answer)
+
+
+def test_a_marker_outside_the_runs_terminators_never_closes_a_row():
+    """With ``<|user|>`` outside the run's terminators a served model would not stop at it: a last answer takes the eos,
+    while a last call keeps ``<|observation|>``, on the tokenizer that closed an answer with ``<|user|>`` under the
+    full set."""
+    tok, eos_set = _load_open_template("hub")
+    user = tok.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    full_set_row = tokenize_training_row({"messages": CONVO}, tok, eos_set, conversation_field="messages")
+    assert full_set_row["input_ids"][-1] == user
+    without_user = eos_set - {user}
+    answer_row = tokenize_training_row({"messages": CONVO}, tok, without_user, conversation_field="messages")
+    assert answer_row["input_ids"] == [*_plain_ids(tok, CONVO), tok.eos_token_id]
+    call_row = tokenize_training_row(
+        {"messages": [CONVO[0], TOOL_CALL_TURN]}, tok, without_user, conversation_field="messages"
+    )
+    assert call_row["input_ids"][-1] == tok.convert_tokens_to_ids(GLM_CALL_CLOSER)
+
+
+@pytest.mark.parametrize("template", sorted(NO_CLOSER_TEMPLATES))
+def test_the_closer_is_probed_again_for_another_template(template):
+    """A run sets its template on a loaded tokenizer, so a closer probed under GLM's must not close a row rendered under
+    one whose probe names none: that row takes the eos."""
+    tok, eos_set = _load_open_template("glm-native")
+    exchange = {"messages": CONVO[:2]}
+    closed = tokenize_training_row(exchange, tok, eos_set, conversation_field="messages")
+    assert closed["input_ids"][-1] == tok.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
+    tok.chat_template = NO_CLOSER_TEMPLATES[template]
+    closed = tokenize_training_row(exchange, tok, eos_set, conversation_field="messages")
+    assert closed["input_ids"] == [*_plain_ids(tok, CONVO[:2]), tok.eos_token_id]
+
+
+@pytest.mark.parametrize("model_id", [QWEN3_0_6B, GEMMA3_4B_IT, GLM4_FLASH])
+def test_a_final_turn_the_template_terminates_gets_no_second_terminator(model_id):
+    tok, cfg = _load(model_id)
+    _apply_sft_template(tok, model_id)
+    eos_set = resolve_eos_token_ids(tok, cfg)
+    row = tokenize_training_row({"messages": CONVO}, tok, eos_set, conversation_field="messages")
+    assert row["input_ids"] == _plain_ids(tok, CONVO)
+
+
+def test_inklings_text_config_default_eos_ends_no_turn():
+    """Inkling-Small declares its eos at the top level alone, so its text config holds the class default 2, ``#``; read
+    as a terminator, a turn holding a markdown heading would train only up to it."""
+    tok = load_cached_tokenizer(INKLING_SMALL, trust_remote_code=True)
+    cfg = load_cached_config(INKLING_SMALL, trust_remote_code=True)
+    assert tok.convert_ids_to_tokens(cfg.text_config.eos_token_id) == "#", "the text config's eos moved"
+    assert resolve_eos_token_ids(tok, cfg) == frozenset({cfg.eos_token_id})
+
+
+def test_only_a_training_row_that_ends_on_an_assistant_turn_is_closed():
+    tok, eos_set = _load_open_template("hub")
+    ends_on_user = tokenize_training_row({"messages": CONVO[:3]}, tok, eos_set, conversation_field="messages")
+    assert ends_on_user["input_ids"] == _plain_ids(tok, CONVO[:3])
+
+    prompt_row = build_chat_row_processor(tok, 4096, "messages", add_generation_prompt=True, eos_token_ids=eos_set)(
+        {"messages": CONVO}
+    )
+    assert prompt_row["input_ids"] == _plain_ids(tok, CONVO[:-1], add_generation_prompt=True)
+    training_row = build_chat_row_processor(tok, 4096, "messages", eos_token_ids=eos_set)({"messages": CONVO})
+    assert training_row["input_ids"] == [*_plain_ids(tok, CONVO), tok.convert_tokens_to_ids(GLM_ANSWER_CLOSER)]
 
 
 if __name__ == "__main__":

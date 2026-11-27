@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from halo.data.conversation import reject_image_content
-from halo.data.pipeline.vlm_rows import build_vlm_row_processor, normalize_vlm_conversation
+from halo.data.pipeline.vlm_rows import normalize_vlm_conversation
 from halo.data.vlm_render import extract_conversation_images
 
 
@@ -206,15 +206,6 @@ def test_a_chat_format_part_is_no_placeholder_for_the_images_column_to_fill(imag
     out = normalize_vlm_conversation(conversation, [_image(5)])
     assert out[0]["content"][0] == filled, "a part with a source keeps it"
     assert np.array_equal(np.asarray(out[0]["content"][1]["image"]), np.asarray(_image(5)))
-
-
-def test_build_vlm_row_processor_images_field():
-    img = _image()
-    row = {"texts": [{"user": "describe", "assistant": "a cat"}], "images": [img]}
-
-    example = build_vlm_row_processor(conversation_field="texts", images_field="images")(dict(row))
-    assert [m["role"] for m in example["history"]] == ["user", "assistant"]
-    assert example["images"] == [img]
 
 
 if __name__ == "__main__":

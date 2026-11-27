@@ -54,11 +54,14 @@ Tips:
         sandbox: SandboxExecutor | None = None,
         sandbox_backend: str | None = None,
         sandbox_url: str | None = None,
+        sandbox_options: dict | None = None,
         **kwargs,
     ):
         require_callable(type(self).__name__, **present(test_function=test_function))
         require_finite(type(self).__name__, gt=0, code_timeout=code_timeout)
-        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
+        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url, **(sandbox_options or {}))
+        # An executor passed in may serve other environments; one built here is closed with this one.
+        self._owns_sandbox = sandbox is None
         warn_if_unisolated(self.sandbox, type(self).__name__)
         self._sessions: dict[int, SandboxSession] = {}
 
@@ -114,6 +117,8 @@ Tips:
         for session in self._sessions.values():
             session.close()
         self._sessions.clear()
+        if self._owns_sandbox:
+            self.sandbox.close()
         super().close()
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:

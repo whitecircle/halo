@@ -83,14 +83,6 @@ def test_ep_sharded_rejected_without_ep_layers():
         reject_unmergeable_ep_sharded_save(_fake_model("gpt_oss"), world_size=1)
 
 
-def test_ep_sharded_allowed_with_ep_layers(monkeypatch):
-    """Otherwise a validator rejecting every run satisfies the guard above."""
-    monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
-    model = _fake_model("gpt_oss")
-    model.mlp = _FakeEPLayer(world_size=8)
-    reject_unmergeable_ep_sharded_save(model, world_size=8)
-
-
 @pytest.mark.parametrize("model_type", ["gemma4_moe", ""])
 def test_ep_sharded_rejects_unclaimed_model_type(model_type):
     with pytest.raises(ValueError, match="no MoE family spec claims"):

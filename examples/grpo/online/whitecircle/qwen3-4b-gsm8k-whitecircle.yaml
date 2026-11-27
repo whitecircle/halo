@@ -1,0 +1,50 @@
+# Online GRPO on GSM8K, rewarding a correct answer that also passes your White Circle policies.
+# Set environment_id to your White Circle environment, start a vLLM server serving the model, then:
+#   WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+# See agent-docs/training-methods/grpo/rewards/whitecircle.md.
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
+attn_implementation: sdpa
+
+# --- Dataset ---
+dataset: openai/gsm8k:main@train
+test_size: 0.01
+prompt_field: question
+system_prompt: "Solve the problem step by step and put your final numeric answer in \\boxed{}."
+
+# --- Rewards ---
+rewards:
+  - source: accuracy                    # the last \boxed{} equals the answer
+  - source: whitecircle                 # 1 when White Circle flags no policy on the completion, else 0
+    name: policy
+    weight: 0.5
+    environment_id: your_environment_id
+    # policies: [policy_a, policy_b]    # read only these policy ids: the fraction not violated
+    # region: eu                        # us (default) or eu
+
+# --- GRPO ---
+beta: 0.0
+num_generations: 8
+temperature: 1.0
+loss_type: grpo
+scale_rewards: batch
+
+# --- Training ---
+per_device_train_batch_size: 8
+gradient_accumulation_steps: 1
+max_steps: 200
+learning_rate: 1.0e-06
+lr_scheduler_type: constant
+max_prompt_length: 256
+
+# --- vLLM generation ---
+use_vllm: true
+vllm_mode: server
+vllm_server_host: 127.0.0.1
+
+# --- Output ---
+output_dir: checkpoints/online-grpo-qwen3-4b-gsm8k-whitecircle
+save_strategy: "no"
+logging_steps: 1
+report_to: []

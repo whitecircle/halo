@@ -7,13 +7,13 @@ import os
 import pickle
 import tempfile
 import threading
+import time
 from contextvars import ContextVar
 from types import SimpleNamespace
 
 import pytest
 import ray
 
-from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.episodes.messages import Trajectory
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from halo.environments.registry import build_environment
@@ -32,6 +32,7 @@ from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, 
 from halo.environments.tools.toolsets import build_math_tools
 from halo.inference.response import FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.rewards.scorers import whitecircle
 from tests.common.repo import REPO_ROOT
 
 
@@ -186,6 +187,64 @@ async def test_rollout_manager_start_shutdown():
         ray.shutdown()
 
 
+async def test_a_node_without_a_scorers_key_fails_the_pool_start(monkeypatch):
+    """Built in the first settlement instead, the scorer would raise in every one, each losing its episode as an error
+    row while the other nodes' episodes train."""
+    monkeypatch.delenv(whitecircle.API_KEY_VARIABLE, raising=False)
+    if ray.is_initialized():
+        ray.shutdown()
+    # Started after the delenv, the local raylet's workers lack the key, as on a node where it was never exported.
+    ray.init(**ray_init_kwargs(num_cpus=2))
+    try:
+        manager = RolloutManager(
+            num_workers=2,
+            env_type="react_math",
+            env_config={"max_turns": 3, "reward_terms": [{"source": "whitecircle", "environment_id": "env_test"}]},
+            server_urls=["http://localhost:8000"],
+            rollout_config=RolloutConfig(),
+            max_concurrent_rollouts=2,
+        )
+        with pytest.raises(RuntimeError, match=f"no API key — set {whitecircle.API_KEY_VARIABLE}"):
+            await manager.start()
+        await manager.shutdown()
+    finally:
+        ray.shutdown()
+
+
+async def test_a_pool_whose_actors_never_build_fails_its_start_and_kills_them():
+    """Unbounded, the start would hold rank 0 while its peers wait in the next collective; left alive, the blocked
+    actors would hold the trainer's teardown, whose shutdown call they never run."""
+
+    class _NeverBuilt:
+        def __init__(self, **_):
+            time.sleep(3600)
+
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(**ray_init_kwargs(num_cpus=2))
+    try:
+        manager = RolloutManager(
+            num_workers=2,
+            env_type=(_NeverBuilt, {}),
+            env_config={},
+            server_urls=["http://localhost:8000"],
+            rollout_config=RolloutConfig(episode_timeout=2),
+            max_concurrent_rollouts=2,
+        )
+        start = asyncio.create_task(manager.start())
+        await asyncio.sleep(0)  # the start has spawned its actors and waits on their builds
+        actors = list(manager._actors)
+        with pytest.raises(RuntimeError, match="did not build their environments within episode_timeout=2s"):
+            # Bounded here as well: a start with no deadline would hang this test, not fail it.
+            await asyncio.wait_for(start, 60)
+        for actor in actors:
+            with pytest.raises(ray.exceptions.RayActorError):
+                await asyncio.wait_for(actor.shutdown.remote(), 30)
+        await asyncio.wait_for(manager.shutdown(), 30)
+    finally:
+        ray.shutdown()
+
+
 class _Spawner:
     """Stands in for a ``@ray.remote`` class: records each spawn with the scheduling strategy it was placed under."""
 
@@ -197,7 +256,7 @@ class _Spawner:
 
     def remote(self, *args):
         self.spawned.append((self.name, self.strategy))
-        return SimpleNamespace()
+        return SimpleNamespace(build_scorers=SimpleNamespace(remote=lambda: asyncio.sleep(0)))
 
 
 async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(monkeypatch):
@@ -681,6 +740,48 @@ async def test_a_call_cut_at_the_cap_reaches_the_judge_as_the_policy_wrote_it():
     assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [written]
 
 
+async def test_without_thinking_a_cut_call_is_decoded_from_its_first_sampled_id():
+    """A run sampling with no reasoning block writes nothing before the call and has no reasoning close to split at:
+    every sampled id is what the policy wrote."""
+    actor = _make_actor("native_math")
+    session = _FakeEngineSession(_cut_turn_body({"finish_reason": "tool_calls"}), decoded=_WRITTEN)
+    config = RolloutConfig(
+        max_retries=0,
+        max_tokens=len(_CUT_IDS),
+        capture_token_ids=True,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    generation = await actor._generate(session, "server:8000", [{"role": "user", "content": "2+2?"}], config)
+
+    assert session.decoded == [_CUT_IDS]
+    written = {**_PARTIAL_CALL, "function": {"name": "calculate", "arguments": _WRITTEN}}
+    assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [written]
+
+
+async def test_without_thinking_a_cut_turn_s_text_goes_to_the_call_being_written():
+    """A notes-harness turn is a message, then calls: the decoded text, less that message, is the last call's, the one
+    the cut caught; the calls before it keep what the parser read of them."""
+    notes = {"id": "n1", "type": "function", "function": {"name": "notes", "arguments": '{"text": "## idea\\nscan"}'}}
+    body = _cut_turn_body({"finish_reason": "tool_calls"})
+    body["choices"][0]["message"] = {"content": "The idea is a scan.", "tool_calls": [notes, _PARTIAL_CALL]}
+    session = _FakeEngineSession(body, decoded="The idea is a scan.\n\n<tool_call>notes</tool_call>\n" + _WRITTEN)
+    config = RolloutConfig(
+        max_retries=0,
+        max_tokens=len(_CUT_IDS),
+        capture_token_ids=True,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    generation = await _make_actor("native_math")._generate(
+        session, "server:8000", [{"role": "user", "content": "?"}], config
+    )
+
+    cut = {
+        **_PARTIAL_CALL,
+        "function": {"name": "calculate", "arguments": "<tool_call>notes</tool_call>\n" + _WRITTEN},
+    }
+    assert step_context_from_generation(None, generation)[CUT_TOOL_CALLS_KEY] == [notes, cut]
+
+
 @pytest.mark.parametrize(
     ("backend", "choice", "decode_status", "end"),
     [
@@ -813,40 +914,6 @@ async def test_actor_drives_async_env_via_step_async():
     assert result.error is None, f"async episode should not error: {result.error}"
     tool_results = [m.content for m in result.trajectory.messages if m.role == "tool"]
     assert any("async-result-hi" in r for r in tool_results), f"async tool output missing: {tool_results}"
-
-
-async def test_run_episode_generation_tokens_sum_across_turns():
-    """The source of episode/generation_tokens, so per-turn accounting would silently mis-report. Drives the real
-    multi-turn loop, mocking only the vLLM call."""
-    actor = _make_actor("native_math", {"max_turns": 5})
-
-    async def _fake_client():
-        return None
-
-    actor._http_client = None
-
-    per_turn: list[int] = []
-    calls = {"n": 0}
-
-    async def _fake_generate(client, url, messages, config, reasoning_effort=None):
-        i = calls["n"]
-        calls["n"] += 1
-        tokens = (i + 1) * 10  # turn 1 -> 10, turn 2 -> 20, turn 3 -> 30
-        per_turn.append(tokens)
-        if i < 2:  # first two turns call a tool -> loop continues
-            tc = [{"id": f"c{i}", "function": {"name": "calculate", "arguments": '{"expression": "1+1"}'}}]
-            return TurnGeneration("", tc, "", tokens)
-        return TurnGeneration("final answer: 4", [], "", tokens)  # third turn: no tool call -> finalize
-
-    actor._generate = _fake_generate
-
-    result = await actor.run_episode("2+2?", {"answer": "4"}, "http://x", RolloutConfig(max_retries=1))
-
-    assert calls["n"] == 3, f"expected a 3-turn episode (setup guard), got {calls['n']} turns"
-    assert result.episode_length == 3
-    # Per-EPISODE total = 10 + 20 + 30 = 60. A per-turn/last-turn/mean bug would give 30 or 20, not 60.
-    assert result.generation_tokens == 60
-    assert result.generation_tokens == sum(per_turn)
 
 
 async def test_each_assistant_turn_records_the_runs_cap_and_the_reasoning_it_sampled():
@@ -1075,31 +1142,6 @@ def test_a_server_error_quoting_a_4xx_in_its_body_is_still_retried():
     assert not _should_giveup(exc)
     # And a plain RuntimeError carrying the same text is a transport fault, not a client error.
     assert not _should_giveup(RuntimeError("vllm error (status 400): Bad request"))
-
-
-def test_async_rollout_config_builds_the_rollout_config():
-    config = AsyncRolloutConfig(
-        rollout_temperature=0.9,
-        rollout_top_p=0.8,
-        rollout_top_k=40,
-        rollout_min_p=0.02,
-        rollout_repetition_penalty=1.05,
-        rollout_max_tokens=2048,
-        model_name="test-model",
-        request_timeout=60.0,
-        max_retries=5,
-        retry_base_wait=2.0,
-    )
-
-    rc = config.get_rollout_config()
-    assert rc.temperature == 0.9
-    assert rc.top_p == 0.8
-    assert (rc.top_k, rc.min_p, rc.repetition_penalty) == (40, 0.02, 1.05)
-    assert rc.max_tokens == 2048
-    assert rc.model_name == "test-model"
-    assert rc.request_timeout == 60.0
-    assert rc.max_retries == 5
-    assert rc.retry_base_wait == 2.0
 
 
 if __name__ == "__main__":

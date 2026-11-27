@@ -235,10 +235,20 @@ def test_the_preprocessed_vision_key_refusal_reads_the_declared_schema():
     assert "pixel_values_shape" in VLM_OUTPUT_FEATURES and "pixel_attention_mask" not in VLM_OUTPUT_FEATURES
 
     with pytest.raises(NotImplementedError, match="pixel_attention_mask"):
-        tokenize_vlm_dataset(Dataset.from_list([row]), _emitting("pixel_attention_mask"), config, split_name="train")
+        tokenize_vlm_dataset(
+            Dataset.from_list([row]),
+            _emitting("pixel_attention_mask"),
+            config,
+            split_name="train",
+            eos_token_ids=frozenset(),
+        )
 
     tokenized = tokenize_vlm_dataset(
-        Dataset.from_list([row]), _emitting("pixel_values_shape"), config, split_name="train"
+        Dataset.from_list([row]),
+        _emitting("pixel_values_shape"),
+        config,
+        split_name="train",
+        eos_token_ids=frozenset(),
     )
     assert len(tokenized) == 1, "a key the stored schema DOES hold was refused as unstorable"
 
@@ -260,7 +270,11 @@ def test_the_non_completions_vlm_bake_routes_through_the_shared_label_builder(mo
     )
     row = {"conversation": [{"role": "user", "content": "hi there"}, {"role": "assistant", "content": "ok"}]}
     tokenized = tokenize_vlm_dataset(
-        Dataset.from_list([row]), FakeVLMProcessorBase(FakeVLMTokenizer()), config, split_name="train"
+        Dataset.from_list([row]),
+        FakeVLMProcessorBase(FakeVLMTokenizer()),
+        config,
+        split_name="train",
+        eos_token_ids=frozenset(),
     )
     assert set(tokenized[0]["labels"]) == {-7}, "the bake built its labels somewhere other than the shared builder"
 
@@ -272,6 +286,10 @@ def test_the_vlm_bake_masks_image_tokens_without_erasing_a_real_eos():
     class _EosTokenizer(FakeVLMTokenizer):
         pad_token_id = 1  # pad == eos, the trap
         eos_token_id = 1
+
+        def __call__(self, text, add_special_tokens=False):
+            # As its processor encodes a row: the last position is the turn terminator, so the row is closed.
+            return {"input_ids": [*super().__call__(text)["input_ids"][:-1], self.eos_token_id]}
 
     class _EosProcessor(FakeVLMProcessorBase):
         def encode_batch(self, text, max_length=None):
@@ -290,7 +308,11 @@ def test_the_vlm_bake_masks_image_tokens_without_erasing_a_real_eos():
     )
     row = {"conversation": [{"role": "user", "content": "hi there"}, {"role": "assistant", "content": "ok"}]}
     tokenized = tokenize_vlm_dataset(
-        Dataset.from_list([row]), _EosProcessor(_EosTokenizer()), config, split_name="train"
+        Dataset.from_list([row]),
+        _EosProcessor(_EosTokenizer()),
+        config,
+        split_name="train",
+        eos_token_ids=frozenset(),
     )
     labels = tokenized[0]["labels"]
     input_ids = tokenized[0]["input_ids"]

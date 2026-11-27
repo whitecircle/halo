@@ -15,7 +15,7 @@ Two columns: `prompt` (a string or a `{"role", "content"}` message list) and `an
 {"prompt": [{"role": "user", "content": "What is 2 + 3?"}], "answer": "5"}
 ```
 
-- `prompt_field` and `answer_field` must name real columns; a typo raises at load.
+- `prompt_field` must name a real column, and so must `answer_field` when something reads the answer: an `accuracy` term, a judge with `include_reference`, an SDPG hint. A typo raises at load.
 - A row with a null or empty prompt is dropped at load.
 - `system_prompt` is prepended unless the row already opens with a system turn.
 - A rendered prompt over `max_prompt_length` is **dropped**, never truncated.
@@ -35,7 +35,13 @@ Accuracy is strict: the answer keeps only its text after a GSM8K `####`, both si
 
 A judge reads the `answer` column as its reference. A veto judge (one listing `checks`) is refused at config time; list `requirements` instead.
 
-A `judge` or `reward_model` term reads the row's `conversation` and `answer` columns, so keep `remove_unused_columns: false` (TRL's GRPO default): at `true` TRL forwards neither column and the term raises at its first scoring call.
+A `whitecircle` term checks each completion against your White Circle policies ([White Circle](rewards/whitecircle.md)), launched in one line:
+
+```bash
+WHITECIRCLE_API_KEY=wc-... halo launch grpo/online examples/grpo/online/whitecircle/qwen3-4b-gsm8k-whitecircle.yaml
+```
+
+A `judge`, `reward_model` or `whitecircle` term reads the row's `conversation` and `answer` columns, so keep `remove_unused_columns: false` (TRL's GRPO default): at `true` TRL forwards neither column and the term raises at its first scoring call.
 
 ## Configuration
 
@@ -58,8 +64,8 @@ learning_rate: 1.0e-06
 ```
 
 - `max_completion_length` must be a positive int; `null` raises, and leaving it out takes TRL's default, so set it. With both length knobs bounded, their sum becomes `model_max_length`.
-- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
-- `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it.
+- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0` (`0.04` in the two White Circle code recipes), `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
+- `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it. `reasoning_effort_field` gives each prompt its row's own level instead; setting both raises.
 - Learning rate: `1e-6` to `5e-6` in the recipes, all full fine-tunes; LoRA takes more ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
 ### Optional objective changes
@@ -72,9 +78,10 @@ All off by default.
 | `drop_degenerate_groups` | Masks all-equal-reward groups out of the loss and normalizer | — |
 | `balance_token_mass` | Cancels each generation round's net token-weighted push ([Token-mass balance](../async-grpo/objective.md#token-mass-balance)) | `loss_type` `cispo`, `dapo` or `dr_grpo`; `top_entropy_quantile: 1.0`; no `off_policy_mask_threshold` |
 | `use_rlrr` | Intra-group ranking advantages ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)) | Neither the std floor nor the drop |
+| `use_maxrl` | MaxRL advantages, divided by the group's mean reward ([MaxRL](../async-grpo/objective.md#advantages)) | `scale_rewards: none`, non-negative rewards; neither the std floor nor RLRR |
 | `use_sdpg` | [Online SDPG](../distillation/online-sdpg.md) | — |
 
-The std floor, the drop and RLRR also require `multi_objective_aggregation: sum_then_normalize`.
+The std floor, the drop, RLRR and MaxRL also require `multi_objective_aggregation: sum_then_normalize`.
 
 The `rlrr_*` tunables are range-validated always and refused at a non-default value with `use_rlrr` off. `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` runs RLRR at these defaults:
 
@@ -122,14 +129,14 @@ For a shaped reward in `[0, 1]` (a grade plus small shaping terms) over a small 
 | Knob | Set it to | Why |
 |---|---|---|
 | `loss_type` | `dapo` (TRL's default) | Length-unbiased: normalizes over the global active-token count, unlike `grpo`'s per-sequence mean |
-| `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens |
+| `epsilon_high` | `0.28` with `epsilon: 0.2` | DAPO clip-higher: only the upper bound loosens; inert at the defaults, like `epsilon` (below) |
 | `scale_rewards` | `batch` for a shaped reward | `group` divides by the group's own spread, inflating shaping noise to full-scale advantages |
 | `mask_truncated_completions` | `true` (default `false`) | Drops a completion cut at the budget instead of scoring it. Async GRPO widens `truncated` to a turn overflow; its recipes leave it off |
 
 - A single binary reward keeps `scale_rewards: group`: the `1e-4` added to the divisor keeps a uniformly-failed group's advantages at zero, not NaN.
 - The clip binds only when a generation batch outlives one optimizer step. At the defaults (`num_iterations: 1`, `steps_per_generation` = `gradient_accumulation_steps`) `epsilon` is inert. `epsilon_high` falls back to `epsilon`.
 
-`beta` is the KL anchor to the base model; every online recipe runs `beta: 0`. TRL weights the KL term by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain k3 term. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
+`beta` is the KL anchor to the base model. The two White Circle code recipes (`examples/grpo/online/whitecircle/qwen3-4b-code-whitecircle.yaml`, `gemma4-26b-a4b-code-whitecircle.yaml`) run `beta: 0.04` as full fine-tunes, so each loads a frozen reference; the other recipes run `beta: 0`. TRL weights the KL term by the importance-sampling ratio (`use_bias_correction_kl`, on by default), which changes its gradient even on-policy; `use_bias_correction_kl: false` keeps the plain k3 term. Without a PEFT wrapper (a full fine-tune, or expert-only LoRA, which builds no `PeftModel`), `beta != 0` holds a frozen reference:
 
 - The script loads it as the policy loads (`load_reference_model_for_on_policy_grpo`, `halo/model_loading/parallel/frozen_models.py`): run dtype, `model_revision`, the policy's attention request and `reset_sinks`, the non-persistent buffers repaired, the vocabulary grown with the tokenizer. The trainer hands it to TRL in place of the fp32 copy TRL would build from the hub's default revision.
 - It is an unsharded dense replica on every rank. Before it loads, the script sizes it from a config-only meta shell at the run dtype and refuses, on every rank, a reference over half the GPU memory free beside the loaded policy or whose copies across the node's ranks (each stages its own in host memory) exceed 80% of the available host RAM; the error names `beta: 0`, an attention LoRA target and offline GRPO's precomputed reference. This covers plain FSDP2 as much as EP, ETP and TP. The check runs twice: before the policy loads, against the free memory then (a run it refuses would fail the later check too), and again after it, against the memory the loaded policy leaves. The half is a heuristic: optimizer state, gradients and activations are not budgeted, so a reference that passes can still run out of memory at the first step. A reference that fits is warned about under EP, ETP and TP when the trainer is built. A resume loads it from `model_name_or_path`, never the checkpoint.
@@ -227,7 +234,7 @@ Each row becomes a group of `num_generations` completions. Under TP and ETP ever
 
 ## vLLM on Blackwell (B200)
 
-- **Server:** `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0 ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
+- **Server:** `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on compute capability 10.0 ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
 - **Trainer:** all three GRPO scripts give an unset `attn_implementation` the padded-batch default — the loader's own pick on Blackwell (SDPA for a remote-code checkpoint, FA2 for a softcapped policy), **SDPA** elsewhere — and request nothing under `reset_sinks: false` and offline GRPO under CP ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
 
 ## Testing a setup
@@ -238,10 +245,11 @@ CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `tests/gpu/trainers/grpo/test_online_g
 
 ## What to watch
 
-Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 when trainer and engine agree), `completions/clipped_ratio`, `entropy`, and each external term's (`judge`, `reward_model`) `<source>/<name>/scored`. Toolkit additions:
+Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 when trainer and engine agree), `completions/clipped_ratio`, `entropy`, and each external term's (`judge`, `reward_model`, `whitecircle`) `<source>/<name>/scored`. Toolkit additions:
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.
+- `sampling/maxrl_zero_mean_group_frac`: under `use_maxrl`, share of groups whose mean reward is not positive, which get advantage 0 and so no gradient.
 - `phase_time/<phase>_s` and `phase_time/<phase>_max_s` under `log_phase_times: true`: where each step's wall time goes, rank mean and slowest rank ([Phase times](../async-grpo/monitoring.md#phase-times)).
 - `rank_balance/tokens_max_over_mean_before` and `_after` under `balance_rank_tokens`: the busiest rank's attended tokens over the mean, before and after the deal ([Rank balance](../async-grpo/performance.md#rank-balance)).
 - Under `enable_efficiency_metrics`: `step_tokens_per_second` / `avg_tokens_per_second` (attended tokens, prompt plus completion, which TRL counts while it builds the round; SDPG's teacher forward is not counted) and `step_data_wait_seconds` / `avg_data_wait_seconds` ([EfficiencyCallback](../callbacks.md#efficiencycallback)).
