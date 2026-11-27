@@ -91,8 +91,10 @@ def reject_unpackable_model(model, attn_impl: str | None) -> None:
 
 
 def resolve_dispatch_ceiling(parallelism_config) -> int | None:
-    """Tokens one EP dispatch can carry per rank on this run (the proxy-GIN ceiling on a group spanning NVLink
-    domains), rounded down to the arena's block; ``None`` where there is no ceiling."""
+    """Tokens one EP forward can carry per rank on this run: MoK's buffers, or DeepEP's proxy-GIN ceiling on a group
+    spanning NVLink domains, rounded down to the arena's block; ``None`` where there is no ceiling."""
+    if parallelism_config.moe_backend == "mok":
+        return parallelism_config.mok_token_capacity
     if parallelism_config.ep_size <= 1:
         return None
     return aligned_dispatch_ceiling(spans_domains=parallelism_config.requires_rdma)

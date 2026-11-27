@@ -202,10 +202,12 @@ def test_the_gin_ceiling_still_refuses_a_cross_domain_budget():
         reject_undispatchable_budget(_parallelism(16, requires_rdma=True), 9000)
 
 
-def test_the_planner_ceiling_exists_only_across_domains():
+def test_the_planner_ceiling_is_the_gin_ceiling_across_domains_and_moks_buffers():
     assert resolve_dispatch_ceiling(_parallelism(1)) is None
     assert resolve_dispatch_ceiling(_parallelism(8)) is None
     assert resolve_dispatch_ceiling(_parallelism(16, requires_rdma=True)) == 8192
+    for ep_size in (1, 4):
+        assert resolve_dispatch_ceiling(_parallelism(ep_size, moe_backend="mok", mok_token_capacity=4096)) == 4096
 
 
 if __name__ == "__main__":

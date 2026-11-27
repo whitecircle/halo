@@ -130,6 +130,17 @@ def test_a_rank_past_every_slot_of_the_ceiling_raises_on_every_rank(monkeypatch)
             agree_microbatch_geometry(lengths, 1000, slots=SLOTS, ceiling=4096, round_rows=len(lengths))
 
 
+def test_balanced_bins_past_the_ceiling_raise_where_first_fit_needs_more_bins_than_slots(monkeypatch):
+    """Four 5,000-token rows in two slots balance into 10,000-token bins, which a ceiling of 8,192 (MoK's buffers at
+    that budget) cannot carry; with no ceiling the same rows are relaxed into those bins."""
+    lengths, budget, slots = [5000] * 4, 8192, 2
+    monkeypatch.setattr(plan_module, "rank_max", lambda values: values)
+    with pytest.raises(ValueError, match="micro-batches of at most 8192 tokens"):
+        agree_microbatch_geometry(lengths, budget, slots=slots, ceiling=8192, round_rows=4)
+    plan = agree_microbatch_geometry(lengths, budget, slots=slots, ceiling=None, round_rows=4)
+    assert [sum(lengths[row] for row in rows) for rows in plan.bins] == [10_000, 10_000]
+
+
 def _slot_chunks(rows: list[int], active: list[int], plan: MicrobatchPlan):
     width = plan.rows_per_bin
     return [(rows[i * width : (i + 1) * width], active[i * width : (i + 1) * width]) for i in range(plan.slots)]
