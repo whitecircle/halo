@@ -295,8 +295,9 @@ replay and the family's shared expert stay on Halo's path.
   gradient, but they are dispatched and computed: a batch shorter than the budget pays for the whole of it, and a
   larger evaluation batch is paid on every training step (the config warns). A forward past the budget raises, an
   unscheduled `evaluate()` on a larger batch included. A packed GRPO micro-batch carries several rows, so a
-  `packed_microbatch_tokens` past the budget is refused at construction, and a round whose rows fit no
-  `steps_per_generation` bins of the budget raises when it is planned.
+  `packed_microbatch_tokens` past the budget is refused at construction, and a round raises on every rank when it
+  is planned if its rows fit no `steps_per_generation` bins of the budget, or if a bin and the 2-token filler rows
+  that pad it to the widest bin pass the budget.
 - **Schedule and ring.** A rank's schedule holds the most rows any routing can send it, each local expert's rounded
   up to 256 (`_schedule_capacity_multiplier`): MoK traps in its kernel past it, with no message, and its default
   holds half the group's rows. MoK allocates every routed activation at its ring's size and Halo saves them for the
