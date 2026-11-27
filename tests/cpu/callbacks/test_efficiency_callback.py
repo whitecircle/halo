@@ -149,7 +149,15 @@ def test_classify_gpu_name():
         ("NVIDIA B200", "B200"),
         ("NVIDIA GB200", "GB200"),
         ("NVIDIA A100-SXM4-80GB", "A100"),
+        ("NVIDIA A100 80GB PCIe", "A100"),
         ("NVIDIA A6000", "A6000"),
+        ("NVIDIA A10", "A10"),
+        ("NVIDIA L4", "L4"),
+        ("NVIDIA L40S", "L40S"),
+        # A SKU whose name only contains a registered one must not take its peak.
+        ("NVIDIA RTX A1000", None),
+        ("NVIDIA L40", None),
+        ("NVIDIA A10G", None),
         ("Unknown GPU", None),
     ]
     for gpu_name, expected in cases:
