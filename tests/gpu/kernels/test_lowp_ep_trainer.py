@@ -50,6 +50,7 @@ parser.add_argument(
     "--backward", choices=("bf16", "fp8"), default="bf16", help="lowp_backward_precision under --native"
 )
 parser.add_argument("--ep-size", type=int, choices=(1, 2), default=2, help="1 trains FSDP2-managed experts")
+parser.add_argument("--checkpointing", action="store_true", help="Train under gradient checkpointing")
 ARGS = parser.parse_args()
 QUANT_FORMAT = LOWP_RECIPES[ARGS.precision].quant_format
 # Expert weights are stored ``[E, K, N]``.
@@ -133,13 +134,15 @@ class _CallsBeforeTheLastStep(TrainerCallback):
 
 
 class _CallsPerForward(TrainerCallback):
-    """How many of ``calls`` each forward of the trained model made."""
+    """How many of ``calls`` each forward of the last EP layer made, and how many forwards the trained model ran. Under
+    gradient checkpointing the backward runs that layer again."""
 
     def __init__(self, calls: list[int]):
-        self.calls, self.per_forward, self._seen = calls, [], 0
+        self.calls, self.per_forward, self.model_forwards, self._seen = calls, [], 0, 0
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        model.register_forward_hook(self._record)
+        model.register_forward_hook(lambda *_: setattr(self, "model_forwards", self.model_forwards + 1))
+        ep_layers(model)[-1].register_forward_hook(self._record)
 
     def _record(self, *_):
         self.per_forward.append(self.calls[0] - self._seen)
@@ -165,7 +168,7 @@ def _train(
             lr_scheduler_type="constant",
             max_length=128,
             bf16=True,
-            gradient_checkpointing=False,
+            gradient_checkpointing=ARGS.checkpointing,
             use_liger_kernel=False,
             logging_steps=1,
             save_strategy="no",
@@ -266,9 +269,11 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
-    # The MXFP4 weight cast only flags a NaN weight on the device: one read a forward, and none under fp8.
+    # The MXFP4 weight cast only flags a NaN weight on the device: one read a forward of the last converted layer, which
+    # a checkpointed step runs twice, and none under fp8.
     checks["mxfp4_reads_its_non_finite_flag_once_a_forward"] = world_all(
-        len(forwards.per_forward) >= 2 * TOTAL_STEPS
+        forwards.model_forwards >= 2 * TOTAL_STEPS
+        and len(forwards.per_forward) == forwards.model_forwards * (1 + ARGS.checkpointing)
         and set(forwards.per_forward) == {int(ARGS.precision == "mxfp4")}
         and flag_reads[0] == sum(forwards.per_forward)
     )
@@ -280,14 +285,16 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
     log(
         f"  {ARGS.precision} native backward={ARGS.backward}: {losses}; {native_calls[0]} kernel, "
-        f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated"
+        f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated, {flag_reads[0]} flag reads over "
+        f"{forwards.model_forwards} forwards"
     )
     return {"checks": checks, "metrics": {"native_calls": native_calls[0], "fp8_wgrad_calls": wgrad_calls[0]}}
 
 
 @gpu_test_main(
     exact_world_size=2,
-    prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}_ep{ARGS.ep_size}",
+    prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}_ep{ARGS.ep_size}"
+    f"{'_checkpointed' if ARGS.checkpointing else ''}",
 )
 def run(ctx):
     torch.cuda.set_device(ctx.device)

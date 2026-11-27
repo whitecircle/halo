@@ -274,8 +274,8 @@ RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       && echo "${CUDA_KEYRING_SHA256}  /tmp/cuda-keyring.deb" | sha256sum -c - \
       && dpkg -i /tmp/cuda-keyring.deb && rm /tmp/cuda-keyring.deb \
       && apt-get update && apt-get install -y --no-install-recommends \
-           cuda-nvcc-13-0 cuda-cudart-dev-13-0 cuda-cccl-13-0 \
-           libcusparse-dev-13-0 libcublas-dev-13-0 libcusolver-dev-13-0 \
+           cuda-nvcc-13-0=13.0.88-1 cuda-cudart-dev-13-0=13.0.96-1 cuda-cccl-13-0=13.0.85-1 \
+           libcusparse-dev-13-0=12.6.3.3-1 libcublas-dev-13-0=13.1.1.3-1 libcusolver-dev-13-0=12.0.4.66-1 \
       && git clone --recursive https://github.com/cursor/mixture-of-kittens.git /tmp/mok \
       && cd /tmp/mok \
       && git checkout ${MOK_COMMIT} \

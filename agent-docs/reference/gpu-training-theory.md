@@ -1142,9 +1142,9 @@ Whether an expert GEMM is above its crossover M depends on its shape. For a weig
 
 A kernel that is faster alone can still make the step slower. Halo's measurements show how it happens ([Low-Precision MoE Kernels → Why bf16 is the default](../optimization/low-precision-moe-kernels.md#why-bf16-is-the-default)):
 
-- The cast costs more than the kernel saves. At one gpt-oss-20b expert shape, casting the activations took 2.66 ms where the whole bf16 forward GEMM took 0.86 to 0.89 ms.
+- The cast costs more than the kernel saves. On the 1.2.0 development build's adapter, at one gpt-oss-20b expert shape, casting the activations took 2.66 ms where the whole bf16 forward GEMM took 0.86 to 0.89 ms.
 - Some grouped low-precision kernels need the rows of each expert laid out in a fixed pattern. Routing changes that pattern at every step, so the layout is rebuilt on the CPU at every call.
-- Whole steps on native fp8 and fp4 kernels came out slower. On 8 B300s with experts over all 8 and 4,096-token rows they ran at 0.37 to 0.54 times the bf16 rate. The expert GEMMs of those runs were far above their crossover M, at 16,384 rows per expert on gpt-oss-20b, so the roofline allowed a gain and the casts took it back.
+- Whole steps on native fp8 and fp4 kernels came out slower on the 1.2.0 development build's adapter. On 8 B300s with experts over all 8 and 4,096-token rows they ran at 0.37 to 0.54 times the bf16 rate. The expert GEMMs of those runs were far above their crossover M, at 16,384 rows per expert on gpt-oss-20b, so the roofline allowed a gain and the casts took it back.
 - A simulated path, which quantizes, dequantizes and then runs the bf16 matmul, executes no low-precision instruction and cannot beat bf16. It ran at 0.10 to 0.45 times the bf16 rate on the B300s, and at 0.93 to 0.99 times on 8 H200s, where the round trip of the activations is fused into one kernel.
 - A quantized weight against a bf16 activation gains no compute speed on Blackwell, because the tensor core has no instruction that multiplies a bf16 operand by an fp4 one.
 
@@ -2057,7 +2057,7 @@ Training does not get the same benefit, for three reasons. The master weights st
 | Largest memory | weights, gradients and optimizer state at 8 bytes per parameter, and activations | weights and the KV cache |
 | Rows per GEMM | the tokens of a rank; per expert, a `k/E` share of them | the running sequences |
 | Usual regime | compute-bound at large `M`; split runs add collectives and waiting | memory-bound at low concurrency; overhead-bound in a Python engine at high concurrency |
-| Low precision | 1.13 to 1.37 times in the large runs cited under [Precision](#when-low-precision-speeds-training-up); below 1 in Halo's paths | less memory always; faster on some engines |
+| Low precision | 1.13 to 1.37 times in the large runs cited under [Precision](#when-low-precision-speeds-training-up); below 1 in the whole steps Halo has measured, the native ones on the 1.2.0 development build's adapter | less memory always; faster on some engines |
 | What to tune | a larger `M`, fusion, checkpointing, overlap | weight quantization, the KV cache, batching |
 
 Even for serving, the speed gain is not a given. On Qwen3.5-35B-A3B with fp8 weights that carry one scale per 128 × 128 block, decode on vLLM stayed within 1% of bf16 on one server. On SGLang with its Triton MoE backend it was 26% faster, at 256 sequences of 1,024 tokens on one B300. What fp8 gave on both engines was memory ([Rollout Servers → FP8 rollouts](../infrastructure/rollout-servers.md#fp8-rollouts)).

@@ -239,8 +239,9 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
         )
 
     if lowp.native and quant_format == "mxfp4":
-        # The MXFP4 weight cast flags a NaN or inf weight on the device, and this is its one host read per forward. It
-        # hooks the last converted layer, not the model: a PEFT wrapper calls the model's ``forward`` past its hooks.
+        # The MXFP4 weight cast flags a NaN or inf weight on the device, and this is its one host read per forward of
+        # the last converted layer, which a checkpointed backward runs again. It hooks that layer, not the model: a
+        # PEFT wrapper calls the model's ``forward`` past its hooks.
         def verify(*_hook_args) -> None:
             verify_finite_mxfp4_weights(
                 (f"{name}.{param_name}", param)
