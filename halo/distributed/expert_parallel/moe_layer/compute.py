@@ -13,7 +13,7 @@ from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
 from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
-from halo.kernels.lowp.deepgemm import deepgemm_available, seed_aligned_layout, warm_fp8_wgrad
+from halo.kernels.lowp.deepgemm import seed_aligned_layout, verify_deepgemm, warm_fp8_wgrad
 from halo.kernels.lowp.frozen_bank import FrozenExpertBank
 from halo.kernels.lowp.spec import GROUP_ROW_ALIGN, LowpSpec
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
@@ -65,12 +65,9 @@ class EPExpertComputeMixin:
     def set_lowp_compute(self, lowp: LowpSpec, *, weight_cacheable: bool) -> bool:
         """Set this layer's expert-compute precision from ``lowp``; return whether it applies: False on the DeepEP
         per-expert loop, where the grouped kernels and their fake-quant never run. Native compute needs ``deep_gemm``
-        unless MoK's own kernels run it."""
-        if lowp.native and not self._runs_mok and not deepgemm_available():
-            raise RuntimeError(
-                "lowp_backend='native' needs the deep_gemm package, built into the Blackwell image only (its kernels "
-                "are SM100 block-scaled). Run on that image, or set lowp_backend='simulated'."
-            )
+        at its pinned version unless MoK's own kernels run it."""
+        if lowp.native and not self._runs_mok:
+            verify_deepgemm()
         self._lowp, self._lowp_weight_cacheable = lowp, weight_cacheable
         self._uses_padded_groups = lowp.native and not self._runs_mok
         return self._use_grouped_mm or self._runs_mok

@@ -13,6 +13,7 @@ from halo.trainers.grpo.rounds.microbatch_plan import (
     balanced_partition,
     build_slot_layout,
     first_fit_decreasing,
+    heaviest_slot_tokens,
     local_bin_count,
     partition_rows,
 )
@@ -32,22 +33,30 @@ def _lengths(rows: int, seed: int, low: int = 2, high: int = 900) -> list[int]:
 
 
 class _World:
-    """The two ``rank_max`` calls of ``agree_microbatch_geometry`` answered from every rank's lengths, so one rank's
-    plan is computed as it would be beside its peers."""
+    """The ``rank_max`` calls of ``agree_microbatch_geometry`` (bin count, widest bin and, under a ceiling, heaviest
+    slot) answered from every rank's lengths, so one rank's plan is computed as it would be beside its peers."""
 
-    def __init__(self, per_rank: list[list[int]], budget: int, ceiling: int | None):
-        self.per_rank, self.budget, self.ceiling = per_rank, budget, ceiling
+    def __init__(self, per_rank: list[list[int]], budget: int, ceiling: int | None, slots: int = SLOTS):
+        self.per_rank, self.budget, self.ceiling, self.slots = per_rank, budget, ceiling, slots
         self.calls = 0
         self.bins = 0
 
     def rank_max(self, values: list[int]) -> list[int]:
         self.calls += 1
         if self.calls == 1:
-            counts = [local_bin_count(lengths, self.budget, SLOTS, self.ceiling) for lengths in self.per_rank]
+            counts = [local_bin_count(lengths, self.budget, self.slots, self.ceiling) for lengths in self.per_rank]
             self.bins = max(max(counts), 1)
             return [max(counts), max(sum(lengths) for lengths in self.per_rank)]
-        widest = [max(len(rows) for rows in partition_rows(l, self.bins, self.budget)) for l in self.per_rank]
-        return [max(widest)]
+        bins = [partition_rows(lengths, self.bins, self.budget) for lengths in self.per_rank]
+        widest = max(max(len(rows) for rows in rank_bins) for rank_bins in bins)
+        if self.calls == 2:
+            return [widest]
+        return [
+            max(
+                heaviest_slot_tokens(lengths, rank_bins, max(widest, 1))
+                for lengths, rank_bins in zip(self.per_rank, bins, strict=True)
+            )
+        ]
 
 
 def _plan_world(per_rank, budget, monkeypatch, ceiling=None) -> list[MicrobatchPlan]:
@@ -139,6 +148,26 @@ def test_balanced_bins_past_the_ceiling_raise_where_first_fit_needs_more_bins_th
         agree_microbatch_geometry(lengths, budget, slots=slots, ceiling=8192, round_rows=4)
     plan = agree_microbatch_geometry(lengths, budget, slots=slots, ceiling=None, round_rows=4)
     assert [sum(lengths[row] for row in rows) for rows in plan.bins] == [10_000, 10_000]
+
+
+@pytest.mark.parametrize("holder", [0, 1])
+def test_a_slot_whose_filler_rows_pass_the_ceiling_raises_on_every_rank(holder, monkeypatch):
+    """One 8,192-token row and three of 1,000 in two slots: the bins are within the ceiling, and the lone row's slot
+    is padded to the three-row bin with two 2-token fillers, 8,196 tokens in an 8,192-token buffer."""
+    heavy, light = [8192, 1000, 1000, 1000], [500, 500]
+    per_rank = [heavy, light] if holder == 0 else [light, heavy]
+    for lengths in per_rank:
+        monkeypatch.setattr(plan_module, "rank_max", _World(per_rank, 8192, 8192, slots=2).rank_max)
+        with pytest.raises(ValueError, match=r"carries 8196 tokens this round, more than the 8192 .* \(3 rows\)"):
+            agree_microbatch_geometry(lengths, 8192, slots=2, ceiling=8192, round_rows=len(lengths))
+
+
+def test_fillers_that_fit_the_ceiling_keep_the_plan(monkeypatch):
+    lengths = [8188, 1000, 1000, 1000]
+    monkeypatch.setattr(plan_module, "rank_max", _World([lengths], 8192, 8192, slots=2).rank_max)
+    plan = agree_microbatch_geometry(lengths, 8192, slots=2, ceiling=8192, round_rows=4)
+    assert plan.bins == ((0,), (1, 2, 3)) and plan.rows_per_bin == 3
+    assert heaviest_slot_tokens(lengths, plan.bins, plan.rows_per_bin) == 8192
 
 
 def _slot_chunks(rows: list[int], active: list[int], plan: MicrobatchPlan):

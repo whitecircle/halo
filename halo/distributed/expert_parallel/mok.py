@@ -276,7 +276,8 @@ class MoKExperts:
                 f"moe_backend='mok' sized its buffers to {capacity} tokens per rank from the run's declared budget "
                 f"(max_length x the training batch's rows, or the eval batch's where eval_strategy or eval_on_start "
                 f"schedules an evaluation), but a forward carried {x.shape[0]}. Raise max_length to the longest row "
-                f"the run feeds, and keep an unscheduled evaluation's batch within the training batch's rows."
+                f"the run feeds, keep an unscheduled evaluation's batch within the training batch's rows, and under "
+                f"packed GRPO lower packed_microbatch_tokens."
             )
         group = self._ep_config.dispatch_ep_group
         return _MoKFn.apply(x, router_weights, top_experts, capacity, group, self._num_experts, mxfp8, *banks)

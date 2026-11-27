@@ -8,6 +8,7 @@ from halo.config_validation import ValidatedConfig, present, require_int
 from halo.distributed.expert_parallel.config import EPBufferBackend, MoEBackend
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
+from halo.env import env_str
 from halo.kernels.lowp.spec import LowpBackend, LowpBackwardPrecision, LowpPrecision, LowpSpec
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
 from halo.runtime.ranks import is_global_main_process
@@ -411,12 +412,17 @@ def parallelism_config_from_args(
     row_sources: tuple = (),
 ) -> ParallelismConfig:
     """The ``ParallelismConfig`` the parsed arguments describe. Refuses here, before any model loads, a CP/PP size
-    ``trainer_cls`` rejects, ``lowp_*`` without ``SUPPORTS_LOWP_PRECISION``, the native backend without
-    ``SUPPORTS_NATIVE_LOWP``, ``init_from_scratch`` without ``supports_init_from_scratch``, and ``full_determinism`` on an EP group spanning NVLink domains.
-    ``training_config`` also declares the token budget the DeepEP dispatch-ceiling gate judges, with ``row_sources``
-    the script's other objects that carry a row-length bound (the script arguments, the rollout config). ``expert_lora`` is
-    passed here, not assigned onto the result: only construction runs its PP and expert-TP refusals, and
-    ``ep_config()`` caches the ``EPConfig``."""
+    ``trainer_cls`` rejects, a set ``HALO_DEEPGEMM_NATIVE``, ``lowp_*`` without ``SUPPORTS_LOWP_PRECISION``, the native
+    backend without ``SUPPORTS_NATIVE_LOWP``, ``init_from_scratch`` without ``supports_init_from_scratch``, and
+    ``full_determinism`` on an EP group spanning NVLink domains. ``training_config`` also declares the token budget
+    the DeepEP dispatch-ceiling gate judges, with ``row_sources`` the script's other objects that carry a row-length
+    bound (the script arguments, the rollout config). ``expert_lora`` is passed here, not assigned onto the result:
+    only construction runs its PP and expert-TP refusals, and ``ep_config()`` caches the ``EPConfig``."""
+    if (env_str("HALO_DEEPGEMM_NATIVE") or "").strip():
+        raise ValueError(
+            "HALO_DEEPGEMM_NATIVE is set and nothing reads it: a run that relied on it would train on the simulated "
+            "numerics. Set lowp_backend: native in the config and unset the variable."
+        )
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not trainer_cls.SUPPORTS_LOWP_PRECISION:
         _reject_unsupported_lowp(lowp, trainer_cls)
