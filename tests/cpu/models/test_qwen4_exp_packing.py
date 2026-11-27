@@ -231,7 +231,7 @@ def _renamed_recurrent_mask(config, input_embeds, attention_mask, past_key_value
             qwen4_exp_forwards.qwen4_exp_modeling,
             "Qwen4ExpTextDecoderLayer",
             _RenamedDecoderLayer,
-            "re-derive it on this release's forward",
+            "re-derive it on this release's code",
         ),
         (
             qwen4_exp_forwards.qwen4_exp_modeling,

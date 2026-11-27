@@ -13,6 +13,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_targets
+from halo.model_loading.parallel.peft_setup import apply_cp_adapter_trainability
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import full_row_loss
@@ -154,6 +155,8 @@ def test_cp_scorer_finds_real_peft_layout_and_preserves_adapter_gradients(peft_o
     config = LoraConfig(r=2, lora_alpha=4, target_modules=["q_proj"], init_lora_weights=False, task_type="CAUSAL_LM")
     if peft_outside:
         model = get_peft_model(wrapper, config)
+        # As trainer construction does: PEFT's name match leaves the adapters under a CP wrapper frozen.
+        apply_cp_adapter_trainability(model)
     else:
         wrapper.model = get_peft_model(wrapper.model, config)
         model = wrapper

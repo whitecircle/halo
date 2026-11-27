@@ -109,6 +109,7 @@ from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 from halo.checkpoint.config_export import restore_model_type
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
+from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.introspection.param_roles import fp32_pinned_names
 from halo.models.upstream.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
@@ -419,6 +420,16 @@ def _with_release_scale_bias(build: Callable[[dict], PreTrainedModel]) -> Callab
     return build_filled
 
 
+def _family_patched(apply_patches: Callable[[], None], build: Callable[[dict], PreTrainedModel]):
+    """``build`` after the family's patches, which the loader applies before it builds the model."""
+
+    def build_patched(overrides: dict) -> PreTrainedModel:
+        apply_patches()
+        return build(overrides)
+
+    return build_patched
+
+
 def _tiny_remote(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
     """Remote code: the classes come from release ``repo``'s module, which needs the toolkit's shims to import."""
 
@@ -478,9 +489,12 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         ulysses_cp=True,
     ),
     # Mamba: a conv and a recurrent scan along the sequence. Its layers are ``mixer``, which no attention spelling names,
-    # and most hold Mamba's two projections.
+    # and most hold Mamba's two projections. PEFT takes an adapter on ``out_proj`` only past the family patches.
     "nemotron_h": TinyFamily(
-        _with_release_scale_bias(_causal(NemotronHConfig, NemotronHForCausalLM, TINY_NEMOTRON_H_CONFIG)),
+        _family_patched(
+            apply_nemotron_h_patches,
+            _with_release_scale_bias(_causal(NemotronHConfig, NemotronHForCausalLM, TINY_NEMOTRON_H_CONFIG)),
+        ),
         attention_targets=("q_proj", "v_proj", "in_proj", "out_proj"),
     ),
     # Gated DeltaNet layers: a conv and a recurrent scan along the sequence.

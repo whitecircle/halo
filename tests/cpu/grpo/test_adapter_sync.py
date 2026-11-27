@@ -1056,7 +1056,8 @@ def _refusal_cases():
         return peft_model
 
     return {
-        "dora": (model(use_dora=True), "DoRA"),
+        "dora": (model(use_dora=True), "the LoRA variant use_dora"),
+        "alora": (model(alora_invocation_tokens=[5]), "the LoRA variant alora_invocation_tokens"),
         "modules_to_save": (model(modules_to_save=["lm_head"]), "modules_to_save"),
         "embedding adapter": (model(targets=("q_proj", "embed_tokens")), "not one SGLang 0.5.22 serves"),
         "lm_head adapter": (model(targets=("q_proj", "lm_head")), "not one SGLang"),

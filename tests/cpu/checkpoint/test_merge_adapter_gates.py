@@ -33,6 +33,8 @@ _REAL_GATES = (
 
 
 class _Merged:
+    config = None
+
     def merge_and_unload(self):
         return self
 
@@ -84,6 +86,7 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -
         return record
 
     monkeypatch.setattr(adapter_merge, "PeftModel", _FakePeftModel)
+    monkeypatch.setattr(adapter_merge, "apply_family_patches", lambda *_args: None)
     monkeypatch.setattr(
         adapter_merge, "resolve_peft_processing_class", stub("resolve_peft_processing_class", object())
     )

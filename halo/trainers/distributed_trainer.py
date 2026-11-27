@@ -34,7 +34,11 @@ from halo.model_loading.parallel.frozen_models import (
     ReferenceAlternatives,
     warn_unparallelized_reference,
 )
-from halo.model_loading.parallel.peft_setup import verify_adapters_trainable
+from halo.model_loading.parallel.peft_setup import (
+    apply_cp_adapter_trainability,
+    apply_expert_lora_trainability,
+    verify_adapters_trainable,
+)
 from halo.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
 from halo.models.families.qwen4_exp.forwards import verify_qwen4_exp_patched
 from halo.models.introspection.config_access import (
@@ -384,6 +388,9 @@ class DistributedTrainerMixin(
         if config.is_tp_mode:
             reject_lora_under_tp(self._top_level_model())
         if (peft_model := find_peft_model(self.model)) is not None:
+            apply_expert_lora_trainability(peft_model)
+            if self._find_cp_wrapper() is not None:
+                apply_cp_adapter_trainability(peft_model)
             verify_adapters_trainable(peft_model)
         self._disable_inert_router_logits()
         reject_unreachable_mtp_term(

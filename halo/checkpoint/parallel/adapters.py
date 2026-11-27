@@ -252,11 +252,16 @@ def read_adapter_across_ranks(
 
 def live_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
     """The live tensor behind every key a PEFT save writes (a tie under each of its names); an FSDP2 DTensor stays as
-    it is, so its ``shape`` is the saved full one."""
+    it is, so its ``shape`` is the saved full one. Rank-local: PEFT selects the keys over meta stand-ins, as it turns
+    every tensor of a selection holding a DTensor into a gathered CPU copy."""
     live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
-    return get_peft_model_state_dict(
-        peft_model, state_dict=live, save_embedding_layers=_saves_embedding_layers(peft_model)
+    stand_ins = {name: torch.empty(tensor.shape, dtype=tensor.dtype, device="meta") for name, tensor in live.items()}
+    live_by_stand_in = {id(stand_ins[name]): tensor for name, tensor in live.items()}
+    selected = get_peft_model_state_dict(
+        peft_model, state_dict=stand_ins, save_embedding_layers=_saves_embedding_layers(peft_model)
     )
+    # A buffer PEFT reads off a ``modules_to_save`` copy itself, when the selection lacks it, is the live one already.
+    return {key: live_by_stand_in.get(id(tensor), tensor) for key, tensor in selected.items()}
 
 
 def _with_tied_aliases(live_tensors: dict[str, torch.Tensor], attn_state: dict) -> dict:

@@ -10,9 +10,12 @@ from typing import TYPE_CHECKING
 import torch
 from peft import PeftModel, get_peft_model, prepare_model_for_kbit_training
 from peft.tuners.tuners_utils import BaseTunerLayer, _maybe_include_all_linear_layers, check_target_module_exists
+from peft.utils import ModulesToSaveWrapper
 from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
+from peft.utils.transformers_weight_conversion import convert_peft_config_for_transformers
 from torch.distributed.tensor import DTensor
 from transformers import PreTrainedModel
+from transformers.conversion_mapping import get_model_conversion_mapping
 from trl import get_peft_config
 from trl.trainer.utils import disable_dropout_in_model
 
@@ -222,8 +225,35 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
     peft_config.exclude_modules = sorted(set(preset or ()) | set(found))
 
 
+def _matched_module_names(model: torch.nn.Module, peft_config) -> set[str]:
+    scan_config = _maybe_include_all_linear_layers(copy.deepcopy(peft_config), model)
+    return {name for name, _ in model.named_modules() if name and check_target_module_exists(scan_config, name)}
+
+
+def reject_peft_moe_target_rewrite(model: torch.nn.Module, peft_config) -> None:
+    """Refuse a config PEFT's wrap would rewrite for the transformers v5 layout of a fused-expert MoE: a regex or
+    ``all-linear`` resolved to bare leaf names, with the fused experts and the router added as ``target_parameters``.
+    Runs PEFT's own rewrite on a copy; rank-local, and alike on every rank."""
+    rewritten = copy.deepcopy(peft_config)
+    convert_peft_config_for_transformers(rewritten, model, get_model_conversion_mapping(model))
+    added = sorted(set(rewritten.target_parameters or ()) - set(peft_config.target_parameters or ()))
+    widened = sorted(_matched_module_names(model, rewritten) - _matched_module_names(model, peft_config))
+    if not added and not widened:
+        return
+    adds = [f"target_parameters {added} (fused expert tensors and router weights)"] if added else []
+    adds += [f"{len(widened)} modules the pattern does not name (e.g. {widened[0]})"] if widened else []
+    raise ValueError(
+        f"PEFT rewrites lora_target_modules={peft_config.target_modules!r} for the transformers v5 layout of this "
+        f"{model.config.model_type} model and would adapt {' and '.join(adds)}, which the target as written does not "
+        f"name. Name the modules to adapt as a list of names or paths (expert projections in the list train as the "
+        f"native grouped expert adapters), or, without Expert Parallelism, list the fused tensors in "
+        f"lora_target_parameters."
+    )
+
+
 def build_peft_config(model: torch.nn.Module, model_config: ModelArguments) -> object | None:
-    """COLLECTIVE: the run's ``LoraConfig``, with the name matches PEFT cannot adapt excluded."""
+    """COLLECTIVE: the run's ``LoraConfig``, with the name matches PEFT cannot adapt excluded and a target PEFT would
+    rewrite refused."""
     targets = model_config.lora_target_modules
     # PEFT reads its sentinel only as a bare string, case-insensitively, while a one-entry list stays a
     # list: ModelArguments keeps one from the YAML or the command line, and the expert peel can leave one.
@@ -234,7 +264,16 @@ def build_peft_config(model: torch.nn.Module, model_config: ModelArguments) -> o
     peft_config = get_peft_config(model_config)
     if peft_config is not None and getattr(peft_config, "target_modules", None):
         _exclude_unadaptable_lora_targets(model, peft_config)
+        reject_peft_moe_target_rewrite(model, peft_config)
     return peft_config
+
+
+def apply_expert_lora_trainability(model: torch.nn.Module) -> None:
+    """Mark every native grouped expert adapter trainable. Rank-local and idempotent. PEFT's wrap freezes every
+    parameter outside its own tuner layers, these included, so it runs again after the wrap."""
+    for _path, layer in named_ep_layers(model):
+        for _name, adapter in layer.expert_lora_named_params():
+            adapter.requires_grad_(True)
 
 
 def configure_adapter_training(
@@ -292,10 +331,8 @@ def configure_adapter_training(
         )
     for p in model.parameters():
         p.requires_grad = False
-    # The native grouped expert adapters come back on; PEFT re-enables its own after the wrap.
-    for _path, layer in named_ep_layers(model):
-        for _name, adapter in layer.expert_lora_named_params():
-            adapter.requires_grad_(True)
+    # PEFT re-enables its own adapters at the wrap.
+    apply_expert_lora_trainability(model)
 
     if not attention_peft:
         # Expert-LoRA only: no PeftModel exists, and ignoring modules_to_save would silently leave router/head frozen.
@@ -333,13 +370,33 @@ def _active_adapter_params(layer: BaseTunerLayer, adapter: str) -> list[torch.nn
     return params
 
 
+def _training_adapters(peft_model: PeftModel) -> set[str]:
+    return {name for name, config in peft_model.peft_config.items() if not config.inference_mode}
+
+
+def apply_cp_adapter_trainability(peft_model: PeftModel) -> None:
+    """Mark trainable, by identity, what PEFT's wrap means to train: every tensor an active adapter that trains holds
+    in a tuner layer or a ``modules_to_save`` copy, less the weights its variant keeps frozen. Rank-local and
+    idempotent. PEFT keeps trainable only the parameters whose ``named_parameters()`` name lies under a tuner layer's
+    ``named_modules()`` name, which ``UlyssesModel``'s hub names never do (huggingface/peft#4181)."""
+    trains = _training_adapters(peft_model)
+    for module in peft_model.modules():
+        if not isinstance(module, (BaseTunerLayer, ModulesToSaveWrapper)):
+            continue
+        for adapter in trains.intersection(module.active_adapters):
+            for param in _active_adapter_params(module, adapter):
+                param.requires_grad_(True)
+        if isinstance(module, BaseTunerLayer):
+            module._freeze_non_trainable_peft_weights()
+
+
 def verify_adapters_trainable(peft_model: PeftModel) -> None:
     """Raise when a tuner layer holds no trainable parameter for an adapter meant to train (an active adapter whose
     config is not ``inference_mode``). Rank-local, not a collective: every rank builds the same wrap.
 
-    PEFT >= 0.21 re-enables adapters by matching ``named_parameters()`` names against ``named_modules()`` prefixes, so
-    a wrapper that yields other names than its modules leaves every adapter frozen."""
-    trains = {name for name, config in peft_model.peft_config.items() if not config.inference_mode}
+    PEFT keeps trainable only the parameters whose ``named_parameters()`` name lies under a tuner layer's
+    ``named_modules()`` name, so a wrapper that yields other names than its modules leaves every adapter frozen."""
+    trains = _training_adapters(peft_model)
     frozen = []
     for name, module in peft_model.named_modules():
         if not isinstance(module, BaseTunerLayer):
@@ -355,10 +412,11 @@ def verify_adapters_trainable(peft_model: PeftModel) -> None:
     if frozen:
         raise RuntimeError(
             f"{len(frozen)} adapter layers hold no trainable parameter after the PEFT wrap (e.g. {frozen[0]}): the run "
-            f"would train nothing. PEFT >= 0.21 re-enables adapters by matching the parameter names of "
-            f"`named_parameters()` against the module names of `named_modules()`, and a wrapper model that yields "
-            f"other names (UlyssesModel under context parallelism, huggingface/peft#4181) leaves every adapter "
-            f"frozen. Pin peft below 0.21, or use a release that fixes peft#4181."
+            f"would train nothing. PEFT keeps trainable only the parameters whose `named_parameters()` name lies "
+            f"under a tuner layer's `named_modules()` name, so a wrapper model that yields other names leaves every "
+            f"adapter frozen (huggingface/peft#4181); trainer construction marks them trainable again only under "
+            f"UlyssesModel. Hand the trainer a model whose adapters train, or wrap no renaming model around the "
+            f"PeftModel."
         )
 
 
@@ -386,7 +444,7 @@ def build_peft_model(model, peft_config, args, *, merge_existing: bool = True):
         prepare_kwargs = {"use_gradient_checkpointing": args.gradient_checkpointing}
         gc_kwargs = getattr(args, "gradient_checkpointing_kwargs", None)
         if gc_kwargs is not None:
-            prepare_kwargs["gradient_checkpointing_kwargs"] = gc_kwargs
+            prepare_kwargs["activation_checkpointing_kwargs"] = gc_kwargs
         model = prepare_model_for_kbit_training(model, **prepare_kwargs)
 
     model = get_peft_model(model, peft_config)

@@ -1,15 +1,14 @@
 #!/usr/bin/env python
-"""A PEFT wrap that leaves a tuner layer with no trainable adapter parameter is refused at trainer construction.
-PEFT >= 0.21 matches parameter names against module names, so a wrapper whose ``named_parameters()`` drops a level
-(``UlyssesModel``) freezes every adapter silently; the check reads the live parameters and does not depend on the
-PEFT release."""
+"""What PEFT's wrap leaves trainable, repaired and checked at trainer construction. PEFT keeps trainable only the
+parameters whose ``named_parameters()`` name lies under a tuner layer's ``named_modules()`` name, so a wrapper whose
+names drop a level (``UlyssesModel``) freezes every adapter, and the native grouped expert adapters, in no tuner layer,
+freeze too. Construction marks both trainable again; the check refuses any tuner layer still left with nothing that
+trains."""
 
-from importlib.metadata import version
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from packaging.version import Version
 from peft import IA3Config, LoraConfig, PeftModel, get_peft_model
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -17,11 +16,19 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
-from halo.model_loading.parallel.peft_setup import build_peft_model, verify_adapters_trainable
+from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.model_loading.parallel.peft_setup import (
+    apply_cp_adapter_trainability,
+    apply_expert_lora_trainability,
+    build_peft_model,
+    verify_adapters_trainable,
+)
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from tests.common.parallelism import make_parallelism_config
+from tests.common.parallelism import make_parallelism_config, single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
-_PEFT_MATCHES_BY_NAME = Version(version("peft")) >= Version("0.21")
 _TINY_QWEN3 = Qwen3Config(
     vocab_size=64,
     hidden_size=32,
@@ -60,20 +67,53 @@ def _freeze_adapters(model: nn.Module) -> None:
             param.requires_grad_(False)
 
 
-def test_the_real_cp_wrapper_is_refused_exactly_where_peft_matches_names():
+def test_peft_leaves_every_adapter_under_the_real_cp_wrapper_frozen():
+    """The failure the CP repair exists for, and that the check alone refuses."""
     model = _under_ulysses(_qwen3())
 
-    if _PEFT_MATCHES_BY_NAME:
-        with pytest.raises(RuntimeError, match=_FROZEN):
-            verify_adapters_trainable(model)
-    else:
+    with pytest.raises(RuntimeError, match=_FROZEN):
         verify_adapters_trainable(model)
-        assert any(p.requires_grad for n, p in model.named_parameters() if "lora_" in n)
 
 
-def test_frozen_adapters_are_refused_on_every_peft_release():
-    """The release-independent form of the failure: the wrap finished with every adapter frozen."""
-    model = _under_ulysses(_qwen3())
+@pytest.mark.parametrize(
+    "lora",
+    [{}, {"use_dora": True}, {"modules_to_save": ["lm_head"]}],
+    ids=["lora", "dora", "modules_to_save"],
+)
+def test_the_cp_repair_trains_exactly_the_adapters(lora):
+    model = _under_ulysses(_qwen3(**lora))
+    adapter = {n for n, _ in model.named_parameters() if "lora_" in n or "modules_to_save" in n}
+    assert adapter, "premise: the wrap built adapters"
+
+    apply_cp_adapter_trainability(model)
+
+    trained = {n for n, p in model.named_parameters() if p.requires_grad}
+    assert trained == adapter, (sorted(adapter - trained)[:3], sorted(trained - adapter)[:3])
+    verify_adapters_trainable(model)
+
+
+def test_the_cp_repair_keeps_the_weights_a_variant_freezes():
+    """MiCA trains ``lora_A`` alone; marking every adapter tensor would train its ``lora_B`` too."""
+    plain = get_peft_model(_tiny_qwen3(), _qwen3(init_lora_weights="mica"))
+    plain_a = {n for n, _ in plain.named_parameters() if "lora_A" in n}
+    assert {n for n, p in plain.named_parameters() if p.requires_grad} == plain_a, "premise: MiCA trains lora_A alone"
+    model = _under_ulysses(_qwen3(init_lora_weights="mica"))
+
+    apply_cp_adapter_trainability(model)
+
+    trained = {n for n, p in model.named_parameters() if p.requires_grad}
+    assert trained and trained == {n for n, _ in model.named_parameters() if "lora_A" in n}
+
+
+def test_the_cp_repair_leaves_an_inference_mode_adapter_frozen():
+    model = _under_ulysses(_qwen3(inference_mode=True))
+    apply_cp_adapter_trainability(model)
+    assert not any(p.requires_grad for p in model.parameters())
+
+
+def test_frozen_adapters_are_refused():
+    """The wrap finished with every adapter frozen, whatever froze them."""
+    model = get_peft_model(_tiny_qwen3(), _qwen3())
     _freeze_adapters(model)
 
     with pytest.raises(RuntimeError, match=_FROZEN):
@@ -163,16 +203,54 @@ class _ConstructionHost(DistributedTrainerMixin):
     ids=["frozen", "trained"],
 )
 def test_trainer_construction_runs_the_check(freeze, error, fragment):
-    """CP is the mode the failure comes from; the check sits before every wrap, so it covers each mode alike."""
-    model = _under_ulysses(_qwen3())
+    """The check sits before every wrap, so it covers each mode alike; adapters frozen outside a CP wrapper are what
+    no repair reaches."""
+    model = get_peft_model(_tiny_qwen3(), _qwen3())
     if freeze:
         _freeze_adapters(model)
-    elif _PEFT_MATCHES_BY_NAME:
-        pytest.skip("PEFT >= 0.21 freezes the real CP wrapper; the frozen case above covers the call site")
-    host = _ConstructionHost(model, cp_size=2)
+    host = _ConstructionHost(model)
 
     with patch("halo.trainers.distributed_trainer.agree_rank_uniform_env"), pytest.raises(error, match=fragment):
         DistributedTrainerMixin._configure_distributed_modes(host)
+
+
+def test_trainer_construction_repairs_the_cp_wrap():
+    model = _under_ulysses(_qwen3())
+    _freeze_adapters(model)
+    host = _ConstructionHost(model, cp_size=2)
+
+    with patch("halo.trainers.distributed_trainer.agree_rank_uniform_env"), pytest.raises(_PastAdapterCheck):
+        DistributedTrainerMixin._configure_distributed_modes(host)
+    assert all(p.requires_grad for n, p in model.named_parameters() if "lora_" in n)
+
+
+def _mixed_expert_lora_model() -> tuple[PeftModel, list]:
+    """Native grouped expert adapters made trainable as ``configure_adapter_training`` does, then the stock PEFT wrap
+    of the attention targets."""
+    model = tiny_family_model(TINY_MOE_FAMILIES["qwen3_moe"])
+    ep_config = single_process_ep_config(expert_lora=ExpertLoraSpec(r=8, alpha=16), experts_fsdp_managed=False)
+    apply_ep_layers(model, ep_config)
+    for param in model.parameters():
+        param.requires_grad_(False)
+    apply_expert_lora_trainability(model)
+    experts = [param for _, layer in named_ep_layers(model) for _, param in layer.expert_lora_named_params()]
+    assert experts and all(param.requires_grad for param in experts), "premise: expert adapters built and trained"
+    return get_peft_model(model, LoraConfig(r=8, lora_alpha=16, target_modules=["q_proj", "v_proj"])), experts
+
+
+def test_peft_freezes_the_native_expert_adapters():
+    _, experts = _mixed_expert_lora_model()
+    assert not any(param.requires_grad for param in experts)
+
+
+def test_trainer_construction_trains_the_native_expert_adapters():
+    model, experts = _mixed_expert_lora_model()
+    host = _ConstructionHost(model)
+
+    with patch("halo.trainers.distributed_trainer.agree_rank_uniform_env"), pytest.raises(_PastAdapterCheck):
+        DistributedTrainerMixin._configure_distributed_modes(host)
+    frozen = sum(not param.requires_grad for param in experts)
+    assert not frozen, f"{frozen} of {len(experts)} native expert adapters left frozen after construction"
 
 
 if __name__ == "__main__":

@@ -19,13 +19,15 @@ _SPEC = ExpertLoraSpec(r=RANK, alpha=2 * RANK)
 
 
 class _MoEHost(nn.Module):
-    """An attention projection beside an EP layer's shared-expert ``nn.Linear``, with or without native adapters."""
+    """An attention projection beside an EP layer's shared-expert ``nn.Linear`` and fused expert bank, with or without
+    native adapters."""
 
     def __init__(self, *, native_adapters: bool):
         super().__init__()
         self.q_proj = nn.Linear(HIDDEN, HIDDEN, bias=False)
         self.mlp = StubEPLayerBase()
         self.mlp.shared_expert = nn.Linear(HIDDEN, HIDDEN, bias=False)
+        self.mlp.down_proj = nn.Parameter(torch.zeros(EXPERTS, HIDDEN, HIDDEN))
         if native_adapters:
             self.mlp._expert_lora_attrs = frozenset({"gate_up_proj"})
             self.mlp.gate_up_proj_lora_A = nn.Parameter(torch.zeros(EXPERTS, HIDDEN, RANK))
@@ -57,8 +59,12 @@ def test_the_supported_adapter_layouts_pass():
     [
         (
             lambda: reject_peft_lora_in_ep_layers(_peft(["shared_expert"])),
-            r"PEFT-wrapped LoRA adapters detected inside EP-wrapped MoE layers"
+            r"PEFT-wrapped LoRA adapters detected inside or around EP-wrapped MoE layers"
             r"(?s:.*)mlp\.shared_expert\.lora_A\.default\.weight",
+        ),
+        (
+            lambda: reject_peft_lora_in_ep_layers(_peft(["q_proj"], target_parameters=["mlp.down_proj"])),
+            r"inside or around EP-wrapped MoE layers(?s:.*)base_model\.model\.mlp \(a ParamWrapper around an EP layer\)",
         ),
         (
             lambda: reject_expert_lora_peft_conflicts(_peft(["q_proj"], use_rslora=True), _SPEC),
@@ -73,7 +79,7 @@ def test_the_supported_adapter_layouts_pass():
             r"routed to native EP grouped-LoRA .* no EP/grouped MoE layer built the adapters",
         ),
     ],
-    ids=["peft-lora-in-ep-layer", "rslora-mismatch", "dora", "unrealized-expert-lora"],
+    ids=["peft-lora-in-ep-layer", "peft-lora-around-ep-layer", "rslora-mismatch", "dora", "unrealized-expert-lora"],
 )
 def test_each_adapter_refusal_names_its_mechanism(refusal, match):
     with pytest.raises(ValueError, match=match):

@@ -37,6 +37,7 @@ from halo.checkpoint.tools.offline_export import (
     resolve_adapter_base_revision,
     save_full_checkpoint,
 )
+from halo.model_loading.model_preparation import apply_family_patches
 from halo.model_loading.tokenizer_setup import (
     grow_vocabulary,
     load_processing_class,
@@ -135,7 +136,9 @@ def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_processor
     """The saved adapter loaded onto ``model``, first grown to a vocabulary the run grew. The added rows start as NaN,
     so an unset row is never served from uninitialized memory. An adapter lacking them has them rebuilt, with a
     warning, as the checkpoint rows' mean, matching the run's frozen mean-resize draw (that mean plus 1e-9 of the rows'
-    covariance)."""
+    covariance). The family patches come first, as PEFT's load runs the target check a patch lets past (Nemotron-H's
+    ``out_proj``)."""
+    apply_family_patches(model.config, None)
     num_tokens = _grown_vocabulary(model, adapter_processor, base_processor)
     if num_tokens is None:
         return PeftModel.from_pretrained(model, adapter_dir)

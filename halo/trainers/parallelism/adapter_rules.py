@@ -1,6 +1,7 @@
 """LoRA / PEFT / expert-LoRA refusals under the parallelism modes, read off the live model after its wrap."""
 
 from peft import PeftModel
+from peft.tuners.tuners_utils import BaseTunerLayer
 
 from halo.checkpoint.parallel.adapters import live_adapter_tensors
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
@@ -13,18 +14,27 @@ from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
 
 def reject_peft_lora_in_ep_layers(model) -> None:
     """PEFT-wrapped LoRA inside EP layers sees rank-specific (post-dispatch) inputs, which break gradient sync; only
-    the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there."""
+    the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there. A tuner layer wrapping an
+    EP layer, PEFT's ``target_parameters`` route, holds its adapters outside the EP gradient sync."""
     if not isinstance(model, PeftModel):
         return
+    ep_layers = named_ep_layers(model)
     offending = []
-    for name, module in named_ep_layers(model):
+    for name, module in ep_layers:
         native = {adapter_name for adapter_name, _ in module.expert_lora_named_params()}
         for param_name, _ in module.named_parameters():
             if "lora_" in param_name and param_name not in native:
                 offending.append(f"{name}.{param_name}")
+    ep_ids = {id(module) for _, module in ep_layers}
+    offending.extend(
+        f"{name} (a {type(module).__name__} around an EP layer)"
+        for name, module in model.named_modules()
+        if isinstance(module, BaseTunerLayer)
+        and any(id(inner) in ep_ids for inner in module.get_base_layer().modules())
+    )
     if offending:
         raise ValueError(
-            f"PEFT-wrapped LoRA adapters detected inside EP-wrapped MoE layers. "
+            f"PEFT-wrapped LoRA adapters detected inside or around EP-wrapped MoE layers. "
             f"Expert layers are distributed across ranks by EP, so a PEFT LoraLayer on them would "
             f"have rank-specific inputs and break gradient sync.\n"
             f"\n"
@@ -34,8 +44,9 @@ def reject_peft_lora_in_ep_layers(model) -> None:
             + "\n\n"
             "To LoRA-tune experts under EP, list the expert projections (gate_proj/up_proj/"
             "down_proj/gate_up_proj/experts) in lora_target_modules: split_expert_lora_targets "
-            "routes them to native grouped adapters instead of PEFT. LoRA on non-EP layers "
-            "(attention, embeddings, lm_head) is unaffected."
+            "routes them to native grouped adapters instead of PEFT. Leave target_parameters "
+            "unset: PEFT wraps the module holding a targeted parameter, here the EP layer. LoRA on "
+            "non-EP layers (attention, embeddings, lm_head) is unaffected."
         )
 
 

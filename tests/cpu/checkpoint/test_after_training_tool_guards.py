@@ -140,6 +140,8 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
     class _Merged:
         """What the conversion actually touches."""
 
+        config = None
+
         def merge_and_unload(self):
             return self
 
@@ -153,6 +155,7 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
 
     monkeypatch.setattr(adapter_merge, "PeftConfig", _FakePeftConfig)
     monkeypatch.setattr(adapter_merge, "PeftModel", _FakePeftModel)
+    monkeypatch.setattr(adapter_merge, "apply_family_patches", lambda *_args: None)
     monkeypatch.setattr(adapter_merge, "reject_expert_lora_adapter", lambda _path: None)
     monkeypatch.setattr(adapter_merge, "resolve_peft_processing_class", lambda *a, **k: object())
     monkeypatch.setattr(adapter_merge, "preflight_model_load_resources", lambda *a, **k: None)

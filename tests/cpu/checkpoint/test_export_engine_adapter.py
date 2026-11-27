@@ -155,10 +155,19 @@ def _saved_mixed(tmp_path: Path, family: TinyFamily = _INKLING2) -> Path:
             {EXPERT_LORA_CONFIG_KEY: {"r": 2 * _RANK, "lora_alpha": 4 * _RANK}},
             "another rank or scaling than the",
         ),
-        (_INKLING2, "vllm", {"use_dora": True}, "DoRA: the engine refuses it"),
+        (_INKLING2, "vllm", {"use_dora": True}, "the LoRA variant use_dora: the engine serves plain LoRA"),
+        (_INKLING2, "vllm", {"alora_invocation_tokens": [5, 6]}, "the LoRA variant alora_invocation_tokens"),
         (_INKLING2, "vllm", {"rank_pattern": {"o_proj": 4}}, "rank_pattern: the engine reads one rank"),
     ],
-    ids=["sglang-experts", "sglang-experts-the-base-fuses", "expert-scaling", "expert-rank", "dora", "rank-pattern"],
+    ids=[
+        "sglang-experts",
+        "sglang-experts-the-base-fuses",
+        "expert-scaling",
+        "expert-rank",
+        "dora",
+        "alora",
+        "rank-pattern",
+    ],
 )
 def test_what_the_engine_cannot_serve_is_refused_with_its_reason_before_any_write(
     tmp_path, family, backend, fields, reason
