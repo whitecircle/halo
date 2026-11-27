@@ -15,7 +15,7 @@ from halo.checkpoint.tools.adapter_merge import load_base_for_adapter
 
 _Q, _EMBED, _HEAD = "model.layers.0.self_attn.q_proj", "model.embed_tokens", "lm_head"
 _PREFIX = "base_model.model."
-# Every key spelling PEFT 0.18.1 writes into an adapter file, and the module each addresses.
+# Every key spelling PEFT 0.22.0 writes into an adapter file, and the module each addresses.
 _KEY_TO_MODULE = {
     f"{_PREFIX}{_Q}.lora_A.weight": _Q,
     f"{_PREFIX}{_Q}.lora_B.weight": _Q,

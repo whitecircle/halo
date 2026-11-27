@@ -14,7 +14,7 @@ accepts LoRA and DoRA, not QLoRA ([Embedding — PEFT / LoRA](../training-method
 
 ## Supported methods
 
-Uses the [PEFT library](https://github.com/huggingface/peft) (pinned 0.18.1). LoRA is the only method with tested
+Uses the [PEFT library](https://github.com/huggingface/peft) (pinned 0.22.0). LoRA is the only method with tested
 parallelism support; other PEFT methods (AdaLoRA, Prompt Tuning, (IA)3) reach the trainer through a custom
 `peft_config` but are untested with it. An AdaLoRA or (IA)3 layer is refused at construction wherever an
 out-of-place fold runs (the weight-sync trainers, embedding LoRA, `merge_expert_lora_on_save`): the fold

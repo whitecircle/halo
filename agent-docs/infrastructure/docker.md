@@ -90,7 +90,7 @@ docker run -d --rm --name <job> \
 |-----------|--------|-----------|
 | Base NGC `nvcr.io/nvidia/pytorch:26.03-py3` (Ubuntu 24.04, Python 3.12, CUDA 13.2) | Yes | Yes |
 | PyTorch 2.11.0+cu130 (reinstalled from the cu130 index over the base's build) | Yes | Yes |
-| Transformers 5.23.0 · TRL 1.14.2 · Accelerate 1.11.0 · PEFT 0.18.1 · sentence-transformers 6.1.0 · Liger 0.8.4 (`uv.lock`) | Yes | Yes |
+| Transformers 5.23.0 · TRL 1.14.2 · Accelerate 1.11.0 · PEFT 0.22.0 · sentence-transformers 6.1.0 · Liger 0.8.4 (`uv.lock`) | Yes | Yes |
 | Flash Attention 2 | Built from tag `v2.8.3.post1`, split-K kernels stubbed | Inherited from `BASE_IMAGE`, which is the pin; the build asserts it imports |
 | Flash Attention 3 (SM90) | Yes | No |
 | Flash Attention 4 (`flash-attn-4[cu13]==4.0.0b37`, `flash_attn.cute`) | No | Yes |

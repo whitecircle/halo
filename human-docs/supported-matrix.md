@@ -12,7 +12,7 @@ truth; where a recipe disagrees with this page, this page wins.
 | Transformers | 5.23.0 |
 | TRL | 1.14.2 |
 | Accelerate | 1.11.0 |
-| PEFT | 0.18.1 |
+| PEFT | 0.22.0 |
 | sentence-transformers | 6.1.0 |
 | Liger Kernel | 0.8.4 |
 | Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
