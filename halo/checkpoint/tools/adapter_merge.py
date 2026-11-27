@@ -43,6 +43,9 @@ from halo.model_loading.tokenizer_setup import (
     resolve_peft_processing_class,
     resolve_tokenizer,
 )
+from halo.models.introspection.config_access import untie_word_embeddings
+from halo.models.introspection.module_tree import embedding_module
+from halo.models.peft_adapters import adapted_tied_embeddings, adapter_base_module
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +166,30 @@ def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_processor
     return peft_model
 
 
+def _untie_adapted_embeddings(model: PeftModel, log) -> None:
+    """Where an adapter makes the halves of a tied embedding pair compute with different weights, give the output head
+    its own copy of the shared weight and clear ``tie_word_embeddings``, so the merge folds each half's adapter into its
+    own tensor and the checkpoint holds both. Runs after the adapter load, whose saved embedding rows land in the tensor
+    both halves share."""
+    adapted = adapted_tied_embeddings(model)
+    if not adapted:
+        return
+    head = adapter_base_module(embedding_module(model, "output"))
+    if head.weight.is_meta:
+        raise ValueError(
+            f"The adapter changes the {' and '.join(adapted.values())} of the base's tied embedding pair, so the merge "
+            f"writes the pair untied from a copy of the shared weight, but --device_map offloaded that weight off the "
+            f"devices, where no copy can be taken. Merge with --device_map cpu, or without --device_map."
+        )
+    head.weight = torch.nn.Parameter(head.weight.detach().clone(), requires_grad=False)
+    untie_word_embeddings(model.config)
+    log(
+        f"The adapter changes the {' and '.join(adapted.values())} of the base's tied embedding pair "
+        f"({', '.join(adapted)}), so training computed the two with different weights: writing the merged "
+        f"model untied (tie_word_embeddings: false), with the input embedding and output head as separate tensors."
+    )
+
+
 def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
     """Refuse a partial directory (adapter and base), an output that is an input, and a native expert adapter
     ``merge_and_unload`` would drop, each of which raises nothing otherwise. Returns the adapter's config."""
@@ -228,9 +255,11 @@ def merge_adapter_into_base(
     processing_class = resolve_peft_processing_class(adapter_processor, base_processor, text_only=base.text_only)
     if processing_class is None:
         raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
-    merged_model = apply_adapter(
+    peft_model = apply_adapter(
         adapter_dir, base.model, adapter_processor=adapter_processor, base_processor=base_processor, log=log
-    ).merge_and_unload()
+    )
+    _untie_adapted_embeddings(peft_model, log)
+    merged_model = peft_model.merge_and_unload()
 
     for action in apply_training_sidecars(merged_model, adapter_dir):
         log(action)

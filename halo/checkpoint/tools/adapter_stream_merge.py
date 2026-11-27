@@ -59,6 +59,8 @@ from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, 
 from halo.model_loading.model_preparation import resolve_auto_model_class, resolve_build_config
 from halo.model_loading.tokenizer_setup import load_processing_class
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, is_sink_key, neutralized_sink_value
+from halo.models.introspection.config_access import ties_word_embeddings
+from halo.models.introspection.module_tree import embedding_module, find_module_path
 from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX, plain_module_name
 from halo.models.moe.balancing import BALANCING_BIASES_ATTR
 from halo.models.moe.expert_layout import (
@@ -373,14 +375,31 @@ def _release_slot_dtypes(layers: dict[str, _ExpertLayer], base: dict[str, _Store
     return {key: stored.dtype for key, stored in base.items() if key.rpartition(".")[2] in stems}
 
 
-def _stored_keys_by_live_name(
+class _LiveNames(NamedTuple):
+    """The base's module-tree tensor names: the key each is stored under, and those sharing one tensor (a tied pair)."""
+
+    stored: dict[str, str]
+    tied: frozenset[str]
+
+
+def _tied_names(shell: torch.nn.Module, config) -> frozenset[str]:
+    """The weight names of ``shell``'s input embedding and output head where ``config`` ties the pair. Read off the
+    config, as a shell built on the meta device holds the pair as two tensors."""
+    halves = [embedding_module(shell, which) for which in ("input", "output")]
+    if not ties_word_embeddings(config) or any(module is None for module in halves):
+        return frozenset()
+    return frozenset(f"{find_module_path(shell, module)}.weight" for module in halves)
+
+
+def _live_names(
     base_dir: str, base_keys: Collection[str], required: Collection[str], trust_remote_code: bool, remedy: str
-) -> dict[str, str]:
+) -> _LiveNames:
     """Each tensor name of the base's module tree → the key ``base_dir`` stores it under, planned as ``from_pretrained``
-    renames the checkpoint onto the config's widest class, built without weights. A name the load fuses or splits out
-    of other keys, or that no stored key supplies, has no entry. Raises for a remote-code config (an ``auto_map``)
-    under ``trust_remote_code=False``. A class the meta device cannot build maps every stored key to itself when the
-    base stores each ``required`` name verbatim, and raises naming ``remedy`` otherwise."""
+    renames the checkpoint onto the config's widest class, built without weights, and the names its tied tensors take.
+    A name the load fuses or splits out of other keys, or that no stored key supplies, has no entry. Raises for a
+    remote-code config (an ``auto_map``) under ``trust_remote_code=False``. A class the meta device cannot build maps
+    every stored key to itself, with no tie seen, when the base stores each ``required`` name verbatim, and raises
+    naming ``remedy`` otherwise."""
     try:
         config = resolve_build_config(base_dir, revision=None, trust_remote_code=trust_remote_code)
     except (ValueError, StrictDataclassError) as e:
@@ -403,10 +422,10 @@ def _stored_keys_by_live_name(
                 f"target is stored under; {remedy}."
             ) from e
         logger.warning(f"{e} The base stores every tensor the adapter rewrites under its module path; folding there.")
-        return {key: key for key in base_keys}
+        return _LiveNames({key: key for key in base_keys}, frozenset())
     namespace = CheckpointNamespace.of(shell)
     plan = build_key_plan(base_keys, shell.state_dict(), namespace.conversions, namespace.base_model_prefix)
-    return plan.live_renames()
+    return _LiveNames(plan.live_renames(), _tied_names(shell, config))
 
 
 def _read_balancing_sidecar(adapter_dir: str) -> dict[str, torch.Tensor]:
@@ -491,11 +510,19 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
     base = _base_tensors(base_dir)
     base_shapes = {key: stored.shape for key, stored in base.items()}
     remedy = _unmergeable_remedy(bool(experts))
-    stored = (
-        _stored_keys_by_live_name(base_dir, base_shapes, by_live_name, trust_remote_code, remedy)
+    stored, tied = (
+        _live_names(base_dir, base_shapes, by_live_name, trust_remote_code, remedy)
         if by_live_name or sidecar
-        else {}
+        else _LiveNames({}, frozenset())
     )
+    tied_rewrites = sorted(tied & set(by_live_name))
+    if tied_rewrites:
+        raise ValueError(
+            f"The adapter at {adapter_dir} rewrites {tied_rewrites}, which the base at {base_dir} ties to another "
+            f"tensor (tie_word_embeddings): the run computed the two with different weights, and the streaming merge, "
+            f"which keeps the base's keys and config, would write one weight for both. The in-memory merge writes such "
+            f"an adapter untied; {remedy}."
+        )
     neutralizes_sinks = _has_neutralized_sinks(adapter_dir)
     sinks = {key for key in base if is_sink_key(key)} if neutralizes_sinks else set()
     rewritten = {stored[name] for name in by_live_name if name in stored} | (set(by_key) & set(base)) | sinks

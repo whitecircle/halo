@@ -1,5 +1,5 @@
-"""PEFT adapter parameters a tuner layer holds beside the module it wraps, and the LoRA merge reproduced
-out of place. Rank-local; a sharded fold lives in ``halo.distributed.lora_fold``."""
+"""PEFT adapter parameters a tuner layer holds beside the module it wraps, the adapters that split a tied embedding
+pair, and the LoRA merge reproduced out of place. Rank-local; a sharded fold lives in ``halo.distributed.lora_fold``."""
 
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -14,6 +14,9 @@ from peft.tuners.lora.variants import (
     DoraLinearVariant,
 )
 from peft.tuners.tuners_utils import BaseTunerLayer
+from peft.utils import ModulesToSaveWrapper
+
+from halo.models.introspection.module_tree import embedding_module, find_module_path
 
 # Exact types, as a subclass (torchao, Intel Neural Compressor) overrides the merge.
 _FOLDABLE_LORA_LAYERS = (Linear, Embedding, Conv1d, Conv2d, Conv3d, ParamWrapper)
@@ -64,8 +67,66 @@ def _unfoldable(layer: BaseTunerLayer) -> str | None:
     return f"{type(unknown[0]).__name__} adapter" if unknown else None
 
 
+def adapter_base_module(module: torch.nn.Module) -> torch.nn.Module:
+    """The module holding the weight ``module`` computes from with its adapters off: a tuner layer's base layer, a
+    ``modules_to_save`` wrapper's original, else ``module`` itself."""
+    if isinstance(module, BaseTunerLayer):
+        return module.get_base_layer()
+    if isinstance(module, ModulesToSaveWrapper):
+        return module.original_module
+    return module
+
+
+def _computed_weight(module: torch.nn.Module) -> object:
+    """What ``module`` computes with: the LoRA layer itself where it folds a delta into its base weight, the active
+    ``modules_to_save`` copy's weight, else its base weight."""
+    if isinstance(module, LoraLayer) and _adapters_to_fold(module):
+        return module
+    if isinstance(module, ModulesToSaveWrapper):
+        copies = [module.modules_to_save[name] for name in module.active_adapters if name in module.modules_to_save]
+        if copies:
+            return copies[0].weight
+    return adapter_base_module(module).weight
+
+
+def adapted_tied_embeddings(model: torch.nn.Module) -> dict[str, str]:
+    """Module path → role (``input embedding``, ``output head``) of each half of ``model``'s tied embedding pair that an
+    adapter makes compute with a weight the other half does not: a LoRA layer adds its delta to one half's weight, a
+    ``modules_to_save`` copy replaces it. Empty when the pair is untied, no adapter touches it, or both halves compute
+    with one copy."""
+    halves = {"input embedding": embedding_module(model, "input"), "output head": embedding_module(model, "output")}
+    if any(module is None for module in halves.values()):
+        return {}
+    bases = {role: getattr(adapter_base_module(module), "weight", None) for role, module in halves.items()}
+    if bases["input embedding"] is None or bases["input embedding"] is not bases["output head"]:
+        return {}
+    computed = {role: _computed_weight(module) for role, module in halves.items()}
+    if computed["input embedding"] is computed["output head"]:
+        return {}
+    return {find_module_path(model, halves[role]): role for role in halves if computed[role] is not bases[role]}
+
+
+def _reject_lora_on_tied_embeddings(model: torch.nn.Module) -> None:
+    lora = {
+        path: role
+        for path, role in adapted_tied_embeddings(model).items()
+        if isinstance(model.get_submodule(path), LoraLayer)
+    }
+    if lora:
+        leaves = sorted({path.rpartition(".")[2] for path in lora})
+        raise ValueError(
+            f"LoRA adapts the {' and '.join(lora.values())} ({', '.join(lora)}) of a tied embedding pair "
+            f"(tie_word_embeddings): training computes the two halves with different weights, but they share one "
+            f"base tensor, and the out-of-place fold writes that tensor once, so the folded weights would carry the "
+            f"delta in both halves. A weight sync or a merged save cannot write this adapter; merge_peft_adapters.py "
+            f"(in memory) writes it as an untied model. Remove {', '.join(leaves)} from lora_target_modules."
+        )
+
+
 def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
-    """In merge order. Keyed by identity, so a tied weight listed under its other name still gets its delta."""
+    """In merge order, keyed by identity. Raises for a layer the fold cannot reproduce, and for a LoRA layer on either
+    half of a tied embedding pair, whose delta the shared tensor would give the other half too."""
+    _reject_lora_on_tied_embeddings(model)
     targets: LoraFolds = {}
     for name, module in model.named_modules():
         if not isinstance(module, BaseTunerLayer):

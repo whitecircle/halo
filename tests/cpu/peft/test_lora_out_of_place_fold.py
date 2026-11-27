@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 """The weight sync folds each LoRA layer out of place into exactly what PEFT's merge would write.
-The frozen base is never written; a layer the fold cannot reproduce, or a target the dense push skips, is refused."""
+The frozen base is never written; a layer the fold cannot reproduce, a target the dense push skips, or a LoRA on a tied
+embedding pair is refused."""
 
 import copy
 
@@ -42,6 +43,12 @@ class _Net(nn.Module):
         self.lm_head = nn.Linear(_DIM, _VOCAB, bias=False)
         if tied:
             self.lm_head.weight = self.embed_tokens.weight
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.embed_tokens
+
+    def get_output_embeddings(self) -> nn.Module:
+        return self.lm_head
 
     def forward(self, x):  # pragma: no cover - never called
         return x
@@ -102,8 +109,8 @@ _CASES = {
     "conv2d_kernel": (_Net, {"target_modules": ["conv2d"]}),
     "conv3d": (_Net, {"target_modules": ["conv3d"]}),
     "conv3d_dora": (_Net, {"target_modules": ["conv3d"], "use_dora": True}),
-    "tied_head": (lambda: _Net(tied=True), {"target_modules": ["lm_head", "proj"]}),
-    "tied_both": (lambda: _Net(tied=True), {"target_modules": ["embed_tokens", "lm_head"]}),
+    "head": (_Net, {"target_modules": ["lm_head"]}),
+    "tied_pair_untouched": (lambda: _Net(tied=True), {"target_modules": ["proj"]}),
     "two_adapters": (_Net, {"target_modules": ["proj", "embed_tokens"]}),
     "param_wrapper": (_MoeNet, {"target_modules": [], "target_parameters": ["experts.gate_up_proj"]}),
 }
@@ -167,7 +174,8 @@ def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_the_push_carries_the_peft_merge(case):
-    """Each forwarded tensor is what PEFT's merge holds under that name; a tied head's delta rides on the embedding."""
+    """Each forwarded tensor is what PEFT's merge holds under that name; a tied pair untouched by the adapters goes
+    once, under the embedding's name."""
     model = _lora_model(case, _DTYPES["bf16"])
     expected = as_pushed(model, merged_by_peft(model))
     before = local_parameters(model)
@@ -184,6 +192,35 @@ def test_the_push_carries_the_peft_merge(case):
     wrong = sorted(name for name, value in pushed.items() if not torch.equal(value, expected[name]))
     assert not wrong, f"pushed tensors differ from PEFT's merge: {wrong}"
     assert not moved_parameters(before, local_parameters(model)), "the push wrote the model's own weights"
+
+
+@pytest.mark.parametrize(
+    "targets", [["lm_head", "proj"], ["embed_tokens"], ["embed_tokens", "lm_head"]], ids=["head", "embedding", "both"]
+)
+def test_a_lora_on_a_tied_embedding_pair_is_refused(targets):
+    """Training adds the delta to one half; folded into the one shared tensor, the push would serve it on both."""
+    model = get_peft_model(_Net(tied=True), LoraConfig(r=4, lora_alpha=8, target_modules=targets))
+    randomize_adapters(model, std=0.1)
+    with pytest.raises(ValueError, match="tied embedding pair"):
+        lora_fold_targets(model)
+    with pytest.raises(ValueError, match="tied embedding pair"):
+        reject_unsyncable_model(model, "vllm")
+    sender = RecordingSender()
+    with pytest.raises(ValueError, match="tied embedding pair"):
+        gather_and_send_weights(model, sender)
+    assert not sender.params, "a refused push must send nothing"
+
+
+def test_an_untied_head_lora_reaches_the_head_alone():
+    """The delta rides on ``lm_head`` and the input embedding goes out as the frozen base."""
+    model = _lora_model("head", _DTYPES["fp32"])
+    sender = RecordingSender(keep_values=True)
+    gather_and_send_weights(model, sender)
+    pushed = {param.name: param.value for param in sender.params}
+    base = model.get_base_model()
+    assert torch.equal(pushed["embed_tokens.weight"], base.embed_tokens.weight)
+    delta = base.lm_head.get_delta_weight("default")
+    assert torch.equal(pushed["lm_head.weight"], base.lm_head.base_layer.weight + delta)
 
 
 class _Attention(nn.Module):
