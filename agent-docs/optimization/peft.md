@@ -368,11 +368,11 @@ which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all
 
 ## Tied embedding pairs
 
-Qwen3-0.6B, Qwen3-4B, Qwen3.5-2B, Qwen3.5-4B, Gemma 4 and LFM2.5-8B-A1B tie their output head to their input
-embedding (`tie_word_embeddings: true`). On such a model an adapter on `lm_head` or `embed_tokens` makes training
-compute the two halves with different weights. A LoRA on the head computes the input with `W` and the head with
-`W + s·B·A`; a `modules_to_save` copy of one half replaces only that half. Training, saving and resuming such a run
-work as for any adapter. The shared tensor matters where the trained policy is written out as one model:
+Some models tie their output head to their input embedding (`tie_word_embeddings: true`), Qwen3-0.6B and Gemma 4
+among them. On such a model an adapter on `lm_head` or `embed_tokens` makes training compute the two halves with
+different weights. A LoRA on the head computes the input with `W` and the head with `W + s·B·A`; a
+`modules_to_save` copy of one half replaces only that half. Training, saving and resuming such a run work as for
+any adapter. The shared tensor matters where the trained policy is written out as one model:
 
 - The in-memory merge (`merge_peft_adapters.py`) writes the policy untied. It gives the head its own copy of `W`
   before the fold, writes `tie_word_embeddings: false` on every config level that declares it, saves both tensors
@@ -387,8 +387,12 @@ work as for any adapter. The shared tensor matters where the trained policy is w
   `modules_to_save` copy of either half needs no fold: the merged save writes each half under its own key and writes
   the config untied ([Checkpoints](../reference/checkpoints.md#exported-configjson)).
 - The [streaming merge](#streaming-merge) refuses an adapter on either half, since it keeps the base's key set and
-  config. A dense adapter merges in memory instead. An adapter holding native expert LoRA has no in-memory merge, so
-  over a tied pair it takes a full copy of the head (`lora_modules_to_save: [lm_head]`), which
+  config. It reads the tie as `from_pretrained` does: the config ties the pair, and the base does not store both
+  halves under keys of their own with different values. A config that says tied over two different stored tensors
+  loads untied, and an adapter on either half merges there. Where the meta device cannot build the base's class, no
+  shell shows which tensors the tie joins, so over a config that ties the pair the merge refuses any adapter that
+  rewrites a dense tensor. A dense adapter merges in memory instead. An adapter holding native expert LoRA has no
+  in-memory merge, so over a tied pair it takes a full copy of the head (`lora_modules_to_save: [lm_head]`), which
   `merge_expert_lora_on_save` writes untied, in place of a head LoRA.
 - vLLM's LFM2 and LFM2-MoE classes tie the pair whatever the config says, so they serve an untied LFM2 export with
   its input embedding as the head.
@@ -586,7 +590,7 @@ as `from_pretrained` renames it, planned on a weightless shell of the class the 
 hub layout spells another way folds into its hub key (GLM-5 Next's `forget_gate.f_a_proj`, stored as `f_a_proj`;
 Laguna's `gate.e_score_correction_bias`, stored as `experts.e_score_correction_bias`). Where the meta device cannot
 build that class (Ling-3.0's remote code on the hub's `rope_scaling: null`), each tensor folds under the key spelling
-its module path, provided the base stores every one so. Expert tensors are matched under the layer's module path.
+its module path, provided the base stores every one so and its config ties no embedding pair. Expert tensors are matched under the layer's module path.
 Tensors keep the base's stored dtype and key spelling, balancing slots aside, so `--dtype` is ignored (logged) and
 `--device_map`, `--fp32_norms` and `--task classification` are refused. The shell's class comes from the base's
 config, so a remote-code base needs `--trust_remote_code`, off by default for an adapter on a Hub base.
@@ -595,8 +599,8 @@ The tool resolves everything it rewrites against the base before the first write
 
 - a tensor with no stored key of its own: a `text_only_model` adapter over a multimodal base, a tensor the load fuses
   or splits out of other keys, a module path the base respells when the shell cannot be built;
-- a LoRA or a `modules_to_save` tensor on either half of a tied embedding pair, read off the base's config
-  ([Tied embedding pairs](#tied-embedding-pairs));
+- a LoRA or a `modules_to_save` tensor on either half of a tied embedding pair, and any dense rewrite of a base
+  whose config ties the pair when the shell cannot be built ([Tied embedding pairs](#tied-embedding-pairs));
 - expert tensors of a family whose hub layout respells the layer path: DeepSeek-V4, Nemotron-H, Step-3.7 Flash and
   the multimodal classes of Inkling and Mistral Small 4;
 - base experts outside the family's export layout, or a stored tensor the run resized (a grown vocabulary);

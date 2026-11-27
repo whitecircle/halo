@@ -92,10 +92,14 @@ def _computed_weight(module: torch.nn.Module) -> object:
 def adapted_tied_embeddings(model: torch.nn.Module) -> dict[str, str]:
     """Module path → role (``input embedding``, ``output head``) of each half of ``model``'s tied embedding pair that an
     adapter makes compute with a weight the other half does not: a LoRA layer adds its delta to one half's weight, a
-    ``modules_to_save`` copy replaces it. Empty when the pair is untied, no adapter touches it, or both halves compute
-    with one copy."""
-    halves = {"input embedding": embedding_module(model, "input"), "output head": embedding_module(model, "output")}
-    if any(module is None for module in halves.values()):
+    ``modules_to_save`` copy replaces it. Empty when the model has no output head, the pair is untied, no adapter
+    touches it, or both halves compute with one copy."""
+    # The head first: transformers answers None for it where get_input_embeddings raises (CLIPModel, Wav2Vec2Model).
+    head = embedding_module(model, "output")
+    if head is None:
+        return {}
+    halves = {"input embedding": embedding_module(model, "input"), "output head": head}
+    if halves["input embedding"] is None:
         return {}
     bases = {role: getattr(adapter_base_module(module), "weight", None) for role, module in halves.items()}
     if bases["input embedding"] is None or bases["input embedding"] is not bases["output head"]:
@@ -106,26 +110,34 @@ def adapted_tied_embeddings(model: torch.nn.Module) -> dict[str, str]:
     return {find_module_path(model, halves[role]): role for role in halves if computed[role] is not bases[role]}
 
 
-def _reject_lora_on_tied_embeddings(model: torch.nn.Module) -> None:
-    lora = {
+def lora_adapted_tied_embeddings(model: torch.nn.Module) -> dict[str, str]:
+    """The halves :func:`adapted_tied_embeddings` names that a LoRA layer adapts, module path → role; a
+    ``modules_to_save`` copy is left out."""
+    return {
         path: role
         for path, role in adapted_tied_embeddings(model).items()
         if isinstance(model.get_submodule(path), LoraLayer)
     }
+
+
+def _reject_lora_on_tied_embeddings(model: torch.nn.Module) -> None:
+    lora = lora_adapted_tied_embeddings(model)
     if lora:
-        leaves = sorted({path.rpartition(".")[2] for path in lora})
+        leaves = ", ".join(sorted({path.rpartition(".")[2] for path in lora}))
         raise ValueError(
             f"LoRA adapts the {' and '.join(lora.values())} ({', '.join(lora)}) of a tied embedding pair "
             f"(tie_word_embeddings): training computes the two halves with different weights, but they share one "
             f"base tensor, and the out-of-place fold writes that tensor once, so the folded weights would carry the "
-            f"delta in both halves. A weight sync or a merged save cannot write this adapter; merge_peft_adapters.py "
-            f"(in memory) writes it as an untied model. Remove {', '.join(leaves)} from lora_target_modules."
+            f"delta in both halves. Remove {leaves} from lora_target_modules. For a merged save "
+            f"(merge_expert_lora_on_save), list {leaves} in lora_modules_to_save instead: that save writes the full "
+            f"copy and the other half under their own keys and the config untied."
         )
 
 
 def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
-    """In merge order, keyed by identity. Raises for a layer the fold cannot reproduce, and for a LoRA layer on either
-    half of a tied embedding pair, whose delta the shared tensor would give the other half too."""
+    """In merge order, keyed by identity, so a weight two modules share gets every delta whichever name lists it. Raises
+    for a layer the fold cannot reproduce, and for a LoRA layer on either half of a tied embedding pair, whose delta the
+    shared tensor would give the other half too."""
     _reject_lora_on_tied_embeddings(model)
     targets: LoraFolds = {}
     for name, module in model.named_modules():

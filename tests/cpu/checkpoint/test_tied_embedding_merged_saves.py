@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """An adapter on one half of a tied embedding pair trains a policy whose input embedding and output head differ. The
 in-memory merge writes it untied and the EP gathered save writes it untied or refuses it; the streaming merge, which
-keeps the base's keys and config, refuses it. An adapter elsewhere leaves the pair tied."""
+keeps the base's keys and config, refuses it where the load ties the pair, and any rewrite of a tied base it cannot
+build a shell for. An adapter elsewhere leaves the pair tied."""
 
 import json
 import os
@@ -10,10 +11,14 @@ import pytest
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
 from safetensors import safe_open
+from safetensors.torch import load_file, save_file
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.tools import adapter_stream_merge
 from halo.checkpoint.tools.adapter_merge import _untie_adapted_embeddings, merge_peft_adapter
+from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
 from tests.common.adapters import randomize_adapters
 from tests.common.checkpoint_io import save_context
 from tests.common.grown_vocab import GROWING_TOKENS, build_word_level_checkpoint, grow_vocabulary
@@ -49,6 +54,46 @@ def tied_base_dir(tmp_path_factory) -> str:
     return directory
 
 
+@pytest.fixture(scope="module")
+def untied_base_dir(tmp_path_factory) -> str:
+    directory = str(tmp_path_factory.mktemp("untied_only"))
+    build_word_level_checkpoint(directory, tied=False)
+    return directory
+
+
+def _edit_json(path: str, edit) -> None:
+    with open(path) as handle:
+        payload = json.load(handle)
+    edit(payload)
+    with open(path, "w") as handle:
+        json.dump(payload, handle)
+
+
+@pytest.fixture(scope="module")
+def flag_only_tied_base_dir(tmp_path_factory) -> str:
+    """Two different stored tensors under a config that says tied, which transformers loads untied."""
+    directory = str(tmp_path_factory.mktemp("flag_only_tied"))
+    build_word_level_checkpoint(directory, tied=False)
+    _edit_json(os.path.join(directory, "config.json"), lambda config: config.update(tie_word_embeddings=True))
+    return directory
+
+
+@pytest.fixture(scope="module")
+def twice_stored_tied_base_dir(tmp_path_factory) -> str:
+    """A tied base storing the head's key beside the embedding's with equal values, which transformers ties."""
+    directory = str(tmp_path_factory.mktemp("twice_stored_tied"))
+    build_word_level_checkpoint(directory, tied=True)
+    shards = [os.path.join(directory, name) for name in os.listdir(directory) if name.endswith(".safetensors")]
+    shard = next(path for path in shards if EMBEDDING_KEY in load_file(path))
+    tensors = load_file(shard)
+    tensors[HEAD_KEY] = tensors[EMBEDDING_KEY].clone()
+    save_file(tensors, shard, metadata={"format": "pt"})
+    index_path = os.path.join(directory, SAFETENSORS_INDEX_FILE)
+    if os.path.exists(index_path):
+        _edit_json(index_path, lambda index: index["weight_map"].update({HEAD_KEY: os.path.basename(shard)}))
+    return directory
+
+
 def _trained(base_dir: str, adapter: dict) -> PeftModel:
     """Adapters and full copies moved off their init, so every half they touch computes with its own weight."""
     model = get_peft_model(
@@ -72,9 +117,9 @@ def _logits(model: torch.nn.Module, ids: torch.Tensor | None = None) -> torch.Te
         return model(input_ids=_ids() if ids is None else ids).logits
 
 
-def _saved_adapter(base_dir: str, adapter: dict, adapter_dir: str) -> PeftModel:
+def _saved_adapter(base_dir: str, adapter: dict, adapter_dir: str, **save_kwargs) -> PeftModel:
     trained = _trained(base_dir, adapter)
-    trained.save_pretrained(adapter_dir)
+    trained.save_pretrained(adapter_dir, **save_kwargs)
     AutoTokenizer.from_pretrained(base_dir).save_pretrained(adapter_dir)
     return trained
 
@@ -176,8 +221,9 @@ def test_the_streaming_merge_refuses_an_adapter_splitting_a_tied_pair(tied_base_
     adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
     _saved_adapter(tied_base_dir, SPLITTING[adapter], adapter_dir)
 
-    with pytest.raises(ValueError, match="ties to another tensor"):
+    with pytest.raises(ValueError, match="ties to another tensor") as refusal:
         merge_peft_adapter(adapter_dir, merged_dir, streaming=True, verbose=False)
+    assert "without --streaming" in str(refusal.value), refusal.value
     assert not os.path.exists(merged_dir), "a refusal must leave no output"
 
 
@@ -188,6 +234,68 @@ def test_the_streaming_merge_keeps_an_adapter_off_the_pair_tied(tied_base_dir, t
     merge_peft_adapter(adapter_dir, merged_dir, streaming=True, verbose=False)
 
     assert _ties(merged_dir) and _embedding_keys(merged_dir) == {EMBEDDING_KEY}
+
+
+@pytest.mark.parametrize("adapter", ["lora_head", "full_head", "full_embedding"])
+def test_the_streaming_merge_folds_a_half_the_load_keeps_untied(flag_only_tied_base_dir, tmp_path, adapter):
+    """transformers ties a pair the config names only where the base does not store the halves apart."""
+    adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
+    base = AutoModelForCausalLM.from_pretrained(flag_only_tied_base_dir)
+    assert base.get_input_embeddings().weight is not base.get_output_embeddings().weight, "premise: loaded untied"
+    # PEFT's copy of a targeted head's base weight is a key no base stores.
+    trained = _saved_adapter(flag_only_tied_base_dir, SPLITTING[adapter], adapter_dir, save_embedding_layers=False)
+
+    merge_peft_adapter(adapter_dir, merged_dir, streaming=True, verbose=False)
+
+    assert _embedding_keys(merged_dir) == {HEAD_KEY, EMBEDDING_KEY}
+    reloaded = AutoModelForCausalLM.from_pretrained(merged_dir, dtype=torch.float32)
+    assert reloaded.get_input_embeddings().weight is not reloaded.get_output_embeddings().weight
+    # The merge keeps the base's bf16, where training computed at fp32.
+    torch.testing.assert_close(_logits(reloaded), _logits(trained), rtol=0, atol=0.1)
+
+
+def test_the_streaming_merge_refuses_a_tied_pair_stored_twice_with_equal_values(twice_stored_tied_base_dir, tmp_path):
+    adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
+    base = AutoModelForCausalLM.from_pretrained(twice_stored_tied_base_dir)
+    assert base.get_input_embeddings().weight is base.get_output_embeddings().weight, "premise: loaded tied"
+    _saved_adapter(twice_stored_tied_base_dir, SPLITTING["full_head"], adapter_dir)
+
+    with pytest.raises(ValueError, match="ties to another tensor"):
+        merge_peft_adapter(adapter_dir, merged_dir, streaming=True, verbose=False)
+    assert not os.path.exists(merged_dir), "a refusal must leave no output"
+
+
+def _refuse_meta_shell(*args, **kwargs):
+    raise MetaShellBuildError("Could not build a config-only meta-device shell for the probe class.")
+
+
+@pytest.mark.parametrize("adapter", ["full_embedding", "attention"])
+def test_the_streaming_merge_without_a_shell_refuses_any_rewrite_on_a_tied_base(
+    tied_base_dir, tmp_path, monkeypatch, adapter
+):
+    """No shell shows which stored tensors the tie joins, and a copy of embed_tokens would land in the one key both
+    halves load."""
+    adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
+    _saved_adapter(tied_base_dir, {**SPLITTING, "attention": ATTENTION_ONLY}[adapter], adapter_dir)
+    monkeypatch.setattr(adapter_stream_merge, "instantiate_on_meta", _refuse_meta_shell)
+
+    with pytest.raises(ValueError, match="cannot tell whether") as refusal:
+        merge_peft_adapter(adapter_dir, merged_dir, streaming=True, verbose=False)
+    assert "without --streaming" in str(refusal.value), refusal.value
+    assert not os.path.exists(merged_dir), "a refusal must leave no output"
+
+
+def test_the_streaming_merge_without_a_shell_folds_a_full_copy_on_an_untied_base(
+    untied_base_dir, tmp_path, monkeypatch
+):
+    adapter_dir, merged_dir = str(tmp_path / "adapter"), str(tmp_path / "merged")
+    trained = _saved_adapter(untied_base_dir, SPLITTING["full_embedding"], adapter_dir)
+    monkeypatch.setattr(adapter_stream_merge, "instantiate_on_meta", _refuse_meta_shell)
+
+    merge_peft_adapter(adapter_dir, merged_dir, streaming=True, verbose=False)
+
+    reloaded = AutoModelForCausalLM.from_pretrained(merged_dir, dtype=torch.float32)
+    torch.testing.assert_close(_logits(reloaded), _logits(trained), rtol=0, atol=0.1)
 
 
 @pytest.mark.parametrize("adapter", ["lora_embedding", "lora_both"])
