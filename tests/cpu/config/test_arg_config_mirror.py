@@ -18,7 +18,9 @@ from halo.configs.parser import _literal_choices
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES
 from halo.kernels.lowp.spec import LowpSpec
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 
@@ -128,6 +130,27 @@ def test_the_native_backend_is_refused_on_a_trainer_no_test_runs_it_on():
         parallelism_config_from_args(ParallelismArguments(**native), trainer_cls=SimulatedOnly)
     simulated = parallelism_config_from_args(ParallelismArguments(lowp_precision="fp8"), trainer_cls=SimulatedOnly)
     assert not simulated.lowp.native
+
+
+def test_the_sft_trainer_admits_the_native_backend_and_teacher_distillation_refuses_it():
+    native = ParallelismArguments(lowp_precision="fp8", lowp_backend="native", lowp_apply_dense_mlp=False)
+    assert parallelism_config_from_args(native, trainer_cls=DistributedSFTTrainer).lowp.native
+    with pytest.raises(ValueError, match="not supported by DistributedTeacherDistillationTrainer"):
+        parallelism_config_from_args(native, trainer_cls=DistributedTeacherDistillationTrainer)
+
+
+@pytest.mark.parametrize("value", ["1", "0"])
+def test_a_set_halo_deepgemm_native_is_refused(value, monkeypatch):
+    """The variable chose the native kernels before ``lowp_backend`` did; left in a ``.env`` it would now train on the
+    simulated numerics with no message."""
+    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", value)
+    with pytest.raises(ValueError, match="HALO_DEEPGEMM_NATIVE is set.*lowp_backend: native"):
+        parallelism_config_from_args(ParallelismArguments(), trainer_cls=DistributedTrainerMixin)
+
+
+def test_a_blank_halo_deepgemm_native_reads_as_unset(monkeypatch):
+    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", " ")
+    parallelism_config_from_args(ParallelismArguments(), trainer_cls=DistributedTrainerMixin)
 
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():

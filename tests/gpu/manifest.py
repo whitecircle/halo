@@ -593,6 +593,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--precision mxfp4",
             "--precision fp8 --native",
             "--precision mxfp4 --native",
+            "--precision mxfp4 --native --checkpointing",
             "--precision fp8 --native --backward fp8",
             "--precision mxfp4 --native --backward fp8",
             "--precision fp8 --native --backward fp8 --ep-size 1",

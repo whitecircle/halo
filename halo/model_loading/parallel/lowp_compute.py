@@ -11,7 +11,7 @@ from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES, _get_pa
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
 from halo.distributed.tensor_parallel.local_linears import LINEAR_TP_STYLES, install_local_forward
-from halo.kernels.lowp.deepgemm import deepgemm_available, verify_finite_mxfp4_weights
+from halo.kernels.lowp.deepgemm import verify_deepgemm, verify_finite_mxfp4_weights
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
@@ -182,11 +182,8 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
     if not lowp.enabled:
         return {"precision": "bf16", "moe_layers": 0, "dense_linears": 0, "kept_blocks": []}
     precision, quant_format = lowp.precision, LOWP_RECIPES[lowp.precision].quant_format
-    if lowp.native and not deepgemm_available():
-        raise RuntimeError(
-            "lowp_backend='native' needs the deep_gemm package, built into the Blackwell image only (its kernels are "
-            "SM100 block-scaled). Run on that image, or set lowp_backend='simulated'."
-        )
+    if lowp.native:
+        verify_deepgemm()
 
     backbone_prefix = _text_backbone_prefix(model)
     block_indices = {
@@ -244,8 +241,9 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
         )
 
     if lowp.native and quant_format == "mxfp4":
-        # The MXFP4 weight cast flags a NaN or inf weight on the device, and this is its one host read per forward. It
-        # hooks the last converted layer, not the model: a PEFT wrapper calls the model's ``forward`` past its hooks.
+        # The MXFP4 weight cast flags a NaN or inf weight on the device, and this is its one host read per forward of
+        # the last converted layer, which a checkpointed backward runs again. It hooks that layer, not the model: a
+        # PEFT wrapper calls the model's ``forward`` past its hooks.
         def verify(*_hook_args) -> None:
             verify_finite_mxfp4_weights(
                 (f"{name}.{param_name}", param)
