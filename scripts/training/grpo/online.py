@@ -10,10 +10,15 @@ from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.chat_render import render_generation_prompt
-from halo.data.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
+from halo.data.conversation import (
+    as_conversation,
+    chat_template_kwargs,
+    fold_system_into_conversation,
+    template_column_kwargs,
+)
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
-from halo.data.render_columns import reject_missing_render_column
+from halo.data.render_columns import reject_missing_render_column, render_column_checks_across_ranks
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
@@ -40,6 +45,7 @@ from halo.model_loading.parallel.frozen_models import (
 )
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.introspection.config_access import config_model_types
 from halo.models.moe.config_fields import has_routed_experts
 from halo.rewards.graders.verifiable import RLVR_GRADERS
 from halo.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
@@ -71,8 +77,9 @@ def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
             list(prompt_data), args.system_prompt, model_supports_system_role=True
         )
 
-        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, tools_field=args.tools_field)
-        # "random" samples a level per prompt, the single-turn analogue of the env-GRPO per-episode steer.
+        template_kwargs = chat_template_kwargs(row, interleaved_thinking=False, **template_column_kwargs(args))
+        # The run-wide steer, refused beside a per-row level; "random" samples a level per prompt, shared by its
+        # generations like env GRPO's per-group draw.
         effort = resolve_reasoning_effort(args.reasoning_effort)
         if effort is not None:
             template_kwargs["reasoning_effort"] = effort
@@ -139,10 +146,14 @@ def main():
         conversation_field=args.prompt_field,
         conversation_knob="prompt_field",
     )
-    reject_image_columns(ds, "RLVR Online GRPO")
-    # Read with .get, so a mistyped answer_field would yield empty answers and all-zero verifiable rewards.
-    if args.answer_field:
-        reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "RLVR Online GRPO")
+        # Read with .get, so a mistyped answer_field would yield empty answers: all-zero verifiable rewards, a judge
+        # shown an empty reference, an SDPG hint with no answer. A run none of whose terms reads the answer (a reward
+        # model, White Circle, a judge with include_reference off) needs no answer column.
+        hints_answer = args.use_sdpg and args.sdpg_beta_base != 0.0
+        if args.answer_field and (hints_answer or any(term.reads_answer for term in args.reward_terms)):
+            reject_missing_render_column(ds, str(args.dataset), "answer_field", args.answer_field)
 
     # Prompts and completions are collated into padded batches.
     requested_attn = grpo_row_attn_implementation(
@@ -180,7 +191,7 @@ def main():
         desc="Processing dataset for RLVR Online GRPO",
         cache_key_extras={
             "system_prompt": args.system_prompt,
-            "tools_field": args.tools_field,
+            **template_column_kwargs(args),
             "prompt_field": args.prompt_field,
             "answer_field": args.answer_field,
             "max_prompt_length": args.max_prompt_length,
@@ -221,7 +232,11 @@ def main():
     )
     verify_server_flags(
         [vllm_base_url],
-        ServerRequirements(is_moe=has_routed_experts(model.config), weight_precision=args.rollout_weight_precision),
+        ServerRequirements(
+            is_moe=has_routed_experts(model.config),
+            weight_precision=args.rollout_weight_precision,
+            model_types=config_model_types(model.config),
+        ),
         backend=VLLM_BACKEND,
         connection_timeout=grpo_config.vllm_server_timeout,
     )
@@ -272,6 +287,7 @@ def main():
         rlrr_config=args.build_rlrr_config(),
         drop_degenerate_groups=args.drop_degenerate_groups,
         scale_rewards_std_floor=args.scale_rewards_std_floor,
+        use_maxrl=args.use_maxrl,
         balance_token_mass=args.balance_token_mass,
         early_stop=args.build_early_stop_config(),
         use_chunked_grpo_logprobs=args.use_chunked_grpo_logprobs,

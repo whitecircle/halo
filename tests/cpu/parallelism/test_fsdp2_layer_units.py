@@ -5,6 +5,7 @@ same checkpoint, with hooks at the unit's two ends (``_install_unit_hooks``)."""
 import contextlib
 import dataclasses
 import datetime
+import functools
 import hashlib
 import json
 import math
@@ -69,6 +70,9 @@ class Case:
     rows: int = 1  # Forwards per backward.
     window: str = ""  # "defer": no reduce before the window's last backward. "keep": no reshard.
     pipeline: bool = False  # The FSDP calls torch's pipeline stage makes around its microbatches.
+    # "forward": transformers checkpoints the layer's forward, inside its FSDP2 hooks. "call": the decoder loop
+    # checkpoints the layer's __call__, as remote code does (Ling, Nemotron-H), so the hooks run in the recompute.
+    placement: str = "forward"
 
     @property
     def name(self) -> str:
@@ -81,9 +85,16 @@ DENSE_CASES = [
     for layers in (3, 4)
     for gc in ("off", "nonreentrant", "reentrant")
     for raf in (False, True)
-] + [Case(layers=layers, raf=raf, rows=3) for layers in (3, 4) for raf in (False, True)]
+] + [
+    Case(layers=layers, raf=raf, rows=rows, placement=placement)
+    for layers in (3, 4)
+    for raf in (False, True)
+    for rows, placement in ((3, "forward"), (1, "call"), (3, "call"))
+]
 PARTIAL_GC_CASES = [
-    Case(layers=layers, gc=gc, every_n_layers=2) for layers in (3, 4) for gc in ("nonreentrant", "reentrant")
+    Case(layers=layers, gc=gc, every_n_layers=2, placement=placement)
+    for layers in (3, 4)
+    for gc, placement in (("nonreentrant", "forward"), ("reentrant", "forward"), ("reentrant", "call"))
 ]
 SHAPE_CASES = [
     Case(window="defer"),
@@ -142,6 +153,21 @@ def _tensor_parallel(model: nn.Module, tp_mesh) -> None:
         parallelize_module(layer, tp_mesh, plan)
 
 
+def _checkpoint_layer_calls(layers: nn.ModuleList) -> None:
+    """The ``call`` placement on each checkpointed layer, by a subclass whose ``__call__`` checkpoints the stock one,
+    hooks included; ``fully_shard`` subclasses it in turn."""
+    for layer in layers:
+        if not layer.gradient_checkpointing:
+            continue
+        layer.gradient_checkpointing = False
+        base = type(layer)
+
+        def checkpointed_call(self, *args, _base=base, **kwargs):
+            return self._gradient_checkpointing_func(functools.partial(_base.__call__, self, **kwargs), *args)
+
+        layer.__class__ = type(base.__name__, (base,), {"__call__": checkpointed_call})
+
+
 def _build(case: Case, tp_mesh) -> tuple[nn.Module, list[nn.Parameter]]:
     family, overrides = FAMILIES[case.family]
     torch.manual_seed(0)
@@ -166,6 +192,8 @@ def _build(case: Case, tp_mesh) -> tuple[nn.Module, list[nn.Parameter]]:
     if case.gc != "off":
         kwargs = {"use_reentrant": case.gc == "reentrant", "every_n_layers": case.every_n_layers}
         enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs=kwargs)
+        if case.placement == "call":
+            _checkpoint_layer_calls(model.model.layers)
     if case.variant == "lora":
         torch.manual_seed(1)
         config = LoraConfig(r=4, lora_alpha=8, target_modules=LORA_TARGETS, init_lora_weights=False)
@@ -321,12 +349,12 @@ def _attempt(fn, *args, **kwargs) -> dict:
 
 def _torch_group_hooks_case(mesh) -> dict:
     with patch.object(fsdp, "_install_unit_hooks", lambda unit: None):
-        return _attempt(_train, Case(), 2, mesh)
+        return _attempt(_train, Case(placement="call"), 2, mesh)
 
 
 def _no_recompute_registration_case(mesh) -> dict:
-    """Negative control: the one call the unit hooks make in ``PRE_BACKWARD`` (FSDP2's own pre-forward makes it in
-    ``FORWARD``)."""
+    """Negative control: the one call the unit hooks make in ``PRE_BACKWARD``, in a recompute running them (FSDP2's own
+    pre-forward makes it in ``FORWARD``)."""
     real = _fsdp_param_group.FSDPParamGroup._register_post_backward_hook
 
     def register(group, args, kwargs):
@@ -335,7 +363,7 @@ def _no_recompute_registration_case(mesh) -> dict:
         return real(group, args, kwargs)
 
     with patch.object(_fsdp_param_group.FSDPParamGroup, "_register_post_backward_hook", register):
-        return _attempt(_train, Case(every_n_layers=2), 2, mesh)
+        return _attempt(_train, Case(every_n_layers=2, placement="call"), 2, mesh)
 
 
 def _dtype_blind_units_case(mesh) -> dict:
@@ -483,18 +511,22 @@ def test_every_fsdp2_state_settles_after_the_backward(runs, case):
 
 @pytest.mark.parametrize("case", DENSE_CASES, ids=lambda case: case.name)
 def test_each_unit_is_one_group_reduced_once_per_pass(runs, case):
-    """torch's final callback visits a unit's state once per module and reduces leftovers itself, so the trainer's
-    completion reduces only one-layer groups'."""
+    """Each forward of a layer checkpointed inside its hooks registers its own post-backward hook, so each reduces
+    inside the backward. Hooks running in the recompute hook only the first recompute of a group; torch's final
+    callback visits a unit's state once per module and reduces its leftovers itself, so the trainer's completion
+    reduces only one-layer groups'."""
     for rank_runs in runs:
         for unit in (1, *UNIT_SIZES):
             run = _ok(rank_runs["cases"][f"{case.name}|{unit}"], case.name)
             layer_groups = math.ceil(case.layers / unit)
             assert run["groups"] == run["param_groups"] == layer_groups + 2, (unit, run["groups"], run["param_groups"])
-            after = 0 if case.rows == 1 else layer_groups
+            hooked_once = case.placement == "call" and case.rows > 1
+            after = layer_groups if hooked_once else 0
+            inside = layer_groups if case.placement == "call" else layer_groups * case.rows
             assert run["layer_reduces_after_backward"] == [after] * STEPS, (unit, run["layer_reduces_after_backward"])
-            assert run["reduces"] == [layer_groups + 2 + after] * STEPS, (unit, run["reduces"])
+            assert run["reduces"] == [inside + 2 + after] * STEPS, (unit, run["reduces"])
             one_layer_groups = case.layers if unit == 1 else int(case.layers % unit == 1)
-            completed = 0 if case.rows == 1 else one_layer_groups
+            completed = one_layer_groups if hooked_once else 0
             assert run["completed"] == [completed] * STEPS, (unit, run["completed"])
 
 

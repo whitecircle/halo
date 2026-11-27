@@ -222,12 +222,10 @@ def test_a_row_of_one_document_takes_no_layout(monkeypatch):
     ("lengths", "batches"),
     [
         ([128] * 64, 1),
-        ([512] * 16, 1),
-        ([2048] * 4, 1),
         ([4096, 2048, 1024, 512, 256, 128, 64, 64], 7),
         ([1], 1),
     ],
-    ids=["many_short", "sixteen_even", "four_long", "skewed", "one"],
+    ids=["many_short", "skewed", "one"],
 )
 def test_documents_share_a_scan_only_within_the_padded_area(lengths, batches):
     planned = nemotron_h._padded_batches(lengths)

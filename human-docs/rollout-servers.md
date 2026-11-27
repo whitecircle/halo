@@ -30,8 +30,9 @@ This server takes GPUs 6 and 7, so start the trainer with
 `TRAINER_CUDA_DEVICES=0,1,2,3,4,5`; its default `0,1,2,3,4,5,6` overlaps GPU 6.
 The compose file also needs `HALO_SCRATCH`, the trainer's large scratch volume,
 even to start the server alone; set it once in the repo-root `.env`. Serve from
-the server image of the same Halo release as the trainer, which refuses a vLLM
-server older than 0.32.0.
+the server image of the same Halo release as the trainer. The trainer refuses a
+vLLM server older than 0.32.0, and an earlier release's `halo:vllm-0.32.0` image,
+which names no engine build.
 
 `docker-compose.vllm.yml` already passes the flags RL depends on. You normally
 set `VLLM_MODEL`, `VLLM_CUDA_DEVICES`, `VLLM_TP` to match the device list,
@@ -47,7 +48,8 @@ A wrong tool parser leaves tool calls as plain text, so no tool runs and every
 episode scores alike. A run on a tool-using environment stops by its second round
 holding an unparsed call. Set the parser per family:
 
-- `qwen3_xml`: Qwen3.5/3.6 and Qwen3-Coder.
+- `qwen3_xml`: Qwen3.5/3.6, Qwen3-Coder and Qwen3.8-Flash-Next, which also
+  takes `VLLM_REASONING_PARSER=qwen3`.
 - `gpt_oss_text`: GPT-OSS, loaded with `VLLM_TOOL_PARSER_PLUGIN`.
 - `glm47`: GLM-4.7-Flash.
 - `gemma4`, `lfm2`, `poolside_v1`, `step3p5`: Gemma 4, LFM-2, Laguna and
@@ -63,7 +65,7 @@ The reasoning parsers and attention backends a few families need are in the
 
 Serve bf16 weights, not a quantized checkpoint: a weight update cannot reach the
 transformed tensors a quantized engine stores. For GPT-OSS that means a bf16
-conversion of the release, not the stock MXFP4 one.
+conversion of the release, since the stock checkpoint is MXFP4.
 
 The one exception is `rollout_weight_precision: fp8_block`, for a validated family.
 Export the server's checkpoint with `scripts/before_training/export_block_fp8.py`,
@@ -185,8 +187,13 @@ freezes them, SGLang requeues them.
 A LoRA run on SGLang can send only the adapter instead: `rollout_adapter_sync: true`
 pushes the frozen base once, then loads the small adapter after each step without
 pausing the server. Launch the server with `SGLANG_LORA_MAX_RANK` set to at least
-`lora_r`; the trainer refuses a model or server it cannot serve this way and names
-the reason ([Adapter sync](../agent-docs/infrastructure/rollout-servers.md#adapter-sync)).
+`lora_r`. On vLLM only Inkling 2 serves this way, from `halo:vllm-0.1.dev25249`
+with `rollout_adapter_dir` set and no base push. Give each live run its own
+servers and its own `rollout_adapter_dir`: a run's first sync unloads every
+`halo-adapter-*` version on the servers and deletes every `halo-adapter-*`
+directory in `rollout_adapter_dir`. The
+trainer refuses a model or server it cannot serve this way and names the reason
+([Adapter sync](../agent-docs/infrastructure/rollout-servers.md#adapter-sync) ↗).
 
 MoE models must be served with `--moe-backend triton` (`--moe-runner-backend
 triton` on SGLang), the compose default. The backends the engine picks on its
@@ -199,8 +206,8 @@ layout with no error. The trainer refuses a server that reports one of them.
 | --- | --- |
 | 400 on every rollout, zero tokens back | The server cannot take a reasoning cap. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap, and leave `VLLM_USE_V2_MODEL_RUNNER` unset. |
 | `… the server parsed no call` by the second round | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser is refused at startup. If the parser is right and the model only writes malformed calls so far, raise `tool_parser_watch_rounds` or set it to `null`. |
-| `No token carried a policy gradient …` | Every group tied or dropped: read the shares in the message. A launch that has not trained yet stops at `zero_gradient_round_limit` rounds in a row, so raise it for a very sparse reward; past its first trained round a streak only warns. |
-| `… does not report the toolkit's image`, or another `cannot serve this run` at startup | A hand-run or upstream server. Serve from this repo's image and restate the flags the message names. |
+| `No token carried a policy gradient …` | Every group tied or dropped: read the shares in the message. A run that has not trained yet stops at `zero_gradient_round_limit` rounds in a row, so raise it for a very sparse reward; past its first trained round a streak only warns. |
+| `… does not report the toolkit's image`, or another `cannot serve this run` at startup | A hand-run or upstream server, an earlier release's vLLM image, or the vLLM tag of another family. Build or pull this release's image of the tag the message names, and restate the flags it names. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |
 | A server restarted during the run | Between syncs the trainer reconnects, warns and pushes the current weights. A server that fails mid-push stays paused and logs `RESTART the … server`: restart the container. |

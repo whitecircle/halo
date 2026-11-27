@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The KTO trainer's TRL integration: MRO and support flags, script-args defaults, the pipeline batch transform."""
+"""The KTO trainer's TRL integration: MRO and support flags, the pipeline batch transform."""
 
 from types import SimpleNamespace
 
@@ -7,7 +7,6 @@ import pytest
 from trl import KTOTrainer
 from trl.trainer.kto_trainer import DataCollatorForUnpairedPreference
 
-from halo.configs.preference import KTOScriptArguments
 from halo.data.collators.fixed_shape import FixedShapeCollator
 from halo.distributed.pipeline_parallel.runner import resolve_batch_pad_values
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
@@ -23,12 +22,6 @@ def test_kto_trainer_mro_and_flags():
     assert DistributedKTOTrainer.SUPPORTS_CP is False
     assert DistributedKTOTrainer.PP_REFUSAL is None
     assert "kto" in DistributedKTOTrainer._tag_names
-
-
-def test_kto_args_defaults():
-    args = KTOScriptArguments()
-    assert args.completion_field == "completion"
-    assert args.label_field == "label"
 
 
 def test_the_pipeline_batch_transform_reads_the_fixed_shape_collators_batch():

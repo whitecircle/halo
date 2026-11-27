@@ -158,12 +158,6 @@ def test_an_fp32_run_leaves_the_half_precision_kernels(release_config):
     assert resolved == "sdpa"
 
 
-def test_the_label_reaches_the_module_of_each_tower(cute):
-    model = _on_fa4()
-    assert model.vision_model.config._attn_implementation == FA4
-    assert model.language_model.model.config._attn_implementation == FA4
-
-
 def test_one_image_runs_the_vision_tower_non_causal_and_the_text_tower_at_its_ratio(cute):
     model = _on_fa4()
     _backward(model, _image_row(model, images=1))

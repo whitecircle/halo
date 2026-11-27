@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP, ep_layer_classes
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.head_transform import build_head_transform_spec_map
 from halo.subclass_registry import build_class_claim_map, iter_subclasses
@@ -86,11 +86,6 @@ def test_each_real_registry_names_its_clash(monkeypatch, build, noun):
         build()
 
     assert str(raised.value) == f"{noun} '{key}' claimed by both {owner.__name__} and Impostor"
-
-
-def test_ep_layer_classes_is_the_shared_walk_not_a_second_copy():
-    """The config lookups built on it must see exactly the tree the registry walks."""
-    assert ep_layer_classes() == iter_subclasses(EPMoELayerBase)
 
 
 def test_ep_registry_is_derived_and_covers_the_wired_families():

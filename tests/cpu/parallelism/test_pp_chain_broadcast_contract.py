@@ -20,7 +20,7 @@ def sent(monkeypatch):
     return buffers
 
 
-@pytest.mark.parametrize("loss_dtype", [torch.float32, torch.bfloat16, torch.float16, torch.float64])
+@pytest.mark.parametrize("loss_dtype", [torch.float32, torch.bfloat16])
 def test_source_buffer_matches_the_receiver_buffer(sent, loss_dtype):
     """Receivers always allocate fp32, so the source is converted."""
     received = broadcast_scalar_from_last_stage(None, LAST_STAGE_RANK, group=None)

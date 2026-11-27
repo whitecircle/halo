@@ -45,8 +45,10 @@ Code runs in a `SandboxExecutor` subprocess with imports and the standard librar
 | `local` | rlimits only; network and host filesystem (other episodes' workspaces included) open | Persist in the workspace |
 | `bubblewrap` | Confined without `allow_network` | Persist in the workspace |
 | `remote` | Confined | Not kept: a run sees only what `write_file` wrote |
+| `modal` | Confined | Persist in the workspace while its sandbox lives |
+| `baseten` | rlimits in a microVM; outbound network open | Persist in the workspace while its sandbox lives |
 
-`swe` [warns](../sandbox.md#confinement) when built on a backend that does not confine the program: `local`, or `bubblewrap` with `allow_network`. Run untrusted code and shell on `bubblewrap` without network, or on `remote`.
+`swe` [warns](../sandbox.md#confinement) when built on a backend that does not confine the program: `local`, `baseten`, or `bubblewrap` with `allow_network`. Run untrusted code and shell on `bubblewrap` without network, on `remote` or on `modal`.
 
 ## Reward
 

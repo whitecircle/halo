@@ -24,7 +24,13 @@ from halo.environments.tools.accounting import (
     tool_call_outcome,
     validate_tool_budgets,
 )
-from halo.environments.tools.definitions import NativeToolCall, NativeToolRegistry, NativeToolResult, is_refused_unrun
+from halo.environments.tools.definitions import (
+    NativeToolCall,
+    NativeToolRegistry,
+    NativeToolResult,
+    ToolBudgetExhausted,
+    is_refused_unrun,
+)
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS
 from halo.rewards.graders.matching import is_correct_answer
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
@@ -42,15 +48,23 @@ class NativeToolUseEnvironment(EnvironmentBase):
         "Your previous turn was cut off before you made a tool call, so nothing was recorded. Make "
         "your tool call now with the best solution you have."
     )
-    # Sent only on a cut inside a call, so it may name the limit; it asks where the reasoning goes, not for less of it.
+    # Sent only on a cut inside a call, so it may name the limit; it asks where the working goes, not for less of it.
     LENGTH_CUTOFF_IN_CALL_NUDGE = (
         "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
         "nothing was recorded. Make the call again, keeping your reasoning out of its arguments."
+    )
+    LENGTH_CUTOFF_IN_CALL_NUDGE_NO_REASONING = (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
+        "nothing was recorded. Make the call again, keeping your working out of its arguments."
     )
     EMPTY_TURN_NUDGE = (
         "Your previous turn ended without a tool call or an answer (a call written inside your reasoning "
         "is not run), so nothing was recorded. Make your tool call now, or give your final answer, with the "
         "best solution you have."
+    )
+    EMPTY_TURN_NUDGE_NO_REASONING = (
+        "Your previous turn ended without a tool call or an answer, so nothing was recorded. Make your tool call "
+        "now, or give your final answer, with the best solution you have."
     )
     # The same facts for an instance whose registry holds no tool: a nudge asking for a tool call there
     # is an instruction the model cannot follow, and the turn that answers it is trained.
@@ -61,6 +75,10 @@ class NativeToolUseEnvironment(EnvironmentBase):
     TOOLLESS_EMPTY_TURN_NUDGE = (
         "Your previous turn ended without an answer (text written inside your reasoning is not read), so "
         "nothing was recorded. Give your final answer now with the best solution you have."
+    )
+    TOOLLESS_EMPTY_TURN_NUDGE_NO_REASONING = (
+        "Your previous turn ended without an answer, so nothing was recorded. Give your final answer now with the "
+        "best solution you have."
     )
     # A cut the driver flags as inside a call is told the same: there is no call to make again.
     TOOLLESS_LENGTH_CUTOFF_IN_CALL_NUDGE = TOOLLESS_LENGTH_CUTOFF_NUDGE
@@ -103,11 +121,11 @@ class NativeToolUseEnvironment(EnvironmentBase):
     def get_tools_schema(self) -> list[dict[str, Any]]:
         return self.registry.to_openai_tools()
 
-    def _unproductive_turn_nudge(self, nudge_attr: str) -> str | None:
+    def _unproductive_turn_nudge(self, nudge_attr: str, *, reasoned: bool) -> str | None:
         """A tool-less environment takes the ``TOOLLESS_`` nudge, so it is never told to make a tool call."""
         if not self.registry.names():
             nudge_attr = f"TOOLLESS_{nudge_attr}"
-        return super()._unproductive_turn_nudge(nudge_attr)
+        return super()._unproductive_turn_nudge(nudge_attr, reasoned=reasoned)
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
         return trajectory.info.get("final_response") if trajectory.info.get(COMPLETED_KEY) else None
@@ -147,14 +165,16 @@ class NativeToolUseEnvironment(EnvironmentBase):
             content=self._truncate_observation(content),
             success=success,
             refused=is_refused_unrun(outcome),
+            budget_spent=isinstance(outcome, ToolBudgetExhausted),
             sandbox_fault=fault,
         )
 
     def _account_tool_result(self, result: NativeToolResult, trajectory: Trajectory) -> float:
         return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
 
-    def _finalize_text_response(self, trajectory: Trajectory, action: str) -> StepOutcome:
-        """Pays nothing: a finish without tool calls is priced once, by :meth:`_tool_use_shaping`."""
+    def _finalize_text_response(self, trajectory: Trajectory, action: str, *, last_turn: bool) -> StepOutcome:
+        """Pays nothing: a finish without tool calls is priced once, by :meth:`_tool_use_shaping`. ``last_turn`` is for
+        a subclass whose text turn does not end the episode."""
         trajectory.info[COMPLETED_KEY] = True
         trajectory.info["final_response"] = action
         return StepOutcome(trajectory=trajectory, reward=0.0, done=True, truncated=False, info={})
@@ -228,7 +248,7 @@ class NativeToolUseEnvironment(EnvironmentBase):
             return self._recover_length_cutoff(trajectory, in_tool_call=in_call, last_turn=last_turn)
         if not action.strip():
             return self._recover_empty_turn(trajectory, last_turn=last_turn)
-        return self._finalize_text_response(trajectory, action)
+        return self._finalize_text_response(trajectory, action, last_turn=last_turn)
 
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
         """``no_tool_use_penalty`` for no tool call, ``turn_overflow_penalty`` for a ``max_turns`` overflow (never for

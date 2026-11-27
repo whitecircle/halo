@@ -3,6 +3,7 @@ apply it from the next step, and record it in ``output_dir``, whose unfinished p
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import os
@@ -81,10 +82,11 @@ CUDA_MEMORY = MemoryReader(
 
 
 class StepMemoryProbe:
-    """One step's :class:`~halo.models.gradient_checkpointing_plan.StepMemory`, from hooks on every plan layer: the
-    peak at each micro-step's first backward recompute, each recompute's allocation delta, a checkpoint's input size
-    and the peak before the optimizer step. Early stop is off for the step, so a non-reentrant recompute runs to its
-    layer's end."""
+    """One step's :class:`~halo.models.gradient_checkpointing_plan.StepMemory`, from a wrapper on every plan layer's
+    checkpoint function, inside the recompute scope it installs: the peak at each micro-step's first backward
+    recompute, each recompute's allocation delta, a checkpoint's input size and the peak before the optimizer step.
+    transformers checkpoints a layer's ``forward``, inside its module hooks, so only the checkpointed function runs again
+    in the recompute. Early stop is off for the step, so a non-reentrant recompute runs to its layer's end."""
 
     def __init__(self, model, reader: MemoryReader):
         self._reader = reader
@@ -92,13 +94,10 @@ class StepMemoryProbe:
         self._backward_peak: int | None = None
         self._recompute: list[int] = []
         self._layer_input = 0
-        self._start = 0
         self._in_backward_recompute = False
-        self._handles = [
-            handle
-            for layer in plan_layers(model)
-            for handle in (layer.register_forward_pre_hook(self._pre), layer.register_forward_hook(self._post))
-        ]
+        self._checkpoint_funcs = {layer: layer._gradient_checkpointing_func for layer in plan_layers(model)}
+        for layer, checkpoint in self._checkpoint_funcs.items():
+            layer._gradient_checkpointing_func = self._measuring(checkpoint)
         self._early_stop = torch.utils.checkpoint.set_checkpoint_early_stop(False)
         self._early_stop.__enter__()
         reader.reset_peak()
@@ -108,9 +107,10 @@ class StepMemoryProbe:
         self._backward_peak = self._reader.peak()
 
     def close(self) -> StepMemory | None:
-        """Remove the hooks; the step's reading, or None when no layer recomputed (nothing checkpointed)."""
-        for handle in self._handles:
-            handle.remove()
+        """Restore the checkpoint functions; the step's reading, or None when no layer recomputed (nothing
+        checkpointed)."""
+        for layer, checkpoint in self._checkpoint_funcs.items():
+            layer._gradient_checkpointing_func = checkpoint
         self._early_stop.__exit__(None, None, None)
         if not self._recompute:
             return None
@@ -125,20 +125,28 @@ class StepMemoryProbe:
             non_torch_bytes=self._reader.non_torch(),
         )
 
-    def _pre(self, _module, args):
+    def _measuring(self, checkpoint: Callable) -> Callable:
+        """``functools.wraps`` keeps the scoped marker and the ``__wrapped__`` chain to the installed ``partial``."""
+
+        @functools.wraps(checkpoint)
+        def measuring(function: Callable, *args, **kwargs):
+            return checkpoint(functools.partial(self._measure, function), *args, **kwargs)
+
+        return measuring
+
+    def _measure(self, function: Callable, *args, **kwargs):
         if not in_backward_pass():
             self._in_backward_recompute = False
             if args and isinstance(args[0], torch.Tensor):
                 self._layer_input = args[0].untyped_storage().nbytes()
-            return
+            return function(*args, **kwargs)
         if not self._in_backward_recompute:
             self._head_phase_peak = max(self._head_phase_peak, self._reader.peak())
             self._in_backward_recompute = True
-        self._start = self._reader.allocated()
-
-    def _post(self, _module, _args, _out):
-        if in_backward_pass():
-            self._recompute.append(self._reader.allocated() - self._start)
+        start = self._reader.allocated()
+        output = function(*args, **kwargs)
+        self._recompute.append(self._reader.allocated() - start)
+        return output
 
 
 def step_memory_across_ranks(local: StepMemory) -> StepMemory:

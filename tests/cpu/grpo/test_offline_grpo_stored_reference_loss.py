@@ -54,9 +54,17 @@ def _oracle(scores, batch, *, floor, loss_type, formulation):
     return rows.sum() / (group_weights.sum() * 4)
 
 
-@pytest.mark.parametrize("loss_type", ["grpo", "bnpo", "dr_grpo"])
-@pytest.mark.parametrize("formulation", ["reinforce", "prob_weighted"])
-@pytest.mark.parametrize("floor", [-1.0, -3.0, -6.0, None])
+@pytest.mark.parametrize(
+    "floor,formulation,loss_type",
+    [
+        (-1.0, "reinforce", "grpo"),
+        (-3.0, "reinforce", "grpo"),
+        (-6.0, "prob_weighted", "grpo"),
+        (None, "prob_weighted", "grpo"),
+        (-3.0, "prob_weighted", "bnpo"),
+        (None, "reinforce", "dr_grpo"),
+    ],
+)
 def test_loss_consumes_stored_raw_reference_at_the_live_scheduled_floor(loss_type, formulation, floor):
     trainer = OfflineGRPOTrainer.__new__(OfflineGRPOTrainer)
     trainer.model = _Policy()

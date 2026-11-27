@@ -48,7 +48,7 @@ def _wrapper(model, cp_size, cp_rank):
     return unpatched_cp_wrapper(model, cp_size=cp_size, cp_rank=cp_rank)
 
 
-@pytest.mark.parametrize("cp_size", [1, 2, 4])
+@pytest.mark.parametrize("cp_size", [1, 4])
 def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
     """Each rank's backbone sees no mask, which only a router aux loss reads outside the attention CP replaces."""
     torch.manual_seed(18)

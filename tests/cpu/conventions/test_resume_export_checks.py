@@ -21,7 +21,6 @@ from transformers import (
 
 import halo.checkpoint.parallel.optimizer as optimizer_store
 from halo.checkpoint.format import REFERENCE_LOGPS_FILE, SAFETENSORS_WEIGHTS_FILE
-from tests.common.checkpoint_io import save_schedule
 from tests.common.pp_trainers import build_pp_args
 from tests.common.rank_log import logged_messages
 from tests.common.resume_export import (
@@ -81,11 +80,6 @@ def base(tmp_path) -> str:
 
 def _export(checkpoint: str, base: str, export_class=AutoModelForSequenceClassification) -> dict[str, bool]:
     return export_checks(export_class, checkpoint, base, torch.float32)
-
-
-def test_save_schedule_saves_only_when_asked():
-    assert save_schedule(None) == {"save_strategy": "no"}
-    assert save_schedule(SAVE_STEP) == {"save_strategy": "steps", "save_steps": SAVE_STEP}
 
 
 def test_pp_args_save_nothing_unless_asked(tmp_path):

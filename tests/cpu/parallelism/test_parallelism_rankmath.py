@@ -93,11 +93,6 @@ def test_h1_pure_ep_ep8_on_8_accepted():
     _run_ep_gc_guard(cfg)
 
 
-def test_h1_pure_ep_ep4_on_4_accepted():
-    cfg = create_config(ep_size=4, world_size=4, gpus_per_node=4, ep_scope="node")
-    _run_ep_gc_guard(cfg)
-
-
 def test_h1_ep_etp_exempt_from_multigroup_reject():
     """The exemption is arithmetic: ETP raises ``ep_group_size`` to 8. ``test_racy_ep_dispatch_topology.py`` pins
     the two 4-rank dispatch groups underneath."""

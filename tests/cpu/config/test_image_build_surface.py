@@ -151,18 +151,20 @@ def test_the_image_installs_every_optional_extra_from_the_lock():
         )
 
 
-@pytest.mark.parametrize("dockerfile", DOCKERFILES)
-def test_every_image_labels_its_provenance(dockerfile):
+def test_every_image_labels_its_provenance(subtests):
     """Each label renders from its build arg, declared in the final stage before the label reads it."""
-    lines = (REPO_ROOT / dockerfile).read_text(encoding="utf-8").splitlines()
-    last_from = max(i for i, line in enumerate(lines) if line.startswith("FROM "))
-    missing = []
-    for label, arg in PROVENANCE_LABELS.items():
-        labeled_at = [i for i, line in enumerate(lines) if line == f'LABEL {label}="${{{arg}}}"']
-        declared_at = [i for i, line in enumerate(lines) if re.fullmatch(rf"ARG {arg}(=\S*)?", line)]
-        if not labeled_at or not any(last_from < i < labeled_at[-1] for i in declared_at):
-            missing.append(f'ARG {arg}, then LABEL {label}="${{{arg}}}", after the last FROM')
-    assert not missing, f"{dockerfile} does not label its provenance: {missing}"
+    assert DOCKERFILES, "no Dockerfile is listed: the scan lost its roots"
+    for dockerfile in DOCKERFILES:
+        with subtests.test(str(dockerfile)):
+            lines = (REPO_ROOT / dockerfile).read_text(encoding="utf-8").splitlines()
+            last_from = max(i for i, line in enumerate(lines) if line.startswith("FROM "))
+            missing = []
+            for label, arg in PROVENANCE_LABELS.items():
+                labeled_at = [i for i, line in enumerate(lines) if line == f'LABEL {label}="${{{arg}}}"']
+                declared_at = [i for i, line in enumerate(lines) if re.fullmatch(rf"ARG {arg}(=\S*)?", line)]
+                if not labeled_at or not any(last_from < i < labeled_at[-1] for i in declared_at):
+                    missing.append(f'ARG {arg}, then LABEL {label}="${{{arg}}}", after the last FROM')
+            assert not missing, f"{dockerfile} does not label its provenance: {missing}"
 
 
 def test_every_image_build_passes_the_provenance_args():

@@ -6,6 +6,7 @@ on every rank; a Hub it cannot reach must raise, while offline a cache without t
 import datetime
 import json
 import os
+import shutil
 from dataclasses import asdict
 
 import pytest
@@ -17,6 +18,7 @@ from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, is_prep
 from halo.data.sources.loading import load_datasets_auto
 from halo.runtime.filesystem import agree_input_probe_across_ranks
 from tests.common.gloo import run_gloo_ranks
+from tests.cpu.data.test_loading_guards import _save_preprocessed_dataset
 
 WORLD_SIZE = 4
 HUB_PATH = "org/name"
@@ -182,6 +184,39 @@ def test_an_offline_cache_without_the_stamp_reads_raw_on_every_rank(tmp_path):
     outcomes = [json.loads((tmp_path / f"rank_{rank}.json").read_text())["outcome"] for rank in range(WORLD_SIZE)]
 
     assert outcomes == ["verdict False"] * WORLD_SIZE, outcomes
+
+
+def _own_copy_worker(rank: int, tmp_dir: str) -> None:
+    """Load ``./ds`` from this rank's own node directory; record what the load raised."""
+    node = os.path.join(tmp_dir, f"node{rank}")
+    os.environ["HF_DATASETS_CACHE"] = os.path.join(node, "hf")
+    os.chdir(node)
+    try:
+        load_datasets_auto("./ds", test_size=None, dataset_ratio=None, data_parallel_rank=rank, data_parallel_size=2)
+    except Exception as error:
+        with open(os.path.join(tmp_dir, f"rank_{rank}.json"), "w") as f:
+            json.dump({"outcome": f"{type(error).__name__}: {error}"}, f)
+        raise
+
+
+def test_a_node_whose_copy_lacks_the_stamp_raises_its_cause_on_every_node(tmp_path):
+    """Two one-rank nodes with their own copies: node 1's stamp is missing (an interrupted copy), which the probe's
+    any-rank verdict outvotes. Raising alone, its rank would leave node 0 in the shard-layout consensus."""
+    _save_preprocessed_dataset(str(tmp_path / "node0" / "ds"))
+    shutil.copytree(tmp_path / "node0" / "ds", tmp_path / "node1" / "ds")
+    os.remove(tmp_path / "node1" / "ds" / "metadata.json")
+
+    with pytest.raises(Exception, match="metadata.json"):
+        run_gloo_ranks(
+            _own_copy_worker,
+            2,
+            str(tmp_path),
+            pg_timeout=PG_TIMEOUT,
+            env={"LOCAL_RANK": "0", "LOCAL_WORLD_SIZE": "1", "DIST_SHARED_FILESYSTEM": "0"},
+        )
+    outcomes = [json.loads((tmp_path / f"rank_{rank}.json").read_text())["outcome"] for rank in range(2)]
+    assert outcomes[1].startswith("FileNotFoundError: No metadata.json"), outcomes
+    assert outcomes[0].startswith("RuntimeError: Reading the metadata.json") and "rank 1" in outcomes[0], outcomes
 
 
 if __name__ == "__main__":

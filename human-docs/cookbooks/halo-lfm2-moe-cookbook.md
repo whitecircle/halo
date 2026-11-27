@@ -67,7 +67,7 @@ Read [Before a GRPO run](README.md#before-a-grpo-run) first. This setup serves t
 vLLM on GPUs 0–1 and trains on GPUs 2–3. On the host:
 
 ```bash
-VLLM_MODEL=/data/checkpoints/lfm2.5-8b-a1b-sft VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+VLLM_MODEL=/data/checkpoints/lfm2.5-8b-a1b-sft/checkpoint-<step> VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
 VLLM_TOOL_PARSER=lfm2 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
@@ -78,7 +78,7 @@ launch:
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml lfm2-grpo.yaml
 CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental lfm2-grpo.yaml -n 2 \
-  --model_name_or_path=/data/checkpoints/lfm2.5-8b-a1b-sft \
+  --model_name_or_path=/data/checkpoints/lfm2.5-8b-a1b-sft/checkpoint-<step> \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/lfm2.5-8b-a1b-grpo
 ```
@@ -112,7 +112,7 @@ Smoke-test with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpo
 [host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/lfm2.5-8b-a1b-sft" \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/lfm2.5-8b-a1b-sft/checkpoint-<step>" \
   docker compose -f docker-compose.sglang.yml up -d
 ```
 

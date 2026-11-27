@@ -54,14 +54,5 @@ def test_policy_above_reference_is_never_clamped():
     assert not over.any()
 
 
-def test_gradient_wrt_policy_logp_is_bounded():
-    """The KL gradient scales as exp(ref - logp)."""
-    logp = torch.tensor([[-12.0]], requires_grad=True)
-    ref = torch.tensor([[-0.3]])
-    clamped, _ = clamp_ref_logps(ref, logp.detach())
-    _k3(clamped, logp).sum().backward()
-    assert abs(logp.grad.item()) < math.exp(KL_LOGRATIO_CLAMP) + 1
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

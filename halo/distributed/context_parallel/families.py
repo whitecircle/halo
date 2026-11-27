@@ -8,6 +8,8 @@ import torch.nn as nn
 from transformers.models.cohere2_moe.modeling_cohere2_moe import rotate_half as rotate_interleaved_pairs
 from transformers.models.mistral4.modeling_mistral4 import get_llama_4_attn_scale
 
+from halo.distributed.context_parallel.gated_delta import Qwen3_5UlyssesGatedDelta as Qwen3_5UlyssesGatedDelta
+from halo.distributed.context_parallel.sequence_layer import UlyssesSequenceLayerBase
 from halo.distributed.context_parallel.ulysses_attention import MLAUlyssesAttention, UlyssesAttention
 from halo.models.attention.gpt_oss_sinks import neutralized_sink_floor
 from halo.subclass_registry import build_class_claim_map
@@ -212,7 +214,7 @@ class Qwen3MoeUlyssesAttention(UlyssesAttention):
 
 class Qwen3_5MoeUlyssesAttention(Qwen3MoeUlyssesAttention):
     """Qwen3.5 / Qwen3.6 full-attention layers: a double-width ``q_proj`` splits into Q and a sigmoid gate, applied
-    after the all-to-all. GatedDeltaNet layers are refused by ``reject_unsupported_ulysses_model``."""
+    after the all-to-all. Dense GatedDeltaNet has a separate CP2 wrapper; MoE GatedDeltaNet is refused."""
 
     HF_MODULE_NAMES = ("Qwen3_5MoeAttention", "Qwen3_5Attention")
 
@@ -231,3 +233,4 @@ class Qwen3_5MoeUlyssesAttention(Qwen3MoeUlyssesAttention):
 
 
 ULYSSES_ATTENTION_MAP = build_class_claim_map(UlyssesAttention, "HF attention class name")
+ULYSSES_GATED_DELTA_MAP = build_class_claim_map(UlyssesSequenceLayerBase, "HF sequence-layer class name")

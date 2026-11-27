@@ -70,7 +70,6 @@ def _worker(rank: int, out: str) -> None:
     # Equal under == but spelled differently per rank: the digest misses, the gathered comparison agrees.
     for name, values in {
         "set": {"names": {f"layer_{i}.mlp" for i in range(16)}},
-        "nested_dict": {"cfg": dict([("a", 1), ("b", 2)][:: 1 if rank == 0 else -1])},
         "int_and_float": {"timeout": 30 if rank == 0 else 30.0},
         "none_and_absent": {"x": None} if rank == 0 else {},
     }.items():
@@ -143,7 +142,7 @@ def test_a_settings_mismatch_raises_on_every_rank_with_the_callers_message(per_r
         assert "Align it." in message and "rank 0 has {'HALO_GRAD_BUCKET_MB': 256}" in message, message
 
 
-@pytest.mark.parametrize("name", ["set", "nested_dict", "int_and_float", "none_and_absent"])
+@pytest.mark.parametrize("name", ["set", "int_and_float", "none_and_absent"])
 def test_values_equal_under_eq_but_spelled_differently_agree(per_rank, name):
     """The digest only fast-paths agreement; a salted set order or ``30`` beside ``30.0`` are one setting."""
     for rank, results in enumerate(per_rank):

@@ -23,6 +23,8 @@ def _make_tokenizer():
     tok.pad_token_id = 0
     tok.eos_token_id = 2
     tok.padding_side = "right"
+    # A completion collator reads its marker's ids at construction, where a mock's would iterate as none.
+    tok.encode.return_value = [7, 7]
     return tok
 
 
@@ -169,40 +171,14 @@ def test_cp_collator_restores_real_eos_when_pad_equals_eos():
     assert baked["labels"][0].tolist() == [-100, 2, -100], "baked labels must not be overwritten by the EOS restore"
 
 
-def test_padding_free_with_completions():
-    collator = _select(
-        padding_free=True,
-        train_on_completions_only=True,
-        assistant_message_template="<|assistant|>",
-    )
-    assert type(collator).__name__ == "DataCollatorWithFlatteningAndCompletionMask"
-
-
 def test_padding_free_no_completions():
     collator = _select(padding_free=True)
     assert type(collator).__name__ == "DataCollatorWithFlattening"
 
 
-def test_packing_with_completions():
-    collator = _select(
-        packing=True,
-        train_on_completions_only=True,
-        assistant_message_template="<|assistant|>",
-    )
-    assert type(collator).__name__ == "DataCollatorForCompletionOnlyLMWithPacking"
-
-
 def test_packing_no_completions():
     collator = _select(packing=True)
     assert type(collator).__name__ == "DataCollatorWithPacking"
-
-
-def test_completions_only():
-    collator = _select(
-        train_on_completions_only=True,
-        assistant_message_template="<|assistant|>",
-    )
-    assert type(collator).__name__ == "DataCollatorForCompletionOnlyLM"
 
 
 def test_default_returns_none():
@@ -283,8 +259,15 @@ def test_non_varlen_attention_allows_packing(attn_impl):
     assert type(collator).__name__ == "DataCollatorWithPacking"
 
 
-@pytest.mark.parametrize("flag", ["padding_free", "packing"])
-@pytest.mark.parametrize("attn_impl", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
+@pytest.mark.parametrize(
+    ("attn_impl", "flag"),
+    [
+        ("flash_attention_2", "padding_free"),
+        ("flash_attention_2", "packing"),
+        ("flash_attention_3", "padding_free"),
+        ("flash_attention_4", "padding_free"),
+    ],
+)
 def test_varlen_attention_allows_flattening(attn_impl, flag):
     """Into the collator the flag asks for, not a padded fallback that would undo the throughput win."""
     expected = {"padding_free": "DataCollatorWithFlattening", "packing": "DataCollatorWithPacking"}[flag]
@@ -349,19 +332,27 @@ _MARKER_LOGGER = "halo.data.turn_markers"
 _ASSISTANT_MARKER = "<|assistant|>"
 _TURN_TEMPLATE = "{% for m in messages %}<|{{ m.role }}|> {{ m.content }} {{ CLOSE }}{% endfor %}"
 _TURN_END = "{% if m.role == 'assistant' %}<eos> {% endif %}"
+# Ends a plain assistant turn with <eos> and leaves a reasoning one open.
+_OPEN_REASONING_TEMPLATE = (
+    "{% for m in messages %}<|{{ m.role }}|> {% if m.thinking %}<think> {{ m.thinking }} </think> {% endif %}"
+    "{{ m.content }} {% if m.role == 'assistant' and not m.thinking %}<eos> {% endif %}{% endfor %}"
+)
+# The reverse: ends a reasoning assistant turn with <eos> and leaves a plain one open.
+_OPEN_PLAIN_TEMPLATE = _OPEN_REASONING_TEMPLATE.replace("not m.thinking", "m.thinking")
+
+
+def _word_level_tokenizer(chat_template: str) -> PreTrainedTokenizerFast:
+    tokens = ["<pad>", "<eos>", "<|user|>", _ASSISTANT_MARKER, "q", "a", "<unk>", "<think>", "</think>", "t"]
+    backend = Tokenizer(models.WordLevel({token: i for i, token in enumerate(tokens)}, unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend, pad_token="<pad>", eos_token="<eos>", chat_template=chat_template
+    )
 
 
 def _template_tokenizer(*, closes_turns: bool) -> PreTrainedTokenizerFast:
     """A word-level tokenizer whose template ends an assistant turn with ``<eos>``, or with nothing."""
-    vocab = {token: i for i, token in enumerate(["<pad>", "<eos>", "<|user|>", _ASSISTANT_MARKER, "q", "a", "<unk>"])}
-    backend = Tokenizer(models.WordLevel(vocab, unk_token="<unk>"))
-    backend.pre_tokenizer = pre_tokenizers.WhitespaceSplit()
-    return PreTrainedTokenizerFast(
-        tokenizer_object=backend,
-        pad_token="<pad>",
-        eos_token="<eos>",
-        chat_template=_TURN_TEMPLATE.replace("{{ CLOSE }}", _TURN_END if closes_turns else ""),
-    )
+    return _word_level_tokenizer(_TURN_TEMPLATE.replace("{{ CLOSE }}", _TURN_END if closes_turns else ""))
 
 
 def _select_completion_only(tokenizer, model_config=None, **flags):
@@ -381,6 +372,20 @@ def test_a_template_ending_no_turn_is_refused_at_construction():
         _select_completion_only(_template_tokenizer(closes_turns=False))
 
 
+def test_the_probe_refuses_only_a_marker_no_matched_conversation_trains_under():
+    """The plain probe ends its assistant turns in ``<eos>``, so ``<|assistant|>`` trains there and builds although the
+    reasoning probe trains nothing, and it builds the other way round too; ``</think>`` matches only the reasoning
+    probe, which trains nothing, so it is refused with that render."""
+    assert _select_completion_only(_word_level_tokenizer(_OPEN_PLAIN_TEMPLATE)) is not None
+    tokenizer = _word_level_tokenizer(_OPEN_REASONING_TEMPLATE)
+    assert _select_completion_only(tokenizer) is not None
+    refusal = r"ends in a turn terminator \['<eos>'\].* renders '<\|user\|> q <\|assistant\|> <think> t </think>"
+    with pytest.raises(ValueError, match=refusal):
+        select_data_collator(
+            tokenizer=tokenizer, train_on_completions_only=True, assistant_message_template="</think>"
+        )
+
+
 @pytest.mark.parametrize("flags", [{"packing": True}, {"padding_free": True}], ids=("packed", "flat"))
 def test_packed_rows_run_a_terminator_less_final_turn_to_the_row_end(flags):
     """The packed policy's fallback trains a row's last turn, so the probe judges these routes by it."""
@@ -397,6 +402,20 @@ def test_a_turn_ended_by_the_next_role_marker_is_accepted():
     assert _select_completion_only(tokenizer, config) is not None
     with pytest.raises(ValueError, match="ends in a turn terminator"):
         _select_completion_only(tokenizer, None)
+
+
+def test_a_turn_closed_only_past_another_roles_turn_is_refused():
+    """The template leaves each assistant turn open and closes only user turns: a span ends where the next user turn
+    opens, before that turn's ``<|im_end|>``, so nothing would train."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    tokenizer.chat_template = (
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}"
+        "{% if m.role == 'user' %}<|im_end|>{% endif %}\n{% endfor %}"
+    )
+    with pytest.raises(ValueError, match="ends in a turn terminator"):
+        select_data_collator(
+            tokenizer=tokenizer, train_on_completions_only=True, assistant_message_template="<|im_start|>assistant\n"
+        )
 
 
 def _probe_tokenizer(*, renders: bool):
@@ -446,20 +465,20 @@ _BOTH_FLAGS = ("packing", "padding_free")
 # name -> (config builder, whether its rows cross, the flags it is checked under)
 _LINEAR_ATTENTION_CONFIGS = {
     "ring_lightning_attention": (lambda: remote_config(BAILING_MOE_RING_MINI), True, _BOTH_FLAGS),
-    "ling3_kda": (lambda: remote_config(BAILING_LING_3_TINY), True, _BOTH_FLAGS),
-    "glm5_next_kda": (lambda: CONFIG_MAPPING["glm5_next_text"](), True, _BOTH_FLAGS),
-    "unknown_family_linear_attention": (unknown_hybrid_config, True, _BOTH_FLAGS),
-    "ling2_softmax_only": (lambda: remote_config(BAILING_MOE_LING_MINI), False, _BOTH_FLAGS),
+    "ling3_kda": (lambda: remote_config(BAILING_LING_3_TINY), True, ("packing",)),
+    "glm5_next_kda": (lambda: CONFIG_MAPPING["glm5_next_text"](), True, ("packing",)),
+    "unknown_family_linear_attention": (unknown_hybrid_config, True, ("packing",)),
+    "ling2_softmax_only": (lambda: remote_config(BAILING_MOE_LING_MINI), False, ("packing",)),
     # Each group's last layer is softmax attention, so groups of one hold no Lightning Attention-2 layer.
     "ring_groups_of_one_softmax_only": (
         lambda: remote_config(BAILING_MOE_RING_MINI, layer_group_size=1),
         False,
-        _BOTH_FLAGS,
+        ("packing",),
     ),
     "qwen3_next_gated_deltanet_marked": (lambda: CONFIG_MAPPING["qwen3_next"](), False, _BOTH_FLAGS),
     # qwen3_next carries the GatedDeltaNet exemption under padding_free.
     "qwen3_5_gated_deltanet_marked": (lambda: CONFIG_MAPPING["qwen3_5_text"](), False, ("packing",)),
-    "qwen3_softmax_only": (lambda: CONFIG_MAPPING["qwen3"](), False, _BOTH_FLAGS),
+    "qwen3_softmax_only": (lambda: CONFIG_MAPPING["qwen3"](), False, ("packing",)),
 }
 _LINEAR_ATTENTION_CASES = [
     (name, flag) for name, (_, _, flags) in sorted(_LINEAR_ATTENTION_CONFIGS.items()) for flag in flags

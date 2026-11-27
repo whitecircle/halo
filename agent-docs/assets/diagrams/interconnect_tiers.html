@@ -6,12 +6,14 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    --label-col: 330px;
-    --read-col: 410px;
+    --label-col: 366px;
+    --read-col: 430px;
     --row-pad: 14px;
   }
 
   body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
 
   .figure { position: relative; }
 
@@ -56,14 +58,18 @@
 
   .key span { display: inline-flex; align-items: center; gap: 10px; }
 
+  /* A measured value is a dot, a specified one a tick, so the two read apart where they nearly meet. */
   .key i {
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    border: 3px solid var(--body);
+    width: 3px;
+    height: 26px;
+    background: var(--body);
   }
 
-  .key .filled i { background: var(--body); }
+  .key .filled i {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+  }
 
   .name {
     font-size: 25px;
@@ -117,7 +123,7 @@
 <div class="canvas">
   <header>
     <h1 id="title"></h1>
-    <p class="subtitle">Bandwidth per GPU, on a log scale</p>
+    <p class="subtitle">Bandwidth per GPU and per direction, on a log scale</p>
   </header>
 
   <div class="figure" id="figure">
@@ -125,69 +131,102 @@
     <div class="chart" id="chart"></div>
     <svg class="marks front" id="marks"></svg>
   </div>
+
+  <footer>
+    <p>
+      <span class="s">Measured: HBM is a copy on one B300, read plus write.</span>
+      <span class="s">NVLink is a copy from one GPU to the next, at 1 GiB and 8 GiB.</span>
+      <span class="s">PCIe is a copy between pinned CPU memory and the GPU, each way, at the same two sizes.</span>
+      <span class="s">An NCCL <span class="nw">all-reduce</span> of {message} on {ranks} GPUs of the node reaches a bus bandwidth of {bus} GB/s.</span>
+      <span class="s">EFA is an NCCL send and receive between a GPU pair on two nodes, at 256 MiB and 1 GiB.</span>
+      <span class="s">Sockets is one weight transfer between two nodes.</span>
+      <span class="s">{load} takes the time shown at the specified rate where there is one.</span>
+      <span class="s">HBM is timed at its measured copy rate, reading and writing the {load}.</span>
+    </p>
+  </footer>
 </div>
 
 <script src="../../../skills/visuals/kit/figure.js"></script>
 <script>
-  // GB/s per GPU: measured where a run recorded it, spec otherwise (null when there is none). A reading
-  // writes the row's values and its gaps below other rows, named by id.
+  // GB/s per GPU and per direction. `measured` lists what runs recorded, and `spec` is the vendor's figure (null
+  // when there is none).
+  // HBM measured: tests/gpu/profiling/benchmark_memory_hierarchy.py with its default sections, in its output
+  // sections.bandwidth[], pattern "copy" at 64 GiB, tb_per_s_median. NVLink measured:
+  // tests/gpu/profiling/benchmark_memory_hierarchy.py --sections peer_copy, sections.peer_copy[].gb_per_s_median,
+  // a copy from one GPU to another at 1 GiB and 8 GiB. PCIe measured: the same script with its default
+  // sections, sections.host_copy[] with memory "pinned", gb_per_s_median, host to device and device to host at
+  // 1 GiB and at 8 GiB. EFA measured:
+  // agent-docs/parallelism/pipeline-parallelism.md, "Measured between two B300 nodes over EFA". Sockets:
+  // agent-docs/infrastructure/rollout-servers.md, "9.7 GB/s over sockets". Specifications: NVIDIA's Blackwell
+  // Ultra table (HBM), 18 NVLink 5 links of 50 GB/s each way, PCIe 6.0 at 64 GT/s on 16 lanes, two 400-gigabit
+  // ports per GPU (EFA), one such port.
   const SECTIONS = [
     {
       name: "Inside a node",
       hue: "--halo-blue",
       rows: [
-        { id: "hbm", link: "HBM", joins: "A GPU and its own memory", measured: 6600, spec: 8000, reading: (r) => [`${r.measured} measured`, `Spec ${r.spec}`] },
-        { id: "nvlink", link: "NVLink 5 / NVSwitch", joins: "GPU to GPU", measured: null, spec: 1800, reading: (r) => [`${r.spec} spec`, `About ${r.below("hbm")} below HBM`] },
-        { id: "pcie", link: "PCIe Gen5 ×16", joins: "CPU to GPU", measured: null, spec: 64, reading: (r) => [`${r.spec} spec`, `Per direction, about ${r.below("hbm")} below HBM`] },
+        { id: "hbm", link: "HBM", joins: "A GPU and its own memory", measured: [6652], spec: 8000, passes: 2 },
+        { id: "nvlink", link: "NVLink 5", joins: "GPUs in one NVLink domain", measured: [766.5, 778.9], spec: 900 },
+        { id: "pcie", link: "PCIe Gen6 ×16", joins: "A GPU and the CPU", measured: [55.8, 57.1, 55.9, 57.0], spec: 128 },
       ],
     },
     {
       name: "Across nodes",
       hue: "--halo-violet",
       rows: [
-        { id: "allreduce", link: "NCCL all-reduce", joins: "16 GPUs on 2 nodes", measured: 767, spec: null, reading: (r) => [`${r.measured} measured`, "Bus bandwidth"] },
-        { id: "efa", link: "EFA on B300", joins: "Node to node", measured: 93, spec: 100, reading: (r) => [`${r.measured} measured`, `Spec about ${r.spec}, ${r.below("nvlink")} below NVLink`] },
-        { id: "ib", link: "InfiniBand NDR", joins: "Node to node", measured: null, spec: 50, reading: (r) => [`About ${r.spec} spec`, `About ${r.below("nvlink")} below NVLink, ${r.below("hbm")} below HBM`] },
+        { id: "efa", link: "EFA on a B300 node", joins: "GPUs on different nodes", measured: [92.8, 96.2], spec: 100 },
+        { id: "ib", link: "One 400-gigabit InfiniBand port", joins: "GPUs on different nodes", measured: [], spec: 50 },
+        { id: "tcp", link: "TCP sockets", joins: "The fallback across nodes", measured: [9.7], spec: null },
       ],
     },
   ];
+  // A collective on the same links: tests/gpu/profiling/benchmark_collectives.py under torchrun on 2 and on 4
+  // GPUs, rows[] with collective "all_reduce" at the largest message (4 GiB), busbw_bytes_per_s in GB/s.
+  const ALL_REDUCE = { bytes: 4294967296, ranks: [2, 4], busGbPerS: [611.9, 675.1] };
+  /** The transfer each row is timed on: the bf16 weights of a model with 8 × 10⁹ parameters, in GB. */
+  const LOAD_GB = 16;
 
   const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
-  const bandwidth = (gbps) => (gbps >= 1000 ? `${gbps / 1000} TB/s` : `${gbps} GB/s`);
+  /** A number as printed: whole from 10 up, to one decimal under 10, and to three figures once scaled to TB/s. */
+  const trim = (v) => (v >= 10 ? Math.round(v) : Number(v.toFixed(1))).toLocaleString("en-US");
+  const terabytes = (gbps) => Number((gbps / 1000).toPrecision(3)).toLocaleString("en-US");
+  const bandwidth = (gbps) => (gbps >= 1000 ? `${terabytes(gbps)} TB/s` : `${trim(gbps)} GB/s`);
+  /** One measured value, or the range of several, in the unit of the largest. */
+  const span = (values) => {
+    const ends = [Math.min(...values), Math.max(...values)];
+    const [low, high] = ends.map(ends[1] >= 1000 ? terabytes : trim);
+
+    return `${low === high ? low : `${low}–${high}`} ${ends[1] >= 1000 ? "TB/s" : "GB/s"}`;
+  };
+  const duration = (seconds) => (seconds >= 1 ? `${trim(seconds)} s` : `${trim(seconds * 1e3)} ms`);
   const rows = SECTIONS.flatMap((section) => section.rows);
   const byId = Object.fromEntries(rows.map((row) => [row.id, row]));
+  /** Seconds to move the load over a row: HBM at its measured copy rate, read plus write; another row at its specified rate, or at its slowest measured one where it has none. */
+  const seconds = (row) => ((row.passes ?? 1) * LOAD_GB) / (row.passes ? Math.min(...row.measured) : row.spec ?? Math.min(...row.measured));
 
-  /** How many times below `ref` a row runs, taken conservatively: ref's measured rate over the row's spec. */
-  const gap = (ref, row) => (ref.measured ?? ref.spec) / (row.spec ?? row.measured);
-  /** A gap as written: a whole number, kept to two significant figures from 100 up. */
-  function roundGap(ratio) {
-    const unit = 10 ** Math.max(0, Math.floor(Math.log10(ratio)) - 1);
+  /** A row's two reading lines: its rate, then the specification and the time for the load. */
+  const reading = (row) => {
+    const took = `${LOAD_GB} GB in ${duration(seconds(row))}`;
 
-    return Math.round(ratio / unit) * unit;
-  }
+    if (row.measured.length === 0) {
+      return [`${bandwidth(row.spec)} specified`, took];
+    }
 
-  const times = (ratio) => `${roundGap(ratio).toLocaleString("en-US")}×`;
+    return [`${span(row.measured)} measured`, [row.spec === null ? null : `Specified ${bandwidth(row.spec)}`, took].filter(Boolean).join(" · ")];
+  };
 
-  /** A row's two reading lines, its values and gaps written in. */
-  const reading = (row) =>
-    row.reading({
-      measured: bandwidth(row.measured),
-      spec: bandwidth(row.spec),
-      below: (id) => times(gap(byId[id], row)),
-    });
-
-  // The title's range: each node-to-node link's gap below NVLink.
-  const nodeGaps = rows.filter((row) => row.joins === "Node to node").map((row) => roundGap(gap(byId.nvlink, row)));
-
-  if (nodeGaps.length === 0) {
-    throw new Error("The title compares node-to-node links, and no row has joins: Node to node.");
-  }
-
-  const [lowGap, highGap] = [Math.min(...nodeGaps), Math.max(...nodeGaps)].map((n) => n.toLocaleString("en-US"));
-  document.getElementById("title").append(el("span", "nw", "Node-to-node"), ` links run ${lowGap === highGap ? lowGap : `${lowGap}–${highGap}`}× below NVLink`);
+  // The title's ratio: NVLink over the nodes' own network, specification against specification.
+  const ratio = byId.nvlink.spec / byId.efa.spec;
+  document.getElementById("title").textContent = `On these nodes the network is specified at 1/${trim(ratio)} of NVLink's rate`;
+  fillValues({
+    message: `${ALL_REDUCE.bytes / 2 ** 30} GiB`,
+    ranks: ALL_REDUCE.ranks.join(" and "),
+    bus: ALL_REDUCE.busGbPerS.map(trim).join(" to "),
+    load: `${LOAD_GB} GB`,
+  });
 
   // Whole decades covering every value, a tick on each.
-  const values = rows.flatMap((row) => [row.measured, row.spec]).filter((v) => v !== null);
+  const values = rows.flatMap((row) => [...row.measured, row.spec]).filter((v) => v !== null);
   const lowDecade = Math.floor(Math.log10(Math.min(...values)) + 1e-9);
   const highDecade = Math.ceil(Math.log10(Math.max(...values)) - 1e-9);
   const decades = Array.from({ length: highDecade - lowDecade + 1 }, (_, i) => 10 ** (lowDecade + i));
@@ -205,7 +244,7 @@
 
     if (i === 0) {
       const key = el("div", "key");
-      key.innerHTML = '<span class="filled"><i></i>Measured</span><span><i></i>Spec</span>';
+      key.innerHTML = '<span class="filled"><i></i>Measured</span><span><i></i>Specified</span>';
       chart.append(key, el("div"));
     } else {
       chart.append(el("div"), el("div"));
@@ -247,7 +286,6 @@
   const plotBottom = box(ticks).t - 10;
   const x = (gbps) => first.l + share(gbps) * (first.r - first.l);
   const line = css("--line");
-  const bg = css("--bg");
 
   for (const tick of decades) {
     grid.append(svgEl("line", { x1: x(tick), y1: plotTop, x2: x(tick), y2: plotBottom, stroke: line, "stroke-width": 1 }));
@@ -257,17 +295,18 @@
     const t = box(track);
     const y = (t.t + t.b) / 2;
     grid.append(svgEl("line", { x1: t.l, y1: y, x2: t.r, y2: y, stroke: line, "stroke-width": 1 }));
+    const drawn = [...row.measured, row.spec].filter((v) => v !== null);
 
-    if (row.measured !== null && row.spec !== null) {
-      marks.append(svgEl("line", { x1: x(row.measured), y1: y, x2: x(row.spec), y2: y, stroke: hue, "stroke-width": 3 }));
+    if (drawn.length > 1) {
+      marks.append(svgEl("line", { x1: x(Math.min(...drawn)), y1: y, x2: x(Math.max(...drawn)), y2: y, stroke: hue, "stroke-width": 3 }));
     }
 
-    if (row.measured !== null) {
-      marks.append(svgEl("circle", { cx: x(row.measured), cy: y, r: 11, fill: hue }));
+    for (const value of row.measured) {
+      marks.append(svgEl("circle", { cx: x(value), cy: y, r: 8, fill: hue }));
     }
 
     if (row.spec !== null) {
-      marks.append(svgEl("circle", { cx: x(row.spec), cy: y, r: 9.5, fill: row.measured === null ? bg : "none", stroke: hue, "stroke-width": 3 }));
+      marks.append(svgEl("line", { x1: x(row.spec), y1: y - 14, x2: x(row.spec), y2: y + 14, stroke: hue, "stroke-width": 3 }));
     }
   }
 </script>

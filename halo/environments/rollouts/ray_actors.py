@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 # Engine-paused seconds, or an awaitable of them (a read of the actor's Ray copy).
 _PausedClock = Callable[[], float | Awaitable[float]]
 
+# The sandbox selection the launcher sets. A credential is never among them, whatever its variable is named.
+_SANDBOX_ENV_NAMES = (
+    "HALO_SANDBOX_BACKEND",
+    "HALO_SANDBOX_URL",
+    "HALO_SANDBOX_REPL",
+    "HALO_SANDBOX_MAX_CONCURRENCY",
+)
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
 _MAX_RAY_TEMP_DIR_LEN = 40
 _RAY_LINK_PARENT = "/tmp"
@@ -190,6 +197,13 @@ def ray_init_kwargs(**overrides) -> dict:
     # Dashboard off: unused by the RL actors and exposes Ray's jobs-API HTTP surface
     # (CVE-2023-48022 job-submission RCE, CVE-2025-62593 DNS rebinding).
     kwargs: dict = {"ignore_reinit_error": True, "include_dashboard": False, **overrides}
+    # An actor on a shared cluster (ray_address) takes its environment from its node's raylet, not from this
+    # process: without the sandbox selection it would run model-written code on the default local backend.
+    sandbox_env = {name: os.environ[name] for name in _SANDBOX_ENV_NAMES if name in os.environ}
+    if sandbox_env:
+        runtime_env = dict(kwargs.get("runtime_env") or {})
+        runtime_env["env_vars"] = {**sandbox_env, **runtime_env.get("env_vars", {})}
+        kwargs["runtime_env"] = runtime_env
     temp_dir = _short_ray_temp_dir()
     if temp_dir is not None:
         kwargs["_temp_dir"] = temp_dir
@@ -199,7 +213,8 @@ def ray_init_kwargs(**overrides) -> dict:
 # Stateless between episodes; a permanent gap in the round-robin would mask every episode routed to the dead actor.
 @ray.remote(max_restarts=-1)
 class EnvironmentActor:
-    """Plays episodes against a rollout server; its env, HTTP session and tool schema are built on first use."""
+    """Plays episodes against a rollout server. The pool's start builds its env and reward scorers (a restarted
+    actor builds them on first use); its HTTP session and tool schema are built on first use."""
 
     def __init__(
         self,
@@ -223,6 +238,11 @@ class EnvironmentActor:
     @cached_property
     def _tools_schema(self) -> list[dict] | None:
         return self._env.get_tools_schema()
+
+    async def build_scorers(self) -> None:
+        """Build the environment and its reward scorers, so a scorer this node cannot build (a ``whitecircle`` term
+        without its key) fails the pool's start instead of every settlement on this actor."""
+        self._env.build_scorers()
 
     @cached_property
     def _http_client(self) -> aiohttp.ClientSession:
@@ -479,6 +499,20 @@ class RolloutManager:
             for i in range(self.num_workers)
         ]
         self._started = True
+        built = asyncio.gather(*(actor.build_scorers.remote() for actor in self._actors))
+        try:
+            # Bounded as an episode is: an actor Ray cannot place, or a constructor that hangs, would hold the start.
+            await asyncio.wait_for(built, self.rollout_config.episode_timeout)
+        except TimeoutError:
+            # Killed, not shut down: an actor Ray has not placed, or one still inside its constructor, runs no call.
+            for actor in (*self._actors, self._actor_pause_clock):
+                ray.kill(actor)
+            self._actors, self._actor_pause_clock, self._started = [], None, False
+            raise RuntimeError(
+                f"The {self.num_workers} environment actors did not build their environments within episode_timeout="
+                f"{self.rollout_config.episode_timeout}s: Ray could not place them all, or an environment constructor "
+                f"hangs. Check `ray status` for pending actors, or raise episode_timeout for a slow constructor."
+            ) from None
         logger.info(f"Started {len(self._actors)} environment actors")
 
     async def shutdown(self):

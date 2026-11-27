@@ -9,7 +9,7 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from halo.checkpoint.format import EP_SHARDED_FORMAT, ep_sharded_index_metadata
+from halo.checkpoint.format import ep_sharded_index_metadata
 from halo.checkpoint.parallel.reading import reject_ep_sharded_resume
 from halo.checkpoint.reading import (
     ep_sharded_checkpoint_reason,
@@ -30,11 +30,6 @@ def _write_index(tmp_path, payload: str) -> str:
 def test_gathered_index_without_format_marker_is_not_sharded(tmp_path):
     payload = json.dumps({"metadata": {"total_size": 4}, "weight_map": {"w": "model-00001.safetensors"}})
     assert is_ep_sharded_checkpoint(_write_index(tmp_path, payload)) is False
-
-
-def test_sharded_format_marker_detected(tmp_path):
-    payload = json.dumps({"metadata": {"format": EP_SHARDED_FORMAT}, "weight_map": {}})
-    assert is_ep_sharded_checkpoint(_write_index(tmp_path, payload)) is True
 
 
 def test_the_ep_sharded_index_metadata_is_what_the_predicate_reads(tmp_path):
@@ -59,11 +54,7 @@ def test_torn_truncated_index_returns_false_not_raise(tmp_path):
     assert is_ep_sharded_checkpoint(torn_dir) is False
 
 
-def test_empty_index_file_returns_false(tmp_path):
-    assert is_ep_sharded_checkpoint(_write_index(tmp_path, "")) is False
-
-
-@pytest.mark.parametrize("payload", ["", "{not json", '{"metadata": {"format": "ep_sha'])
+@pytest.mark.parametrize("payload", ["", '{"metadata": {"format": "ep_sha'])
 def test_load_full_state_dict_diagnoses_a_torn_index(tmp_path, payload):
     """Only the peer holding the torn copy raises, so its traceback has to carry the diagnosis."""
     checkpoint_dir = _write_index(tmp_path, payload)

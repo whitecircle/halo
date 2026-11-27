@@ -64,6 +64,8 @@ SHAPE_GROUPS: dict[str, list[Shape]] = {
         *_grid("crossover", (8,), GPT_OSS_20B, (256, 512, 1024, 2048, 4096)),
     ],
     "dense": _grid("dense", (1,), ((2880, 2880), (2048, 2048)), (DENSE_ROWS,)),
+    # Large square products, for the per-precision compute ceiling.
+    "square": _grid("square", (1,), ((8192, 8192),), (8192, DENSE_ROWS)),
 }
 
 
@@ -308,6 +310,48 @@ def _dense_scaled_mxfp8(ops: Operands) -> Callable:
     )
 
 
+def _dense_scaled_fp8_tensorwise(ops: Operands) -> Callable:
+    """Per-tensor-scaled e4m3 operands, the Hopper-style fp8 GEMM; the casts run once, outside the timed call."""
+    fp8_max = torch.finfo(torch.float8_e4m3fn).max
+    x, weight = ops.x.float(), ops.w.detach()[0].float()
+    scale_a = (x.abs().amax() / fp8_max).reshape(1)
+    scale_b = (weight.abs().amax() / fp8_max).reshape(1)
+    a = (x / scale_a).to(torch.float8_e4m3fn)
+    b = (weight.t() / scale_b).to(torch.float8_e4m3fn).contiguous().t()
+    return lambda: F.scaled_mm(
+        a,
+        b,
+        scale_a=scale_a,
+        scale_recipe_a=F.ScalingType.TensorWise,
+        scale_b=scale_b,
+        scale_recipe_b=F.ScalingType.TensorWise,
+        output_dtype=torch.bfloat16,
+    )
+
+
+def _dense_scaled_nvfp4(ops: Operands) -> Callable:
+    """NVFP4 operands quantized once by Halo's quantizer: 16-element e4m3 block scales under one global scale."""
+    to_blocked = _torchao()[3]
+    a = quantize_nvfp4(ops.x, axis=-1)
+    b = quantize_nvfp4(ops.w.detach()[0].t().contiguous(), axis=-1)
+    scale_a, scale_b = ([to_blocked(q.scales.view(torch.float8_e4m3fn)), q.global_scale.reshape(1)] for q in (a, b))
+    recipes = [F.ScalingType.BlockWise1x16, F.ScalingType.TensorWise]
+    swizzles = [F.SwizzleType.SWIZZLE_32_4_4, F.SwizzleType.NO_SWIZZLE]
+    data_a = a.data.view(torch.float4_e2m1fn_x2)
+    data_b = b.data.view(torch.float4_e2m1fn_x2).t()
+    return lambda: F.scaled_mm(
+        data_a,
+        data_b,
+        scale_a=scale_a,
+        scale_recipe_a=recipes,
+        scale_b=scale_b,
+        scale_recipe_b=recipes,
+        swizzle_a=swizzles,
+        swizzle_b=swizzles,
+        output_dtype=torch.bfloat16,
+    )
+
+
 BASELINE_PREFIX = "bf16_"
 # An arm reads against the bf16 arm of the pass its name ends in; a cast has none.
 PASSES = ("forward", "dgrad", "wgrad", "step")
@@ -341,7 +385,11 @@ GROUPED_ARMS: dict[str, Callable[[Operands], Callable]] = {
 }
 DENSE_ARMS: dict[str, Callable[[Operands], Callable]] = {
     "bf16_forward": _dense_bf16,
+    "torch_scaled_fp8_tensorwise_forward": _dense_scaled_fp8_tensorwise,
     "torch_scaled_mxfp8_forward": _dense_scaled_mxfp8,
+    "torch_scaled_nvfp4_forward": _dense_scaled_nvfp4,
+    "deepgemm_mxfp8_kernel_forward": _dg_kernel("mxfp8"),
+    "deepgemm_mxfp4_kernel_forward": _dg_kernel("mxfp4"),
 }
 
 
@@ -377,8 +425,8 @@ def main() -> None:
     torch.cuda.set_device(device)
     with open(args.output, "a", encoding="utf-8") as output:
         for shape in (shape for group in args.groups for shape in SHAPE_GROUPS[group]):
-            arms = DENSE_ARMS if shape.group == "dense" else GROUPED_ARMS
-            for routing in ("uniform",) if shape.group == "dense" else args.routing:
+            arms = DENSE_ARMS if shape.experts == 1 else GROUPED_ARMS
+            for routing in ("uniform",) if shape.experts == 1 else args.routing:
                 ops = _operands(shape, routing, device)
                 baselines: dict[str, float] = {}
                 for arm, build in arms.items():

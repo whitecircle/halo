@@ -76,7 +76,7 @@ before the process starts. It does not make the racy single-domain multi-group s
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
 `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `HALO_CHECKPOINT_WRITE_THREADS`, `HALO_CHECKPOINT_WRITERS_PER_NODE`,
 `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
-`FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`, `HALO_FP32_MATMUL_PRECISION`. A divergence is a hang
+`FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`, `HALO_FP32_MATMUL_PRECISION`, `HALO_WEIGHT_SYNC_GATHER_AHEAD`, `HALO_WEIGHT_SYNC_PARITY_PROBE`. A divergence is a hang
 or a silent drift, not a slow run: the dedup changes how many
 collectives a rank runs, the grad-bucket size sets the chunk boundaries of the bucketed gradient
 reductions (EP, TP and QLoRA alike), the write-thread count decides whether a rank refuses a save its
@@ -84,8 +84,10 @@ peers have entered (a negative count raises on every rank once the ranks agree),
 which rank gives up on a join first (the survivors then die on the next collective and blame it) and how
 long each rank looks for the filesystem probe's file, transformers' determinism switch picks a head_dim-256 model's attention backend (FA4 or its
 fallback, [Flash Attention](../optimization/flash-attention.md#model-specific-handling)), the flex-sliding
-switch an SDPA run's backend, the matmul precision whether a rank's fp32 matmuls round through TF32, and the
-rest are wire parameters both ends of the all-to-all share.
+switch an SDPA run's backend, the matmul precision whether a rank's fp32 matmuls round through TF32, the
+writers-per-node count which ranks retain which chunks of a gathered save, the weight-sync gather-ahead the
+order in which a push issues its expert gathers, the parity probe whether a rank runs the first push's probe
+forward, and the rest are wire parameters both ends of the all-to-all share.
 
 `agree_rank_uniform_env` (`halo/distributed/rank_uniform_env.py`) gathers them after the device bind and
 **before the weight load**, and `load_distributed_model` repeats it as a latched backstop; a mismatch
@@ -194,13 +196,13 @@ behind one interface (`DeepEPBackend`, built by `build_ep_backend` in
 | `legacy` | `deep_ep.Buffer` (V1) | CUDA IPC P2P over NVLink | fixed-size chunked pipeline sized by hidden, streams any length | **No** (rejected at config time) |
 
 The two are numerically identical (bit-identical loss and matching expert/router gradients on
-gpt-oss-20b ep2). Legacy runs 9,826 tok/s/GPU against elastic's 11,896 at ep8 (gpt-oss-20b, seq 4096, batch 1,
+gpt-oss-20b `ep2`). Legacy runs 9,826 tok/s/GPU against elastic's 11,896 at `ep8` (gpt-oss-20b, seq 4096, batch 1,
 GC on, 8× B300, [1.2.0](../optimization/throughput-benchmarks.md#120-against-110));
 `tests/gpu/profiling/bench_ep_buffer_backends.py` A/Bs the two.
 
-Pick **`legacy`** for long-context ep8 within a node: on gpt-oss-20b, elastic ep8 at extreme tokens/rank
+Pick **`legacy`** for long-context `ep8` within a node: on gpt-oss-20b, elastic `ep8` at extreme tokens/rank
 (≥~64k·b1) fails at step 1, its combine barrier racing FSDP2's reduce-scatter into a deadlock, while legacy's
-CUDA-IPC buffer has no such barrier and trains ep8 at 64k. EP+CP is the other long-context ep8 path. Elastic ep8
+CUDA-IPC buffer has no such barrier and trains `ep8` at 64k. EP+CP is the other long-context `ep8` path. Elastic `ep8`
 ran Qwen3.6-35B at `max_length` 65,536, about 63,200 tokens per rank, with no fault over its 8 steps, at
 [8,113 tok/s/GPU](../optimization/throughput-benchmarks.md#recipes-and-real-text). That row sits just under the
 threshold, so it says nothing about elastic past ~64k tokens per rank.
@@ -232,12 +234,12 @@ allocated on the buffer and passed to every dispatch **and** combine, since disp
 
 The **dispatch** computes the routing layout and exchanges per-expert receive counts across the group. The
 combine reuses that layout through the `handle`. The count exchange earns its cost: the local GEMM processes only
-real tokens instead of a capacity-padded buffer. Within one NVLink domain the dispatch is 9–13% of the EP phases, and
-at ep8 the combine's larger share is mostly the wait for the busiest rank
-([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). Levers:
-`HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert FFN (+2.1–2.5% on Qwen3.5-35B-A3B and
-Qwen3.6-35B-A3B EP8 at 16k, with a small reduction-order shift in the gradients; it cost 4.6% on Qwen3.5-122B-A10B EP8
-with activation offload at 64k), and
+real tokens instead of a capacity-padded buffer. Within one NVLink domain and on uniform token ids the dispatch is
+9–13% of the EP phases (8× B300, forward and recompute), and at `ep8` the combine's larger share is mostly the wait for
+the busiest rank ([measured split](../optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes)). Levers:
+`HALO_EP_SHARED_OVERLAP=1` hides part of the dispatch behind the shared-expert MLP (+2.1–2.5% on Qwen3.5-35B-A3B and
+Qwen3.6-35B-A3B `ep8` at 16k, with a small reduction-order shift in the gradients; it cost 4.6% on Qwen3.5-122B-A10B
+`ep8` with activation offload at 64k), and
 `HALO_DEEPEP_NUM_SMS` tunes the split.
 
 ## Dispatch token ceiling
@@ -245,7 +247,7 @@ with activation offload at 64k), and
 A dispatch within one NVLink domain has no token ceiling: `ElasticBuffer` addresses its wire buffer with 64-bit
 offsets, and the legacy buffer streams any length through a fixed-size chunked pipeline. The only ceiling is
 cross-node Gin at ~8k tokens/rank ([EFA](#expert-parallelism-over-aws-efa)). What bounds a long single-domain
-sequence is memory and, for elastic ep8, the combine-barrier deadlock under
+sequence is memory and, for elastic `ep8`, the combine-barrier deadlock under
 [Transport backend](#transport-backend).
 
 The Gin ceiling is also applied before any weight is read: `reject_unsupported_model` sizes the run's
@@ -263,9 +265,9 @@ node-local run with no bound declares nothing. The dispatcher's check stays the 
 caps every bin at the same Gin ceiling. Whether the Gin ceiling applies is
 decided by the NVLink **domain**: a rack-wide NVL72 group is not bound by it.
 
-There is no lower "symmetric-window" ceiling. What carries long-context ep8 is the int64 program offset
+There is no lower "symmetric-window" ceiling. What carries long-context `ep8` is the int64 program offset
 in the fused GptOss SwiGLU kernel (`halo/kernels/fused_glu.py`): a skewed router piling >745k tokens
-onto one rank (gpt-oss-20b ep8 at 64k) takes the grouped activation past `2³¹` elements. An int32
+onto one rank (gpt-oss-20b `ep8` at 64k) takes the grouped activation past `2³¹` elements. An int32
 offset there faults, and the fault surfaces on peer ranks at DeepEP's `symmetric.hpp:136` (`CUDA 700` /
 async `719`), which reads like a transport ceiling: on a long sequence it means the activation kernel or
 an OOM, not the all-to-all.
@@ -304,7 +306,7 @@ device-side assert (`torch._assert_async`, checked before any slot is placed): o
 `device-side assert triggered` at the rank's next synchronizing call, and its peers then wait out DeepEP's
 timeout. Besides each dispatch's own wait, the EP layer code reads back only the first MoE layer's capacity
 all-reduce (`cap.item()`, once per forward; per layer under `HALO_EP_CAPACITY_DEDUP=0`) and, at
-`ep_size == 1` (EP1, pure ETP), where no dispatch counts exist, the loop's `torch.where` per local expert.
+`ep_size == 1` (`ep1`, pure ETP), where no dispatch counts exist, the loop's `torch.where` per local expert.
 
 ### Hidden padding (`hidden % 256`)
 
@@ -313,7 +315,7 @@ feature dim to the next multiple of 256 on the wire (GPT-OSS 2880 → 3072) and 
 row-strided view before results re-enter autograd, symmetrically in forward and backward, so gradients
 are exact and the MoE layer sees the real hidden. The view keeps its padded buffer alive, so the GC
 replay cache pins received tensors at the padded width, `padded/hidden − 1` more (≈6.7% on GPT-OSS,
-≈+0.5 GiB peak on gpt-oss-20b EP8; more on Gemma 4, 2816 → 3072), with the same extra transport
+≈+0.5 GiB peak on gpt-oss-20b `ep8`; more on Gemma 4, 2816 → 3072), with the same extra transport
 bandwidth. Conforming models (Qwen3 MoE) and the legacy backend need no padding.
 
 ## Expert parallelism over AWS EFA
@@ -336,28 +338,28 @@ and DeepEP aborts with `NCCL GIN is unavailable`; `Failed to initialize GDRCopy`
 
 Cross-node EP over EFA is bound by **proxy-Gin per-operation latency, not bandwidth**: the dispatch's
 layout exchange round-trips through a CPU proxy, and the cost scales with the number of cross-node
-operations (on two 8-GPU B300 nodes NCCL all-to-all reaches ~173 GB/s busbw, yet a measured per-step
-dispatch sits ~100× over what that bandwidth predicts). Three consequences:
+operations (on two 8-GPU B300 nodes an NCCL all-to-all reaches about 173 GB/s of NCCL bus bandwidth, yet a measured per-step
+dispatch sits about 100× over what that bandwidth predicts). Three consequences:
 
-- **Fewer cross-node partners per rank is faster.** On 2-node 8× B300 EFA, gpt-oss-20b at **EP=2
-  global** (1 cross-node partner, 16 experts/GPU) ran ~2.4× the throughput of EP=16 (8 partners), at a
-  batch shape the run did not record. `gptoss-20b-multinode-ep.yaml` at EP=16 (one 8,192-token row
+- **Fewer cross-node partners per rank is faster.** On 2-node 8× B300 EFA, gpt-oss-20b at **`ep2`
+  global** (1 cross-node partner, 16 experts/GPU) ran ~2.4× the throughput of `ep16` (8 partners), at a
+  batch shape the run did not record. `gptoss-20b-multinode-ep.yaml` at `ep16` (one 8,192-token row
   per rank, `gradient_accumulation_steps: 4`, loop path, `aux_loss`, no gradient checkpointing) runs
   3,636 tok/s/GPU at 8.97 s/step and a 55.4 GiB rank-0 allocated peak. The PP recipe's 15,715 is not
-  comparable: its dispatch stays on NVLink, with grouped GEMM and `bias_update`, and the same arm at EP=16 with
-  those two settings runs [4,115](../parallelism/pipeline-parallelism.md#measured-throughput). Combine EP=2 with
+  comparable: its dispatch stays on NVLink, with grouped GEMM and `bias_update`, and the same arm at `ep16` with
+  those two settings runs [4,115](../parallelism/pipeline-parallelism.md#measured-throughput). Combine `ep2` with
   `expert_tp_size` to shard those experts back down
   ([Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md#process-groups-epetp-combo));
   the ETP partners share one batch, so tok/s/GPU falls as the ETP width grows.
 - **At most ~8k tokens/rank per dispatch.** Above that a proxy-Gin dispatch **wedges instead of
-  erroring**: on 2× 8× B300, 8,192 tokens/rank trains and 16,384 hangs, at ep8 and ep16, `num_sms` 24
+  erroring**: on 2× 8× B300, 8,192 tokens/rank trains and 16,384 hangs, at `ep8` and `ep16`, `num_sms` 24
   and 48. The receive counts never arrive, and the run dies in DeepEP's CPU wait (`Dispatch CPU wait ...
   received count 0`) or a GPU spin-wait (Xid 109 `CTX SWITCH TIMEOUT`, cascading into Xid 43 and an
   async `unspecified launch failure`). The dispatcher refuses a larger cross-node dispatch at buffer
   sizing (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, default 8192, `0` disables).
-- **A lower-latency fabric removes the wall.** Mellanox IB with IBGDA, or rack-wide NVLink (GB200/GB300
-  NVL72, where cross-node EP rides NVLink), collapses the dispatch latency; the limit is EFA's proxy
-  path, not cross-node EP itself.
+- **The latency sits in EFA's proxy path.** On Mellanox IB, Gin can be device-initiated (IBGDA, no CPU
+  proxy), and on a rack-wide NVLink domain (GB200/GB300 NVL72) cross-node EP rides NVLink and the Gin
+  ceiling does not apply.
 
 Reserve cross-node EP for a MoE too large for one node: the same recipe at `ep8` on one 8× B300 host, on
 the same loop path and tokens per step (under `bias_update`), runs 14,402 tok/s/GPU against that 3,636.

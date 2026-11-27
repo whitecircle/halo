@@ -1,28 +1,35 @@
 #!/usr/bin/env python
-"""The on-policy SDPG trainer's own logic (no GPU or vLLM): teacher prompts, completion logits and the OPD term.
-A real tokenizer is needed for the hint encoding; the test skips when none is cached.
+"""The on-policy SDPG trainer's own logic (no GPU or vLLM): teacher prompts, the OPD term on the full-logits and the
+chunked scorer, and the full-logits memory check. A real tokenizer is needed for the hint encoding; the test skips when
+none is cached.
 """
 
+import functools
 import gc
 import types
 import weakref
 from collections import defaultdict
+from typing import get_args
 from unittest import mock
 
 import pytest
 import torch
 from datasets import Dataset
+from peft import LoraConfig, get_peft_model
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.tensor import Shard, distribute_tensor
+from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 import halo.trainers.distillation.sdpg as sdpg_module
-from halo.configs.distillation import SDPGArguments
+import halo.trainers.grpo.logprob_scoring as logprob_scoring
+from halo.configs.distillation import SDPGArguments, SelfDistillationLoss
+from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
 from halo.kernels import logprobs
-from halo.models import head_transform
-from halo.trainers.distillation.divergences import pooled_token_mean, reverse_kl_loss
+from halo.trainers.distillation.divergences import pooled_token_mean, require_divergence, reverse_kl_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
+from halo.trainers.full_logits_memory import LogitsWidth
+from halo.trainers.grpo.logprob_scoring import CompletionTerm
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
@@ -294,7 +301,7 @@ def test_a_loss_forward_that_hands_back_no_logits_raises(monkeypatch):
     """A scorer path that stops capturing would leave OPD without a student; it raises, never reforwards."""
     monkeypatch.setattr(DistributedOnlineGRPOTrainer, "_compute_loss", lambda self, model, inputs: torch.tensor(1.0))
     trainer, _ = _opd_trainer(_ContextTable().train(), positive_advantage_only=True)
-    with pytest.raises(RuntimeError, match="reads the student's completion logits off the GRPO loss forward"):
+    with pytest.raises(RuntimeError, match="reads the student's completion rows off the GRPO loss forward"):
         trainer._compute_loss(trainer.model, _opd_inputs())
 
 
@@ -346,14 +353,15 @@ def test_the_student_runs_once_and_the_loss_matches_two_forwards(chunked, batch_
     torch.manual_seed(0)
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).train()
     inputs = _real_inputs()
-    grad_forwards = []
-    model.model.register_forward_hook(lambda *_: grad_forwards.append(torch.is_grad_enabled()))
+    forwards = []
+    model.model.register_forward_hook(lambda module, *_: forwards.append((torch.is_grad_enabled(), module.training)))
 
     trainer = _real_loss_trainer(model, chunked=chunked, batch_size=batch_size)
     loss = trainer._compute_loss(model, inputs)
     rows = inputs["completion_ids"].size(0)
-    assert grad_forwards.count(True) == (rows if batch_size == 1 else 1)
-    assert grad_forwards.count(False) == 1, "the privileged teacher forward"
+    assert forwards.count((True, True)) == (rows if batch_size == 1 else 1)
+    assert forwards.count((False, False)) == 1, "the privileged teacher forward, with no grad and no dropout"
+    assert len(forwards) == forwards.count((True, True)) + 1
     loss.backward()
     grads = {name: param.grad.clone() for name, param in model.named_parameters() if param.grad is not None}
     model.zero_grad()
@@ -382,77 +390,238 @@ def test_the_student_runs_once_and_the_loss_matches_two_forwards(chunked, batch_
             torch.testing.assert_close(grads[name], param.grad, atol=1e-5, rtol=1e-3, msg=name)
 
 
-def _opd_parts(chunked: bool, dtype: torch.dtype):
-    """``(trainer, model, inputs, student logits parts)`` on a tiny Qwen3 of ``dtype``."""
+_LOSSES = get_args(SelfDistillationLoss)
+# fp32 rounding: the two paths group the head's matmul rows differently, and the dense rows run trimmed.
+_RTOL = 1e-4
+
+
+def _tiny_qwen3(dtype=torch.float32) -> nn.Module:
     torch.manual_seed(0)
-    model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).to(dtype).train()
-    inputs = _real_inputs()
-    trainer = _real_loss_trainer(model, chunked=chunked, batch_size=3)
-    student = trainer._completion_logits(
-        model, inputs["prompt_ids"], inputs["prompt_mask"], inputs["completion_ids"], inputs["completion_mask"]
+    return Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG, attn_implementation="eager")).to(dtype).train()
+
+
+def _sdpg_step(model, inputs, *, chunked: bool, batch_size: int = 3, loss: str = "reverse_kl", trainer=None):
+    """``(loss, gradients, stored metrics)`` of one SDPG loss forward and backward through TRL's own GRPO loss."""
+    trainer = trainer or _real_loss_trainer(model, chunked=chunked, batch_size=batch_size)
+    trainer.sdpg = SDPGArguments(
+        sdpg_loss=loss,
+        sdpg_jsd_beta=0.3 if loss == "jensen_shannon" else 0.5,
+        sdpg_beta_base=0.5,
+        sdpg_temperature=1.3,
     )
-    return trainer, model, inputs, [student]
+    trainer.sdpg_loss_fn = require_divergence(loss, jsd_beta=trainer.sdpg.sdpg_jsd_beta)
+    stored = {}
+    trainer.store_metrics = lambda metrics, train_eval, rows=1: stored.update(metrics)
+    model.zero_grad(set_to_none=True)
+    value = trainer._compute_loss(model, dict(inputs))
+    if torch.is_grad_enabled():
+        value.backward()
+    grads = {name: param.grad.clone() for name, param in model.named_parameters() if param.grad is not None}
+    return value.detach(), grads, stored
 
 
-@pytest.mark.parametrize(("dtype", "tol"), [(torch.float32, 1e-5), (torch.bfloat16, 2e-2)])
-def test_the_chunked_teacher_divergence_matches_the_full_plane_one(dtype, tol):
-    """Both sides project the same hidden states through the same head; chunking only regroups rows of the matmul, so
-    fp32 agrees to rounding and bf16 to a few of its 2**-8 mantissa steps on a sum over the vocabulary."""
-    full_trainer, model, inputs, student = _opd_parts(False, dtype)
-    full = full_trainer._opd_token_divergence(model, inputs, student)
-    chunked_trainer, _, _, _ = _opd_parts(True, dtype)
-    chunked = chunked_trainer._opd_token_divergence(model, inputs, student)
-    assert full.abs().sum() > 0
-    torch.testing.assert_close(chunked.float(), full.float(), atol=tol, rtol=tol)
+def _assert_paths_agree(model, inputs, *, batch_size: int = 3, loss: str = "reverse_kl", rtol: float = _RTOL):
+    full_loss, full_grads, full_metrics = _sdpg_step(model, inputs, chunked=False, batch_size=batch_size, loss=loss)
+    chunked_loss, chunked_grads, chunked_metrics = _sdpg_step(
+        model, inputs, chunked=True, batch_size=batch_size, loss=loss
+    )
+    torch.testing.assert_close(chunked_loss, full_loss, rtol=rtol, atol=rtol * full_loss.abs())
+    torch.testing.assert_close(chunked_metrics["opd_loss"], full_metrics["opd_loss"], rtol=rtol, atol=0.0)
+    assert full_metrics["opd_loss"] > 0
+    assert chunked_grads.keys() == full_grads.keys() and full_grads
+    for name, grad in full_grads.items():
+        floor = rtol * grad.abs().max()
+        torch.testing.assert_close(chunked_grads[name], grad, rtol=rtol, atol=floor, msg=name)
+    return full_grads
 
 
-def test_the_chunked_teacher_never_builds_a_batch_by_completion_by_vocab_plane(monkeypatch):
-    """Every head call of the term sees one row's chunk of tokens, never the batch's whole completion window."""
-    monkeypatch.setattr(logprobs, "LOGIT_CHUNK_ELEMENTS", 4 * TINY_QWEN3_CONFIG["vocab_size"])
-    trainer, model, inputs, student = _opd_parts(True, torch.float32)
+@pytest.mark.parametrize("batch_size", [3, 2, 1], ids=["padded", "padded-chunks", "dense"])
+@pytest.mark.parametrize("loss", _LOSSES)
+def test_the_chunked_opd_term_matches_the_full_logits_one_on_a_full_fine_tune(loss, batch_size):
+    """The loss, the OPD metric and every gradient, ``lm_head.weight`` included: the student projects through the
+    head with a gradient, the teacher without."""
+    model = _tiny_qwen3()
+    grads = _assert_paths_agree(model, _real_inputs(), batch_size=batch_size, loss=loss)
+    assert grads["lm_head.weight"].abs().sum() > 0
+
+
+def test_the_chunked_opd_term_matches_in_bf16():
+    """bf16 heads on both sides: the term agrees to a few of bf16's 2**-8 mantissa steps on a sum over the
+    vocabulary."""
+    model = _tiny_qwen3(torch.bfloat16)
+    _, _, full = _sdpg_step(model, _real_inputs(), chunked=False)
+    _, _, chunked = _sdpg_step(model, _real_inputs(), chunked=True)
+    assert full["opd_loss"] > 0
+    torch.testing.assert_close(chunked["opd_loss"].float(), full["opd_loss"].float(), rtol=2e-2, atol=0.0)
+
+
+def test_the_chunked_opd_term_matches_under_lora():
+    model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"]))
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if "lora_B" in name:
+                param.normal_(std=0.5)
+    grads = _assert_paths_agree(model, _real_inputs())
+    assert grads and all("lora_" in name for name in grads)
+
+
+def test_a_batch_without_a_positive_advantage_projects_nothing(monkeypatch):
+    """The gate drops every position, so the term projects none, and the step is the GRPO loss alone."""
+    projections = []
+    divergence = sdpg_module.projected_divergence
+    monkeypatch.setattr(
+        sdpg_module,
+        "projected_divergence",
+        lambda *args, **kwargs: projections.append(1) or divergence(*args, **kwargs),
+    )
+    inputs = {**_real_inputs(), "advantages": torch.tensor([-0.7, 0.0, -0.4])}
+    model = _tiny_qwen3()
+    loss, _, metrics = _sdpg_step(model, inputs, chunked=True)
+    assert not projections and metrics["opd_loss"] == 0
+    grpo = DistributedOnlineGRPOTrainer._compute_loss(
+        _real_loss_trainer(model, chunked=True, batch_size=3), model, inputs
+    )
+    torch.testing.assert_close(loss, grpo.detach())
+
+
+def test_the_teacher_side_projects_with_grad_disabled(monkeypatch):
+    """The teacher's logits keep no graph, in the forward and in the backward's recompute, so its side holds no
+    ``[chunk, V]`` activations for the backward."""
+    modes = []
+    divergence = sdpg_module.projected_divergence
+
+    def recording(loss_fn, student, student_rows, teacher, *args, **kwargs):
+        def project(rows):
+            modes.append(torch.is_grad_enabled())
+            return teacher(rows)
+
+        return divergence(loss_fn, student, student_rows, project, *args, **kwargs)
+
+    monkeypatch.setattr(sdpg_module, "projected_divergence", recording)
+    _sdpg_step(_tiny_qwen3(), _real_inputs(), chunked=True)
+    assert len(modes) >= 2 and not any(modes), modes
+
+
+def test_an_evaluation_step_leaves_the_padding_rows_out_on_both_paths():
+    """Row 2 pads the eval split's final round (2 of 3 rows are the split's own). Its advantage is positive, so the gate
+    keeps it and only the eval split cuts it; eval has no grad-accum division."""
+    model = _tiny_qwen3().eval()
+    inputs = {**_real_inputs(), "advantages": torch.tensor([0.7, 0.2, 0.4])}
+    results = []
+    for chunked in (False, True):
+        trainer = _real_loss_trainer(model, chunked=chunked, batch_size=3)
+        trainer.eval_split_rows = lambda num_rows: 2
+        stored = {}
+        trainer.store_metrics = lambda metrics, train_eval, rows=1: stored.update(metrics, train_eval=train_eval)
+        with torch.no_grad():
+            results.append((trainer._compute_loss(model, dict(inputs)), stored))
+    (full, full_metrics), (chunked, chunked_metrics) = results
+    per_token = _per_token_opd(_real_loss_trainer(model, chunked=False, batch_size=3), model, inputs)
+    split = inputs["completion_mask"][:2].bool()
+    expected = per_token[:2][split].mean()
+    assert not torch.isclose(expected, per_token[inputs["completion_mask"].bool()].mean()), "row 2 must move the mean"
+    for metrics in (full_metrics, chunked_metrics):
+        torch.testing.assert_close(metrics["opd_loss"], expected, rtol=_RTOL, atol=0.0)
+        assert metrics["train_eval"] == "eval"
+    torch.testing.assert_close(chunked, full, rtol=_RTOL, atol=_RTOL * full.abs())
+
+
+def test_the_chunked_term_builds_no_batch_by_completion_by_vocab_plane(monkeypatch):
+    """Every head projection of the term covers one chunk of the gated positions, never the completion window, and
+    each gated position is projected once per side."""
+    monkeypatch.setattr(logprobs, "LOGIT_CHUNK_ELEMENTS", 2 * TINY_QWEN3_CONFIG["vocab_size"])
+    inputs = _real_inputs()
+    model = _tiny_qwen3()
+    trainer = _real_loss_trainer(model, chunked=True, batch_size=3)
     trainer._head_transform(model)  # resolved once, its probe forward is not the term's
     shapes = []
-    linear = head_transform.F.linear
-
+    linear = logprob_scoring.F.linear
     monkeypatch.setattr(
-        head_transform.F, "linear", lambda *args: shapes.append(tuple((out := linear(*args)).shape)) or out
+        logprob_scoring.F, "linear", lambda *args: shapes.append(tuple((out := linear(*args)).shape)) or out
     )
-    trainer._opd_token_divergence(model, inputs, student)
-    batch, width = inputs["completion_ids"].shape
+    with torch.no_grad():
+        _sdpg_step(model, inputs, chunked=True, trainer=trainer)
+    gated = int(positive_advantage_gate(inputs["completion_mask"], inputs["advantages"], True).sum())
     shapes = [shape for shape in shapes if shape[-1] == TINY_QWEN3_CONFIG["vocab_size"]]
-    assert shapes and all(len(shape) == 2 and shape[0] <= 4 for shape in shapes), shapes
-    assert sum(shape[0] for shape in shapes) == batch * width, "every teacher token is projected exactly once"
+    assert shapes and all(len(shape) == 2 and shape[0] <= 2 for shape in shapes), shapes
+    assert sum(shape[0] for shape in shapes) == 2 * gated
 
 
-def _resharded_head_worker(rank: int, nprocs: int) -> None:
-    """ZeRO-3 leaves the head a sharded DTensor once the redirected forward ends; the teacher still projects."""
-    trainer, model, inputs, student = _opd_parts(True, torch.float32)
-    expected = _opd_parts(False, torch.float32)[0]._opd_token_divergence(model, inputs, student)
-    mesh = init_device_mesh("cpu", (nprocs,))
-    head = model.lm_head
-    head.weight = nn.Parameter(distribute_tensor(head.weight.detach(), mesh, [Shard(0)]))
-    seen = []
-    handle = head.register_forward_hook(lambda *_: seen.append(1))
-    gathered = []
-    gather = sdpg_module.materialize_dtensor
+def _term_alone(model, inputs) -> tuple[torch.Tensor, torch.Tensor, DistributedSDPGTrainer]:
+    """``(OPD values, head gradient, trainer)`` of a backward through the armed term alone, the GRPO log-probs left out
+    of it, against a fixed teacher."""
+    trainer = _real_loss_trainer(model, chunked=True, batch_size=3)
+    trainer.sdpg = SDPGArguments(sdpg_beta_base=0.5, sdpg_temperature=1.3)
+    completion = inputs["completion_ids"]
+    teacher = torch.randn(
+        *completion.shape, TINY_QWEN3_CONFIG["hidden_size"], generator=torch.Generator().manual_seed(1)
+    )
+    term = CompletionTerm(inputs["completion_mask"].float(), functools.partial(trainer._opd_scores, teacher))
+    model.zero_grad(set_to_none=True)
+    with trainer._scoring_with_completion_term(term):
+        trainer._chunked_completion_logps(
+            model,
+            torch.cat([inputs["prompt_ids"], completion], 1),
+            torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], 1),
+            completion.size(1),
+            3,
+        )
+    (values,) = term.per_token
+    values.sum().backward()
+    return values.detach(), model.lm_head.weight.grad, trainer
+
+
+def _zero3_worker(rank: int, nprocs: int) -> None:
+    """ZeRO-3 reshards the head after the loss forward. The term's values are outputs of that forward, so the backward
+    gathers the head again before it recomputes them, also when no GRPO log-prob reaches the backward first."""
+    inputs = _real_inputs()
+    reference = _tiny_qwen3()
+    expected_loss, expected_grads, _ = _sdpg_step(reference, inputs, chunked=True)
+    expected_values, expected_head, _ = _term_alone(reference, inputs)
+    model = _tiny_qwen3()
+    policy = mixed_precision_policy(torch.float32, fp32_reduce=True, cast_forward_inputs=True)
+    apply_fsdp2_per_layer(model, init_device_mesh("cpu", (nprocs,)), policy, True, IdentityParamSet())
+    loss, grads, _ = _sdpg_step(model, inputs, chunked=True)
+    torch.testing.assert_close(loss, expected_loss, rtol=_RTOL, atol=0.0)
+    for name in ("lm_head.weight", "model.embed_tokens.weight"):
+        torch.testing.assert_close(grads[name].full_tensor(), expected_grads[name], rtol=_RTOL, atol=1e-6, msg=name)
+    sweeps = []
+    head_sweep = DistributedSDPGTrainer._head_sweep
     with mock.patch.object(
-        sdpg_module,
-        "materialize_dtensor",
-        lambda t: (out := gather(t), t is None or gathered.append(weakref.ref(out)))[0],
+        DistributedSDPGTrainer,
+        "_head_sweep",
+        lambda self, unwrapped: (sweep := head_sweep(self, unwrapped), sweeps.append(weakref.ref(sweep)))[0],
     ):
-        got = trainer._opd_token_divergence(model, inputs, student)
-    torch.testing.assert_close(got, expected, atol=1e-5, rtol=1e-5)
-    assert not seen, "the module's own forward ran against its sharded weight"
-    handle.remove()
-    (student[0].sum() * 0 + got.sum()).backward()
-    assert head.weight.grad is None, "the teacher side must take no head gradient"
-    del got, student
+        values, head, trainer = _term_alone(model, inputs)
+    torch.testing.assert_close(values, expected_values, rtol=_RTOL, atol=0.0)
+    torch.testing.assert_close(head.full_tensor(), expected_head, rtol=_RTOL, atol=1e-6)
+    # The trainer stays alive across the check, as it does for a whole run.
     gc.collect()
-    assert gathered[0]() is None, "the gathered head outlived the OPD term's backward"
+    assert sweeps and all(sweep() is None for sweep in sweeps), "the gathered head outlived the term's backward"
+    assert isinstance(model.lm_head.weight, DTensor), "the head was left gathered after the backward"
+    del trainer
 
 
-def test_the_chunked_teacher_projects_from_gathered_values_when_the_head_is_resharded():
-    run_gloo_ranks(_resharded_head_worker, 2, 2)
+def test_the_chunked_term_backward_regathers_a_resharded_head():
+    run_gloo_ranks(_zero3_worker, 2, 2)
+
+
+@pytest.mark.parametrize(
+    ("beta", "precision", "bytes_per_logit"),
+    [(0.5, "bf16", 6), (0.5, "fp32", 8), (0.0, "bf16", 4)],
+    ids=["opd-bf16", "opd-fp32", "grpo"],
+)
+def test_the_full_logits_check_weighs_the_teacher_plane_while_opd_is_on(monkeypatch, beta, precision, bytes_per_logit):
+    """GRPO's plane, and the teacher's in the run's precision while the OPD term is on."""
+    weighed = []
+    monkeypatch.setattr(logprob_scoring, "verify_full_logits_fit", lambda *args, **kwargs: weighed.append(kwargs))
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    trainer, _ = _opd_trainer(_tiny_qwen3(), positive_advantage_only=True)
+    trainer.sdpg = SDPGArguments(sdpg_beta_base=beta)
+    trainer.args = types.SimpleNamespace(bf16=precision == "bf16", fp16=False)
+    trainer.accelerator = types.SimpleNamespace(unwrap_model=lambda module: module, device="cpu")
+    trainer._verify_full_logits_fit(LogitsWidth(64, "max_completion_length"))
+    assert [call["bytes_per_logit"] for call in weighed] == [bytes_per_logit]
 
 
 if __name__ == "__main__":

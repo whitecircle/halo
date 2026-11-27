@@ -22,6 +22,8 @@ from halo.config_validation import reject_non_default_args, reject_unsupported_a
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.conversation import template_column_kwargs
+from halo.data.render_columns import render_column_checks_across_ranks
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
 from halo.entrypoints.model_setup import load_model_and_tokenizer, plan_row_attention
@@ -414,7 +416,7 @@ def _reject_unhonored_args(args: EmbeddingScriptArguments) -> None:
         unfreeze_layers_patterns=args.unfreeze_layers_patterns,
         freeze_layers_patterns=args.freeze_layers_patterns,
         # No chat-template rendering and no log_dataset_examples stage on this path.
-        tools_field=args.tools_field,
+        **template_column_kwargs(args),
         log_decoded_samples=args.log_decoded_samples,
         # The parallel loader pins model_class=AutoModel and the SentenceTransformer branch never reads the flag.
         text_only_model=args.text_only_model,
@@ -443,7 +445,8 @@ def main():
     parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=None)
-    reject_image_columns(ds, "Embedding training")
+    with render_column_checks_across_ranks(str(args.dataset), sharded=dataset_presharded):
+        reject_image_columns(ds, "Embedding training")
     train_dataset = ds["train"]
     eval_dataset = ds.get("test")
     # Here, ahead of the model load: the trainer would refuse the same run only after it.

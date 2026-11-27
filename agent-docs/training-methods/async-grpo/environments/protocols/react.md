@@ -36,7 +36,7 @@ The [common knobs](../README.md#common-knobs) apply too. The native protocol's `
 ## Tools
 
 - `calculate` — restricted arithmetic and math functions, one `expression`.
-- `python` — the in-process restricted REPL, imports blocked.
+- `python` — the in-process restricted REPL, imports blocked; with `HALO_SANDBOX_REPL=1`, which `--halo-rollout-backend modal` sets, it runs on the [sandbox](../sandbox.md#modal) backend instead.
 - `web_search` — `query` and optional `max_results` (default 5).
 
 ## Reward

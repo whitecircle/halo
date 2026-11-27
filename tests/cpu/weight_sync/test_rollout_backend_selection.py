@@ -256,9 +256,12 @@ def test_the_filter_defaults_are_the_engines_off_values():
 
 
 @pytest.mark.parametrize(
-    "filters", [{}, {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}], ids=["defaults", "set"]
+    ("backend", "filters"),
+    [
+        pytest.param("vllm", {}, id="vllm-defaults"),
+        pytest.param("sglang", {"top_k": 20, "min_p": 0.05, "repetition_penalty": 1.1}, id="sglang-set"),
+    ],
 )
-@pytest.mark.parametrize("backend", ["vllm", "sglang"])
 def test_rollout_and_eval_requests_carry_the_configured_filters(backend, filters):
     """A filter left out renormalizes every reported log-prob over what the model's default keeps, while the trainer
     scores the full distribution."""

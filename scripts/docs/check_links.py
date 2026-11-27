@@ -1,8 +1,8 @@
 """Resolve every relative markdown link and code reference in the doc trees; fail on a dangling one.
 
-A ``#fragment`` must name a heading anchor GitHub generates or an explicit ``<a id>`` / ``<a name>``; a ``{#id}``
-heading attribute is refused, as GitHub renders the braces as text. Code spans and fenced code are checked as
-references (:mod:`scripts.docs.references`). Standard library only; parsing the package's grammar needs Python 3.12.
+A ``#fragment`` must name a heading anchor GitHub generates or an explicit ``<a id>`` / ``<a name>``. A ``{#id}``
+heading attribute is refused, and so is raw HTML in ``PLAIN_MARKDOWN_TREES``. Code spans and fenced code are checked
+as references (:mod:`scripts.docs.references`). Standard library only; parsing the package's grammar needs Python 3.12.
 """
 
 from __future__ import annotations
@@ -28,6 +28,8 @@ DEFAULT_PATHS = (
     "CODE_OF_CONDUCT.md",
 )
 EXTERNAL_PREFIXES = ("http://", "https://", "mailto:")
+# Trees whose pages are also read where HTML is not rendered, so a tag there prints as text.
+PLAIN_MARKDOWN_TREES = ("agent-docs", "human-docs")
 
 
 def markdown_files(paths: list[str]) -> list[Path]:
@@ -42,12 +44,19 @@ def markdown_files(paths: list[str]) -> list[Path]:
 
 
 def check_file(file: Path, index: RepoIndex) -> list[str]:
-    """Every broken link, anchor, ``{#id}`` attribute and reference in ``file``, one line each."""
+    """Every broken link, anchor, ``{#id}`` attribute and reference in ``file``, and every raw HTML tag of a page
+    under ``PLAIN_MARKDOWN_TREES``, one line each."""
     document = load_document(file.resolve())
     problems = [
         f"HEADING ID  {file}:{lineno}  {attribute}  (GitHub renders it as text; link the generated slug)"
         for lineno, attribute in document.heading_attributes
     ]
+    if any(file.resolve().is_relative_to(index.root / tree) for tree in PLAIN_MARKDOWN_TREES):
+        problems.extend(
+            f"RAW HTML  {file}:{lineno}  {tag}  (prints as text where HTML is not rendered; write markdown: a "
+            "heading's slug for an anchor, a linked section for folded text, a code span for a placeholder)"
+            for lineno, tag in document.html_tags
+        )
     problems.extend(
         f"UNRESOLVED  {file}:{lineno}  {reference.text}  ({reference.why})"
         for lineno, code in document.code
@@ -96,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
     for problem in problems:
         print(problem)
     if problems:
-        print(f"FAIL: {len(problems)} broken link(s), anchor(s), heading id(s) or code reference(s)")
+        print(f"FAIL: {len(problems)} broken link(s), anchor(s), heading id(s), HTML tag(s) or code reference(s)")
         return 1
     print("OK: every relative link, anchor and code reference resolves")
     return 0

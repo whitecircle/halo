@@ -1,0 +1,186 @@
+# Environmental GRPO — Qwen3.6-35B-A3B full fine-tune with no reasoning step, code-contests curriculum stage 1 of 3:
+# the policy samples with its reasoning block closed (rollout_thinking: false) and works in its visible messages, tool calls
+# and the notes harness. Stage 1 starts from a notes SFT checkpoint: the model fine-tuned on teacher notes-harness turns
+# rendered with this template, one row per assistant turn.
+# Serve with: --tool-call-parser qwen3_xml --reasoning-parser qwen3 --chat-template /jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja (the file chat_template: pins below) --moe-backend triton,
+#   --speculative-config '{"method":"mtp","num_speculative_tokens":2}' --no-enable-prefix-caching (speculation and the align-mode
+#   prefix cache do not mix) --gpu-memory-utilization 0.87 (0.90 left a weight sync 1 GB short of the card), each server on its
+#   own cores (--cpuset-cpus) with VLLM_TUNED_CONFIG_FOLDER at tuned Triton MoE tiles, on the image's pinned Model Runner V2
+#   (leave VLLM_USE_V2_MODEL_RUNNER unset).
+# Launch: start 2 vLLM servers, TP=1 each, on GPUs 6 and 7 with --weight-transfer-config '{"backend":"nccl"}', then CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=120 torchrun --nproc_per_node=6 scripts/training/grpo/environmental.py <this config>
+# --- Model ---
+# Placeholder: the notes SFT's last checkpoint-<step> (a text_only_model export) after
+# scripts/after_training/reattach_vision_tower.py --model_id Qwen/Qwen3.6-35B-A3B restores the composite layout and MTP
+# head the servers load, since the weight sync forwards parameter names verbatim.
+model_name_or_path: checkpoints/qwen3.6-35b-a3b-notes-sft-composite
+model_name: Qwen/Qwen3.6-35B-A3B   # the id the rollout servers serve; unset, the path above would be sent as the model id
+chat_template: jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja  # states the episode's level and reads enable_thinking, which rollout_thinking: false sets
+force_chat_template: true      # pins this file whatever the checkpoint ships; serve with the same file
+attn_implementation: flash_attention_2
+# No output_router_logits: the aux loss is inert under a policy-gradient objective, and the flag would still
+# record a [tokens, num_experts] router-logit plane per MoE layer on every forward.
+# train_on_sampled_tokens (default on) needs the server flag --return-tokens-as-token-ids.
+
+# --- Parallelism (6 train GPUs: pure data-parallel, DP=6, ZeRO-3) ---
+expert_parallel_size: 1            # pure DP; the servers hold the other 2 GPUs
+fsdp_reshard_after_forward: true   # ZeRO-3: max activation headroom for long full-FT trajectories
+
+# --- Full fine-tune (no PEFT) ---
+use_peft: false
+
+# --- Environment ---
+environment_type: codeforces
+max_turns: 18               # the high profile's 3 submissions + 8 test calls and two recoveries, with slack for failed
+                            # calls and turns of text alone: the last submission or an accepted one ends the episode, a
+                            # turn of text never does, and an unproductive turn within the recovery cap costs a
+                            # turn, not the episode
+environment_kwargs:
+  language: [python, cpp]   # the model names each program's language; python runs at the stated limit, at least
+                            # timeout_per_test, cpp at compiled_time_limit_scale x the stated limit (timeout_per_test
+                            # where none is stated), both at most max_time_limit (default 15 s)
+  notes: {}                  # the notes harness: named sections kept across turns, shown as the last user turn
+  compiled_time_limit_scale: 2.0   # a compiled solution's time limit as a multiple of the stated one
+  timeout_per_test: 5
+  max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a stop before any failure leaves the group baseline, one after is a failure
+  stop_on_first_failure: true   # a failing test ends the grade: every test runs in a fresh jail, and a wrong program would
+                               # spend the grading budget on tests already decided (the policy reads the pass count so far)
+  reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
+  max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
+  # Each level's interaction budgets; with no reasoning there is no reasoning budget or price to set.
+  reasoning_effort_profiles:
+    low: {max_submissions: 1, max_test_calls: 6}
+    medium: {max_submissions: 2, max_test_calls: 8}
+    high: {max_submissions: 3, max_test_calls: 8}
+  # Reward ladder: see code_contests.py _grade_episode.
+  submission_reward: 0.1     # bonus for reaching the graded channel
+  verdict_detail: outcome    # a failed test's verdict class only; expected/got would make the judge a free test oracle
+  resubmission_penalty: 0.1  # magnitude, >= 0 — charged per graded submission after the first; half the curriculum's: a turn
+                             # of text never ends a notes episode, so a failure ends by spending its submissions or running out
+  no_tool_use_penalty: 0.2   # ending with 0 tool calls: below a failed attempt
+  turn_overflow_penalty: 0.35 # magnitude, >= 0 — charged once when the episode ends truncated (max_turns or the output budget spent, or a cut/empty turn it could not retry): above every submission a level has left at its honest price,
+                              # below a caught probe (its 0.1 resubmission, the check's 0.2 and the 0.1 submission credit its veto takes)
+  length_cutoff_penalty: 0.08  # magnitude, >= 0 — charged per recovered turn that produced nothing: engine-cut or empty (a turn of text alone is working under notes: nudged, never charged)
+  tool_error_penalty: 0.05   # magnitude, >= 0 — per call that errors or is refused (bad arguments, an unknown tool, a
+                             # spent budget, a mislabelled language, a refused notes write); a program that crashes or
+                             # fails to compile still ran, uncharged
+
+# --- Rewards ---
+# No length terms: without reasoning there is none to price, and the turn and episode caps below bound the visible
+# output. The judge reads the whole episode and vetoes the credit of one that carried its working-out into a
+# submitted, engine-cut or post-budget scratchpad program, spent a call on an unfinished draft, or faked,
+# probed or mined the grade; the notes checks (false_record, unexplained_program) are logged, never priced. Its evidence is a line of what the policy did.
+rewards:
+  - source: environment
+  - source: judge
+    name: audit
+    model: openai/gpt-6-luna   # through OpenRouter; the key is read from OPENROUTER_API_KEY in the launch environment (api_key_env names another)
+    view: full
+    max_view_chars: 900000     # a whole episode: its messages, calls and tool replies
+    max_tokens: 16384          # room for the verdict's own reasoning on the longest episodes
+    request_timeout: 120       # a verdict on a full episode takes ~10 s; it is scored inside the episode's episode_timeout,
+                               # where the client's retries can spend up to 5 x 120 s on a judge that hangs
+    on_error: invalid          # a verdict the judge never reached leaves the episode out of training: an outage never trains unjudged episodes
+    weight: -0.7               # prices each fired weighted check by its share: wasted_run and untested_submission 0.1, hardcoded_output 0.3 and verdict_probe 0.2 beyond their veto; reasoning_in_runs is logged
+    context_file: examples/grpo/environmental/code-contests-judge/notes-no-thinking.txt
+    checks: environment        # the environment's audit rubric (CodeContestsEnvironment.JUDGE_CHECKS)
+
+# --- Ray Workers ---
+rollout_actor_budget: 288  # per node, split over its trainer ranks
+max_concurrent_rollouts: 48  # >= the per-rank batch (24) and >= eval_rollout_batch_size (36): both must fit one wave
+
+# --- vLLM Servers ---
+# One engine per serving GPU: a second engine on the same GPU only time-slices it.
+rollout_server_configs:
+- url: "http://localhost:8000"
+  group_port: 51216
+- url: "http://localhost:8001"
+  group_port: 51217
+rollout_connection_timeout: 180.0
+request_timeout: 1600.0       # per HTTP call = one turn; at least twice the turn cap over the per-sequence decode
+                              # speed at peak concurrency (agent-docs/training-methods/async-grpo/performance.md#sizing-a-run)
+max_retries: 1                # per turn: a failed or timed-out request is re-issued, not the episode;
+                              # (1 + max_retries) x request_timeout must fit inside episode_timeout
+episode_timeout: 3600         # whole-episode deadline in engine-serving time (a weight-sync pause is credited
+                              # back); must stay below the NCCL watchdog (DIST_NCCL_TIMEOUT_MINUTES)
+
+# --- Rollout Generation ---
+rollout_temperature: 1.0     # on-policy; the trainer and the engine's IS reference must score at this temperature
+rollout_top_p: 1.0           # a top-p cut renormalizes uncertain positions, which the geometric band below reads as drift
+rollout_thinking: false                # no reasoning block: the template closes it on the engine and in the trainer's renders
+rollout_max_tokens: 16384              # per-turn total, all of it visible: ~5x the notes teachers' p99 turn
+rollout_stop_tokens: ["<|im_start|>"]  # a turn ends where the model starts a chat turn of its own
+rollout_max_episode_tokens: 98304  # the most an episode samples over all its turns (never stated to the model); the notes
+                                   # teachers' stage-3 episodes reach 36k visible tokens at p99, 54k at most
+
+# --- Prefetch ---
+enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
+
+# --- Dataset ---
+# The held-out split ships in the pool — leave test_size unset. What each split holds: --config_name in
+# agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md.
+dataset:
+- your-org/code-contests-codeforces-verifiable-rl:r1500-2600
+
+# --- Sequence Lengths ---
+max_prompt_length: null
+
+# --- GRPO objective: KL-free, bands as the trust region ---
+num_generations: 8
+use_chunked_grpo_logprobs: true # required by packed_microbatch_tokens; full logits over Qwen3.6's ~248k vocab OOM anyway
+max_train_row_tokens: 64000   # a training rank's memory bound (a B300 rank peaks near 250 GB here); a longer row leaves the batch
+loss_type: dapo
+beta: 0.0                   # KL-free: the IS bands below are the trust region
+num_iterations: 1
+epsilon: 0.2
+# --- IS trust region (vLLM↔trainer ratio; see agent-docs/reference/configuration-reference.md) ---
+# Requires train_on_sampled_tokens + vllm_importance_sampling_correction (trainer raises otherwise).
+isr_geo_band_min: 0.95       # +-0.05 nats above the entropy-dependent numerical floor; on sustained
+isr_geo_band_max: 1.05       #   masking fix the disagreement, never widen the band
+isr_veto_min: 1.0e-4         # any corrected token below this raw ratio masks its whole trajectory
+isr_opsm_delta: 0.05         # masks negative-advantage trajectories with |mean log-ratio| > delta (nats)
+skip_update_masked_frac: 0.4  # skip the optimizer step when > this fraction of corrected trajectories or tokens is masked
+early_stop_on_skipped_updates: true  # end the run once the breaker has skipped every update of early_stop_patience (3) rounds in a row
+# early_stop_entropy_band and early_stop_logratio_gap stay unset: the thinking recipes' values are calibrated on
+# reasoning-heavy token mixes; set them from this policy's first rounds (entropy, sampling/logratio_mean).
+scale_rewards_std_floor: 0.2  # floor (reward units) on the batch-std divisor
+num_generations_eval: 1
+scale_rewards: batch        # global batch std — never per-group (degenerate-group noise inflation)
+drop_degenerate_groups: true  # groups alike in reward would still inflate the DAPO normalizer
+balance_token_mass: true    # failures run longer than solves: cancel each round's net token-weighted push, or entropy climbs
+top_entropy_quantile: 1.0   # train ALL tokens: tool-format tokens need direct reinforcement at beta=0
+mask_truncated_completions: false  # `truncated` = the max_turns or output-budget overflow, or a cut/empty turn past the recovery
+                                   # cap or on the last turn: a real failure worth its negative advantage; a
+                                   # cut turn within the cap is priced and retried in-episode
+
+# --- Training ---
+per_device_train_batch_size: 1
+packed_microbatch_tokens: 12288  # rows packed into one varlen call per 12,288-token bin
+per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
+eval_rollout_batch_size: 36       # rows per rank per eval rollout round: 36 x 6 ranks = 216 requests in
+                                  # flight at once, so the band's test split takes one round
+gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (18 prompts x 8); the per-rank value must divide by num_generations
+num_train_epochs: 1
+learning_rate: 2.0e-07
+lr_scheduler_type: cosine
+warmup_steps: 10
+
+# --- Optimization ---
+moe_balancing: none          # bias_update would diverge trainer↔vLLM routing (bias is never synced)
+gradient_checkpointing_kwargs:
+  use_reentrant: true       # a MoE runs reentrant GC (the trainer force-promotes false)
+fp32_grad_reduce: true
+
+# --- Output ---
+output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-notes-no-thinking-full-ep1-stage1-codeforces
+save_steps: 47
+save_total_limit: 3              # archive the eval-peak checkpoint before it rotates out
+
+# --- Eval (the pool's held-out test split: 79 problems in this band, pass@1) ---
+eval_strategy: steps
+eval_steps: 47              # with every checkpoint: a peak between two coarse evals is a peak lost
+eval_on_start: true         # eval the starting checkpoint
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: ["wandb"]

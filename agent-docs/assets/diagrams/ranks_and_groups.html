@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Ranks and process groups</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --all: var(--body);
+    --split: var(--halo-blue);
+    --replica: var(--halo-violet);
+    --label-col: 190px;
+    --cell-gap: 30px;
+    /* How far the outline of all ranks stands off the cells, as OFFSETS.all in the script. */
+    --world-pad: 40px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .figure { position: relative; }
+
+  /* The key names the three kinds of group in a row above the layout. */
+  .key {
+    display: grid;
+    grid-template-columns: repeat(3, max-content);
+    justify-content: space-between;
+    align-items: start;
+  }
+
+  .key .name {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  .key .name i {
+    flex: none;
+    width: 30px;
+    height: 20px;
+    border: 2px solid var(--hue);
+    border-radius: 6px;
+  }
+
+  .key p {
+    margin-top: 8px;
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .key p.members { color: var(--body); }
+
+  /* One row per node: its name, then one cell per rank. The last row names each column's replica group. */
+  .layout {
+    display: grid;
+    grid-template-columns: var(--label-col) repeat(var(--per-node), minmax(0, 1fr));
+    column-gap: var(--cell-gap);
+    row-gap: 64px;
+    align-items: center;
+    margin-top: calc(var(--group-gap) + var(--world-pad));
+    padding-right: calc(var(--world-pad) + 2px);
+  }
+
+  .node h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+    font-variant-numeric: lining-nums;
+  }
+
+  .node p,
+  .below {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .cell {
+    padding: 16px 0 18px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--surface);
+    text-align: center;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .cell .rank {
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  .cell .local {
+    margin-top: 2px;
+    font-size: 19px;
+    line-height: 1.3;
+    color: var(--secondary);
+  }
+
+  .below { text-align: center; }
+
+  .below.head { text-align: left; }
+
+  svg.wires {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+    <p class="subtitle">One process per GPU on {nodes} nodes of {perNode} GPUs: rank = node × {perNode} + local rank</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+    <div class="layout" id="layout"></div>
+    <svg class="wires" id="wires"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">A schematic of one layout, in which every tensor is split {perNode} ways inside a node.</span>
+      <span class="s">A split group is then the ranks of one node, and the ranks at one position on every node hold the same piece and are replicas of each other.</span>
+      <span class="s">A collective runs over one group.</span>
+      <span class="s">Rank {exampleRank} is local rank {exampleLocal} on node {exampleNode}: {exampleNode} × {perNode} + {exampleLocal}.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * Every count and rank number on the canvas is computed from this: the lecture's layout in "Processes, ranks
+   * and groups", 16 ranks on 2 nodes of 8 with every tensor split 8 ways inside a node (the same layout as
+   * agent-docs/parallelism/multi-node.md, "Ranks sharing a TP position form a DP group").
+   */
+  const SETUP = { nodes: 2, perNode: 8 };
+  /** How far each kind of outline stands off the cells it encloses, in px: [sideways, up and down]. */
+  const OFFSETS = { replica: [8, 24], split: [24, 8], all: [40, 40] };
+
+  const { nodes, perNode } = SETUP;
+  const worldSize = nodes * perNode;
+  const rankOf = (node, local) => node * perNode + local;
+  const range = (n) => Array.from({ length: n }, (_, i) => i);
+  /** The groups, each a list of member ranks. */
+  const GROUPS = {
+    all: [range(worldSize)],
+    split: range(nodes).map((node) => range(perNode).map((local) => rankOf(node, local))),
+    replica: range(perNode).map((local) => range(nodes).map((node) => rankOf(node, local))),
+  };
+
+  // Every rank sits in exactly one group of each kind.
+  for (const [kind, groups] of Object.entries(GROUPS)) {
+    const members = groups.flat().sort((a, b) => a - b);
+
+    if (members.length !== worldSize || members.some((rank, i) => rank !== i)) {
+      throw new Error(`the ${kind} groups do not cover every rank exactly once`);
+    }
+  }
+
+  const span = (ranks) => `${ranks[0]}–${ranks.at(-1)}`;
+  const set = (ranks) => `{${ranks.join(", ")}}`;
+  const example = { node: nodes - 1, local: 1 };
+
+  document.getElementById("title").textContent =
+    `Each of ${worldSize} ranks belongs to three process groups: all ranks, its split group and its replica group`;
+
+  fillValues({
+    nodes: String(nodes),
+    perNode: String(perNode),
+    exampleRank: String(rankOf(example.node, example.local)),
+    exampleLocal: String(example.local),
+    exampleNode: String(example.node),
+  });
+
+  const KEY = [
+    { kind: "all", name: "All ranks", lines: [`1 group of ${worldSize}: the world size is ${worldSize}`], members: `Ranks ${span(GROUPS.all[0])}` },
+    {
+      kind: "split",
+      name: "Split groups",
+      lines: [`${GROUPS.split.length} groups of ${perNode}: the ranks that share one split tensor`],
+      members: GROUPS.split.map((ranks) => `Ranks ${span(ranks)}`).join(" · "),
+    },
+    {
+      kind: "replica",
+      name: "Replica groups",
+      lines: [`${GROUPS.replica.length} groups of ${nodes}: the ranks that are replicas of each other`],
+      members: GROUPS.replica.map(set).join(" · "),
+    },
+  ];
+  const key = document.getElementById("key");
+
+  for (const entry of KEY) {
+    const column = el("div");
+    const name = el("div", "name");
+    const swatch = el("i");
+    swatch.style.setProperty("--hue", `var(--${entry.kind})`);
+    name.append(swatch, entry.name);
+    column.append(name, ...entry.lines.map((line) => el("p", "", line)), el("p", "members", entry.members));
+    key.append(column);
+  }
+
+  // The layout: a row of rank cells per node, then each column's replica group under it.
+  const layout = document.getElementById("layout");
+  layout.style.setProperty("--per-node", perNode);
+  const cells = [];
+
+  for (const node of range(nodes)) {
+    const head = el("div", "node");
+    head.append(el("h2", undefined, `Node ${node}`), el("p", undefined, `${perNode} GPUs`));
+    layout.append(head);
+
+    for (const local of range(perNode)) {
+      const cell = el("div", "cell");
+      cell.append(el("div", "rank", `rank ${rankOf(node, local)}`), el("div", "local", `local rank ${local}`));
+      layout.append(cell);
+      cells[rankOf(node, local)] = cell;
+    }
+  }
+
+  layout.append(el("div", "below head", "Replica groups"));
+
+  for (const ranks of GROUPS.replica) {
+    layout.append(el("div", "below", ranks.join(", ")));
+  }
+
+  // One outline per group, around its members' cells.
+  const figure = document.getElementById("figure");
+  const wires = document.getElementById("wires");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const hue = (kind) => getComputedStyle(document.documentElement).getPropertyValue(`--${kind}`).trim();
+
+  for (const kind of ["replica", "split", "all"]) {
+    const [dx, dy] = OFFSETS[kind];
+
+    for (const ranks of GROUPS[kind]) {
+      const boxes = ranks.map((rank) => box(cells[rank]));
+      const l = Math.min(...boxes.map((b) => b.l)) - dx;
+      const r = Math.max(...boxes.map((b) => b.r)) + dx;
+      const t = Math.min(...boxes.map((b) => b.t)) - dy;
+      const b = Math.max(...boxes.map((b) => b.b)) + dy;
+      wires.append(svgEl("rect", { x: l, y: t, width: r - l, height: b - t, rx: 14, fill: "none", stroke: hue(kind), "stroke-width": kind === "all" ? 1.5 : 2 }));
+    }
+  }
+</script>
+</body>
+</html>

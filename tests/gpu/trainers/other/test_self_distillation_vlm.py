@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 """DistributedSelfDistillationTrainer on Qwen3-VL-2B: the OPD term ran, not just the SFT arm. Single-GPU smoke."""
 
+import argparse
+
 import torch
 from datasets import Dataset, Sequence
 from datasets import Image as HFImage
@@ -16,6 +18,10 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
 from tests.common.rank_log import log
 from tests.common.training_checks import step_losses, training_run_checks
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
+ARGS = parser.parse_args()
 
 MODEL_NAME = QWEN3_VL_2B
 NUM_TRAIN_SAMPLES = 16
@@ -114,6 +120,7 @@ def run(ctx) -> dict:
         reference_kl_loss="unnormalized_kl",
         confidence_weight_opd=True,
         opd_exclude_eos=True,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
     ctx.on_teardown(lambda: trainer.cleanup_ep() if hasattr(trainer, "cleanup_ep") else None)
 

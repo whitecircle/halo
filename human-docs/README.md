@@ -5,7 +5,7 @@ HuggingFace stack (Transformers, TRL, Accelerate). It adds expert, context,
 tensor, expert-tensor and pipeline parallelism to native HuggingFace models.
 
 It covers supervised fine-tuning through asynchronous multi-turn RL, on dense
-models and eighteen MoE families. You start from a HuggingFace model, and the
+models and nineteen MoE families. You start from a HuggingFace model, and the
 result loads with `from_pretrained`.
 
 Read the guide in order for a first run, or jump to the section you need. Links
@@ -40,6 +40,9 @@ mechanism.
   generates and verifiable rewards score it.
 - [Async GRPO with Environments](training-methods/async-grpo-environments.md):
   multi-turn, tool-using RL with Ray actors and overlapped rollouts.
+- [GRPO rewards](training-methods/rewards.md): choosing and setting up the reward
+  terms the GRPO methods share, from rules to LLM judges, reward models and
+  White Circle policies.
 
 ## Configure
 
@@ -93,5 +96,5 @@ mechanism.
   images.
 
 [GPU Training Theory](../agent-docs/reference/gpu-training-theory.md) ↗ explains
-why the defaults are what they are: arithmetic intensity, and where a training
-step's time goes.
+the limits a training step hits on one GPU and across many, with measurements
+on B300 GPUs, and how to find which one your step is hitting.

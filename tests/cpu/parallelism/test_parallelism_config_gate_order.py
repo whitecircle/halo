@@ -173,10 +173,13 @@ def _refusal(shape: dict) -> str:
     return str(excinfo.value)
 
 
-@pytest.mark.parametrize(("shape", "first", "later_shape", "later"), GATE_OVERLAPS)
-def test_the_earlier_gate_reports_a_shape_both_refuse(shape, first, later_shape, later):
-    assert _refusal(later_shape).startswith(later), _refusal(later_shape)
-    assert _refusal(shape).startswith(first), _refusal(shape)
+def test_the_earlier_gate_reports_a_shape_both_refuse(subtests):
+    assert GATE_OVERLAPS, "the gate table has no row"
+    for row in GATE_OVERLAPS:
+        shape, first, later_shape, later = row.values
+        with subtests.test(row.id):
+            assert _refusal(later_shape).startswith(later), _refusal(later_shape)
+            assert _refusal(shape).startswith(first), _refusal(shape)
 
 
 def test_the_node_width_is_resolved_before_the_node_width_rule(monkeypatch):

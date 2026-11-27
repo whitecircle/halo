@@ -10,10 +10,12 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from datasets import DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.glm5_next import Glm5NextConfig
 
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
 from tests.common.models import BAILING_MOE_RING_MINI, TINY_DSV4_CONFIG, TINY_GPTOSS_CONFIG
 from tests.common.repo import load_script_module
 from tests.common.tiny_models import remote_config
@@ -91,7 +93,7 @@ def _run_sft_to_the_model_load(
     tmp_path, config_body: str, *, is_cp: bool, baked_packed: bool | None = None, is_vlm: bool = False
 ) -> None:
     """``baked_packed`` stands in a pre-processed corpus; ``None`` keeps it raw."""
-    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=is_cp))
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=is_cp), resume_checkpoint=None)
     _run_main(
         "sft.py",
         config_body,
@@ -145,7 +147,7 @@ def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> No
         config_body,
         tmp_path,
         probe_checkpoint=lambda *args, **kwargs: (None, False),
-        init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None),
+        init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None, resume_checkpoint=None),
         load_script_datasets=lambda *args, **kwargs: ((None, preprocessed), False),
         resolve_vlm_run=_stop,
     )
@@ -357,25 +359,40 @@ def test_self_distill_runs_with_the_opd_term_off(tmp_path):
         _run_main("distillation/self_distill.py", "sdpg_beta_base: 0\n", tmp_path, init_training_script=_stop)
 
 
-def _smpo_truncation_run(tmp_path, *, is_vlm: bool) -> None:
+_DPO = ("preference/dpo.py", "load_preference_models")
+_SMPO = ("preference/smpo.py", "load_policy_model")
+
+
+def _preference_run(script: str, model_load: str, config_body: str, tmp_path, *, is_vlm: bool) -> None:
+    """Drive a preference script on the data path ``is_vlm`` picks, to ``model_load``, its step past the refusals."""
     runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=False))
     _run_main(
-        "preference/smpo.py",
-        "truncation_mode: keep_start\n",
+        script,
+        config_body,
         tmp_path,
         init_training_script=lambda *a, **k: runtime,
-        load_script_datasets=lambda *a, **k: (None, False),
+        load_script_datasets=lambda *a, **k: (DatasetDict(), False),
         resolve_preference_vlm_run=lambda *a, **k: is_vlm,
-        load_policy_model=_stop,
+        **{model_load: _stop},
     )
 
 
 def test_smpo_refuses_a_truncation_mode_on_the_vlm_path(tmp_path):
     """The VLM collator refuses an over-length prompt instead of cutting one."""
     with pytest.raises(ValueError, match=rf"SMPO VLM mode {_REFUSED}.*truncation_mode"):
-        _smpo_truncation_run(tmp_path, is_vlm=True)
+        _preference_run(*_SMPO, "truncation_mode: keep_start\n", tmp_path, is_vlm=True)
     with pytest.raises(_PastTheGuards):
-        _smpo_truncation_run(tmp_path, is_vlm=False)
+        _preference_run(*_SMPO, "truncation_mode: keep_start\n", tmp_path, is_vlm=False)
+
+
+@pytest.mark.parametrize("knob", TEMPLATE_COLUMN_KNOBS)
+@pytest.mark.parametrize(("method", "run"), [("DPO", _DPO), ("SMPO", _SMPO)], ids=["dpo", "smpo"])
+def test_preference_vision_arms_refuse_every_template_column(method, run, knob, tmp_path):
+    """Neither vision render hands the chat template a row's template column, while the text arm renders it."""
+    with pytest.raises(ValueError, match=rf"{method} VLM mode {_REFUSED}.*{knob}"):
+        _preference_run(*run, f"{knob}: column\n", tmp_path, is_vlm=True)
+    with pytest.raises(_PastTheGuards):
+        _preference_run(*run, f"{knob}: column\n", tmp_path, is_vlm=False)
 
 
 def test_self_distill_accepts_the_defaults(tmp_path):

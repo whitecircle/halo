@@ -1,8 +1,8 @@
 """COLLECTIVE preflights of each rollout server: its context window, its launch flags, and whether its log-probs are the
-reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass unread; its
-refusal raises everywhere, while a server that is up and then cannot answer a probe only warns. Rank 0 probes the servers
-concurrently and the verdict reaches the peers over the c10d store, so a slow startup is never bounded by the NCCL
-watchdog."""
+reference the IS ratio divides by. Rank 0 waits for every server, as group formation would, so a loading one cannot pass
+unread; its refusal raises everywhere, while a server that is up and then cannot answer a probe only warns, except the
+chat-template probe of a run with thinking off. Rank 0 probes the servers concurrently and the verdict reaches the peers
+over the c10d store, so a slow startup is never bounded by the NCCL watchdog."""
 
 import logging
 import math
@@ -22,7 +22,8 @@ from halo.environments.rollouts.engine_wire import build_payload, capture_genera
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.fp8_rollout import RolloutWeightPrecision
 from halo.runtime.consensus import refusal_text, store_run_on_rank0_raising_everywhere
-from halo.weight_sync.clients.base import ServerFlags, WeightSyncClientBase
+from halo.weight_sync.adapter_versions import ADAPTER_NAME_PREFIX
+from halo.weight_sync.clients.base import RUNTIME_ADAPTER_ROUTES_FACT, ServerFlags, WeightSyncClientBase
 from halo.weight_sync.clients.server_calls import map_concurrently
 from halo.weight_sync.group_eligibility import find_fleet_disagreement, find_unread_server
 from halo.weight_sync.registry import resolve_weight_sync_client
@@ -92,6 +93,11 @@ class ServerRequirements(NamedTuple):
     weight_precision: RolloutWeightPrecision = "bf16"
     candidate_logprobs: int = 0
     """Candidate log-probs per generated token the run reads (score centering's ``K``); 0 = none."""
+    pushes_base: bool = True
+    """``False`` for an adapter-synced policy over a base no push may carry: the served weights are never written, so
+    their format and MoE runner do not matter."""
+    model_types: tuple[str, ...] = ()
+    """The trained model's ``model_type`` spellings, which pick the toolkit image its family is served from."""
     patches: frozenset[str] = frozenset()
     """Image patches the served model's updates need (``WeightSyncClientBase.REQUIRED_PATCHES``)."""
 
@@ -137,18 +143,25 @@ def _server_flag_refusals(
 ) -> list[str]:
     """Each flag a run needs and a server reports wrong; a field the reply does not carry reads as unread."""
     refusals = []
+    image = client_cls.image_for(needs.model_types)
     if not flags.toolkit_image:
         refusals.append(
             f"it does not report the toolkit's image, so updates would land wrong with no error. "
-            f"{client_cls.IMAGE_REMEDY}"
+            f"{client_cls.image_remedy(needs.model_types)}"
+        )
+    elif image is not None and flags.engine_build != image.build:
+        refusals.append(
+            f"it is the toolkit image of engine build {flags.engine_build!r}, and this model is served from "
+            f"{image.tag} (engine build {image.build!r}) alone. {client_cls.image_remedy(needs.model_types)}"
         )
     if missing := sorted(needs.patches - flags.patches):
         refusals.append(
             f"its image lacks the {', '.join(missing)} patch, which the served model's updates need: without it a "
             f"push is acknowledged and part of the model keeps serving launch weights. {client_cls.IMAGE_REMEDY}"
         )
-    refusals.extend(_quantization_refusals(flags, needs))
-    if needs.is_moe and flags.moe_backend not in (None, "triton"):
+    if needs.pushes_base:
+        refusals.extend(_quantization_refusals(flags, needs))
+    if needs.pushes_base and needs.is_moe and flags.moe_backend not in (None, "triton"):
         refusals.append(
             f"its MoE backend is {flags.moe_backend!r}, which repacks expert weights, so every push would corrupt "
             f"them behind a 200. Serve with {client_cls.MOE_BACKEND_FLAG}."
@@ -188,9 +201,12 @@ def _server_flag_refusals(
     return refusals
 
 
-def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[str]:
-    """Each launch fact that would make a server serve the adapter wrong or not at all; an unreported one reads as
-    unread."""
+def _adapter_refusals(
+    client_cls: type[WeightSyncClientBase], flags: ServerFlags, needs: AdapterRequirements, foreign: list[str]
+) -> list[str]:
+    """Each launch fact that would make a server serve the adapter wrong or not at all, under the engine's own flag
+    names; an unreported one reads as unread. ``foreign`` are the adapters it lists under names outside
+    ``ADAPTER_NAME_PREFIX``, which the first sync leaves loaded and a load past the limit would unload."""
     facts = flags.extras
     refusals = []
     if not facts.get("enable_lora"):
@@ -204,35 +220,56 @@ def _adapter_refusals(flags: ServerFlags, needs: AdapterRequirements) -> list[st
             f"without a trace."
         )
     loaded = facts.get("max_loaded_loras")
-    if loaded is not None and int(loaded) < needs.live_versions:
+    short = loaded is not None and int(loaded) < needs.live_versions
+    if short:
         refusals.append(
-            f"its --max-loaded-loras is {loaded}, below the {needs.live_versions} versions the run keeps live, so a "
-            f"load would evict one a round still runs under."
+            f"its {client_cls.ADAPTER_LOADED_LIMIT_FLAG} is {loaded}, below the {needs.live_versions} versions the run "
+            f"keeps live, so a load would evict one a round still runs under."
         )
     per_batch = facts.get("max_loras_per_batch")
     if per_batch is not None and int(per_batch) < 2:
         refusals.append(
-            f"its --max-loras-per-batch is {per_batch}, so rounds on two versions could not share a batch."
+            f"its {client_cls.ADAPTER_BATCH_LIMIT_FLAG} is {per_batch}, so rounds on two versions could not share a "
+            f"batch."
         )
     if facts.get("speculative_algorithm"):
         refusals.append("it serves with speculative decoding, whose draft runs without the adapter.")
     if int(facts.get("dp_size") or 1) != 1:
         refusals.append("it runs data-parallel replicas, which cannot load an adapter at runtime.")
-    remedy = (
-        " Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service), or "
-        "set rollout_adapter_sync: false."
-    )
-    return [refusal + remedy for refusal in refusals]
+    remedy = f" {client_cls.ADAPTER_FLAGS_REMEDY}, or set rollout_adapter_sync: false."
+    refusals = [refusal + remedy for refusal in refusals]
+    if loaded is not None and not short and foreign and int(loaded) - len(foreign) < needs.live_versions:
+        refusals.append(
+            f"it holds {len(foreign)} adapter(s) this toolkit did not load ({', '.join(sorted(foreign))}), which leave "
+            f"fewer than the {needs.live_versions} versions the run keeps live under its "
+            f"{client_cls.ADAPTER_LOADED_LIMIT_FLAG} {loaded}, so a load would evict one of them or a version a round "
+            f"still runs under. Unload them ({client_cls.ADAPTER_UNLOAD_ROUTE}), raise "
+            f"{client_cls.ADAPTER_LOADED_LIMIT_FLAG}, or set rollout_adapter_sync: false."
+        )
+    if facts.get(RUNTIME_ADAPTER_ROUTES_FACT) is False:
+        refusals.append(
+            "it runs without VLLM_ALLOW_RUNTIME_LORA_UPDATING=True, so it registered no adapter load or unload route "
+            "and every load would answer 404. Set the variable in the server's environment, or set "
+            "rollout_adapter_sync: false."
+        )
+    return refusals
 
 
 def _verify_adapter_servers_on_rank0(
     client_cls: type[WeightSyncClientBase], urls: list[str], needs: AdapterRequirements
 ) -> None:
     readings = _probe_servers(client_cls, urls, client_cls.read_server_flags, None, "read the launch flags of")
-    for url, flags in zip(urls, readings, strict=True):
+    # Elsewhere the limit sizes a cache the engine refills, so the adapters it lists take no slot.
+    listed = (
+        _probe_servers(client_cls, urls, client_cls.loaded_adapters, (), "read the adapters of")
+        if client_cls.ADAPTER_LIMIT_UNLOADS_LISTED
+        else [()] * len(urls)
+    )
+    for url, flags, names in zip(urls, readings, listed, strict=True):
         if flags is None:
             continue
-        if refusals := _adapter_refusals(flags, needs):
+        foreign = [name for name in names if not name.startswith(ADAPTER_NAME_PREFIX)]
+        if refusals := _adapter_refusals(client_cls, flags, needs, foreign):
             raise ValueError(f"Rollout server {url} cannot serve the policy as an adapter: " + " ".join(refusals))
         logger.info(f"Rollout server {url} serves adapters: {dict(flags.extras)}")
 
@@ -259,15 +296,35 @@ def _verify_server_chat_template_on_rank0(
     efforts: list,
     rollout: RolloutConfig,
 ) -> None:
+    unchecked = (
+        "and the run samples without reasoning, so a server template that ignores enable_thinking, and opens the "
+        "reasoning block the trainer's render closes, would pass unchecked."
+    )
     try:
         trainer = [trainer_prompt_ids(effort) for effort in efforts]
-    except Exception as e:  # a template's own raise, here on a contract the run may never draw
+    except Exception as e:  # a template's own raise, on a contract the run may never draw
         logger.warning(f"Could not render the trainer's prompt for the chat-template probe, so it is skipped: {e}")
         return
     probe = partial(_engine_prompt_ids, rollout=rollout, messages=messages, efforts=efforts)
     engines = _probe_servers(client_cls, urls, probe, None, "read the prompt ids of")
+    # Thinking off, a difference at any contract refuses; on, it only warns, so the first contract stands for all.
+    compared = range(len(efforts)) if not rollout.thinking else range(1)
     for url, engine in zip(urls, engines, strict=True):
-        if engine is None or None in engine:
+        if engine is None:
+            if not rollout.thinking:
+                raise ValueError(
+                    f"Rollout server {url} did not answer the chat-template probe (the warning before this names "
+                    f"why), {unchecked} Start the trainer once the server answers a chat completion within "
+                    f"{_PROBE_TIMEOUT_S:g}s, or set rollout_thinking: true."
+                )
+            continue
+        if None in engine:
+            if not rollout.thinking:
+                raise ValueError(
+                    f"Rollout server {url} returned no prompt ids for the chat-template probe, {unchecked} Serve the "
+                    f"toolkit's image with the file chat_template: pins ({client_cls.CHAT_TEMPLATE_FLAG}), or set "
+                    f"rollout_thinking: true."
+                )
             continue
         if trainer[0] != trainer[-1] and engine[0] == engine[-1]:
             raise ValueError(
@@ -276,15 +333,28 @@ def _verify_server_chat_template_on_rank0(
                 f"terms would charge for a contract the model never read. Serve the file chat_template: pins "
                 f"({client_cls.CHAT_TEMPLATE_FLAG})."
             )
-        if engine[0] != trainer[0]:
-            shared = min(len(engine[0]), len(trainer[0]))
-            at = next((i for i in range(shared) if engine[0][i] != trainer[0][i]), shared)
-            logger.warning(
-                f"Rollout server {url} renders this prompt differently from the trainer, first at token {at} of "
-                f"{len(engine[0])}/{len(trainer[0])}. Rows train on the engine's ids, so this is harmless where the "
-                f"engine only derives a thinking toggle, and a re-rendered path scores a prompt never generated "
-                f"where the templates differ: check {client_cls.CHAT_TEMPLATE_FLAG} against chat_template:."
+        if (contract := next((i for i in compared if engine[i] != trainer[i]), None)) is None:
+            continue
+        served, rendered = engine[contract], trainer[contract]
+        shared = min(len(served), len(rendered))
+        at = next((i for i in range(shared) if served[i] != rendered[i]), shared)
+        level = efforts[contract].level if efforts[contract] else None
+        differs = (
+            f"Rollout server {url} renders this prompt differently from the trainer at reasoning_effort {level}, "
+            f"first at token {at} of {len(served)}/{len(rendered)}."
+        )
+        if not rollout.thinking:
+            raise ValueError(
+                f"{differs} The run samples without reasoning and the request carries the switch, so no derived "
+                f"toggle explains it: the server's template differs, and one that ignores enable_thinking opens "
+                f"the reasoning block the trainer's render closes. Serve the file chat_template: pins "
+                f"({client_cls.CHAT_TEMPLATE_FLAG})."
             )
+        logger.warning(
+            f"{differs} Rows train on the engine's ids, so this is harmless where the engine only derives a "
+            f"thinking toggle, and a re-rendered path scores a prompt never generated where the templates differ: "
+            f"check {client_cls.CHAT_TEMPLATE_FLAG} against chat_template:."
+        )
 
 
 def _verify_server_flags_on_rank0(
@@ -672,8 +742,9 @@ def _verify_engine_prompt_logprobs_on_rank0(
                 f"isr_engine_reference would compare the sampling log-probs against garbage. The known cause is "
                 f"vLLM's V1 model runner with speculative decoding (MTP): the drafter's CUDA graph overwrites the "
                 f"hidden states the prompt log-probs are read from whenever the prefill runs as a graph "
-                f"(vllm-project/vllm#53488). Serve vLLM from the image Dockerfile.vllm builds, which pins Model "
-                f"Runner V2, turn speculative decoding off, or set isr_engine_reference: false."
+                f"(vllm-project/vllm#53488). Serve vLLM from an image Dockerfile.vllm builds, whose build asserts "
+                f"Model Runner V2 is the engine's runner, turn speculative decoding off, or set "
+                f"isr_engine_reference: false."
             )
         logger.info(
             f"Rollout server {url}: prompt log-probs follow from the tokens (probe mean NLL {mean_nll:.3f}, "
@@ -762,9 +833,11 @@ def verify_server_chat_template(
     connection_timeout: float,
 ) -> None:
     """COLLECTIVE. Refuses a server whose chat template ignores the level the run draws, which rows on the engine's
-    prompt ids would never show, and warns where a render differs at all. ``messages`` carry no tools, as a client-side
-    schema render drifts on correct setups, and only the refusal is certain: an engine derives toggles the trainer's
-    lack. ``efforts`` are the two contracts compared, ``None`` for no level."""
+    prompt ids would never show. With thinking off it also refuses a server whose render differs at any contract, that
+    does not answer the probe, or whose reply carries no prompt ids; with it on, a differing first render only warns
+    and an unanswered probe is skipped. A trainer template that cannot render the probe warns and skips it either way.
+    ``messages`` carry no tools, as a client-side schema render drifts on correct setups, and with thinking on an engine
+    derives toggles the trainer's render lacks. ``efforts`` are the two contracts compared, ``None`` for no level."""
     probe_config = replace(
         rollout, capture_token_ids=True, capture_routed_experts=False, max_tokens=1, max_thinking_tokens=None
     )

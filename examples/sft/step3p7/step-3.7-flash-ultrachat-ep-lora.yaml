@@ -4,7 +4,7 @@
 # optimizer state adapter-only; confirm free GPU memory with nvidia-smi. See agent-docs/models/step3p7.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
-# --- Model — hub bf16 release; transformers 5.20 drops the 3 trailing MTP layers at load ---
+# --- Model — hub bf16 release; transformers 5.23 drops the 3 trailing MTP layers at load ---
 model_name_or_path: stepfun-ai/Step-3.7-Flash
 # Native step3p7 classes, trust_remote_code off: the repo's remote config (its auto_map, for the serving
 # engines) is one the native class cannot build from. The text run loads the tokenizer: the repo ships no
@@ -42,8 +42,9 @@ lora_target_modules:
 - gate_up_proj
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> servable HF
-                                      #   checkpoint; without it the adapter stays mixed and
-                                      #   merge_peft_adapters.py streams the merge instead
+                                      #   checkpoint; without it the adapter stays mixed, and
+                                      #   merge_peft_adapters.py refuses the whole adapter before
+                                      #   writing any output (the hub respells the expert layer path)
 
 # --- Attention & sequence ---
 # Packing note: plain full/sliding attention only (no conv or linear-attention mixers), and the

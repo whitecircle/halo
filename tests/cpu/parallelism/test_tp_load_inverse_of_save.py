@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor
 from torch.distributed.tensor.placement_types import _StridedShard
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES
 
 from tests.common.distributed import fake_process_group_mesh
 

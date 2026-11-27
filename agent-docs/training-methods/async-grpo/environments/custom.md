@@ -39,9 +39,10 @@ Rules that bite:
 - **Build through `self._init_trajectory(...)`**, so the system turn, the task turn and the context land where the base expects them.
 - **Route an unproductive turn, never grade it** ([Unproductive turns](../episodes.md#unproductive-turns)).
     - An engine cut arrives with `context["finish_reason"] in ENGINE_CUT_FINISH_REASONS` (`halo/inference/response.py`): call `self._recover_length_cutoff(trajectory)`. A turn with neither visible content nor a tool call: call `self._recover_empty_turn(trajectory)`. Both nudge and retry within `max_turns` and the shared `max_length_cutoff_recoveries` cap.
-    - Declare `LENGTH_CUTOFF_NUDGE` and `EMPTY_TURN_NUDGE`, or the base raises `NotImplementedError` on the first such turn.
+    - Declare `LENGTH_CUTOFF_NUDGE` and `EMPTY_TURN_NUDGE`, or the base raises `NotImplementedError` on the first such turn. A nudge that names the reasoning declares its `<NAME>_NO_REASONING` wording in the same class (a parent's is never taken), sent after a turn that carried none.
     - A token-cap cut's unfinished tool calls arrive under `context[CUT_TOOL_CALLS_KEY]`, not `context["tool_calls"]`; never execute them. Pass `in_tool_call=bool(context.get(CUT_TOOL_CALLS_KEY))` to `_recover_length_cutoff` so the turn counts under `episode/length_cutoff_in_call_turns` and gets `LENGTH_CUTOFF_IN_CALL_NUDGE` (the plain nudge if unset).
     - A native-protocol environment with no tools sends the `TOOLLESS_*` nudges, which ask for the final answer. A subclass with its own wording declares those too.
+- **Without reasoning**: an environment that needs more of a `rollout_thinking: false` run than the base checks extends `reject_settings_without_thinking` ([Thinking off](../reasoning.md#thinking-off)).
 - **For I/O-bound steps** subclass `AsyncEnvironmentBase` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`, which `cleanup` calls after every episode, error and timeout paths included.
 - **Probe your own backend.** Extend `verify_backend` and call `super()`, so a bad URL fails the launch instead of every episode.
 
@@ -79,12 +80,13 @@ Pass the registry as `NativeToolUseEnvironment(tool_registry=registry, ...)`.
 
 ## Trainable trajectory shape
 
-The trainer builds one row per assistant turn from the engine's sampled ids ([Training rows](../objective.md#training-rows)). Four rules keep that possible:
+The trainer builds one row per assistant turn from the engine's sampled ids ([Training rows](../objective.md#training-rows)). Five rules keep that possible:
 
 - **Let `step()` append the assistant turn.** Only it carries the sampled ids, logprobs and reasoning. One hand-appended assistant message sends the whole trajectory to a re-tokenization fallback that trains text the policy never emitted.
 - **Give every advertised tool call a result message.** Set `max_tool_calls_per_turn` when the environment executes fewer calls than the model may request.
 - **Return tool output as a message**: `Message.tool(content, tool_call_id, name)`, or an `Observation: …` user turn for a text protocol. The loss mask comes from spans, not roles.
 - **Keep `tool_calls` renderable.** A trajectory the chat template cannot render, or whose turn spans cannot be located, is dropped as a masked row, not trained on a guess.
+- **Rewrite earlier turns only in `observation_view`, and say so.** The engine's prompt and the trainer's per-turn render both read it; one that rewrites earlier turns sets `rewrites_history_in_view = True` with it ([Single-row fallback](../objective.md#single-row-fallback)).
 
 To log per-episode diagnostics, override `rollout_metrics(trajectory) -> dict[str, float]` and merge `super().rollout_metrics(trajectory)`; keys log under their full paths (`outcome/*`, `episode/*`). A string stamped under a slice name in `trajectory.info["slices"]` (`{"language": "cpp"}`) splits the `episode/*` keys as `<slice>/<value>/*` ([Logged metrics](../monitoring.md#logged-metrics)).
 

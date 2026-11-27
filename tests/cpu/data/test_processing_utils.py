@@ -1,15 +1,28 @@
 #!/usr/bin/env python
 import functools
 import json
+from types import SimpleNamespace
 
 import pytest
+from datasets import Dataset
 
 from halo.data.conversation import resolve_json_value
 from halo.data.pipeline import vlm_rows
 from halo.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
-from halo.data.pipeline.preferences import render_preference_row
-from halo.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation
+from halo.data.pipeline.preferences import (
+    prepare_generative_dataset,
+    prepare_preference_datasets,
+    render_preference_row,
+)
+from halo.data.pipeline.text_rows import (
+    build_chat_row_processor,
+    prepare_generative_row,
+    render_row_conversation,
+    text_render_kwargs,
+)
 from halo.data.pipeline.vlm_rows import build_vlm_row_processor
+from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
+from tests.common.tiny_models import word_level_tokenizer
 
 
 def _helper_func_a(x):
@@ -42,15 +55,6 @@ def test_function_id_with_lambda():
     assert isinstance(fid, str)
     assert fid.startswith("<lambda>_"), f"Expected '<lambda>_...' prefix, got '{fid}'"
     assert len(fid) > len("<lambda>_")
-
-
-def test_function_id_nested_function():
-    def inner_func(y):
-        return y**2
-
-    fid = function_cache_id(inner_func)
-    assert isinstance(fid, str)
-    assert "inner_func" in fid
 
 
 def test_function_id_partial_distinguishes_bound_tokenizer():
@@ -232,6 +236,7 @@ def test_build_chat_row_processor_threads_tools():
         max_length=128,
         conversation_field="messages",
         tools_field="tools",
+        eos_token_ids=frozenset(),
     )
     row = {
         "messages": [{"role": "user", "content": "hi"}],
@@ -295,6 +300,67 @@ def test_prepare_generative_row_threads_tools():
     assert tokenizer.calls and tokenizer.calls[-1].get("tools") == tools
 
 
+_EFFORT_ROW = {"messages": [{"role": "user", "content": "hi"}], "effort": "high"}
+
+
+def test_the_row_level_renders_into_the_effort_template():
+    """Dropped, the student would never see the level its row was collected at; undeclared or null, the row passes
+    no level, and this template then states none."""
+    tokenizer = word_level_tokenizer()
+    tokenizer.chat_template = QWEN3_6_EFFORT_TEMPLATE.read_text()
+
+    def render(row, **kwargs):
+        return render_row_conversation(row, tokenizer, conversation_field="messages", **kwargs)
+
+    assert LEVEL_LINES["high"] in render(_EFFORT_ROW, reasoning_effort_field="effort")
+    plain = render(_EFFORT_ROW)
+    assert "Reasoning effort" not in plain
+    assert render({**_EFFORT_ROW, "effort": None}, reasoning_effort_field="effort") == plain
+
+
+@pytest.mark.parametrize("cell", [2, ["high"], "", " "], ids=["int", "list", "empty", "blank"])
+def test_a_level_that_is_not_a_non_blank_string_is_refused_naming_the_column(cell):
+    """A blank level would still render: gpt-oss writes ``Reasoning: `` with nothing after it."""
+    with pytest.raises(ValueError, match=r"reasoning_effort_field='effort' holds the cell .* Store each level as a"):
+        render_row_conversation(
+            {**_EFFORT_ROW, "effort": cell},
+            _RecordingTokenizer(),
+            conversation_field="messages",
+            reasoning_effort_field="effort",
+        )
+
+
+def test_build_chat_row_processor_threads_the_level():
+    tokenizer = _RecordingTokenizer()
+    build_chat_row_processor(
+        tokenizer=tokenizer,
+        max_length=128,
+        conversation_field="messages",
+        reasoning_effort_field="effort",
+        eos_token_ids=frozenset(),
+    )(_EFFORT_ROW)
+    assert tokenizer.calls[-1].get("reasoning_effort") == "high"
+
+
+_EFFORT_PAIR = {
+    "prompt": [{"role": "user", "content": "q"}],
+    "chosen": [{"role": "assistant", "content": "a1"}],
+    "rejected": [{"role": "assistant", "content": "a2"}],
+    "effort": "medium",
+}
+
+
+def test_the_preference_maps_hand_their_renders_the_level_column(monkeypatch, tmp_path):
+    """A row render learns the level column only from its map, so a map dropping it renders every row without one."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path))
+    split = Dataset.from_list([_EFFORT_PAIR])
+    pairs, generative = _RecordingTokenizer(), _RecordingTokenizer()
+    prepare_preference_datasets(split, split, pairs, num_proc=1, reasoning_effort_field="effort")
+    prepare_generative_dataset(split, generative, max_prompt_length=128, num_proc=1, reasoning_effort_field="effort")
+    assert {call.get("reasoning_effort") for call in pairs.calls} == {"medium"}
+    assert {call.get("reasoning_effort") for call in generative.calls} == {"medium"}
+
+
 def _stub_process_vlm(conversation, system_prompt=None, model_supports_system_role=True):
     return list(conversation), []
 
@@ -344,6 +410,13 @@ def test_vlm_processor_handles_missing_tools_column(_passthrough_vlm_conversatio
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
     assert example["tools_json"] is None
+
+
+def test_vlm_processor_carries_the_row_level(_passthrough_vlm_conversation):
+    """Always present (schema stable), and None unless the field is declared."""
+    declared = build_vlm_row_processor(conversation_field="messages", reasoning_effort_field="effort")
+    assert declared(_EFFORT_ROW)["reasoning_effort"] == "high"
+    assert build_vlm_row_processor(conversation_field="messages")(_EFFORT_ROW)["reasoning_effort"] is None
 
 
 class _StubDataset:
@@ -424,11 +497,13 @@ def test_closure_tokenizer_changes_cache_filename():
         tokenizer=_StubTokenizer("modelA", 201088),
         max_length=4096,
         conversation_field="conversation",
+        eos_token_ids=frozenset(),
     )
     proc_b = build_chat_row_processor(
         tokenizer=_StubTokenizer("modelB", 262155),
         max_length=4096,
         conversation_field="conversation",
+        eos_token_ids=frozenset(),
     )
     name_a = map_cache_file_name("map", proc_a, ds, "Processing dataset", {})
     name_b = map_cache_file_name("map", proc_b, ds, "Processing dataset", {})
@@ -442,11 +517,13 @@ def test_closure_max_length_changes_cache_filename():
         tokenizer=tok,
         max_length=4096,
         conversation_field="conversation",
+        eos_token_ids=frozenset(),
     )
     proc_long = build_chat_row_processor(
         tokenizer=tok,
         max_length=36000,
         conversation_field="conversation",
+        eos_token_ids=frozenset(),
     )
     name_short = map_cache_file_name("map", proc_short, ds, "Processing dataset", {})
     name_long = map_cache_file_name("map", proc_long, ds, "Processing dataset", {})
@@ -461,8 +538,12 @@ def test_closure_chat_template_changes_cache_filename():
     tok_a.chat_template = "{{ messages }}"
     tok_b = _StubTokenizer("modelA", 201088)
     tok_b.chat_template = "{{ messages }}<|eot|>"
-    proc_a = build_chat_row_processor(tokenizer=tok_a, max_length=4096, conversation_field="conversation")
-    proc_b = build_chat_row_processor(tokenizer=tok_b, max_length=4096, conversation_field="conversation")
+    proc_a = build_chat_row_processor(
+        tokenizer=tok_a, max_length=4096, conversation_field="conversation", eos_token_ids=frozenset()
+    )
+    proc_b = build_chat_row_processor(
+        tokenizer=tok_b, max_length=4096, conversation_field="conversation", eos_token_ids=frozenset()
+    )
     name_a = map_cache_file_name("map", proc_a, ds, "Processing dataset", {})
     name_b = map_cache_file_name("map", proc_b, ds, "Processing dataset", {})
     assert name_a != name_b, f"chat_template change collided on '{name_a}'"
@@ -476,11 +557,36 @@ def test_closure_fingerprint_deterministic():
             tokenizer=_StubTokenizer("modelA", 201088),
             max_length=4096,
             conversation_field="conversation",
+            eos_token_ids=frozenset(),
         )
 
     name_1 = map_cache_file_name("map", mk(), ds, "Processing dataset", {})
     name_2 = map_cache_file_name("map", mk(), ds, "Processing dataset", {})
     assert name_1 == name_2
+
+
+def test_the_text_render_cache_key_changes_with_the_level_column():
+    """The SFT map keys on ``text_render_kwargs``, so a run switching the level column must not reuse rows rendered
+    without it."""
+
+    def cache_name(reasoning_effort_field):
+        args = SimpleNamespace(
+            conversation_field="conversation",
+            system_prompt=None,
+            model_supports_system_role=True,
+            interleaved_thinking=False,
+            tools_field=None,
+            reasoning_effort_field=reasoning_effort_field,
+        )
+        render_kwargs = text_render_kwargs(args)
+        processor = build_chat_row_processor(
+            tokenizer=_StubTokenizer("modelA", 201088), max_length=4096, eos_token_ids=frozenset(), **render_kwargs
+        )
+        return map_cache_file_name(
+            "map", processor, _StubDataset(), "Processing dataset", {}, cache_key_extras=render_kwargs
+        )
+
+    assert len({cache_name(None), cache_name("effort"), cache_name("level")}) == 3
 
 
 if __name__ == "__main__":

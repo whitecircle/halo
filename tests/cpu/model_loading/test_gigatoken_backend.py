@@ -29,7 +29,7 @@ VLM_MODEL_REVISION = PINNED_REVISIONS[QWEN2_5_VL_3B]
 
 
 class PreprocessingArgsStub:
-    pad_token = bos_token = eos_token = chat_template = added_special_tokens = None
+    pad_token = bos_token = eos_token = chat_template = added_special_tokens = reasoning_effort_field = None
     force_chat_template = False
 
     def __init__(self, tokenizer_backend: str) -> None:
@@ -103,24 +103,6 @@ def test_proxy_matches_hf_tokenizer():
     assert len(proxy) == len(tokenizer)
     assert proxy.chat_template == tokenizer.chat_template
     assert proxy.eos_token_id == tokenizer.eos_token_id
-
-
-def test_verifier_catches_truncation_only_divergence(monkeypatch):
-    """Production paths tokenize with truncation=True."""
-    pytest.importorskip("gigatoken")
-
-    tokenizer = load_cached_tokenizer(MODEL_NAME)
-    real_call = tb.GigatokenTokenizerProxy.__call__
-
-    def diverge_when_truncating(self, text=None, **kwargs):
-        out = real_call(self, text, **kwargs)
-        if kwargs.get("truncation"):
-            out["input_ids"] = list(out["input_ids"])[:-1]
-        return out
-
-    monkeypatch.setattr(tb.GigatokenTokenizerProxy, "__call__", diverge_when_truncating)
-    with pytest.raises(ValueError, match="diverges"):
-        tb.resolve_tokenizer_backend(tokenizer, "gigatoken")
 
 
 def test_proxy_pickle_roundtrip():

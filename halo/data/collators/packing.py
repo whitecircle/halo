@@ -16,6 +16,7 @@ from halo.data.completion_spans import (
     PACKED_SPAN_POLICY,
     build_span_labels,
     mask_batch_to_completion_spans,
+    resolve_span_bounds,
     resolve_spans_or_warn,
 )
 from halo.data.turn_markers import (
@@ -211,6 +212,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         self.train_on_last_assistant_only = train_on_last_assistant_only
         self.response_token_ids = tokenize_response_template(response_prompt_template, self.tokenizer)
         self.eos_token_ids = eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(self.tokenizer)
+        self.span_bounds = resolve_span_bounds(self.tokenizer, self.response_token_ids, self.eos_token_ids)
 
         warn_if_pad_equals_eos(self.tokenizer)
 
@@ -228,6 +230,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
                 self.train_on_last_assistant_only,
                 self.response_prompt_template,
                 tokenizer=self.tokenizer,
+                span_bounds=self.span_bounds,
             )
 
         return batch
@@ -267,6 +270,7 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
             response_prompt_template=self.response_prompt_template,
             tokenizer=self.tokenizer,
             row_label="packed document",
+            span_bounds=self.span_bounds,
         )
         return build_span_labels(labels, input_ids, spans, restore_end=True)
 
@@ -329,6 +333,7 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
 
         if self.eos_token_ids is None:
             self.eos_token_ids = resolve_eos_token_ids(self.tokenizer)
+        self.span_bounds = resolve_span_bounds(self.tokenizer, self.response_token_ids, self.eos_token_ids)
 
         warn_if_pad_equals_eos(self.tokenizer)
 
@@ -344,5 +349,6 @@ class DataCollatorWithFlatteningAndCompletionMask(DataCollatorWithFlattening):
             response_prompt_template=self.response_prompt_template,
             tokenizer=self.tokenizer,
             row_label="flattened sample",
+            span_bounds=self.span_bounds,
         )
         return build_span_labels(labels, input_ids, spans)

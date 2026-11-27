@@ -17,6 +17,7 @@
   "EPStep3p7MoELayer",
   "EPNemotronHMoELayer",
   "EPMistral4MoELayer",
+  "EPInkling2MoELayer",
   "EPGlm5NextMoELayer",
   "EPGlm4MoELayer",
   "EPLagunaMoELayer"
@@ -38,6 +39,7 @@
   "Step3p7SparseMoeBlock": "EPStep3p7MoELayer",
   "NemotronHMoE": "EPNemotronHMoELayer",
   "Mistral4MoE": "EPMistral4MoELayer",
+  "Inkling2SparseMoeBlock": "EPInkling2MoELayer",
   "Glm5NextTextMoE": "EPGlm5NextMoELayer",
   "Glm4MoeLiteMoE": "EPGlm4MoELayer",
   "LagunaSparseMoeBlock": "EPLagunaMoELayer"
@@ -69,6 +71,8 @@
   "nemotron_h_omni": "EPNemotronHMoELayer",
   "mistral4": "EPMistral4MoELayer",
   "mistral3": "EPMistral4MoELayer",
+  "inkling2": "EPInkling2MoELayer",
+  "inkling2_text": "EPInkling2MoELayer",
   "glm5_next": "EPGlm5NextMoELayer",
   "glm5_next_text": "EPGlm5NextMoELayer",
   "glm4_moe_lite": "EPGlm4MoELayer",
@@ -87,6 +91,8 @@
   "glm5_next",
   "glm5_next_text",
   "gpt_oss",
+  "inkling2",
+  "inkling2_text",
   "inkling_mm_model",
   "inkling_text",
   "laguna",
@@ -173,6 +179,18 @@
    ],
    "config_flag": null
   },
+  "inkling2": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
+  "inkling2_text": {
+   "attrs": [
+    "gate.e_score_correction_bias"
+   ],
+   "config_flag": null
+  },
   "laguna": {
    "attrs": [
     "gate.e_score_correction_bias",
@@ -253,6 +271,7 @@
   "DeepseekV4Model",
   "Gemma4TextModel",
   "Glm5NextTextModel",
+  "Inkling2TextModel",
   "NemotronHModel",
   "Qwen4ExpTextModel"
  ],
@@ -268,6 +287,8 @@
   "CohereForCausalLM": "CohereHeadTransform",
   "Cohere2ForCausalLM": "CohereHeadTransform",
   "Cohere2MoeForCausalLM": "CohereHeadTransform",
+  "Inkling2ForCausalLM": "Inkling2HeadTransform",
+  "Inkling2ForConditionalGeneration": "Inkling2HeadTransform",
   "InklingForCausalLM": "InklingHeadTransform",
   "InklingForConditionalGeneration": "InklingHeadTransform"
  },
@@ -639,6 +660,29 @@
    "rms_norm_casting_mode": "llama",
    "rms_norm_offset": 0.0,
    "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [],
+   "fp32_logits": false,
+   "router_aux_loss_in_head": false,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
+  },
+  {
+   "model_types": [
+    "inkling2_text",
+    "inkling2"
+   ],
+   "modeling_module": "transformers.models.inkling2.modeling_inkling2",
+   "rms_norm": [
+    "Inkling2RMSNorm"
+   ],
+   "rms_norm_casting_mode": "gemma",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "native",
    "gated_rms_norm": [],
    "glu_mlp": [],
    "causal_lm": [],

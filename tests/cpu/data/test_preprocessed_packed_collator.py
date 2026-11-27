@@ -35,6 +35,9 @@ def make_tokenizer(pad_token_id: int = PAD, eos_token_id: int = EOS) -> MagicMoc
     tok.padding_side = "right"
     tok.model_max_length = 4096
     tok.encode.return_value = [RESP_1, RESP_2]
+    # A plain tokenizer of the vocabulary _write_metadata records, not a processor wrapping one.
+    tok.__len__.return_value = 100
+    del tok.tokenizer
 
     def _pad(features, **kwargs):
         max_len = max(len(f["input_ids"]) for f in features)
@@ -77,6 +80,8 @@ def _write_metadata(dataset_dir: str, packed: bool, max_length: int = 64) -> Non
         "preprocessed": True,
         "model_name": "stub-model",
         "tokenizer_vocab_size": 100,
+        # A chat bake records the turn terminators it closed its rows against: the stub tokenizer's eos.
+        "eos_token_ids": [EOS],
         "max_length": max_length,
         "packed": packed,
         "packing_strategy": "bfd" if packed else None,
@@ -134,6 +139,7 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             tokenizer,
             parallelism_config,
             hf_config=None,
+            generation_config=None,
         )
         return collator
     finally:

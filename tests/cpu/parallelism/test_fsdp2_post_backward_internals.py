@@ -25,7 +25,7 @@ ROWS = 3
 
 
 class _Block(nn.Module):
-    """FSDP2's hooks inside the checkpoint, the placement of transformers' ``GradientCheckpointingLayer``."""
+    """FSDP2's hooks inside the checkpoint, which wraps the module's call."""
 
     def __init__(self):
         super().__init__()

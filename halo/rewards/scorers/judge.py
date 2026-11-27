@@ -13,7 +13,7 @@ from openai import AsyncOpenAI
 
 from halo.config_validation import is_finite_number
 from halo.env import env_str
-from halo.inference.endpoints import HOSTED_API_KEY_VARIABLES, is_loopback, resolve_local_api_key
+from halo.inference.endpoints import HOSTED_API_KEY_VARIABLES, is_loopback, resolve_local_server_api_key
 from halo.inference.openai_client import build_openai_client, chat_completion
 from halo.inference.response import get_finish_reason
 from halo.rewards.samples import (
@@ -63,13 +63,13 @@ class Verdict:
 
 def scorer_api_key(term: JudgeTerm) -> str:
     """A variable the term names is that key or a refusal, since a fallback would send another vendor's key to the
-    term's endpoint. At the default name a loopback server takes the local key, which needs none, a hosted vendor's own
-    host that vendor's key, and any other endpoint is refused."""
+    term's endpoint. At the default name a loopback server takes its own key or none, a hosted vendor's own host that
+    vendor's key, and any other endpoint is refused."""
     host = urlparse(term.base_url).hostname or ""
     if term.api_key_env != JudgeTerm.api_key_env:
         variable = term.api_key_env
     elif is_loopback(host):
-        return resolve_local_api_key()
+        return resolve_local_server_api_key()
     else:
         variable = HOSTED_API_KEY_VARIABLES.get(host)
         if variable is None:

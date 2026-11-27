@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Attention by row length</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  /* Each panel's key sits in a column left of its plot. */
+  .figure {
+    display: grid;
+    grid-template-columns: 330px minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: var(--group-gap);
+    align-items: start;
+  }
+
+  .key h3 {
+    margin-bottom: var(--heading-gap);
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 31px;
+    line-height: 1.15;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .key svg.swatch {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
+  }
+
+  .key p {
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+  }
+
+  .key p + p { margin-top: 12px; }
+
+  /* A mark's line in the key: its swatch, then what it is. */
+  .key p.mark {
+    display: grid;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
+    color: var(--body);
+  }
+
+  .key p.mark svg { margin-top: 3px; }
+
+  /* The score matrix, drawn small beside what it explains. */
+  .key .scores {
+    display: grid;
+    grid-template-columns: 112px 1fr;
+    column-gap: 18px;
+    align-items: center;
+    margin-top: 20px;
+  }
+
+  .key .scores svg {
+    width: 112px;
+    height: 112px;
+  }
+
+  svg.chart {
+    display: block;
+    width: 100%;
+    overflow: visible;
+    font-family: var(--sans);
+  }
+
+  svg text { font-variant-numeric: tabular-nums; }
+
+  svg .tick { font-size: 21px; fill: var(--secondary); }
+
+  svg .axis { font-size: 23px; fill: var(--body); }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="time-key"></div>
+    <svg class="chart" id="time"></svg>
+    <div class="key" id="memory-key"></div>
+    <svg class="chart" id="memory"></svg>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">One B300: a single causal attention call on a batch of 1 with 16 heads of width 128 in bf16, forward and backward.</span>
+      <span class="s">Each point is the median of 7 samples.</span>
+      <span class="s">Naive is a matmul for the scores, a softmax in fp32 and a second matmul.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300 by tests/gpu/profiling/benchmark_attention_scaling.py: one causal attention call, batch 1,
+  // 16 heads of width 128, bf16. attention.json, rows[] with pass "forward_backward", by implementation:
+  // [seq, seconds_summary.median in ms, peak_bytes_above_inputs in GiB], or nulls where the row holds "oom".
+  // Medians of 7 samples. The script stops an implementation at its first out-of-memory length.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_attention_scaling.py --output attention.json
+  const RUNS = {
+    naive: [[1024, 0.498, 0.2667], [2048, 1.785, 1.02], [4096, 6.993, 4.047], [8192, 28.47, 16.12], [16384, 107.3, 64.38], [32768, null, null]],
+    sdpa: [[1024, 0.1252, 0.02356], [2048, 0.1289, 0.04712], [4096, 0.2506, 0.09424], [8192, 0.8569, 0.1885], [16384, 3.219, 0.3779], [32768, 12.46, 0.7539], [65536, 48.72, 1.508]],
+    flash_attention_4: [[1024, 0.2433, 0.02362], [2048, 0.2274, 0.04724], [4096, 0.2603, 0.09448], [8192, 0.8642, 0.189], [16384, 3.115, 0.3779], [32768, 11.83, 0.7559], [65536, 46.34, 1.512]],
+    flash_attention_2: [[1024, 0.1872, 0.02356], [2048, 0.5975, 0.04712], [4096, 0.9353, 0.09424], [8192, 3.036, 0.1885], [16384, 10.74, 0.377], [32768, 40.45, 0.7539], [65536, 157.6, 1.508]],
+  };
+  /** attention.json, gpu.memory_bytes, in GiB: the HBM the driver reports. */
+  const HBM_GIB = 267.7;
+  /** The four ways to compute attention, in drawing order: the last sits on top where lines coincide. */
+  const WAYS = [
+    { id: "naive", name: "Naive", hue: "var(--body)" },
+    { id: "flash_attention_2", name: "FA2", hue: "var(--halo-indigo)" },
+    { id: "sdpa", name: "SDPA", hue: "var(--halo-violet)" },
+    { id: "flash_attention_4", name: "FA4", hue: "var(--halo-blue)" },
+  ];
+  /** The row length the title reads the two ends of the range at, and the two ways it compares. */
+  const TITLE = { seq: 16384, slow: "naive", fast: "flash_attention_4" };
+
+  const series = WAYS.map((way) => ({
+    ...way,
+    points: RUNS[way.id].filter(([, time]) => time !== null).map(([seq, time, memory]) => ({ seq, time, memory })),
+    failed: RUNS[way.id].filter(([, time]) => time === null).map(([seq]) => seq),
+  }));
+  const byId = Object.fromEntries(series.map((s) => [s.id, s]));
+  const at = (id, seq) => byId[id].points.find((p) => p.seq === seq);
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const short = (v) => (v >= 10 ? fmt(v) : v.toFixed(1));
+  const [slow, fast] = [at(TITLE.slow, TITLE.seq), at(TITLE.fast, TITLE.seq)];
+
+  document.getElementById("title").textContent =
+    `At ${fmt(TITLE.seq)} tokens naive attention takes ${short(slow.time)} ms and ${short(slow.memory)} GiB, ${byId[TITLE.fast].name} ${short(fast.time)} ms and ${short(fast.memory)} GiB`;
+
+  /** A key swatch: a 36 × 24 drawing of the mark. */
+  const swatch = (draw) => {
+    const svg = svgEl("svg", { class: "swatch", viewBox: "0 0 36 24", "aria-hidden": "true" });
+    draw(svg);
+
+    return svg;
+  };
+  const rule = (attrs) => (svg) => svg.append(svgEl("line", { x1: 2, y1: 12, x2: 34, y2: 12, ...attrs }));
+  const cross = (x, y, hue) => [[-6, -6, 6, 6], [-6, 6, 6, -6]].map(([x1, y1, x2, y2]) =>
+    svgEl("line", { x1: x + x1, y1: y + y1, x2: x + x2, y2: y + y2, stroke: hue, "stroke-width": 2.5, "stroke-linecap": "round" }));
+  const SWATCHES = {
+    ...Object.fromEntries(series.map((s) => [s.id, rule({ stroke: s.hue, "stroke-width": 3, "stroke-linecap": "round" })])),
+    capacity: rule({ stroke: "var(--secondary)", "stroke-width": 1.5 }),
+    failed: (svg) => svg.append(...cross(18, 12, "var(--danger)")),
+  };
+
+  /** Fills a key column: its heading, plain lines, then one line per mark. */
+  function fillKey(id, { name, lines = [], marks }) {
+    const key = document.getElementById(id);
+    key.append(el("h3", undefined, name));
+
+    for (const line of lines) {
+      key.append(el("p", undefined, line));
+    }
+
+    for (const [kind, text] of marks) {
+      const p = el("p", "mark");
+      p.append(swatch(SWATCHES[kind]), el("span", undefined, text));
+      key.append(p);
+    }
+
+    return key;
+  }
+
+  const DESCRIPTIONS = {
+    naive: "Naive: every score stored",
+    sdpa: "SDPA, PyTorch’s own call",
+    flash_attention_4: "FA4",
+    flash_attention_2: "FA2",
+  };
+  fillKey("time-key", {
+    name: "Time, forward and backward",
+    marks: [...series].reverse().map((s) => [s.id, DESCRIPTIONS[s.id]]),
+  });
+
+  // The flash kernels' memory is drawn as their lines, which coincide where they hold the same.
+  const kernels = series.filter((s) => s.id !== "naive");
+  const spread = Math.max(...kernels[0].points.map((p) => {
+    const values = kernels.map((s) => s.points.find((q) => q.seq === p.seq).memory);
+
+    return Math.max(...values) / Math.min(...values) - 1;
+  }));
+  const naive = byId.naive;
+  const memoryKey = fillKey("memory-key", {
+    name: "Peak memory above the inputs",
+    lines: [`${kernels.map((s) => s.name).join(", ").replace(/, ([^,]*)$/, " and $1")} hold the same memory, within ${Math.max(1, Math.ceil(100 * spread))}%: one line`],
+    marks: [
+      ["capacity", `${HBM_GIB} GiB, the HBM of a B300`],
+      ...naive.failed.map((seq) => ["failed", `${naive.name}: out of memory at ${fmt(seq)} tokens`]),
+    ],
+  });
+
+  // The score matrix of a causal row: the naive form stores every cell, a flash kernel holds one tile at a time.
+  const CELLS = 8;
+  const LIT = [5, 2];
+  const scores = el("div", "scores");
+  const matrix = svgEl("svg", { viewBox: `0 0 ${CELLS * 14} ${CELLS * 14}`, "aria-hidden": "true" });
+
+  for (let row = 0; row < CELLS; row += 1) {
+    for (let column = 0; column <= row; column += 1) {
+      const lit = row === LIT[0] && column === LIT[1];
+      matrix.append(svgEl("rect", { x: column * 14 + 1, y: row * 14 + 1, width: 12, height: 12, rx: 2.5, fill: lit ? "var(--halo-blue)" : "var(--line)" }));
+    }
+  }
+
+  scores.append(matrix, el("p", undefined, "The scores of one row of tokens. Naive holds them all, a flash kernel one tile at a time"));
+  memoryKey.append(scores);
+
+  /** Plot-area insets inside each SVG: room for the y title and ticks on the left. */
+  const PAD = { l: 118, r: 24 };
+  const lengths = RUNS[WAYS.at(-1).id].map(([seq]) => seq);
+  const first = Math.log2(lengths[0]);
+  const last = Math.log2(lengths.at(-1));
+
+  /** Sets up one panel's SVG and returns its plot box, x scale and an element adder. */
+  function panel(id, height, top, bottom) {
+    const chart = document.getElementById(id);
+    const width = chart.getBoundingClientRect().width;
+    chart.setAttribute("height", height);
+    chart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+    const plot = { l: PAD.l, r: width - PAD.r, t: top, b: height - bottom };
+    // The length axis is logarithmic, with room at each end for the first and last mark.
+    const sx = (seq) => plot.l + 30 + ((Math.log2(seq) - first) / (last - first)) * (plot.r - plot.l - 60);
+    const add = (tag, attrs, text) => chart.appendChild(svgEl(tag, attrs, text));
+
+    return { chart, plot, sx, add, height };
+  }
+
+  /** A log scale over the whole decades that hold `values`, with its tick values. */
+  function decades(values, plot) {
+    const low = Math.floor(Math.log10(Math.min(...values)) + 1e-9);
+    const high = Math.ceil(Math.log10(Math.max(...values)) - 1e-9);
+
+    return {
+      sy: (v) => plot.b - ((Math.log10(v) - low) / (high - low)) * (plot.b - plot.t),
+      ticks: Array.from({ length: high - low + 1 }, (_, i) => 10 ** (low + i)),
+    };
+  }
+
+  /** Draws a panel: its frame, then every series as a line through its points. */
+  function draw({ plot, sx, add }, { sy, ticks }, field, title) {
+    for (const v of ticks) {
+      if (sy(v) < plot.b - 0.5) {
+        add("line", { x1: plot.l, x2: plot.r, y1: sy(v), y2: sy(v), stroke: "var(--line)", "stroke-width": 1 });
+      }
+
+      add("text", { class: "tick", x: plot.l - 14, y: sy(v), "text-anchor": "end", "dominant-baseline": "central" }, v.toLocaleString("en-US"));
+    }
+
+    for (const seq of lengths) {
+      add("line", { x1: sx(seq), x2: sx(seq), y1: plot.b, y2: plot.b + 8, stroke: "var(--secondary)", "stroke-width": 1 });
+    }
+
+    add("line", { x1: plot.l, x2: plot.r, y1: plot.b, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("line", { x1: plot.l, x2: plot.l, y1: plot.t, y2: plot.b, stroke: "var(--secondary)", "stroke-width": 1 });
+    add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, title);
+
+    for (const s of series) {
+      add("polyline", { points: s.points.map((p) => `${sx(p.seq)},${sy(p[field])}`).join(" "), fill: "none", stroke: s.hue, "stroke-width": 3, "stroke-linejoin": "round", "stroke-linecap": "round" });
+
+      for (const p of s.points) {
+        add("circle", { cx: sx(p.seq), cy: sy(p[field]), r: 5, fill: s.hue });
+      }
+    }
+  }
+
+  // The time panel.
+  {
+    const p = panel("time", 400, 8, 8);
+    draw(p, decades(series.flatMap((s) => s.points.map((q) => q.time)), p.plot), "time", "Time per call, ms");
+  }
+
+  // The memory panel, on the same length axis, which it labels. A way that ran out of memory is marked on the
+  // line of the GPU's capacity, at the length it failed at.
+  {
+    const p = panel("memory", 430, 8, 84);
+    const { chart, plot, sx, add, height } = p;
+    const scale = decades([...series.flatMap((s) => s.points.map((q) => q.memory)), HBM_GIB], plot);
+    draw(p, scale, "memory", "Peak memory, GiB");
+
+    for (const seq of lengths) {
+      add("text", { class: "tick", x: sx(seq), y: plot.b + 34, "text-anchor": "middle" }, fmt(seq));
+    }
+
+    add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: height - 6, "text-anchor": "middle" }, "Tokens in the row");
+    add("line", { x1: plot.l, x2: plot.r, y1: scale.sy(HBM_GIB), y2: scale.sy(HBM_GIB), stroke: "var(--secondary)", "stroke-width": 1.5 });
+
+    for (const seq of naive.failed) {
+      chart.append(...cross(sx(seq), scale.sy(HBM_GIB), "var(--danger)"));
+    }
+  }
+</script>
+</body>
+</html>

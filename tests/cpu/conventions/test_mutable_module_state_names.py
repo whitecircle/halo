@@ -48,9 +48,8 @@ def _upper_snake_mutable_bindings(source: str) -> list[str]:
     return found
 
 
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
+def test_detector_reads_module_level_empty_mutable_bindings(subtests):
+    rows = [
         ("_WARNED: set[str] = set()", ["_WARNED"]),
         ("REGISTRY = {}", ["REGISTRY"]),
         ("_SEEN = []", ["_SEEN"]),
@@ -60,10 +59,10 @@ def _upper_snake_mutable_bindings(source: str) -> list[str]:
         ("NAMES = frozenset({'a'})", []),
         ("TABLE = {'a': 1}", []),
         ("def f():\n    LOCAL = set()", []),
-    ],
-)
-def test_detector_reads_module_level_empty_mutable_bindings(source, expected):
-    assert _upper_snake_mutable_bindings(source) == expected
+    ]
+    for source, expected in rows:
+        with subtests.test(repr(source)):
+            assert _upper_snake_mutable_bindings(source) == expected
 
 
 def test_no_upper_snake_name_holds_mutable_state():

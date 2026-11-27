@@ -2,8 +2,7 @@
 """Gemma 2 and Gemma 3 train each row shape on the backend its script resolves, as accurately as eager. Blackwell only.
 
 FA4's head_dim-256 backward asserts on a softcap and a window, and a softcap stays off its varlen kernels, so only
-Gemma 2 27B's unpacked row may stay on FA4. On Gemma 2 SDPA's logits error must be at least 10x eager's, showing the
-softcap it drops matters at this geometry.
+Gemma 2 27B's unpacked row may stay on FA4. On Gemma 2 transformers' SDPA must refuse the softcap.
 """
 
 import argparse
@@ -34,8 +33,6 @@ SOFTCAP = 2.0
 SCORE_SCALE = 8.0
 # Two bf16 kernels accumulate in different orders.
 EAGER_ERROR_RATIO = 1.5
-# SDPA without the softcap is a different function, not a rounding difference.
-SOFTCAP_DROP_RATIO = 10.0
 # What FA4's varlen entry point raises once the family patches installed its refusal.
 VARLEN_SOFTCAP_REFUSAL = "reached FlashAttention-4's varlen kernels"
 FA2, FA4, SDPA = "flash_attention_2", "flash_attention_4", "sdpa"
@@ -116,6 +113,14 @@ def _errors(model, row, attn_implementation, reference) -> dict[str, float]:
     }
 
 
+def _sdpa_refuses(model, row) -> bool:
+    try:
+        _forward_backward(model, row, SDPA)
+    except ValueError as error:
+        return "softcap" in str(error)
+    return False
+
+
 def _fa4_refuses(model, row) -> bool:
     """Whether FA4 raises on this row, its kernel's assert or the patches' softcap refusal: the limit a route off FA4
     exists for."""
@@ -171,9 +176,7 @@ def run(ctx):
             metrics[f"{row_name}_{metric}_{backend}"] = chosen[metric]
             metrics[f"{row_name}_{metric}_eager"] = eager[metric]
         if config_cls is Gemma2Config:
-            sdpa = _errors(model, row, SDPA, reference)
-            checks[f"{row_name}_sdpa_drops_the_softcap"] = sdpa["logits"] >= SOFTCAP_DROP_RATIO * eager["logits"]
-            metrics[f"{row_name}_logits_sdpa"] = sdpa["logits"]
+            checks[f"{row_name}_sdpa_refuses_the_softcap"] = _sdpa_refuses(model, row)
     if base.config.head_dim == 256:
         checks["fa4_backward_refuses_this_model"] = _fa4_refuses(model, rows["unpacked"])
     else:

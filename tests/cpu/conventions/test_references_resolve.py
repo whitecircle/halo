@@ -315,14 +315,15 @@ def test_the_sweep_sees_every_kind_of_reference():
     assert text_references > 400, f"the build files, runners and recipes name only {text_references} references"
 
 
-@pytest.mark.parametrize("path", _FILES, ids=lambda path: str(path.relative_to(REPO_ROOT)))
-def test_every_reference_resolves(path):
-    file = str(path.relative_to(REPO_ROOT))
-    exempt = _NOT_REFERENCES.get(file, set())
-    unresolved = [finding for finding in _findings(path) if finding.why and finding.text not in exempt]
-    assert not unresolved, "\n".join(
-        f"{file}:{finding.line}: {finding.kind} {finding.text} — {finding.why}" for finding in unresolved
-    )
+def test_every_reference_resolves(subtests):
+    for path in _FILES:
+        file = str(path.relative_to(REPO_ROOT))
+        with subtests.test(file):
+            exempt = _NOT_REFERENCES.get(file, set())
+            unresolved = [finding for finding in _findings(path) if finding.why and finding.text not in exempt]
+            assert not unresolved, "\n".join(
+                f"{file}:{finding.line}: {finding.kind} {finding.text} — {finding.why}" for finding in unresolved
+            )
 
 
 def test_every_exemption_is_still_needed():

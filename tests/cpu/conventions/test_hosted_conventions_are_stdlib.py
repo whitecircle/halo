@@ -136,14 +136,15 @@ def test_every_probe_exception_names_a_listed_test_that_runs_one():
     assert not stale, f"drop these from _PROBE_COLLECTS: {stale}"
 
 
-@pytest.mark.parametrize("path", _HOSTED)
-def test_a_hosted_test_reaches_only_the_standard_library_and_pytest(path):
-    findings = _foreign_imports(_INDEX, REPO_ROOT / path, _PROBE_COLLECTS)
-    assert not findings, (
-        f"the hosted conventions job ({_WORKFLOW.relative_to(REPO_ROOT)}) installs only pytest, so these "
-        "imports fail it: read the source with ast instead of importing it, move the import out of the "
-        "shared helper, or drop the test from the job's list:\n  " + "\n  ".join(findings)
-    )
+def test_a_hosted_test_reaches_only_the_standard_library_and_pytest(subtests):
+    for path in _HOSTED:
+        with subtests.test(path):
+            findings = _foreign_imports(_INDEX, REPO_ROOT / path, _PROBE_COLLECTS)
+            assert not findings, (
+                f"the hosted conventions job ({_WORKFLOW.relative_to(REPO_ROOT)}) installs only pytest, so these "
+                "imports fail it: read the source with ast instead of importing it, move the import out of the "
+                "shared helper, or drop the test from the job's list:\n  " + "\n  ".join(findings)
+            )
 
 
 def test_the_job_installs_the_locked_pytest():

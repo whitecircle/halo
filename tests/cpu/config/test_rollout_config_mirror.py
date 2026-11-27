@@ -54,17 +54,19 @@ def test_every_rollout_field_is_either_mirrored_or_derived():
     )
 
 
-@pytest.mark.parametrize(("rollout_field", "async_field"), sorted(_FORWARDED.items()))
-def test_every_mirrored_knob_reaches_the_built_rollout_config(rollout_field, async_field):
+def test_every_mirrored_knob_reaches_the_built_rollout_config(subtests):
     """Matching defaults only prove the two declarations agree. The actors read nothing but the built RolloutConfig."""
-    requested = _NON_DEFAULT_VALUES[async_field]
+    assert _FORWARDED, "AsyncRolloutConfig mirrors no RolloutConfig field"
+    for rollout_field, async_field in sorted(_FORWARDED.items()):
+        with subtests.test(f"{rollout_field}-{async_field}"):
+            requested = _NON_DEFAULT_VALUES[async_field]
 
-    built = AsyncRolloutConfig(**{async_field: requested}).get_rollout_config()
+            built = AsyncRolloutConfig(**{async_field: requested}).get_rollout_config()
 
-    assert getattr(built, rollout_field) == requested, (
-        f"AsyncRolloutConfig.{async_field}={requested!r} never reached RolloutConfig.{rollout_field} "
-        f"(got {getattr(built, rollout_field)!r}): the knob parses and no rollout sees it."
-    )
+            assert getattr(built, rollout_field) == requested, (
+                f"AsyncRolloutConfig.{async_field}={requested!r} never reached RolloutConfig.{rollout_field} "
+                f"(got {getattr(built, rollout_field)!r}): the knob parses and no rollout sees it."
+            )
 
 
 def test_the_non_default_table_covers_every_mirrored_knob():

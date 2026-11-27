@@ -294,57 +294,53 @@ def test_no_test_bootstraps_the_repo_root_onto_sys_path():
     )
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
+def test_the_marker_detector_fires_on_every_spelling(subtests):
+    sources = [
         "pytestmark = pytest.mark.cpu",
         "pytestmark = [pytest.mark.cpu]",
         "pytestmark = (pytest.mark.slow, pytest.mark.cpu)",
         "pytestmark: list = [pytest.mark.cpu]",
         "pytestmark += [pytest.mark.cpu]",
         "from pytest import mark\npytestmark = [mark.cpu]",
-    ],
-)
-def test_the_marker_detector_fires_on_every_spelling(source):
-    assert len(_redeclared_cpu_marker_lines(ast.parse(source))) == 1
+    ]
+    for source in sources:
+        with subtests.test(source):
+            assert len(_redeclared_cpu_marker_lines(ast.parse(source))) == 1
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
+def test_the_marker_detector_passes_other_marks_and_mentions(subtests):
+    sources = [
         "pytestmark = [pytest.mark.gpu, pytest.mark.core]",
         '"""Never write pytestmark = pytest.mark.cpu here."""',
-    ],
-)
-def test_the_marker_detector_passes_other_marks_and_mentions(source):
-    assert _redeclared_cpu_marker_lines(ast.parse(source)) == []
+    ]
+    for source in sources:
+        with subtests.test(source):
+            assert _redeclared_cpu_marker_lines(ast.parse(source)) == []
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
+def test_the_bootstrap_detector_fires_on_every_spelling(subtests):
+    sources = [
         "sys.path.insert(0, ROOT)",
         "sys.path.append(ROOT)",
         "sys.path.extend([ROOT])",
         "sys.path[:0] = [ROOT]",
         "sys.path += [ROOT]",
         "sys.path = [ROOT, *sys.path]",
-    ],
-)
-def test_the_bootstrap_detector_fires_on_every_spelling(source):
-    assert len(_sys_path_bootstrap_lines(ast.parse(f"import sys\n{source}"))) == 1
+    ]
+    for source in sources:
+        with subtests.test(source):
+            assert len(_sys_path_bootstrap_lines(ast.parse(f"import sys\n{source}"))) == 1
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
+def test_the_bootstrap_detector_passes_reads_removals_and_mentions(subtests):
+    sources = [
         "found = ROOT in sys.path",
         "sys.path.remove(ROOT)",
         '"""Never call sys.path.insert here."""',
-    ],
-)
-def test_the_bootstrap_detector_passes_reads_removals_and_mentions(source):
-    assert _sys_path_bootstrap_lines(ast.parse(f"import sys\n{source}")) == []
+    ]
+    for source in sources:
+        with subtests.test(source):
+            assert _sys_path_bootstrap_lines(ast.parse(f"import sys\n{source}")) == []
 
 
 def test_the_conventions_scan_reads_the_whole_suite():
@@ -378,33 +374,31 @@ def test_no_cpu_tier_module_reaches_a_gpu_script():
     )
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
+def test_the_gpu_script_detector_fires_on_every_spelling(subtests):
+    sources = [
         f"from {GPU_PACKAGE}.trainers.grpo.test_offline_grpo_ep_cp import parser",
         f"import {GPU_PACKAGE}.parallelism.ep.test_ep_optimizer_resume",
         f"from {GPU_PACKAGE} import test_suite_helpers",
         f'suite = load_script_module("{GPU_DIR}/trainers/grpo/test_offline_grpo_chunked.py")',
         f'suite = repo.load_script_module("{GPU_DIR}/parallelism/ep/test_ep_optimizer_resume.py")',
         f'script = """\nfrom {GPU_PACKAGE}.trainers.grpo.test_x import fixture\nprint(fixture())\n"""',
-    ],
-)
-def test_the_gpu_script_detector_fires_on_every_spelling(source):
-    assert len(_gpu_script_reach_lines(ast.parse(source))) == 1
+    ]
+    for source in sources:
+        with subtests.test(source):
+            assert len(_gpu_script_reach_lines(ast.parse(source))) == 1
 
 
-@pytest.mark.parametrize(
-    "source",
-    [
+def test_the_gpu_script_detector_passes_the_launcher_side_and_mentions(subtests):
+    sources = [
         f"from {GPU_PACKAGE}.manifest import MANIFEST",
         f"from {GPU_PACKAGE} import manifest",
         f"import {GPU_PACKAGE}.conftest",
         'module = load_script_module("scripts/training/sft.py")',
         f'"""A probe never imports from {GPU_DIR}/ trainers."""',
-    ],
-)
-def test_the_gpu_script_detector_passes_the_launcher_side_and_mentions(source):
-    assert _gpu_script_reach_lines(ast.parse(source)) == []
+    ]
+    for source in sources:
+        with subtests.test(source):
+            assert _gpu_script_reach_lines(ast.parse(source)) == []
 
 
 if __name__ == "__main__":

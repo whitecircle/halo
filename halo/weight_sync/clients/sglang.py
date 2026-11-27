@@ -44,8 +44,6 @@ logger = logging.getLogger(__name__)
 _INFLIGHT_CHUNKS = 2
 # Past the 20 s the server's /health gives a scheduler step before answering 503 itself, so a busy engine answers.
 _ENGINE_ANSWER_TIMEOUT_S = 30.0
-# A load or unload waits for the scheduler between batches and, for a load, for the adapter's host-to-device copy.
-_ADAPTER_UPDATE_TIMEOUT_S = 120.0
 
 
 def _served_quantization(info: dict) -> str | None:
@@ -114,6 +112,9 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     # linear-attention ``in_proj_ba`` is not adaptable, and the stacked ``in_proj_qkvz`` has no counterpart in the
     # trainer's split names.
     ADAPTER_SERVABLE_MODULES = ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj")
+    ADAPTER_DIRECTORY_LOAD_ROUTE = "/load_lora_adapter"
+    ADAPTER_UNLOAD_ROUTE = "/unload_lora_adapter"
+    ADAPTER_LIMIT_UNLOADS_LISTED = True
     PAUSE_ENDPOINT = "/pause_generation"
     # retract hands in-flight requests back to the queue with their tokens and rebuilds their KV under the new weights,
     # and the post-update flush skips that queue while paused. abort would drop them: re-issued from scratch, the
@@ -129,6 +130,11 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     IMAGE_REMEDY = "Serve from the toolkit's SGLang image (make build-sglang), or its docker-compose.sglang.yml."
     MOE_BACKEND_FLAG = "--moe-runner-backend triton (SGLANG_MOE_RUNNER_BACKEND)"
     REASONING_PARSER_FLAG = "--reasoning-parser (SGLANG_REASONING_PARSER)"
+    ADAPTER_LOADED_LIMIT_FLAG = "--max-loaded-loras"
+    ADAPTER_BATCH_LIMIT_FLAG = "--max-loras-per-batch"
+    ADAPTER_FLAGS_REMEDY = (
+        "Serve with the adapter flags (the SGLANG_LORA_MAX_RANK launch variable of the SGLang compose service)"
+    )
     TOOL_PARSER_FLAG = "--tool-call-parser (SGLANG_TOOL_PARSER, the family's name where auto cannot read the template)"
     CHAT_TEMPLATE_FLAG = "--chat-template (SGLANG_CHAT_TEMPLATE)"
     LAUNCH_FACTS = {
@@ -169,8 +175,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         self._own_group_name = f"weight_update_group_{urlparse(self.base_url).netloc}"
         self.group_name = group_name or self._own_group_name
         self._joined_names: set[str] = set()
-        # Names the adapter a score request reads through, when the run serves its policy as one.
-        self.adapter_source: Callable[[], str | None] | None = None
         self._engine_ranks: int | None = None
 
     def read_server_flags(self) -> ServerFlags:
@@ -434,33 +438,12 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         """The ``model`` a request names to be served through ``adapter``: SGLang reads everything after the first colon."""
         return f"{base_model}:{adapter}"
 
-    def load_adapter(self, name: str, config: dict, payload: str) -> None:
-        """Register ``payload`` (:func:`~halo.weight_sync.adapter_payload.serialize_adapter_tensors`) as the adapter
-        ``name``. The route takes one copy per tensor-parallel rank, each rank deserializing its own."""
+    def _tensors_load_request(self, name: str, config: dict, payload: str) -> tuple[str, dict]:
+        """The route takes one copy per tensor-parallel rank, each rank deserializing its own."""
         if self._engine_ranks is None:
             self._engine_ranks = self.read_engine_layout(require=False)[0]
         body = {"lora_name": name, "config_dict": config, "serialized_named_tensors": [payload] * self._engine_ranks}
-        response = self.request(
-            "POST",
-            "/load_lora_adapter_from_tensors",
-            retry=False,
-            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
-            check=False,
-            json=body,
-        )
-        self._require_adapter_update(response, f"load adapter {name!r}")
-
-    def unload_adapter(self, name: str) -> None:
-        """Drop the adapter ``name``; the engine first waits for the requests still running under it."""
-        response = self.request(
-            "POST",
-            "/unload_lora_adapter",
-            retry=False,
-            timeout=_ADAPTER_UPDATE_TIMEOUT_S,
-            check=False,
-            json={"lora_name": name},
-        )
-        self._require_adapter_update(response, f"unload adapter {name!r}")
+        return "/load_lora_adapter_from_tensors", body
 
     @classmethod
     def is_adapter_missing(cls, error: str, adapter: str) -> bool:
@@ -475,21 +458,15 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             revision=info.get("revision") or None,
         )
 
-    def loaded_adapters(self) -> list[str]:
-        """The adapters registered on the engine: the model cards that name a parent, after the base's own."""
-        return [str(card["id"]) for card in self._served_model_cards() if card.get("parent")]
-
-    def _require_adapter_update(self, response: requests.Response, what: str) -> None:
+    def _adapter_update_refusal(self, response: requests.Response) -> str | None:
+        """The engine answers a refused update with ``success: false`` and its ``error_message``."""
         try:
             reply = response.json()
         except ValueError:
             reply = {}
         if response.ok and reply.get("success"):
-            return
-        raise RuntimeError(
-            f"SGLang {self.base_url} could not {what}: HTTP {response.status_code}, "
-            f"{reply.get('error_message') or response.text[:300]}"
-        )
+            return None
+        return reply.get("error_message") or response.text[:300]
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

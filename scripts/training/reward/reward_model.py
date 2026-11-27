@@ -50,11 +50,13 @@ def main():
     )
 
     # text_only_model: the score head is pinned to AutoModelForSequenceClassification. log_decoded_samples: rows reach
-    # the trainer untokenized, so there is nothing to decode. Rejected, as neither can take effect.
+    # the trainer untokenized, so there is nothing to decode. reasoning_effort_field: TRL's RewardTrainer templates the
+    # rows itself and reads a level only from its own chat_template_kwargs column. Rejected, as none can take effect.
     reject_unsupported_args(
         "Reward modeling",
         text_only_model=args.text_only_model,
         log_decoded_samples=args.log_decoded_samples,
+        reasoning_effort_field=args.reasoning_effort_field,
     )
 
     context = init_training_script(

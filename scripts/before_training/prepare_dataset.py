@@ -3,6 +3,9 @@
 at startup. The flags are :class:`PreprocessingConfig`'s plus :class:`PrepareDatasetArguments`'s; a YAML file of them
 works as first argument."""
 
+import signal
+import sys
+
 from halo.configs.parser import HaloArgumentParser
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.prepare_dataset_tool import PrepareDatasetArguments, bake_num_proc, run_dataset_preparation
@@ -29,6 +32,8 @@ def parse_args() -> tuple[PrepareDatasetArguments, PreprocessingConfig]:
 
 
 def main():
+    # SIGTERM (scancel, docker stop) would otherwise skip the cleanup that removes the scratch and stops the map workers.
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     args, config = parse_args()
     configure_cli_logging(verbose=args.verbose)
     run_dataset_preparation(args, config)

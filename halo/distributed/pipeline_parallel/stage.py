@@ -17,7 +17,7 @@ from transformers import PretrainedConfig
 
 from halo.checkpoint.config_export import hf_architecture_name
 from halo.checkpoint.hub_layout import CheckpointNamespace
-from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR
 from halo.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.pipeline_parallel.families import require_pp_attr, resolve_pp_spec
@@ -159,9 +159,11 @@ class PipelineStageModule(nn.Module):
             architecture = hf_architecture_name(source)
             if architecture is not None:
                 self.config.architectures = [architecture]
-        # Where load_distributed_model read the weights: the resume's construction-identity verdict.
-        if hasattr(source, LOADED_WEIGHTS_FROM_ATTR):
-            setattr(self, LOADED_WEIGHTS_FROM_ATTR, getattr(source, LOADED_WEIGHTS_FROM_ATTR))
+        # Where load_distributed_model read the weights (the resume's construction-identity verdict) and at which
+        # Hub commit (an adapter save's base revision).
+        for stamp in (LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR):
+            if hasattr(source, stamp):
+                setattr(self, stamp, getattr(source, stamp))
         # The EP capacity generation must ride the module the schedule calls: EP patching registered
         # it on the unsplit model, whose forward no pipeline runs.
         register_forward_generation_hook(self)

@@ -77,7 +77,7 @@ class OnlineGRPOScriptArguments(
         metadata={
             "help": "Reward terms, each {source, name?, weight?, exponent?, ...} and one TRL reward function: "
             "'accuracy' (the last \\boxed{} equals the answer), 'format' (pattern), 'judge' (a veto judge listing "
-            "checks is refused here) or 'reward_model'. YAML-only. "
+            "checks is refused here), 'reward_model' or 'whitecircle'. YAML-only. "
             "See agent-docs/training-methods/grpo/rewards/README.md."
         },
     )
@@ -125,3 +125,9 @@ class OnlineGRPOScriptArguments(
     def _validate_fields(self) -> None:
         super()._validate_fields()
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails before any server is touched
+        if self.reasoning_effort is not None and self.reasoning_effort_field:
+            raise ValueError(
+                f"reasoning_effort={self.reasoning_effort!r} steers every prompt and reasoning_effort_field="
+                f"{self.reasoning_effort_field!r} gives each row its own level, but a prompt renders one. Drop "
+                f"reasoning_effort to render each row's level, or drop reasoning_effort_field for the run-wide steer."
+            )

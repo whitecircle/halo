@@ -90,7 +90,7 @@ GPU_PEAK_FLOPS = {
             "fp32": 80.0e12,
         },
     ),
-    "B300": GpuPeak(  # same 148-SM die as B200; the published 6x FP4 names GB300, so this keeps the 4x
+    "B300": GpuPeak(  # bf16 as NVIDIA's HGX B300 row; fp4 keeps the B200's 4x where that row gives 6x dense
         aliases=("B300",),
         flops={
             "bf16": 2250.0e12,

@@ -19,7 +19,7 @@ its concern:
 | `loop/evaluation.py` | `EvaluationMixin`: `evaluate` / `evaluation_loop`, the unequal-batch escape hatch, the DP-scoped evaluation gather and the final round's padding cut (`eval_split_rows`) |
 | `metrics/token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device accumulator) and HF's input-token count (`include_num_input_tokens_seen: all`, counted as attended tokens by `count_attended_tokens` and added up on the device), summed over the world in one all-reduce per log, the input tokens also before each save and at each step the [EfficiencyCallback](../training-methods/callbacks.md#efficiencycallback) measures, where the step's data-wait seconds ride the same all-reduce (the host time of every `next` the train loop makes, timed in `NonFiniteStepGuardMixin.get_batch_samples`, the one seam every trainer draws its window through); the per-document attention-work accumulator the MFU attention term reads; HF's `total_flos` estimate, with its parameter count walked once per model, summed in the log's all-reduce and on its own at a save and at the end of training (`store_flos`); `effective_loss_mask` |
 | `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `_fsdp_excluded_params`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
-| `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant` |
+| `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant`, and `apply_checkpointing_args`, which writes the checkpoint kwargs under both `gradient_checkpointing*` and `activation_checkpointing*` |
 | `parallelism/grad_sync.py` | `GradientSyncMixin`: the grad-accum window, the QLoRA / deferred-EP / TP-replicated grad sweeps and their step-pre-hooks |
 | `parallelism/grad_clipping.py` | `GradientClippingMixin`: the EP / TP / QLoRA `clip_grad_norm_` replacements and the EP/DTensor-aware global norm they reduce; `pp_clip_grad_norm` and the clip primitives |
 | `parallelism/pipeline_trainer.py` | `PipelineTrainerMixin`: the PP split, setup, schedule-driven step and eval, inert unless `pp_size > 1` |
@@ -118,23 +118,27 @@ them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 | `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
 No trainer refuses EP, TP or ETP. GPU rows run all three under SFT, DPO, offline, online and async GRPO,
-SDPG, reward and classification; SMPO, KTO, teacher distillation and embedding are verified under EP and TP,
-and self-distillation under EP only. A **No** PP trainer is refused at config time
+SDPG, reward, classification, SMPO and teacher and self distillation; KTO and embedding are verified under EP
+and TP. A **No** PP trainer is refused at config time
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 `DistributedSDPGTrainer` overrides the online trainer's `PACKED_ROWS_REFUSAL` and declares its teacher prompt as a second entry of `ROUND_PROMPT_ROWS` ([Online SDPG](../training-methods/distillation/online-sdpg.md#refusals)).
 
 A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
-`SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,
+`SUPPORTS_CP` and `PP_REFUSAL` are read by `reject_undeclared_axes(cp_size=,
 pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
-`_init_distributed_config` runs again at construction:
+`_init_distributed_config` runs again at construction. `SUPPORTS_HYBRID_CP` is read by
+`reject_hybrid_cp_training` on the concrete trainer class:
 
 | ClassVar | Default | Meaning |
 |---|---|---|
 | `SUPPORTS_CP` | `False` | CP admitted |
+| `SUPPORTS_HYBRID_CP` | `False` | dense hybrid CP admitted only when declared on the concrete SFT trainer; subclasses must opt in separately ([restrictions](../parallelism/context-parallelism.md#dense-hybrid-sft)) |
 | `PP_REFUSAL` | a generic refusal | the mechanism the PP refusal names; `None` where PP is supported |
 | `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
-| `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT) |
+| `GENERATION_SHAPED_ROWS` | `False` | rows come from generation, so the config has no `max_length`: the EP dispatch-ceiling gate takes the row length from `declared_row_length` (online and async GRPO, SDPG) |
+| `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT, and teacher distillation on the student) |
+| `SUPPORTS_NATIVE_LOWP` | `False` | `lowp_backend: native` applies (SFT) |
 | `POLICY_GRADIENT_LOSS` | `False` | the loss runs outside the forward with no labels (the GRPO family): it never adds the router aux loss, and an applied Liger FLCE draws a warning |
 | `SYNCS_TO_EXTERNAL_GENERATOR` | `False` | on-policy RL that syncs weights to a rollout engine (online and async GRPO, SDPG) |
 | `ROUTER_AUX_LOSS_ADDED_BY` | `None` | what adds the router aux loss: `"model_forward"` (SFT's `labels` forward), `"trl_loss"` (DPO, KTO; TRL is handed the balancing mode's coefficient, every other trainer `0.0`), or nothing, where `moe_balancing: aux_loss` is refused and `auto` turns the router logits back off |
@@ -416,8 +420,8 @@ every clip path, so every rank reaches the same verdict. The optimizer picks how
 
 On the device path the warning and both raises come at the late read, at the latest before the next step's
 update, so no later step is applied and a final non-finite step is reported before training ends. Against no guard
-on 8× B300 at s4096 (1.2.0) that path reads TP2 +0.88%, ep1 +0.31%, ep2 +0.69% and CP2 −0.96% (six rounds, ranges
-overlapping), where a host read before every step costs TP2 3.26% and ep2 42 ms of sync wait per step.
+on 8× B300 at s4096 (1.2.0) that path reads `tp2` +0.88%, `ep1` +0.31%, `ep2` +0.69% and `cp2` −0.96% (six rounds, ranges
+overlapping), where a host read before every step costs `tp2` 3.26% and `ep2` 42 ms of sync wait per step.
 
 The skip is installed in `create_optimizer` on the optimizer that steps (the one inside accelerate's wrapper), so
 every trainer gets it: before the LR scheduler wraps its `step`, or over the scheduler's wrapper when the caller
@@ -574,7 +578,7 @@ constructor; `early_stop.py`; `phase_timing.py` (`PhaseTimedMixin`, the phase sp
 `DistributedTrainerMixin`; `rounds/packed_rounds.py` (`PackedRoundMixin`, the packed micro-batches' plan, slot layout and bin-by-bin
 scoring), `rounds/packed_rules.py` (their refusals), `rounds/microbatch_plan.py` and `rounds/row_order.py` (the row permutation and the loss types
 that admit a regrouping of rows), which both on-policy trainers share; and `logprob_scoring.py`, the log-prob scoring every GRPO trainer composes (the chunked sweep over
-`halo/kernels/head_logprobs.py`, the full-logits memory guard, the protected-token entropy mask, and
+`halo/kernels/head_logprobs.py`, the full-logits memory guard on the shared `halo/trainers/full_logits_memory.py`, the protected-token entropy mask, and
 `_reference_policy`, the model the KL reference forward runs: a held `ref_model`, else the PEFT policy with
 its adapters disabled). Support code lives in `objective/` (pure loss-side functions) and `rollout/`
 (`weight_push.py`, the push and its construction gate; `engine_preflight.py`, the COLLECTIVE rollout-server
@@ -630,13 +634,14 @@ the frozen base ([PEFT](../optimization/peft.md#online-rl--rollout-server-weight
 ## FSDP2 output capturing
 
 Transformers models capture auxiliary outputs (router logits, hidden states, attention weights) via
-a `capture_outputs` decorator keyed on `_CAN_RECORD_REGISTRY` (`str(class)` → capturable flags).
-FSDP2 `fully_shard` creates dynamic subclasses at wrap time (`GptOssModel` → `FSDPGptOssModel`) that
-are not in the registry, so capture silently fails.
+a `capture_outputs` decorator keyed on `_CAN_RECORD_REGISTRY` (`str(class)` → capturable flags; the
+registry takes the model and derives that key). FSDP2 `fully_shard` swaps in a dynamic subclass at wrap
+time (`GptOssModel` → `FSDPGptOssModel`) that is not in the registry, so an unregistered one captures
+nothing: a `router_logits` request comes back empty and the aux loss is the int 0.
 
 `_register_output_capturing_for_fsdp()` walks the wrapped model, finds modules with `_can_record_outputs` not yet registered, and adds them. It
-runs from `_configure_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path);
-accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
+runs from `_configure_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path).
+Accelerate-managed FSDP2 wraps the model inside `train()`, after this point, and registers nothing.
 
 ## Checkpoint save and load
 
@@ -662,7 +667,8 @@ load). The shared reference mixin overrides the write for DPO/KTO and offline GR
 DPO/KTO read it back during TRL's `__init__`, and offline GRPO restores it during construction,
 not through the resume hook. The async GRPO rollout mixin overrides both for its pending prefetch
 rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixin` in its bases,
-so the empty defaults do not shadow it.
+and each override calls `super()` first, so the defaults still run: they write and read back
+`moe_expert_token_counts.json` ([Callbacks](../training-methods/callbacks.md#expert-token-counts-over-the-run)).
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
 guaranteed to be refused: `cp_size > 1`, a MoE carrying EP layers (`ep_size: 1`

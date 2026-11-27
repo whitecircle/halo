@@ -10,12 +10,14 @@ import re
 import statistics
 from collections import defaultdict
 from collections.abc import Iterable
+from dataclasses import replace
 from functools import partial
 from typing import Any
 
 import httpx
 from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 
+from halo.env import env_str
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.episodes.episode_keys import ANSWER_KEY, CONTEXT_KEY, EPISODE_INVALID_REASON_KEY, solve_verdict
 from halo.environments.episodes.messages import Message, Trajectory, task_prompt
@@ -26,7 +28,7 @@ from halo.environments.episodes.reasoning_effort import (
     stable_reasoning_effort,
 )
 from halo.environments.episodes.turn_recovery import EMPTY_TURNS_KEY
-from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
+from halo.environments.rollout_config import RANDOM_REASONING_EFFORT, VALID_REASONING_EFFORTS, RolloutConfig
 from halo.environments.rollouts.engine_wire import (
     capture_request_fields,
     generation_control_fields,
@@ -139,62 +141,28 @@ async def _detokenize(client: AsyncOpenAI, rollout: RolloutConfig, ids: list[int
     return reply.json()["prompt"]
 
 
-async def _chat_turn(
-    client: AsyncOpenAI,
-    messages: list[dict[str, Any]],
-    tools: list[dict] | None,
-    rollout: RolloutConfig,
-    effort: EpisodeEffort,
-) -> TurnGeneration:
-    """Read back by the training rollout's own parser, a call cut at the cap decoded as the policy wrote it."""
-    request: dict[str, Any] = {
+def _written_body_fields(
+    rollout: RolloutConfig, level: str | None, messages: list[dict[str, Any]], tools: list[dict] | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The body fields an eval request writes itself: those the SDK takes as keywords, and those sent in its
+    ``extra_body``. ``NOT_GIVEN`` leaves a field out of the body."""
+    keywords = {
         "model": rollout.model_name or NOT_GIVEN,
         "messages": messages,
         "max_tokens": rollout.max_tokens,
-        "timeout": rollout.request_timeout,
         "temperature": rollout.temperature,
         "top_p": rollout.top_p,
-        "extra_body": {
-            **capture_request_fields(rollout),
-            **generation_control_fields(rollout, effort.level),
-        },
+        "tools": NOT_GIVEN if tools is None else tools,
     }
-    if tools is not None:
-        request["tools"] = tools
-    completion = await chat_completion(client, **request)
-    gen = turn_from_chat_completion(completion.model_dump(), rollout)
-    return await with_cut_call_as_written(gen, rollout, partial(_detokenize, client, rollout), "eval episode")
-
-
-async def _request_turn(
-    client: AsyncOpenAI,
-    env: EnvironmentBase,
-    messages: list[dict[str, Any]],
-    rollout: RolloutConfig,
-    effort: EpisodeEffort,
-) -> TurnGeneration:
-    """The tools are read per turn, after the reset: an MCP environment learns its tools only when the first reset
-    connects to the server."""
-    try:
-        return await generate_turn(
-            partial(_chat_turn, client, messages, env.get_tools_schema() or None, rollout, effort),
-            rollout,
-            retry_on=(APIStatusError,),
-            giveup=_is_terminal_for_eval,
-            log_prefix="eval episode",
-        )
-    except Exception:
-        # Unlogged, an early end yields an all-zero eval indistinguishable from a bad endpoint.
-        logger.warning("generation failed, ending episode early", exc_info=True)
-        raise
+    return keywords, {**capture_request_fields(rollout), **generation_control_fields(rollout, level)}
 
 
 def _bind_eval_effort(
     env: EnvironmentBase, prompt: str | list[dict[str, Any]], context: dict[str, Any], rollout: RolloutConfig
 ) -> tuple[dict[str, Any], EpisodeEffort]:
     """Bound as the training rollout binds it; a ``random`` level is drawn from the problem, so every checkpoint scores
-    a problem at the same level."""
-    if env.reasoning_effort == RANDOM_REASONING_EFFORT and not (context or {}).get("reasoning_effort"):
+    a problem at the same level. Only a missing or null cell is drawn: any other reaches the binding's check."""
+    if env.reasoning_effort == RANDOM_REASONING_EFFORT and (context or {}).get("reasoning_effort") is None:
         context = {**(context or {}), "reasoning_effort": stable_reasoning_effort(prompt)}
     effort = bind_episode_effort(
         context,
@@ -209,6 +177,75 @@ def _bind_eval_effort(
     return context, effort
 
 
+def resolve_eval_extra_body(env: EnvironmentBase, rollout: RolloutConfig) -> dict[str, Any]:
+    """``HALO_EVAL_EXTRA_BODY``, the fields laid over every eval request's body for an endpoint's own options
+    (OpenRouter's ``provider`` routing). Raises on anything but a JSON object, and on a field a turn's request writes
+    itself, top-level or nested: the SDK lays ``extra_body`` over the whole body, so the overlay would replace it."""
+    raw = env_str("HALO_EVAL_EXTRA_BODY") or "{}"
+    try:
+        body = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise ValueError(
+            f"HALO_EVAL_EXTRA_BODY is not JSON ({e}): set it to a JSON object of endpoint options."
+        ) from e
+    if not isinstance(body, dict):
+        raise ValueError(f"HALO_EVAL_EXTRA_BODY must be a JSON object of endpoint options, got {type(body).__name__}.")
+    # A turn's request under the episode's caps, which carry the reasoning cap a run derives from its answer room; at
+    # a level, since a request writes reasoning_effort only under one.
+    _, effort = _bind_eval_effort(env, "", {"reasoning_effort": VALID_REASONING_EFFORTS[0]}, rollout)
+    turn = replace(rollout, **effort.turn_caps(0))
+    keywords, nested = _written_body_fields(turn, effort.level, [], None)
+    overlap = sorted(body.keys() & (keywords.keys() | nested.keys()))
+    if overlap:
+        raise ValueError(
+            f"HALO_EVAL_EXTRA_BODY sets {overlap}, which every eval request writes itself, so the overlay would "
+            "replace them. Drop them from HALO_EVAL_EXTRA_BODY and set them through the training config or the "
+            "eval's flags."
+        )
+    return body
+
+
+async def _chat_turn(
+    client: AsyncOpenAI,
+    messages: list[dict[str, Any]],
+    tools: list[dict] | None,
+    rollout: RolloutConfig,
+    effort: EpisodeEffort,
+    extra_body: dict[str, Any],
+) -> TurnGeneration:
+    """Read back by the training rollout's own parser, a call cut at the cap decoded as the policy wrote it."""
+    keywords, nested = _written_body_fields(rollout, effort.level, messages, tools)
+    completion = await chat_completion(
+        client, **keywords, timeout=rollout.request_timeout, extra_body={**nested, **extra_body}
+    )
+    gen = turn_from_chat_completion(completion.model_dump(), rollout)
+    return await with_cut_call_as_written(gen, rollout, partial(_detokenize, client, rollout), "eval episode")
+
+
+async def _request_turn(
+    client: AsyncOpenAI,
+    env: EnvironmentBase,
+    extra_body: dict[str, Any],
+    messages: list[dict[str, Any]],
+    rollout: RolloutConfig,
+    effort: EpisodeEffort,
+) -> TurnGeneration:
+    """The tools are read per turn, after the reset: an MCP environment learns its tools only when the first reset
+    connects to the server."""
+    try:
+        return await generate_turn(
+            partial(_chat_turn, client, messages, env.get_tools_schema() or None, rollout, effort, extra_body),
+            rollout,
+            retry_on=(APIStatusError,),
+            giveup=_is_terminal_for_eval,
+            log_prefix="eval episode",
+        )
+    except Exception:
+        # Unlogged, an early end yields an all-zero eval indistinguishable from a bad endpoint.
+        logger.warning("generation failed, ending episode early", exc_info=True)
+        raise
+
+
 async def run_episode(
     env: EnvironmentBase,
     prompt: str | list[dict[str, Any]],
@@ -216,16 +253,18 @@ async def run_episode(
     client: AsyncOpenAI,
     *,
     rollout: RolloutConfig,
+    extra_body: dict[str, Any],
 ) -> Trajectory:
-    """A generation lost past the retries closes the episode on what it earned, stamped :data:`_DRIVER_FAULT_KEY`
-    unless the request itself caused it."""
+    """``extra_body`` is laid over every request's body (:func:`resolve_eval_extra_body`). A generation lost past the
+    retries closes the episode on what it earned, stamped :data:`_DRIVER_FAULT_KEY` unless the request itself caused
+    it."""
     context, effort = _bind_eval_effort(env, prompt, context, rollout)
     played = await play_episode(
         env,
         prompt,
         context,
         effort,
-        partial(_request_turn, client, env),
+        partial(_request_turn, client, env, extra_body),
         rollout,
         log_prefix="eval episode",
         keep_lost=lambda exc: True,
@@ -289,6 +328,7 @@ async def collect_results(
         max_episode_tokens=rollout.max_episode_tokens,
         max_answer_tokens=rollout.max_answer_tokens,
     )
+    extra_body = resolve_eval_extra_body(env, rollout)
     tasks = [task_prompt(example["prompt"]) for example in examples]
     semaphore = asyncio.Semaphore(max_workers)
 
@@ -296,7 +336,7 @@ async def collect_results(
         # Isolated: an escaping exception would cancel the sibling tasks in the gather.
         try:
             async with semaphore:
-                traj = await run_episode(env, task, example["context"], client, rollout=rollout)
+                traj = await run_episode(env, task, example["context"], client, rollout=rollout, extra_body=extra_body)
             rec = _sample_record(env, traj, success_threshold)
             if collect_trajectories:
                 rec["trajectory"] = serialize_trajectory(traj)

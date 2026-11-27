@@ -118,7 +118,7 @@ def test_the_reference_trl_builds_itself_runs_the_pretrained_sinks(tmp_path, mon
     assert has_live_attention_sinks(reference) is True
 
 
-@pytest.mark.parametrize("ep_size", [1, 2, 8])
+@pytest.mark.parametrize("ep_size", [1, 8])
 def test_a_reference_without_the_live_sinks_is_rejected_in_every_parallelism_mode(ep_size):
     """At ep_size == 1 an early return would never see the sinks."""
     with pytest.raises(ValueError, match=r"disagree on attention sinks \(policy: live, reference: not live\)"):

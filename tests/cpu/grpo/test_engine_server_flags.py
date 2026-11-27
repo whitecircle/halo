@@ -19,6 +19,9 @@ from tests.common.fake_engines import FakeSGLangServer, FakeVLLMServer
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT, load_script_module
 
+# Registered so the SGLang patch table's own ``from engine_source_patch import ...`` resolves, as in the image.
+load_script_module("docker/engine_source_patch.py", register=True)
+
 _ENV_SCRIPT = REPO_ROOT / "scripts/training/grpo/environmental.py"
 _ONLINE_SCRIPT = REPO_ROOT / "scripts/training/grpo/online.py"
 
@@ -146,6 +149,16 @@ def test_a_quantized_server_is_refused_on_every_model(engine):
     for is_moe in (True, False):
         with pytest.raises(ValueError, match=r"weights are quantized \(fp8\)"):
             _verify(server, client_cls, is_moe=is_moe)
+
+
+@_ENGINES_FIXTURE
+def test_a_server_whose_weights_are_never_written_may_be_quantized_on_any_moe_runner(engine):
+    """An adapter-synced policy over a base no push carries: the served release is only read."""
+    server, client_cls = engine
+    server.quantization, server.moe_backend = "modelopt_fp4", "auto"
+    _verify(server, client_cls, is_moe=True, pushes_base=False)
+    with pytest.raises(ValueError, match=r"weights are quantized \(modelopt_fp4\)"):
+        _verify(server, client_cls, is_moe=True)
 
 
 @_ENGINES_FIXTURE
@@ -327,16 +340,14 @@ def test_a_reply_missing_a_flag_passes_with_it_unread(engine, monkeypatch):
     def bare(method, path, body):
         if path != "/server_info":
             return original(method, path, body)
-        identity = {"vllm_env": {_IDENTITY_KEY: "x"}} if client_cls is VLLMWeightSyncClient else {"halo_patches": True}
+        if client_cls is VLLMWeightSyncClient:
+            identity = {"vllm_env": {_IDENTITY_KEY: server.identity}}
+        else:
+            identity = {"halo_patches": True}
         return 200, {"tp_size": 1, **identity}
 
     monkeypatch.setattr(server, "answer", bare)
     _verify(server, client_cls, is_moe=True, reasoning_consumers=("reasoning_floor",), sends_tools=True)
-
-
-def test_the_identity_key_is_the_one_the_image_declares():
-    patch = load_script_module("docker/vllm/patches/vllm_image_identity_patch.py")
-    assert patch.IDENTITY_KEY == _IDENTITY_KEY
 
 
 @pytest.mark.parametrize("script", [_ENV_SCRIPT, _ONLINE_SCRIPT], ids=["environmental", "online"])
@@ -370,6 +381,8 @@ _LAUNCH_FACTS = {
         "attention_backend": "FLASH_ATTN",
         "compilation_mode": "VLLM_COMPILE",
         "cudagraph_mode": "FULL_AND_PIECEWISE",
+        "enable_lora": False,
+        "runtime_adapter_routes": True,
     },
     FakeSGLangServer: {
         "tp_size": 1,
