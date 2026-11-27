@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 
 import torch.nn as nn
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_plan
+from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES, _get_parameter_plan
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
@@ -151,6 +151,27 @@ def _convert_dense_mlps(
                 _convert_dense_linear(child, path, quant_format, tp_plan, tp_mesh)
                 converted += 1
     return converted
+
+
+def lowp_converted_modules(model: nn.Module) -> list[str]:
+    """Names of the modules :func:`apply_lowp_compute` converted: retyped dense projections and EP layers carrying a
+    quantization format, loop-path layers included, as they carry it too."""
+    return [
+        name
+        for name, module in model.named_modules()
+        if isinstance(module, LowPrecisionLinear) or (isinstance(module, EPMoELayerBase) and module._lowp is not None)
+    ]
+
+
+def lowp_computing_modules(model: nn.Module) -> list[str]:
+    """The :func:`lowp_converted_modules` whose forward applies the format, as :func:`apply_lowp_compute` counts them:
+    an EP layer on the per-expert loop path carries the format but computes its experts unquantized."""
+    modules = dict(model.named_modules())
+    return [
+        name
+        for name in lowp_converted_modules(model)
+        if not (isinstance(modules[name], EPMoELayerBase) and not modules[name]._use_grouped_mm)
+    ]
 
 
 def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cacheable: bool) -> dict:

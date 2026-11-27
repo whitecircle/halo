@@ -3,36 +3,49 @@ cancel out."""
 
 import argparse
 import contextlib
+import itertools
 import math
+import random
+from collections.abc import Callable
+from functools import partial
+from typing import TYPE_CHECKING, NamedTuple
 
 import torch
-from datasets import Dataset
+from datasets import Dataset, concatenate_datasets
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from tokenizers.pre_tokenizers import Whitespace
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedTokenizerFast, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
+from halo.callbacks.moe_metrics import _selected_experts
 from halo.checkpoint.reading import load_full_state_dict
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.model_loading.parallel.loader import load_distributed_model
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from halo.models.introspection.config_access import get_config_field
+from halo.models.moe.config_fields import resolve_moe_routing
+from halo.models.moe.router_logits import declared_routers
+from halo.runtime.collectives import combine_across_ranks
 from halo.trainers.grpo.objective.logratio import KL_LOGRATIO_CLAMP
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from tests.common.checkpoint_io import loading_problems
 from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.numerics import max_or_nan
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 
+if TYPE_CHECKING:
+    from tests.common.tiny_models import TinyFamily
+
 OFFLINE_WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet")
-OFFLINE_VOCAB = {
-    word: index
-    for index, word in enumerate(
-        ("<pad>", "<eos>", "<unk>", "question", "answer", "yes", "no", "maybe", *OFFLINE_WORDS)
-    )
-}
+# The offline vocabulary past its special tokens.
+OFFLINE_TEXT_WORDS = ("question", "answer", "yes", "no", "maybe", *OFFLINE_WORDS)
+OFFLINE_VOCAB = {word: index for index, word in enumerate(("<pad>", "<eos>", "<unk>", *OFFLINE_TEXT_WORDS))}
 OFFLINE_QWEN3_MOE_CONFIG = TINY_QWEN3_MOE_CONFIG | {
     "vocab_size": len(OFFLINE_VOCAB),
     "num_hidden_layers": 2,
@@ -60,6 +73,27 @@ EP_LOADINGS = ("lazy", "eager")
 EXPORT_PROBE_WORDS = ("question", "alpha", "answer", "yes", "<eos>")
 # Mismatching tensors an export comparison names before it stops listing.
 EXPORT_MISMATCH_PREVIEW = 12
+# Random-word groups a KL suite trains beside its template rows, which share prompt positions: one such position inside
+# the bf16 routing noise fails every templated row at once. Over 21 CPU seeds of each Ulysses MoE family, the fewest of
+# the 144 rows beside 8 template groups with routing headroom for a KL check was 6 (Mistral 4). More groups do not
+# raise it, since the noise is a maximum over every row: at 128, Mistral 4's base checkpoint fell from 7 such rows to 5.
+KL_ROUTING_POOL_GROUPS = 64
+# The routing margin, in measured bf16 router noises, a row needs before it is compared against the trainer's kernels.
+ROUTING_HEADROOM = 3
+
+
+class RoutingClearRows(NamedTuple):
+    """``rows`` to collate; ``cleared``, in dataset order, every row keeping fp32's selection at every router past twice
+    ``noise``, the largest bf16-vs-fp32 router-logit difference the scan measured, which holds the eager oracle's own
+    kernels to fp32's choice; ``headroom``, those of them whose margin is at least :data:`ROUTING_HEADROOM` times
+    ``noise``, which also holds any kernel moving router logits less than half that many times ``noise``; ``clear``
+    when ``rows`` all come from ``headroom``."""
+
+    rows: tuple[int, ...]
+    clear: bool
+    noise: float
+    cleared: tuple[int, ...]
+    headroom: tuple[int, ...]
 
 
 def ep_loading_parser() -> argparse.ArgumentParser:
@@ -107,6 +141,30 @@ def offline_grpo_dataset(groups, offset=0):
     return Dataset.from_list(records)
 
 
+def random_word_groups(groups, seed) -> Dataset:
+    """``groups`` oppositely rewarded completion pairs of random offline words, one to three in a prompt and one or two
+    in a completion, so no position is common to every row."""
+    rng = random.Random(seed)
+
+    def words(fewest, most):
+        return " ".join(rng.choices(OFFLINE_TEXT_WORDS, k=rng.randint(fewest, most)))
+
+    return Dataset.from_list(
+        [
+            {"prompt": words(1, 3), "completions": [words(1, 2), words(1, 2)], "rewards": [1.0, -1.0]}
+            for _ in range(groups)
+        ]
+    )
+
+
+def kl_oracle_training_set(template_groups, seed) -> Dataset:
+    """:func:`offline_grpo_dataset` followed by :data:`KL_ROUTING_POOL_GROUPS` random-word groups: the rows
+    :func:`routing_clear_rows` draws a KL batch from."""
+    return concatenate_datasets(
+        [offline_grpo_dataset(template_groups), random_word_groups(KL_ROUTING_POOL_GROUPS, seed)]
+    )
+
+
 def mixed_length_groups(groups) -> Dataset:
     """Long prompts and short ones, so a batch holding both left-pads a short row past Mistral 4's scale step and
     DeepSeek-V4's compressor windows."""
@@ -136,6 +194,24 @@ def load_liger_class_patched_model(model_path, *, attn_implementation="flash_att
         trust_remote_code=True,
         attn_implementation=attn_implementation,
     )
+
+
+def eager_oracle(source, device="cpu", dtype=torch.bfloat16, *, family: "TinyFamily | None" = None):
+    """``source`` at ``dtype`` with full-row eager attention and sinks neutralized, in eval mode, through ``family``'s
+    loader (the auto causal-LM class without one). Finalized as production loads are: a remote-code rotary table is
+    otherwise the uninitialized memory transformers 5 leaves in non-persistent buffers."""
+    model, info = (AutoModelForCausalLM if family is None else family.load_class).from_pretrained(
+        source,
+        dtype=dtype,
+        attn_implementation="eager",
+        output_loading_info=True,
+        trust_remote_code=family is not None and family.trust_remote_code,
+    )
+    assert not loading_problems(info), f"incomplete oracle/export checkpoint: {loading_problems(info)}"
+    model.to(device)
+    finalize_loaded_model(model, source)
+    apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
+    return model.eval()
 
 
 def offline_grpo_config(
@@ -247,17 +323,36 @@ def completion_logps(model, batch) -> torch.Tensor:
     return token_logps(model, ids, attention_mask)[:, -batch["completion_input_ids"].size(1) :]
 
 
+def sweep_batches(rows: int, width: int, dp_size: int) -> list[range]:
+    """The dataset rows of each batch a reference sweep collates: ``width`` rows in order within each of ``dp_size``
+    contiguous data-parallel shards, the last batch of a shard ``width`` does not divide holding the remainder."""
+    bounds = [shard * rows // dp_size for shard in range(dp_size + 1)]
+    return [
+        range(start, min(start + width, end))
+        for begin, end in itertools.pairwise(bounds)
+        for start in range(begin, end, width)
+    ]
+
+
 def reference_oracle_rows(oracle) -> list[torch.Tensor]:
     """Each row's completion log-probs under ``oracle``, a ``kl_beta=0`` trainer released here: what a reference sweep
-    must reproduce."""
-    batch = oracle._prepare_inputs(oracle.data_collator(list(oracle.train_dataset)))
+    must reproduce. Collated in the sweep's :func:`sweep_batches`, a short one filled to full width with copies of its
+    last row as the sweep fills it, so a row's padding, and any routing near-tie with it, comes out alike on both
+    sides."""
+    dataset, width = oracle.train_dataset, oracle.args.per_device_train_batch_size
+    dp_size, _ = oracle.dp_shard_geometry()
     oracle.model.eval()
-    with torch.no_grad():
-        logps = completion_logps(oracle.model, batch)
-    rows = [
-        row[: int(mask.sum())].cpu().clone()
-        for row, mask in zip(logps, batch["completion_attention_mask"], strict=True)
-    ]
+    rows = []
+    for indices in sweep_batches(len(dataset), width, dp_size):
+        features = list(dataset.select(indices))
+        batch = oracle._prepare_inputs(oracle.data_collator(features + features[-1:] * (width - len(features))))
+        with torch.no_grad():
+            logps = completion_logps(oracle.model, batch)
+        real = len(features)
+        rows.extend(
+            row[: int(mask.sum())].cpu().clone()
+            for row, mask in zip(logps[:real], batch["completion_attention_mask"][:real], strict=True)
+        )
     finish_phase(oracle)
     return rows
 
@@ -273,10 +368,164 @@ def swept_reference_error(swept_rows, expected_rows) -> float:
     )
 
 
-def pure_kl_batch(trainer) -> dict:
-    """The first two training rows, collated and placed, with zero advantages: the loss on this batch is the KL term
-    alone."""
-    batch = trainer._prepare_inputs(trainer.data_collator([trainer.train_dataset[index] for index in range(2)]))
+def _router_outputs(model, input_ids, attention_mask) -> list[tuple[torch.Tensor, torch.Tensor | None]]:
+    """Each router's fp32 ``[B, S, experts]`` logits and ``[B, S, k]`` selected ids (None where it returns logits
+    alone), in forward order. A model declaring no router is read off its forward's ``router_logits``."""
+    routers = declared_routers(model)
+    outputs = []
+
+    def record(router, module, inputs, output):
+        logits = output[router.logits_index] if isinstance(output, (tuple, list)) else output
+        outputs.append((logits, None if router.folds_discard_slot else _selected_experts(output, router.logits_index)))
+
+    handles = [router.module.register_forward_hook(partial(record, router)) for router in routers]
+    try:
+        with torch.no_grad():
+            result = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                use_cache=False,
+                **({} if routers else {"output_router_logits": True}),
+            )
+    finally:
+        for handle in handles:
+            handle.remove()
+    if not routers:
+        outputs = [
+            (layer[0] if isinstance(layer, (tuple, list)) else layer, _selected_experts(layer, 0))
+            for layer in getattr(result, "router_logits", None) or ()
+        ]
+    shape = input_ids.shape
+    return [
+        (logits.float().reshape(*shape, -1), None if ids is None else ids.reshape(*shape, -1))
+        for logits, ids in outputs
+    ]
+
+
+def _selection(logits, ids, top_k) -> torch.Tensor:
+    return (logits.topk(top_k, dim=-1).indices if ids is None else ids).sort(-1).values
+
+
+def _selection_margin(logits, selection, groups, picked_groups) -> torch.Tensor:
+    """Per position, the logit shift that could first change the router's own ``selection``: its lowest logit's lead
+    over every expert competing with it, and, for a router picking ``picked_groups`` of ``groups`` contiguous expert
+    blocks by their top two scores, each picked block's first and second logits over every other block's. A bound for
+    scores strictly increasing in the logit with no selection bias added after it; a router ranking scores it rounded to
+    bf16 (Mistral 4's softmax) can swap logits up to one bf16 score step apart, which it does not bound."""
+    chosen = torch.zeros_like(logits, dtype=torch.bool).scatter_(-1, selection, True)
+    picked = chosen.unflatten(-1, (groups, -1)).any(-1)
+    # One picked block leaves only its own experts in the race; with more, a picked block may hold no selection.
+    competing = (
+        picked.repeat_interleave(logits.size(-1) // groups, dim=-1) if picked_groups == 1 else torch.ones_like(chosen)
+    )
+    lead = logits.masked_fill(~chosen, math.inf).amin(-1) - logits.masked_fill(chosen | ~competing, -math.inf).amax(-1)
+    top_two = logits.unflatten(-1, (groups, -1)).topk(2, dim=-1).values
+    block_lead = top_two.masked_fill(~picked[..., None], math.inf).amin(-2) - top_two.masked_fill(
+        picked[..., None], -math.inf
+    ).amax(-2)
+    return torch.minimum(lead, block_lead.amin(-1))
+
+
+def routing_clear_rows(load_oracle: Callable[[torch.dtype], torch.nn.Module], dataset, count=2) -> RoutingClearRows:
+    """Every row of ``dataset`` whose expert choices at every router outlast the bf16 kernel noise of the weights
+    ``load_oracle(dtype)`` loads, those of them with :data:`ROUTING_HEADROOM`, and ``count`` rows with headroom for
+    a KL batch: those with twice the headroom first, then the most completion tokens, the tokens a KL check scores
+    (EOS included), then the wider margin. Where fewer have headroom, ``clear`` is False and the widest-margin rows,
+    clearing ones first, fill in. A dense model clears every row and keeps the first. Raises when a model with routed
+    experts exposes no router logits.
+
+    The bar is the eager oracle's measured noise: a row clears where the bf16 oracle keeps fp32's choices and every
+    router's fp32 margin exceeds twice the largest bf16-vs-fp32 logit difference at each position a scored log-prob
+    reads, which holds two forwards moving logits no further than the eager oracle to one choice. The trainer's kernels
+    go unmeasured; only the headroom covers them."""
+    pairs = [(row["prompt_input_ids"], row["completion_input_ids"]) for row in dataset]
+    rows = [prompt + completion for prompt, completion in pairs]
+    scored = [len(completion) for _, completion in pairs]
+    lengths = torch.tensor([len(row) for row in rows])
+    exact_model = load_oracle(torch.float32)
+    routing = resolve_moe_routing(exact_model)
+    if not routing.routes_between_experts and not declared_routers(exact_model):
+        every = tuple(range(len(rows)))
+        return RoutingClearRows(every[:count], True, 0.0, every, every)
+    groups = get_config_field(exact_model.config, "n_group") or 1
+    picked_groups = get_config_field(exact_model.config, "topk_group") or 1
+    input_ids = torch.nn.utils.rnn.pad_sequence([torch.tensor(row) for row in rows], batch_first=True)
+    positions = torch.arange(input_ids.size(1))
+    attention_mask = (positions < lengths[:, None]).long()
+    device = exact_model.device
+    exact = _router_outputs(exact_model, input_ids.to(device), attention_mask.to(device))
+    del exact_model
+    if not exact:
+        raise ValueError(
+            "The oracle's routing scan found no router logits on a model with routed experts: it declares no "
+            "router_logits recorder and its forward returns no router_logits, so the margins that keep the trainer's "
+            "and the oracle's expert choices alike cannot be read. Register the family's router under "
+            "_can_record_outputs['router_logits']."
+        )
+    noisy = _router_outputs(load_oracle(torch.bfloat16), input_ids.to(device), attention_mask.to(device))
+    # A row's last real position predicts past the row, so no scored log-prob reads it.
+    checked = (positions < (lengths - 1)[:, None]).to(device)
+    agree = torch.ones(len(rows), dtype=torch.bool, device=device)
+    margin = torch.full((len(rows),), math.inf, device=device)
+    for (logits, ids), (noisy_logits, noisy_ids) in zip(exact, noisy, strict=True):
+        selection = _selection(logits, ids, routing.top_k)
+        agree &= ((selection == _selection(noisy_logits, noisy_ids, routing.top_k)).all(-1) | ~checked).all(-1)
+        position_margin = _selection_margin(logits, selection, groups, picked_groups)
+        margin = torch.minimum(margin, position_margin.masked_fill(~checked, math.inf).amin(-1))
+    # Past a flip, a row's later routers move by the flip's effect, not by kernel noise.
+    trusted = checked & agree[:, None]
+    noise = max(
+        float((noisy_logits - logits).abs().amax(-1)[trusted].max()) if trusted.any() else 0.0
+        for (logits, _), (noisy_logits, _) in zip(exact, noisy, strict=True)
+    )
+    margins = margin.tolist()
+    clears = [kept and lead > 2 * noise for kept, lead in zip(agree.tolist(), margins, strict=True)]
+    cleared = tuple(index for index, clear in enumerate(clears) if clear)
+    headroom = tuple(index for index in cleared if margins[index] >= ROUTING_HEADROOM * noise)
+    if len(headroom) >= count:
+        order = sorted(
+            headroom,
+            key=lambda index: (margins[index] < 2 * ROUTING_HEADROOM * noise, -scored[index], -margins[index]),
+        )
+    else:
+        order = sorted(range(len(rows)), key=lambda index: (not clears[index], -margins[index]))
+    chosen = tuple(order[:count])
+    leads = ", ".join(f"{margins[index] / (noise or math.nan):.3g}" for index in chosen)
+    log(
+        f"Routing scan: {len(cleared)}/{len(rows)} rows keep fp32's routing at every router past twice the bf16 noise "
+        f"{noise:.3g}, {len(headroom)} by {ROUTING_HEADROOM} times it or more; rows {chosen} lead it by {leads} times and "
+        f"score {sum(scored[index] for index in chosen)} completion tokens"
+    )
+    return RoutingClearRows(chosen, len(headroom) >= count, noise, cleared, headroom)
+
+
+def _double_output_head(model) -> None:
+    with torch.no_grad():
+        model.get_output_embeddings().weight.mul_(2)
+
+
+def _doubled_head_oracle(load_oracle, dtype):
+    model = load_oracle(dtype)
+    _double_output_head(model)
+    return model
+
+
+def agree_kl_rows(load_oracle, dataset) -> RoutingClearRows:
+    """COLLECTIVE. Rank 0's :func:`routing_clear_rows` of ``load_oracle``'s weights under the doubled output head every
+    KL check compares, which every rank collates alike: a tied head doubles the input embeddings too, moving routers.
+    A scan that raises on rank 0 raises on every rank."""
+    rows = combine_across_ranks(
+        None,
+        lambda _: routing_clear_rows(partial(_doubled_head_oracle, load_oracle), dataset),
+        what="the KL rows' routing scan",
+    )
+    cleanup_memory()
+    return rows
+
+
+def pure_kl_batch(trainer, rows) -> dict:
+    """Training ``rows``, collated and placed, with zero advantages: the loss on this batch is the KL term alone."""
+    batch = trainer._prepare_inputs(trainer.data_collator([trainer.train_dataset[index] for index in rows]))
     batch["advantage"] = torch.zeros_like(batch["advantage"])
     return batch
 
@@ -290,8 +539,7 @@ def doubled_output_head(model):
     was_training = model.training
     model.eval()
     try:
-        with torch.no_grad():
-            model.get_output_embeddings().weight.mul_(2)
+        _double_output_head(model)
         yield model
     finally:
         reshard_fsdp2_modules(model)

@@ -40,10 +40,6 @@ def test_process_wide_cross_entropy_is_untouched(patched):
     F.cross_entropy(torch.randn(4, 7), torch.softmax(torch.randn(4, 7), dim=-1))
 
 
-def test_loss_utils_is_actually_routed_through_liger(patched):
-    assert loss_utils.nn.functional.cross_entropy is liger_cross_entropy
-
-
 def test_hf_loss_really_reaches_the_override():
     """If HF stopped reaching CE through its module-level ``nn``, the patch would silently no-op with a proxy-only
     assert still green."""

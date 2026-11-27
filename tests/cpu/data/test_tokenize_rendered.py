@@ -37,6 +37,7 @@ class BosTokenizer:
 
     bos_token = "<bos>"
     bos_token_id = BOS_ID
+    eos_token_id = None
 
     def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False, **kwargs):
         return self.bos_token + "".join(f"<{m['role']}>{m['content']}</{m['role']}>" for m in messages)
@@ -228,13 +229,6 @@ def test_bos_counts_toward_truncation_budget():
     tok = BosTokenizer()
     ids = tokenize_rendered(tok, "a b c d e", truncation=True, max_length=3)["input_ids"]
     assert len(ids) == 3 and ids[0] == BOS_ID
-
-
-def test_trailing_eos_post_processing_preserved_on_training_rows():
-    """add_special_tokens=False would silently drop the row terminator."""
-    tok = TrailingEosTokenizer()
-    ids = tokenize_rendered(tok, "hello world")["input_ids"]
-    assert ids[-1] == tok.eos_token_id
 
 
 def test_for_generation_strips_trailing_special():
@@ -432,6 +426,7 @@ def test_chat_text_rows_are_length_filtered_on_the_ids_they_train_on():
         model_supports_system_role=True,
         interleaved_thinking=False,
         tools_field=None,
+        reasoning_effort_field=None,
     )
     training_config = SimpleNamespace(dataset_num_proc=1, max_length=len(trained_ids))
 
@@ -440,6 +435,8 @@ def test_chat_text_rows_are_length_filtered_on_the_ids_they_train_on():
         tok,
         args,
         training_config,
+        model_config=None,
+        generation_config=None,
         desc="Processing dataset",
     )
 

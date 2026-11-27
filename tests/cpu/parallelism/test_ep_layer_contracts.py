@@ -12,7 +12,7 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
-from transformers import Qwen3MoeConfig
+from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig
 
 from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
@@ -28,7 +28,7 @@ from halo.kernels.fused_glu import GluCombine
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.trainers.parallelism.ep_layers import EPLayersMixin
-from tests.common.models import TINY_QWEN3_MOE_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
@@ -167,6 +167,28 @@ def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
 
     assert model.gradient_checkpointing_enable is wrapper, "the re-enable wrapper nested itself"
     assert getattr(model._gradient_checkpointing_func, "_ep_scoped", False)
+
+
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+@pytest.mark.parametrize("spelling", ["gradient_checkpointing", "activation_checkpointing"])
+def test_a_reenable_under_either_spelling_keeps_the_scopes_and_splits_the_layer_policy(spelling):
+    """TRL re-enables through the deprecated spelling with the args dict unchanged, transformers' Trainer through the
+    current one; ``every_n_layers`` left in the dict would reach ``torch.utils.checkpoint``."""
+    model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
+    enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
+    wrapper = getattr(model, f"{spelling}_enable")
+
+    wrapper(**{f"{spelling}_kwargs": {"use_reentrant": False, "every_n_layers": 2}})
+
+    assert getattr(model, f"{spelling}_enable") is wrapper, "the re-enable wrapper nested itself"
+    layers = list(model.model.layers)
+    assert [layer.gradient_checkpointing for layer in layers] == [index % 2 == 0 for index in range(len(layers))]
+    for layer in layers:
+        installed = layer._gradient_checkpointing_func
+        assert getattr(installed, "_ep_scoped", False)
+        while hasattr(installed, "__wrapped__"):
+            installed = installed.__wrapped__
+        assert installed.keywords == {"use_reentrant": False}
 
 
 def test_a_second_full_enable_is_idempotent_not_a_raise():

@@ -4,7 +4,7 @@ Thinking Machines' `InklingForConditionalGeneration` (`thinkingmachines/Inkling-
 
 Attention is hybrid sliding (5 sliding : 1 full, period 6) with **no RoPE** — position enters as an additive relative-logits bias — plus depthwise causal short convolutions (`InklingShortConvolution`) on the projected K/V and around each decoder sublayer.
 
-Transformers ships `transformers.models.inkling` natively (the image pins 5.20.2), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
+Transformers ships `transformers.models.inkling` natively (the image pins 5.23.0), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and TP are out for architectural reasons, not a missing registration ([why](#why-cp-and-tp-are-out)). Pipeline parallelism splits the text tower on whole six-layer `layer_types` periods, with packing refused whatever `allow_cross_document_linear_attention` says ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). LoRA is tiny-model verified only (`test_lora_merged_save_resume.py --family inkling_text`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume).
 
@@ -28,7 +28,7 @@ One contract fails closed: the spec's `weight_sync_refusal` refuses online/async
 
 The release's MTP tail (`model.mtp.*`, eight layers) drops at load and exports carry none, so `method=mtp` refuses them; `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
 
-The hub config spells the expert width `intermediate_size: 2048` beside `dense_intermediate_size: 16384`. transformers 5.20 reads those as `moe_intermediate_size` 2048 and `intermediate_size` 16384, so a run needs no override: the built expert tensors match the hub's shard shapes.
+The hub config spells the expert width `intermediate_size: 2048` beside `dense_intermediate_size: 16384`. transformers 5.23 reads those as `moe_intermediate_size` 2048 and `intermediate_size` 16384, so a run needs no override: the built expert tensors match the hub's shard shapes.
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 
@@ -36,7 +36,7 @@ The lazy loaders plan their keys on the same declarative entries, as `from_pretr
 
 The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 
-The family's fp32 pin covers the **short convolutions** (`_keep_in_fp32_modules_strict`: `k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`). Every training loader casts them to the run dtype ([Load precision](README.md#load-precision)), so the sconvs train in bf16 unless the run keeps fp32 masters — a deliberate trade validated by the multi-node runs below.
+The family's fp32 pins (`_keep_in_fp32_modules_strict`) are the **short convolutions** (`k_sconv`/`v_sconv`/`attn_sconv`/`mlp_sconv`), the router's `gate.global_scale` and its `e_score_correction_bias` buffer. Every training loader casts the pinned parameters to the run dtype while the buffer stays fp32 ([Load precision](README.md#load-precision)), so the sconvs train in bf16 unless the run keeps fp32 masters, a deliberate trade validated by the multi-node runs below.
 
 ## Why CP and TP are out
 
@@ -56,12 +56,15 @@ alongside the expert shards (`tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, 
 undistributed composite reference).
 
 Image-text SFT rides the VLM data path (`VLMDataCollator` + `processing_inkling`); text-only data
-through the same class is what the multi-node runs below validated. CP rejects the class outright, so
+through the same class is what the multi-node runs below validated. That path hands a message's text to the template
+as a text part, and Inkling's template writes a tool reply's content only when it is a string, so a tool reply renders
+empty in every row of a VLM run, a text-only row of an image dataset included: the run, not the row, picks the data path
+(`is_vlm_run_across_ranks`). A run with no image data takes the text pipeline and renders the reply whole. CP rejects the class outright, so
 multimodal is EP/ETP-only.
 
 ## Multi-node EP
 
-532 GB of bf16 weights do not fit node-local EP=8 alongside full-FT optimizer states — Inkling-Small trains at `ep_size: 16` / `ep_scope: global` on 2×8 B300. Measured on that topology on Halo 1.0.0 or earlier:
+532 GB of bf16 weights do not fit node-local EP=8 alongside full-FT optimizer states — Inkling-Small trains at `expert_parallel_size: 16` / `ep_scope: global` on 2×8 B300. Measured on that topology on Halo 1.0.0 or earlier:
 
 - Keep `per_device_train_batch_size × max_length` within the cross-node Gin dispatch cap (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, 8192 — [DeepEP](../infrastructure/deepep.md)); the shipped config runs mbs 2 × 4096 = 8192, validated exactly at the cap.
 - Grouped GEMM and the auto SM count (the 24-SM zero-division fallback) run clean at Inkling's shapes. If the first cross-node combine times out intermittently, pin `HALO_DEEPEP_NUM_SMS=16` — fewer channels shrink the barrier race window.
@@ -78,7 +81,7 @@ Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP a
 
 That division and cut are the family's declared head transform (`halo/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep applies them too.
 
-Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here under `allow_cross_document_linear_attention: true` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
+Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: a text-only SFT run takes the text pipeline, so `packing` is available here under `allow_cross_document_linear_attention: true` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 
 The shipped config sets `packing: false`: packed rows would attend the full 8192 tokens/rank/step, against the ~2.3k real tokens the measurement above ran at with a 246 of 288 GB peak, and the depthwise convs would cross packed documents (refused without the opt-in).
 

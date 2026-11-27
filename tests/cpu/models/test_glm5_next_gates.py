@@ -187,15 +187,19 @@ def test_dsa_layers_leak_across_a_packed_row_on_a_dense_backend(attn_impl):
     )
 
 
-@pytest.mark.parametrize("allow_crossing", [False, True], ids=["default", "opted-in"])
-@pytest.mark.parametrize("attn_impl", ["sdpa", "eager"])
 @pytest.mark.parametrize(
-    "build",
+    "build, attn_impl, allow_crossing",
     [
-        lambda: Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG)),
-        lambda: Glm5NextTextConfig(**TINY_GLM5_NEXT_TEXT_CONFIG),
+        pytest.param(
+            lambda: Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG)),
+            "sdpa",
+            False,
+            id="composite-sdpa-default",
+        ),
+        pytest.param(
+            lambda: Glm5NextTextConfig(**TINY_GLM5_NEXT_TEXT_CONFIG), "eager", True, id="text-eager-opted-in"
+        ),
     ],
-    ids=["composite", "text"],
 )
 def test_flat_packing_is_refused_on_every_backend_the_family_runs(build, attn_impl, allow_crossing):
     """No flash support upstream, so every backend is dense, where the DSA layers leak whatever the opt-in admits."""

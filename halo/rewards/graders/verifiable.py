@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 from halo.rewards.graders.matching import extract_last_boxed
-from halo.rewards.terms import JudgeTerm, RewardModelTerm, RewardTerm, sources_of
+from halo.rewards.terms import JudgeTerm, RewardModelTerm, RewardTerm, WhiteCircleTerm, sources_of
 
 _DEFAULT_FORMAT_PATTERN = r"<think>.*?</think>\s*<answer>.*?</answer>"
 
@@ -19,6 +19,10 @@ class AccuracyTerm(RewardTerm):
     source: ClassVar[str] = "accuracy"
 
     name: str = "accuracy"
+
+    @property
+    def reads_answer(self) -> bool:
+        return True
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -77,4 +81,4 @@ def _format_grader(term: FormatTerm):
 
 
 RLVR_GRADERS = {AccuracyTerm: lambda term: accuracy_reward, FormatTerm: _format_grader}
-RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)
+RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm, WhiteCircleTerm)

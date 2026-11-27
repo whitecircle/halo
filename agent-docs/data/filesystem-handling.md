@@ -52,7 +52,7 @@ flaky shared mount (NFS/EFS). Input wants per-node: global rank 0 writing the HF
 remote ranks reading those same inodes is a read-after-cross-node-write that NFS surfaces as
 `OSError: [Errno 116] Stale file handle`.
 
-Output is fine shared — checkpoints have a single writer, per-rank dumps are distinct files, and a
+Output is fine shared — each checkpoint file has one writer, per-rank dumps are distinct files, and a
 shared mount gives one authoritative copy with no post-hoc gather. That combination is
 `DIST_INPUT_SHARED_FILESYSTEM=0` with the umbrella left at its shared default.
 
@@ -121,12 +121,14 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
   writes its own copy.
 
     Every gathered/sharded save, the `run.log` tee, and `fs_aware_makedirs` by default route their
-    writer choice through it.
+    writer choice through it. On a shared output filesystem a gathered EP save adds the first
+    `HALO_CHECKPOINT_WRITERS_PER_NODE` local ranks of every node (default 1) as writers of its
+    EP layers; the non-expert tensors stay with the save rank.
 
 - `fs_aware_makedirs(path, writer_rank=is_fs_save_rank)` — creates a directory with the correct
-  rank behind `barrier_on_exit`, so a read-only or full volume raises on every rank. Pass
-  `writer_rank=is_fs_load_rank` for a read-side cache dir (what `halo/entrypoints/run_setup.py` does
-  for `HF_DATASETS_CACHE`).
+  rank behind `barrier_on_exit`, so a read-only or full volume raises on every rank. `ensure_cache_dir`
+  creates `HF_DATASETS_CACHE` on each node's local main rank, on shared storage too, where a second
+  `makedirs` of it changes nothing.
 
 - `reject_across_ranks(local_reason, what, exc_type=RuntimeError)` — the collective that joins a
   rank-gated body. Every rank calls it with its own reason or `None`; if **any** is non-`None`, every
@@ -212,6 +214,7 @@ joins go permanently off-by-one on the equal-entry invariant.
 | Dataset loading | input | `halo/data/sources/loading.py` | `run_load_rank_first` around the source load (S3, Hub, or local) and the train/test split. A Hub source loads on each scope's load rank alone, which hands the scope its memory-mapped copy (the pickle of its tables, file paths under the probed `HF_DATASETS_CACHE`), so the other ranks make no Hub request; a rank that cannot open those files raises on every rank, so a shared `HF_DATASETS_CACHE` must be mounted at the same path on every node, which the startup probe does not check. The preprocessed-dataset probe runs once per filesystem scope (`agree_input_probe_across_ranks`) and its verdict is shared; a probe that raises raises its cause on every rank. A sharded dataset coordinates per shard with a file lock instead, and joins the world over the store so one rank's shard failure aborts every rank with the cause |
 | Dataset map / filter | input | `halo/data/pipeline/coordinated_map.py` | `coordinated_map` / `coordinated_filter` — self-ordering, see the warning above |
 | Dataset packing | input | `coordinated_pack` (`coordinated_map.py`) | `coordinated_dataset_operation` around a deterministic `cache_file_name`, on the map worker count. Each worker packs whole 1000-row batches, the unit TRL's `pack_dataset` packs alone, so per-node load ranks with different CPU counts pack the same rows. Unguarded, `pack_dataset` materializes a full corpus copy **per rank** |
+| Tree rows | input | `prepare_tree_dataset` (`halo/data/pipeline/tree_rows.py`) | A run of rows that a map-worker boundary cuts becomes two trees, so the rows depend on the worker count. Every rank builds them with the smallest count of any rank, and the cache name holds that count, so per-node load ranks with different CPU counts build the same rows and never serve a cache built on another count |
 | TRL dataset preparation (DPO, KTO, BT reward) | input | `halo/trainers/trl_dataset_prep.py` (`TRLDatasetPrepMixin`) | `coordinated_dataset_transform` (`coordinated_map.py`): the load rank runs TRL's `_prepare_dataset` with its `main_process_first` barriers disabled and the map cache off, then publishes the result as `HF_DATASETS_CACHE/transform-<md5>`, keyed on the rows, the tokenizer and every training argument but the run's identity; the rest load it. Its intermediate maps write a staging directory beside that copy (`transform-<md5>.tmp-<uuid>`, through `scratch_dataset_maps`), removed when the preparation ends, rather than `$TMPDIR`. Unguarded, TRL holds the peers in an NCCL barrier for the whole tokenization and writes a full copy per rank per run |
 | EP lazy model loading | input | `halo/model_loading/parallel/lazy_plan.py` | A shared prologue orders the meta-device instantiation main-rank-first; each rank then slices its expert range from the safetensors shards |
 | Checkpoint saves | output | `halo/checkpoint/parallel/ep.py`, `halo/checkpoint/parallel/save.py`, `halo/trainers/loop/checkpointing.py` | Writer-rank selection via `is_fs_save_rank()`, with HF's `save_on_each_node` aligned to it ([Checkpoints → Multi-node](../reference/checkpoints.md#multi-node)); a non-shared output FS also rejects a multi-node sharded-EP save (the per-rank expert shards are keyed by global rank and would scatter across nodes' local disks with no gather path) |
@@ -220,7 +223,7 @@ joins go permanently off-by-one on the equal-entry invariant.
 | Offline GRPO reference scratch | output | `halo/trainers/grpo/offline/reference_cache.py` | `_reference_cache/<launch>/` under `output_dir`: the save rank(s) append and merge the scores, and every rank memory-maps the merged file from its own node's copy. Needs an output filesystem that appends and memory-maps; lifetime and cleanup: [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model) |
 | `run.log` tee | output | `halo/entrypoints/run_setup.py` | Same `is_fs_save_rank()` predicate as the checkpoint writers, so two nodes can never both hold one `run.log` |
 | Checkpointing-plan record | output | `halo/callbacks/gradient_checkpointing_plan.py` | `_halo_run_plan.json` in `output_dir` from the save rank(s); each rank reads its own node's copy and the world takes the highest recompute floor any copy sets ([GradientCheckpointingPlanCallback](../training-methods/callbacks.md#gradientcheckpointingplancallback)) |
-| Directory creation | either | `fs_aware_makedirs()` | Output dirs by default; read-side cache dirs pass `writer_rank=is_fs_load_rank` |
+| Directory creation | either | `fs_aware_makedirs()` | Output dirs on the save rank by default; `HF_DATASETS_CACHE` on each node's local main rank |
 
 ## Storage layout
 
@@ -231,7 +234,7 @@ contents still require a resume, `overwrite_output_dir: true`, or a different ou
 Put read-only models and datasets on shared storage; put the HF cache and temp files on local NVMe.
 
 ```bash
-export DIST_SHARED_FILESYSTEM=1          # 0 for per-node local storage
+export DIST_INPUT_SHARED_FILESYSTEM=0    # the caches are per-node; outputs keep the shared default
 export HF_HOME=/local/hf_cache
 export HF_DATASETS_CACHE=/local/hf_cache/datasets
 export TMPDIR=/local/tmp
@@ -239,7 +242,8 @@ export TMPDIR=/local/tmp
 
 `HF_DATASETS_CACHE` grows without bound across config sweeps: every distinct
 (function, tokenizer, knobs, dataset, library-version) tuple leaves a permanent `cache-*.arrow` set,
-plus `packed_*.arrow` per packing shape and a `transform-*` directory per TRL preparation, and
+plus `packed_*.arrow` per packing shape, a `split-*.arrow` pair per `test_size` split (never written into the
+source dataset, so a read-only one loads) and a `transform-*` directory per TRL preparation, and
 `hf cache prune` reclaims only the hub cache, not these. Reclaim by deleting the directory — every cache name is deterministic, so the next run
 rebuilds exactly what it needs.
 

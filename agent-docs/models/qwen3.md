@@ -29,7 +29,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 | `examples/grpo/online/qwen3/online-grpo-qwen3-8b-rlrr-math.yaml` | Online GRPO (RLVR + RLRR) | `Qwen/Qwen3-8B` |
 | `examples/grpo/{online/rlvr-online-grpo,environmental/environmental-grpo}-template.yaml` | RLVR / env GRPO templates | `Qwen/Qwen3-4B-Instruct-2507` |
 
-The full fine-tune trains without gradient checkpointing. Each micro-batch, two packed 4,096-token rows, holds about 35 GB of activations, which fit under FSDP2 on several GPUs but not beside the whole model, gradient and optimizer state of a single 80 GB GPU, so a one-GPU Hopper launch passes `--gradient_checkpointing=true`.
+The full fine-tune trains without gradient checkpointing. Each micro-batch, two packed 4,096-token rows, holds about 37 GiB of activations (18.6 GiB per 4,096 tokens with Halo's default Liger kernels, measured on one B300), which fit under FSDP2 on several GPUs. On a single GPU the whole model, its accumulated gradient and AdamWBF16 state add about 30 GiB (measured on the same B300), about 67 GiB in all before transients, so a one-GPU launch on an 80 GB Hopper GPU passes `--gradient_checkpointing=true`.
 
 The per-method canonical examples (DPO, SMPO, KTO, reward, classification, distillation, GRPO task configs) are built on Qwen3.5/3.6 — see [Qwen3.5 / Qwen3.6](qwen3_5.md).
 

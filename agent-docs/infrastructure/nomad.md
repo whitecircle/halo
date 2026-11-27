@@ -54,8 +54,8 @@ nomad job plan -var 'scratch_host_path=/path/to/large/volume' <spec>      # sche
 | Spec | Layout | GPUs | Training config |
 |---|---|---|---|
 | `qwen3-4b-1gpu-lora.nomad.hcl` | single process, `python` | 1 | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` |
-| `qwen3.5-35b-a3b-8gpu-ep.nomad.hcl` | 1 node, EP=8 node-local | 8 | `examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml` |
-| `qwen3.5-122b-a10b-2node-ep.nomad.hcl` | 2 Blackwell nodes, EP=8 node-local + cross-node DP | 2 × 8 | `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` |
+| `qwen3.5-35b-a3b-8gpu-ep.nomad.hcl` | 1 node, `ep8` node-local | 8 | `examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml` |
+| `qwen3.5-122b-a10b-2node-ep.nomad.hcl` | 2 Blackwell nodes, `ep8` node-local + cross-node DP | 2 × 8 | `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` |
 
 The LoRA job is the entry point: one GPU, one process, driven by a config whose own header calls for `python` rather than `torchrun`.
 

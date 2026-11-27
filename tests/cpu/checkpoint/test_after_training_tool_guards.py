@@ -12,6 +12,7 @@ from datasets import Dataset
 
 from halo.checkpoint.tools import adapter_merge, model_merge, sink_reset
 from halo.checkpoint.tools.adapter_merge import DEFAULT_NUM_LABELS
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.data import deduplication
 from tests.common.repo import load_script_module
 
@@ -127,6 +128,7 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
     class _FakePeftConfig:
         base_model_name_or_path = str(base)
         peft_type = "LORA"
+        revision = None
 
         @classmethod
         def from_pretrained(cls, _path):
@@ -248,6 +250,38 @@ def _merge_labels(monkeypatch, *flags: str) -> list[int]:
     monkeypatch.setattr(sys, "argv", [*_MERGE_ARGV, *flags])
     module.main()
     return seen
+
+
+@pytest.mark.parametrize(("flags", "revision"), [((), None), (("--base_revision", "c0ffee"), "c0ffee")])
+def test_merge_hands_on_the_base_revision_it_was_given(monkeypatch, flags, revision):
+    seen: list[str | None] = []
+    module = load_script_module("scripts/after_training/merge_peft_adapters.py", "halo_test_merge_base_revision")
+    monkeypatch.setattr(module, "merge_peft_adapter", lambda **kwargs: seen.append(kwargs["base_revision"]))
+    monkeypatch.setattr(sys, "argv", [*_MERGE_ARGV, *flags])
+    module.main()
+
+    assert seen == [revision]
+
+
+@pytest.mark.parametrize(
+    ("flags", "handed"),
+    [
+        ((), {"rollout_backend": AsyncRolloutConfig.rollout_backend, "base_revision": None}),
+        (
+            ("--rollout_backend", "sglang", "--base_revision", "c0ffee"),
+            {"rollout_backend": "sglang", "base_revision": "c0ffee"},
+        ),
+    ],
+    ids=["defaults", "stated"],
+)
+def test_the_engine_export_hands_on_the_engine_and_base_revision_it_was_given(monkeypatch, flags, handed):
+    seen: list[dict] = []
+    module = load_script_module("scripts/after_training/export_engine_adapter.py", "halo_test_export_engine_adapter")
+    monkeypatch.setattr(module, "export_engine_adapter", lambda *paths, **kwargs: seen.append(kwargs))
+    monkeypatch.setattr(sys, "argv", ["export_engine_adapter.py", "--adapter_dir", "a", "--output_dir", "o", *flags])
+    module.main()
+
+    assert [{key: kwargs[key] for key in handed} for kwargs in seen] == [handed]
 
 
 def test_merge_refuses_a_label_count_without_a_classification_head(monkeypatch, capsys):

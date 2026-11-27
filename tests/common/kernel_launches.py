@@ -60,19 +60,12 @@ def grouped_mm_kernel(mat_a: torch.Tensor, mat_b: torch.Tensor) -> tuple:
     return ("grouped_mm", torch.bfloat16, layout, "small" if small else "large")
 
 
-def grouped_mm_ragged_rows(mat_a: torch.Tensor, mat_b: torch.Tensor, offs: torch.Tensor) -> int:
-    """Token rows per group: ``mat_a``'s rows over a 3-D ``mat_b``'s groups, or against 2-D (the weight gradient) its
-    columns over ``offs``' groups."""
-    return mat_a.shape[0] // mat_b.shape[0] if mat_b.dim() == 3 else mat_a.shape[1] // offs.numel()
-
-
 class KernelLaunches(TorchDispatchMode):
     """The kernel classes of every aten op while active, backward included."""
 
     def __init__(self):
         super().__init__()
         self.kernels: set[tuple] = set()
-        self.grouped_mm_calls: list[tuple[tuple, int]] = []
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = kwargs or {}
@@ -90,9 +83,7 @@ class KernelLaunches(TorchDispatchMode):
                 raise NotImplementedError(
                     "a grouped GEMM without a ragged 2-D mat_a: the class is modelled for that one"
                 )
-            kernel = grouped_mm_kernel(mat_a, mat_b)
-            self.kernels.add(kernel)
-            self.grouped_mm_calls.append((kernel, grouped_mm_ragged_rows(mat_a, mat_b, offs)))
+            self.kernels.add(grouped_mm_kernel(mat_a, mat_b))
         else:
             leaves = tree_leaves((args, kwargs))
             self.kernels.add((str(func), tuple(leaf.dtype for leaf in leaves if isinstance(leaf, torch.Tensor))))

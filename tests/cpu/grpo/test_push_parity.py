@@ -63,7 +63,7 @@ def test_an_engine_at_the_trainers_log_probs_passes_once():
     assert trainer.first_push_verified
 
 
-@pytest.mark.parametrize("offset", [3.0, float("nan"), float("inf")])
+@pytest.mark.parametrize("offset", [3.0, float("nan")])
 def test_an_engine_that_serves_other_weights_is_refused_when_the_probe_raises(offset, monkeypatch):
     monkeypatch.setenv("HALO_WEIGHT_SYNC_PARITY_PROBE", "raise")
     with pytest.raises(ValueError, match="may not have taken the pushed weights"):

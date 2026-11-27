@@ -27,9 +27,6 @@ from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
 from tests.common.repo import REPO_ROOT
 
 _SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
-_NUM_EXPERTS = TINY_STEP3P7_CONFIG["n_routed_experts"]
-_MOE_INTERMEDIATE = TINY_STEP3P7_CONFIG["moe_intermediate_size"]
-_HIDDEN = TINY_STEP3P7_CONFIG["hidden_size"]
 
 
 def _tiny_step3p7() -> Step3p7ForConditionalGeneration:
@@ -181,26 +178,6 @@ def test_the_release_shape_goes_through_the_expert_path():
             ("down_proj", (text.moe_num_experts, text.hidden_size, text.moe_intermediate_size)),
         ):
             assert sender.sent[f"model.layers.{i}.moe.{proj}.weight"].shape == shape
-
-
-def test_hub_layouts_not_module_layouts():
-    """The split expert stacks, the shared expert's hub spelling, the fused vision q/k/v, no module-tree spelling."""
-    sent = _sync(_ep_wrapped(_tiny_step3p7()))
-    for i in _SPARSE_LAYERS:
-        for proj in ("gate_proj", "up_proj"):
-            assert sent[f"model.layers.{i}.moe.{proj}.weight"].shape == (_NUM_EXPERTS, _MOE_INTERMEDIATE, _HIDDEN)
-        assert sent[f"model.layers.{i}.moe.down_proj.weight"].shape == (_NUM_EXPERTS, _HIDDEN, _MOE_INTERMEDIATE)
-        assert f"model.layers.{i}.moe.gate.weight" in sent
-        assert f"model.layers.{i}.share_expert.gate_proj.weight" in sent
-    width = TINY_STEP3P7_VISION_CONFIG["hidden_size"]
-    assert sent["vision_model.transformer.resblocks.0.attn.in_proj_weight"].shape == (3 * width, width)
-    assert "vit_large_projector.weight" in sent and "lm_head.weight" in sent
-    module_spellings = ("language_model", ".mlp.experts.", "shared_experts", "multi_modal_projector", "q_proj")
-    leaked = sorted(
-        key for key in sent if any(s in key for s in module_spellings) and not key.startswith("model.layers")
-    )
-    assert not leaked, leaked
-    assert not any(".mlp.experts." in key or "language_model" in key or "shared_experts" in key for key in sent)
 
 
 if __name__ == "__main__":

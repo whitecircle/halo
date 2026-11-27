@@ -56,8 +56,8 @@ halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/laguna-s-2.1-lora
 ```
 
-These targets adapt attention and the experts. No tool merges expert adapters afterwards, so
-`merge_expert_lora_on_save` folds them into each save.
+These targets adapt attention and the experts. `halo run merge-peft-adapters` merges expert
+adapters afterwards; `merge_expert_lora_on_save` folds them into each save instead.
 
 ### GRPO
 
@@ -65,7 +65,7 @@ Read [Before a GRPO run](README.md#before-a-grpo-run) first. Laguna S has about 
 setup serves the SFT checkpoint from vLLM on GPUs 0–3 and trains at EP4 with `flash_adamw` on GPUs 4–7. On the host:
 
 ```bash
-VLLM_MODEL=/data/checkpoints/laguna-s-2.1-sft VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
+VLLM_MODEL=/data/checkpoints/laguna-s-2.1-sft/checkpoint-<step> VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \
 VLLM_TOOL_PARSER=poolside_v1 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
@@ -76,7 +76,7 @@ launch:
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml laguna-grpo.yaml
 CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 4 \
-  --model_name_or_path=/data/checkpoints/laguna-s-2.1-sft \
+  --model_name_or_path=/data/checkpoints/laguna-s-2.1-sft/checkpoint-<step> \
   --trust_remote_code=true --attn_implementation=sdpa \
   --expert_parallel_size=4 --optim=flash_adamw \
   --routing_replay=rollout --beta=0.0 \
@@ -121,7 +121,7 @@ Gathered saves write the hub's per-expert layout. Smoke-test with `AutoModelForC
 Serve from the [host](README.md#serve-from-the-host) with vLLM on port 8000:
 
 ```bash
-VLLM_MODEL=/data/checkpoints/laguna-s-2.1-sft VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
+VLLM_MODEL=/data/checkpoints/laguna-s-2.1-sft/checkpoint-<step> VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 \
 VLLM_TOOL_PARSER=poolside_v1 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```

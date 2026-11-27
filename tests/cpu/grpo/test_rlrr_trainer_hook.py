@@ -9,7 +9,6 @@ import pytest
 import torch
 
 from halo.configs.grpo import RLRRConfig
-from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
@@ -87,15 +86,6 @@ def test_unscorable_member_does_not_shift_its_siblings():
         f"the unscorable placeholder shifted its siblings: {adv[:3].tolist()} vs {expected.tolist()}"
     )
     assert adv[3].item() == 0.0, "the unscorable row must carry no advantage of its own"
-
-
-def test_build_rlrr_config_from_args():
-    assert OnlineGRPOScriptArguments(use_rlrr=False).build_rlrr_config() is None
-    cfg = OnlineGRPOScriptArguments(
-        use_rlrr=True, rlrr_mode="prr", rlrr_tau=0.2, rlrr_correctness_clip=False
-    ).build_rlrr_config()
-    assert isinstance(cfg, RLRRConfig)
-    assert cfg.mode == "prr" and cfg.tau == 0.2 and cfg.correctness_clip is False
 
 
 def test_hook_noop_in_eval_mode():

@@ -4,6 +4,7 @@ chain cannot proceed as if it were gone. The client is stubbed at its own method
 dotted path."""
 
 import sys
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -44,6 +45,33 @@ def test_a_delete_that_leaves_the_data_exits_non_zero(kwargs, message):
 
 def test_a_successful_delete_returns_normally():
     _run_delete(delete_result=True)
+
+
+class _RefusingBoto:
+    """Lists two objects under the prefix and refuses to delete either, as ``DeleteObjects`` does: success with an
+    error list."""
+
+    def get_paginator(self, name):
+        return SimpleNamespace(
+            paginate=lambda **kwargs: [{"Contents": [{"Key": "my_folder/a"}, {"Key": "my_folder/b"}]}]
+        )
+
+    def delete_objects(self, Bucket, Delete):
+        return {"Errors": [{"Key": e["Key"], "Code": "AccessDenied", "Message": "denied"} for e in Delete["Objects"]]}
+
+
+def test_a_recursive_delete_s3_refuses_raises_instead_of_reporting_success():
+    def post_init(client):
+        client.boto_client = _RefusingBoto()
+
+    argv = ["s3", "delete", "my_folder", "--recursive", "--yes", "--bucket", "test-bucket"]
+    with (
+        patch("halo.data.sources.s3_client.S3Client.__post_init__", post_init),
+        patch("halo.data.sources.s3_client.S3Client.exists", return_value=True),
+        patch.object(sys, "argv", argv),
+        pytest.raises(PermissionError, match=r"refused to delete 2 of 2 .* my_folder/a \(AccessDenied"),
+    ):
+        s3_cli_main()
 
 
 if __name__ == "__main__":

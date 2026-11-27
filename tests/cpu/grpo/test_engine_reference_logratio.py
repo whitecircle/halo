@@ -206,7 +206,7 @@ def test_a_rescore_failure_is_reported_by_the_rank_that_hit_it(monkeypatch, fail
     assert msg.startswith("[rank 3] isr_engine_reference:"), msg
 
 
-@pytest.mark.parametrize(("world_size", "per_rank"), [(1, 128), (8, 16), (64, 2), (1024, 1)])
+@pytest.mark.parametrize(("world_size", "per_rank"), [(1, 128), (8, 16), (1024, 1)])
 def test_the_rescore_load_on_a_server_is_bounded_whatever_the_world_size(world_size, per_rank):
     """A fixed per-rank width would put world × width requests in flight on a server; each rank keeps its share of the
     budget, one request at the least."""

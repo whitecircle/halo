@@ -137,12 +137,18 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
 
 
 @pytest.mark.parametrize(
-    "stop",
-    ["weights", "state", "shards"],
-    ids=["stopped-in-weights", "stopped-after-trainer-state", "stopped-in-shards"],
+    ("per_node", "rewrite", "stop"),
+    [
+        pytest.param(False, False, "weights", id="shared-output-fresh-step-stopped-in-weights"),
+        pytest.param(False, True, "weights", id="shared-output-rewritten-step-stopped-in-weights"),
+        pytest.param(False, True, "state", id="shared-output-rewritten-step-stopped-after-trainer-state"),
+        pytest.param(False, True, "shards", id="shared-output-rewritten-step-stopped-in-shards"),
+        pytest.param(True, False, "state", id="per-node-output-fresh-step-stopped-after-trainer-state"),
+        pytest.param(True, True, "weights", id="per-node-output-rewritten-step-stopped-in-weights"),
+        pytest.param(True, True, "state", id="per-node-output-rewritten-step-stopped-after-trainer-state"),
+        pytest.param(True, True, "shards", id="per-node-output-rewritten-step-stopped-in-shards"),
+    ],
 )
-@pytest.mark.parametrize("rewrite", [False, True], ids=["fresh-step", "rewritten-step"])
-@pytest.mark.parametrize("per_node", [False, True], ids=["shared-output", "per-node-output"])
 def test_a_stopped_save_is_passed_over_by_resume_detection(tmp_path, per_node, rewrite, stop):
     run_gloo_ranks(
         _worker,

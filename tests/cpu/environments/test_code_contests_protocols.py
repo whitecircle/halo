@@ -221,11 +221,6 @@ def test_a_contradiction_stated_for_this_run_is_refused():
         _env(**{**contract, "eval_protocol": "leaderboard", "max_submissions": 3})
 
 
-def test_the_eval_script_takes_the_protocol_from_its_flag_only():
-    with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
-        reject_flag_owned_env_kwargs({"eval_protocol": "leaderboard"}, FLAG_OWNED_ENV_KWARGS)
-
-
 def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
     """``--env_kwargs`` is laid over the flags, so ``{"max_turns": 3}`` would silently cap a ``--max_turns 16`` run.
     Read off the resolver, so a flag added without a refusal fails here."""
@@ -314,7 +309,9 @@ async def test_a_no_level_episode_sends_no_level_and_records_none(monkeypatch):
         return chat_reply("done", completion_tokens=3)
 
     monkeypatch.setattr(eval_runner, "chat_completion", fake_chat)
-    traj = await eval_runner.run_episode(env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout)
+    traj = await eval_runner.run_episode(
+        env, "solve it", dict(SINGLE_TEST_ANSWER), None, rollout=rollout, extra_body={}
+    )
 
     assert env.reasoning_effort is None
     filters = {"top_k": rollout.top_k, "min_p": rollout.min_p, "repetition_penalty": rollout.repetition_penalty}

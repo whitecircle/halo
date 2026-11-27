@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Blocks on SMs</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --block: var(--halo-blue);
+    --waiting: color-mix(in oklab, var(--surface), var(--halo-blue) 34%);
+    --store: var(--halo-violet);
+    --side-col: 448px;
+    --col-gap: 80px;
+  }
+
+  body { width: 1600px; }
+
+  .figure {
+    display: grid;
+    grid-template-columns: 1fr var(--side-col);
+    column-gap: var(--col-gap);
+    align-items: start;
+  }
+
+  .group + .group { margin-top: var(--group-gap); }
+
+  .head {
+    display: flex;
+    align-items: baseline;
+    gap: 20px;
+    margin-bottom: var(--heading-gap);
+  }
+
+  .head h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
+    color: var(--heading);
+    white-space: nowrap;
+  }
+
+  .head span {
+    font-size: 22px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A row-major strip of equal cells: the blocks of a grid, the SMs of the chip, the blocks left waiting. */
+  .cells {
+    display: grid;
+    grid-template-columns: repeat(var(--per-row), 1fr);
+    grid-auto-rows: var(--cell-h, 28px);
+    gap: 4px;
+  }
+
+  .cells i { border-radius: 5px; }
+
+  .cells .on { background: var(--block); }
+
+  .cells .off { background: var(--surface); border: 1px solid var(--line); }
+
+  .cells .wait { background: var(--waiting); }
+
+  .cells + .cells { margin-top: 14px; }
+
+  .caption {
+    margin-top: 14px;
+    font-size: 22px;
+    line-height: 1.35;
+    color: var(--body);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* A sentence that does not fit moves to the next line whole. */
+  .caption .s { display: inline-block; }
+
+  .key {
+    display: flex;
+    gap: 36px;
+    margin-top: 40px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .key i {
+    width: 24px;
+    height: 24px;
+    border-radius: 5px;
+    background: var(--fill);
+    border: 1px solid var(--edge, transparent);
+  }
+
+  /* One block: a row of dots per warp, a dot per thread. */
+  .threads {
+    display: grid;
+    grid-template-columns: repeat(var(--per-row), 1fr);
+    gap: 4px;
+  }
+
+  .threads i {
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: var(--block);
+  }
+
+  .slots { --cell-h: 14px; }
+
+  .slots i { border-radius: 4px; }
+
+  .sub {
+    margin-top: 28px;
+    font-size: 22px;
+    color: var(--text);
+  }
+
+  .sub.first { margin-top: 0; }
+
+  .sub + .cells, .sub + .stores { margin-top: 12px; }
+
+  .stores { display: grid; row-gap: 14px; }
+
+  .store .line {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    font-size: 21px;
+    color: var(--body);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .store .line b { font-weight: 400; color: var(--text); }
+
+  .store .bar {
+    height: 18px;
+    margin-top: 6px;
+    border-radius: 5px;
+    background: var(--store);
+  }
+
+  .store .what {
+    margin-top: 6px;
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>A launch is a grid of blocks, and a block stays on one SM</h1>
+    <p class="subtitle">The grids of two bf16 matrix multiplies on one {device}, and what one of its {sms} streaming multiprocessors (SMs) holds</p>
+  </header>
+
+  <div class="figure">
+    <div class="main" id="main"></div>
+    <div class="side" id="side"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Measured: the blocks in each grid and the threads in a block, read from a profiler trace of <span class="nw">torch.mm</span> on one {device}, where cuBLAS picks the kernel.</span>
+      <span class="s">Not measured: which SM runs a block, and how many blocks of this kernel an SM runs at once.</span>
+      <span class="s">The strips draw one block on an SM at a time, as when a block needs more than half of one store.</span>
+      <span class="s">The limits and sizes of an SM are NVIDIA’s specification for this GPU.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * One B300. SM count and limits: CUDA Programming Guide, appendix "Compute Capabilities", compute capability
+   * 10.3, and the device's own attributes as tests/gpu/profiling/benchmark_roofline.py records them in its
+   * output's `gpu` block (148 SMs, 2,048 threads per SM, 1,024 per block, 65,536 registers, warps of 32, 233,472
+   * bytes of shared memory = 228 KiB). Cores per SM: NVIDIA, "Inside NVIDIA Blackwell Ultra". Tensor memory:
+   * Colfax, "Writing GEMM Kernels Using Tensor Memory". NVIDIA writes these sizes as KB and means 1,024 bytes.
+   */
+  const DEVICE = {
+    name: "B300",
+    sms: 148,
+    stripRows: 4,
+    warpSize: 32,
+    maxThreadsPerBlock: 1024,
+    resident: { blocks: 32, warps: 64, threads: 2048 },
+    tensorCores: 4,
+    cudaCores: 128,
+    kib: 1024,
+    registers: { count: 65536, bits: 32, maxPerThread: 255 },
+    sharedMemory: { kib: 228, kibPerBlock: 227 },
+    tensorMemory: { rows: 128, columns: 512, bits: 32 },
+  };
+
+  /**
+   * Two launches of bf16 `torch.mm(x, w)` with x [m, k] and w [k, n], measured on one B300: the grid (blocks per
+   * launch) and the threads per block that the profiler recorded for the cuBLAS kernel, in the sweep of
+   * tests/gpu/profiling/benchmark_roofline.py: sections.sweep[] at m = 128 and m = 1560 with k = n = 2880,
+   * kernels.<name>.grid and .block. Nothing here records which SM ran a block.
+   */
+  const LAUNCHES = [
+    { m: 128, k: 2880, n: 2880, grid: 92, blockThreads: 256 },
+    { m: 1560, k: 2880, n: 2880, grid: 240, blockThreads: 256 },
+  ];
+
+  const fmt = (n) => n.toLocaleString("en-US");
+  const shape = (l) => `[${l.m}, ${l.k}] @ [${l.k}, ${l.n}]`;
+  const perRow = DEVICE.sms / DEVICE.stripRows;
+  const [small, large] = LAUNCHES;
+  const warps = small.blockThreads / DEVICE.warpSize;
+  const registerKib = (DEVICE.registers.count * DEVICE.registers.bits) / 8 / DEVICE.kib;
+  const tensorKib = (DEVICE.tensorMemory.rows * DEVICE.tensorMemory.columns * DEVICE.tensorMemory.bits) / 8 / DEVICE.kib;
+
+  if (!Number.isInteger(perRow) || !Number.isInteger(warps) || LAUNCHES.some((l) => l.blockThreads !== small.blockThreads)) {
+    throw new Error("the strip needs whole rows of SMs, and both launches blocks of one whole number of warps");
+  }
+
+  if (DEVICE.resident.warps * DEVICE.warpSize !== DEVICE.resident.threads || small.grid >= DEVICE.sms || large.grid <= DEVICE.sms) {
+    throw new Error("the limits disagree, or the two launches are not one below and one above the SM count");
+  }
+
+  fillValues({ device: DEVICE.name, sms: fmt(DEVICE.sms) });
+
+  /** A strip of `count` cells, `rowLength` to a row, each classed by `kind(i)`. */
+  function cells(count, rowLength, kind, className = "cells") {
+    const strip = el("div", className);
+    strip.style.setProperty("--per-row", rowLength);
+
+    for (let i = 0; i < count; i += 1) {
+      strip.append(el("i", kind(i)));
+    }
+
+    return strip;
+  }
+
+  /** A caption under a strip, one span per sentence. */
+  function caption(...sentences) {
+    const node = el("div", "caption");
+
+    for (const sentence of sentences) {
+      node.append(el("span", "s", sentence), " ");
+    }
+
+    return node;
+  }
+
+  function group(title, note, ...children) {
+    const node = el("section", "group");
+    const head = el("div", "head");
+    head.append(el("h2", undefined, title), el("span", undefined, note));
+    node.append(head, ...children);
+
+    return node;
+  }
+
+  const main = document.getElementById("main");
+  const side = document.getElementById("side");
+  // A block stays on one SM, so a grid of fewer blocks than SMs uses at most that many of them. How many blocks
+  // an SM runs at once was not measured: the strips draw one, and the captions say so.
+  const share = Math.round((100 * small.grid) / DEVICE.sms);
+  const waiting = large.grid - DEVICE.sms;
+  const blocksPerSmByWarps = Math.floor(DEVICE.resident.warps / warps);
+
+  // Left: the launch as its grid, then the SMs under each of the two launches.
+  main.append(
+    group(
+      "One launch",
+      `${shape(small)}: a grid of ${fmt(small.grid)} blocks`,
+      cells(small.grid, small.grid / 2, () => "on"),
+      caption("Every block runs the same kernel, from start to finish on one SM."),
+    ),
+    group(
+      `The ${fmt(DEVICE.sms)} SMs under this launch`,
+      `at most ${fmt(small.grid)} run a block, at least ${fmt(DEVICE.sms - small.grid)} have none`,
+      cells(DEVICE.sms, perRow, (i) => (i < small.grid ? "on" : "off")),
+      caption(
+        "Drawn one block to an SM, the most SMs this launch can use.",
+        `A grid smaller than the chip leaves SMs with nothing to do: at most ${fmt(small.grid)} of ${fmt(DEVICE.sms)} are busy, ${share}%.`,
+      ),
+    ),
+    group(
+      "The SMs under a larger launch",
+      `${shape(large)}: ${fmt(large.grid)} blocks`,
+      cells(DEVICE.sms, perRow, () => "on"),
+      cells(waiting, perRow, () => "wait"),
+      caption(
+        `Drawn as if each SM took one block at a time: ${fmt(DEVICE.sms)} blocks start, and each of the other ${fmt(waiting)} waits for an SM to finish its block.`,
+        `An SM has warp slots for ${blocksPerSmByWarps} such blocks, and how many it runs at once was not measured.`,
+      ),
+    ),
+  );
+
+  const key = el("div", "key");
+  key.innerHTML = [
+    '<span style="--fill: var(--block)"><i></i>Block running on an SM</span>',
+    '<span style="--fill: var(--surface); --edge: var(--line)"><i></i>SM with no block</span>',
+    '<span style="--fill: var(--waiting)"><i></i>Block waiting</span>',
+  ].join("");
+  main.append(key);
+
+  // Right: one block as its threads, then one SM as its slots and stores.
+  const threads = el("div", "threads");
+  threads.style.setProperty("--per-row", DEVICE.warpSize);
+
+  for (let i = 0; i < small.blockThreads; i += 1) {
+    threads.append(el("i"));
+  }
+
+  const stores = [
+    { name: "Registers", kib: registerKib, what: `${fmt(DEVICE.registers.count)} of ${DEVICE.registers.bits} bits, at most ${DEVICE.registers.maxPerThread} for one thread` },
+    { name: "Shared memory", kib: DEVICE.sharedMemory.kib, what: `The kernel’s work area, ${DEVICE.sharedMemory.kibPerBlock} KiB for one block` },
+    { name: "Tensor memory", kib: tensorKib, what: `${DEVICE.tensorMemory.rows} rows × ${DEVICE.tensorMemory.columns} columns of ${DEVICE.tensorMemory.bits}-bit cells that hold the tensor cores’ accumulator` },
+  ];
+  const largest = Math.max(...stores.map((s) => s.kib));
+  const storesEl = el("div", "stores");
+
+  for (const store of stores) {
+    const node = el("div", "store");
+    const line = el("div", "line");
+    line.append(el("b", undefined, store.name), el("span", undefined, `${fmt(store.kib)} KiB`));
+    const bar = el("div", "bar");
+    bar.style.width = `${(100 * store.kib) / largest}%`;
+    node.append(line, bar, el("div", "what", store.what));
+    storesEl.append(node);
+  }
+
+  side.append(
+    group(
+      "One of its blocks",
+      `${fmt(small.blockThreads)} threads`,
+      threads,
+      caption(`Each row is a warp: ${DEVICE.warpSize} threads that step through the kernel together.`, `This block is ${warps} warps, and a block can hold ${fmt(DEVICE.maxThreadsPerBlock)} threads at most.`),
+    ),
+    group(
+      "One SM",
+      `of ${fmt(DEVICE.sms)}`,
+      el("div", "sub first", `${DEVICE.tensorCores} tensor cores and ${DEVICE.cudaCores} CUDA cores`),
+      el("div", "sub", `${DEVICE.resident.warps} warp slots, ${warps} taken by one such block`),
+      cells(DEVICE.resident.warps, DEVICE.resident.warps / 4, (i) => (i < warps ? "on" : "off"), "cells slots"),
+      el("div", "sub", "Its three stores, drawn to scale"),
+      storesEl,
+      caption(`At most ${DEVICE.resident.blocks} blocks, ${DEVICE.resident.warps} warps and ${fmt(DEVICE.resident.threads)} threads live on one SM at a time, and they share these stores.`),
+    ),
+  );
+</script>
+</body>
+</html>

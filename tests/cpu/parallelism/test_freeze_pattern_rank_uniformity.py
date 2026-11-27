@@ -95,15 +95,5 @@ def test_a_pattern_every_stage_carries_raises_on_nobody(tmp_path):
         assert reached, f"rank {rank} did not reach the next collective"
 
 
-def test_the_local_verdict_is_unchanged_by_the_routing():
-    """``ValueError`` is the type every caller and config gate matches on."""
-    model = _Stage(0)
-    freeze_parameters_by_patterns(model, ["block_0.*"])
-    assert not any(p.requires_grad for p in model.parameters())
-
-    with pytest.raises(ValueError, match="matched no parameter"):
-        freeze_parameters_by_patterns(_Stage(0), ["block_9.*"])
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

@@ -15,6 +15,8 @@ GRADED_PROGRAMS_KEY = "_graded_programs"
 # in the same turn returned nothing the program could have been fixed from.
 FAILED_SUBMISSION_RUNS_LEFT_KEY = "_failed_submission_runs_left"
 TURN_RUNS_LEFT_KEY = "_turn_runs_left"
+# Set once a reply has refused a scratchpad call for the spent budget: a later such call was sent knowing it.
+RUN_REFUSAL_SHOWN_KEY = "_run_refusal_shown"
 # Normalized, and how many had run as the turn began: a run in the submission's own turn informed nothing.
 RUN_PROGRAMS_KEY = "_run_programs"
 TURN_RUN_PROGRAMS_KEY = "_turn_run_programs"

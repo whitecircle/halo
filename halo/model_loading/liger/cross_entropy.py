@@ -240,10 +240,10 @@ def fused_head_ce_sum(
     frozen_head: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The fp32 cross-entropy summed over the rows of ``hidden`` under ``transform.project(head, hidden)``, and each
-    supervised row's argmax (``-1`` when ignored), through Liger's fused kernel. No ``[N, V]`` logits plane exists: the
-    kernel projects a chunk at a time and writes gradients in the forward. A logit scale needs a bias-free head; the
-    softcap runs in the kernel. ``frozen_head`` leaves the head out of the graph, as the kernel keys its gradient on the
-    weight's ``requires_grad``."""
+    supervised row's argmax (``-1`` when ignored), through Liger's fused linear cross-entropy: a loop over row chunks,
+    each a head GEMM and a Triton cross-entropy kernel that writes the gradients in the forward, so no ``[N, V]`` logits
+    plane exists. A logit scale needs a bias-free head; the softcap runs in the cross-entropy kernel. ``frozen_head``
+    leaves the head out of the graph, as Liger keys the weight gradient on the weight's ``requires_grad``."""
     weight, bias = transform.kept_rows(head.weight, head.bias)
     if frozen_head:
         weight, bias = weight.detach(), None if bias is None else bias.detach()
@@ -290,8 +290,9 @@ def fused_head_loss(model: nn.Module) -> Callable[[torch.Tensor, torch.Tensor], 
 
 def head_token_ce_sum(model: nn.Module, *, fused: bool) -> Callable[..., torch.Tensor]:
     """``(hidden [N, H], targets [N], *, frozen_head) -> fp32 CE sum`` under ``model``'s head path, for hidden states
-    the forward's own loss does not score: Liger's fused kernel where ``fused`` and the rows sit on a GPU, else chunked
-    fp32 logits, the fallback CP and PP use. An empty plane skips the kernel, whose chunking divides by its length."""
+    the forward's own loss does not score: Liger's fused linear cross-entropy where ``fused`` and the rows sit on a GPU,
+    else chunked fp32 logits, the fallback CP and PP use. An empty plane skips Liger, whose chunking divides by its
+    length."""
     base = base_transformers_model(model)
     head = base.get_output_embeddings()
     transform = resolve_head_transform(base)

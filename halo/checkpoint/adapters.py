@@ -61,11 +61,15 @@ def expert_lora_config_fields(spec: ExpertLoraSpec) -> dict:
     }
 
 
-def expert_lora_adapter_config(spec: ExpertLoraSpec, base_model_name_or_path: str | None) -> dict:
-    """The PEFT-style ``adapter_config.json`` of an expert-only adapter save."""
+def expert_lora_adapter_config(
+    spec: ExpertLoraSpec, base_model_name_or_path: str | None, revision: str | None
+) -> dict:
+    """The PEFT-style ``adapter_config.json`` of an expert-only adapter save; ``revision`` is the Hub commit of the
+    base, under PEFT's own key."""
     return {
         "peft_type": EXPERT_LORA_PEFT_TYPE,
         "base_model_name_or_path": base_model_name_or_path,
+        "revision": revision,
         **expert_lora_config_fields(spec),
     }
 
@@ -146,11 +150,15 @@ def read_adapter_keys(adapter_dir: str) -> list[str]:
 
 
 def adapter_module_paths(adapter_dir: str) -> set[str]:
-    """The base model's module paths a saved adapter addresses; a key with no PEFT segment is a whole parameter."""
+    """The base model's module paths a saved adapter addresses; a key with no PEFT segment is a whole parameter, and a
+    native expert adapter addresses its EP layer, where the base holds the family's own MoE module."""
     paths: set[str] = set()
     for key in read_adapter_keys(adapter_dir):
         name = key.removeprefix(PEFT_BASE_MODEL_PREFIX)
-        cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
+        if is_expert_lora_key(key):
+            cut = name.rfind(".experts.")
+        else:
+            cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
         paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
     return paths
 
@@ -260,12 +268,13 @@ def find_expert_lora_adapter_shape(adapter_dir: str) -> ExpertAdapterShape | Non
 
 
 def reject_expert_lora_adapter(adapter_dir: str) -> None:
-    """Refuse an adapter with native EP expert-LoRA deltas, which ``merge_and_unload`` drops; the in-memory merge runs
-    this. The streaming merge folds them."""
+    """Refuse an adapter with native EP expert-LoRA deltas, which ``merge_and_unload`` drops; the in-memory merge's
+    input gates run this. ``merge_peft_adapters.py`` sends such an adapter to its streaming merge instead, which folds
+    it where the base stores each expert layer under its module path."""
     shape = find_expert_lora_adapter_shape(adapter_dir)
     if shape is None:
         return
-    # The streaming merge and ``merge_expert_lora_on_save`` fold both shapes; ``mixed`` only selects the wording.
+    # Both shapes take the same remedy; ``mixed`` only selects the wording.
     if shape == "mixed":
         described = (
             f"holds a MIXED attention+expert LoRA adapter (peft_type={MIXED_EXPERT_LORA_PEFT_TYPE}): "
@@ -277,10 +286,11 @@ def reject_expert_lora_adapter(adapter_dir: str) -> None:
             "*.experts.<attr>.lora_{A,B} tensors"
         )
     raise ValueError(
-        f"{adapter_dir} {described} — which an in-memory PEFT merge silently drops, so this adapter only resumes in "
-        f"this toolkit. Merge it with the streaming merge (merge_peft_adapters.py --streaming, which "
-        f"folds the expert and attention deltas shard by shard), or set merge_expert_lora_on_save=True so the "
-        f"gathered EP save folds them into a merged servable HF checkpoint."
+        f"{adapter_dir} {described} — which an in-memory PEFT merge silently drops. Merge it with "
+        f"merge_peft_adapters.py, which sends it to its streaming merge: that folds both halves where the base "
+        f"stores each expert layer under its module path, and refuses a base whose hub layout respells that path "
+        f"(a text_only_model run on a multimodal base among them). There, resume the run with "
+        f"merge_expert_lora_on_save=True: its gathered EP save folds both halves into a servable HF checkpoint."
     )
 
 

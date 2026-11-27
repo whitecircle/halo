@@ -25,13 +25,20 @@ from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.tiny_models import word_level_tokenizer
 
 
-@pytest.fixture(params=[0o022, 0o002, 0o077], ids=lambda umask: f"umask-{umask:03o}")
+def _umask_id(umask: int) -> str:
+    return f"umask-{umask:03o}"
+
+
+@pytest.fixture(params=[0o022, 0o002, 0o077], ids=_umask_id)
 def umask(request):
     previous = os.umask(request.param)
     try:
         yield request.param
     finally:
         os.umask(previous)
+
+
+_UMASK_022_AND_077 = pytest.mark.parametrize("umask", [0o022, 0o077], ids=_umask_id, indirect=True)
 
 
 def _modes(directory) -> dict[str, str]:
@@ -61,11 +68,13 @@ def test_streamed_checkpoint_files_follow_the_umask(umask, max_shard_size, tmp_p
     assert _modes(tmp_path) == _expect(umask, files)
 
 
+@_UMASK_022_AND_077
 def test_adapter_file_follows_the_umask(umask, tmp_path):
     write_adapter_file({"base_model.model.q_proj.lora_A.weight": torch.ones(4, 8)}, str(tmp_path))
     assert _modes(tmp_path) == _expect(umask, ["adapter_model.safetensors"])
 
 
+@_UMASK_022_AND_077
 def test_full_checkpoint_files_follow_the_umask(umask, tmp_path):
     torch.manual_seed(0)
     save_full_checkpoint(Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)), str(tmp_path), max_shard_size="1MB")
@@ -74,6 +83,7 @@ def test_full_checkpoint_files_follow_the_umask(umask, tmp_path):
     assert _modes(tmp_path) == _expect(umask, shards)
 
 
+@_UMASK_022_AND_077
 def test_an_adapter_conversion_changes_the_mode_of_its_own_file_only(umask, tmp_path):
     """It removes nothing, so earlier weights keep their mode (another user's file would refuse the chmod)."""
     Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).save_pretrained(tmp_path / "base")
@@ -107,6 +117,7 @@ def _embedding_pipeline(head) -> SentenceTransformer:
 
 
 @pytest.mark.parametrize(("head", "weight_folders"), _EMBEDDING_HEADS)
+@_UMASK_022_AND_077
 def test_an_embedding_save_follows_the_umask_in_every_module_folder(umask, head, weight_folders, tmp_path):
     """sentence-transformers writes each module's weights into its own folder at ``0600``."""
     args = EmbeddingConfig(
@@ -131,6 +142,7 @@ def test_an_embedding_save_follows_the_umask_in_every_module_folder(umask, head,
 
 
 @pytest.mark.parametrize(("head", "weight_folders"), _EMBEDDING_HEADS)
+@_UMASK_022_AND_077
 def test_a_distributed_embedding_save_follows_the_umask_in_every_module_folder(umask, head, weight_folders, tmp_path):
     """A sharded run's save writes these modules one by one."""
     host = object.__new__(EmbeddingTrainer)

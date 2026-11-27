@@ -165,7 +165,7 @@ def test_the_chunked_path_scores_the_ep_model_as_its_forward(route):
 
     scorer = LogprobScoringMixin()
     scorer.temperature = 1.0
-    logps, _ = scorer._chunked_logps_impl(model, ids, mask, keep, 2, False)
+    logps, _, _ = scorer._chunked_logps_impl(model, ids, mask, keep, 2, False)
     torch.testing.assert_close(logps, forward, atol=1e-5, rtol=1e-5)
     logps.sum().backward()
     banks = [bank for _, layer in named_ep_layers(model) for bank in (layer.up_proj, layer.down_proj)]

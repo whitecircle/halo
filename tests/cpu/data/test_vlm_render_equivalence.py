@@ -15,6 +15,7 @@ from halo.data.collators.vlm import VLMDataCollator
 from halo.data.pipeline.vlm_rows import _VLM_SIGNATURE_COLUMNS, build_vlm_row_processor, vlm_map_features
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.data.turn_markers import resolve_eos_token_ids
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_VL_2B
 from tests.common.tokenizers import load_cached_processor
 
@@ -174,6 +175,15 @@ def _preprocessing_config(images_field: str | None) -> PreprocessingConfig:
     )
 
 
+def _bake(processor, dataset: Dataset, images_field: str | None) -> Dataset:
+    """The offline bake of this dataset, told the terminators the runtime collator below resolves: its
+    ``local/processor`` names no model config to read them from."""
+    eos_token_ids = resolve_eos_token_ids(processor.tokenizer)
+    return tokenize_vlm_dataset(
+        dataset, processor, _preprocessing_config(images_field), "train", eos_token_ids=eos_token_ids
+    )
+
+
 def _runtime_batch(processor, dataset: Dataset, images_field: str | None) -> dict:
     """The batch an untouched runtime VLM SFT run builds from this dataset's single row."""
     mapped = dataset.map(
@@ -193,7 +203,7 @@ def test_offline_bake_matches_runtime_render(model_name, revision, case):
     processor = load_cached_processor(model_name, revision=revision)
     dataset = TEXT_DATASETS[case]()
 
-    baked = tokenize_vlm_dataset(dataset, processor, _preprocessing_config(None), "train")
+    baked = _bake(processor, dataset, None)
     assert len(baked) == 1, f"{model_name} / {case}: the offline bake DROPPED the row — nothing was compared"
     batch = _runtime_batch(processor, dataset, None)
 
@@ -215,7 +225,7 @@ def test_image_rows_reach_the_schema_capability_refusal(model_name, revision, ca
     build_dataset, images_field = IMAGE_DATASETS[case]
 
     with pytest.raises(NotImplementedError, match="the preprocessed VLM schema cannot store"):
-        tokenize_vlm_dataset(build_dataset(), processor, _preprocessing_config(images_field), "train")
+        _bake(processor, build_dataset(), images_field)
 
 
 @pytest.mark.parametrize("model_name,revision", PROCESSORS)

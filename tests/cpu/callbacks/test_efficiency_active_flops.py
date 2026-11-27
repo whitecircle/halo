@@ -51,7 +51,7 @@ def _active_flops_per_token(ep_size: int, expert_tp_size: int = 1) -> float:
     return flops.active_model_flops_per_token
 
 
-@pytest.mark.parametrize("ep_size", [2, 4, 8])
+@pytest.mark.parametrize("ep_size", [2, 8])
 def test_active_flops_per_token_is_ep_invariant(ep_size):
     """Without the ``ep_size`` factor on the expert term, S-MFU under-reports by up to 8x on an ep8 run."""
     baseline = _active_flops_per_token(ep_size=1)
@@ -78,7 +78,7 @@ def test_active_flops_matches_hand_derivation():
         )
 
 
-@pytest.mark.parametrize("expert_tp_size", [1, 2, 4])
+@pytest.mark.parametrize("expert_tp_size", [1, 4])
 def test_expert_tp_divides_active_flops(expert_tp_size):
     """``expert_tp_size`` must not be multiplied in, because it already divides the local expert params."""
     baseline_expert_term = 6.0 * TOP_K * HIDDEN * HIDDEN

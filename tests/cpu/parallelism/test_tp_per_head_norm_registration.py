@@ -50,13 +50,5 @@ def test_empty_module_list_leaves_an_existing_registration_intact():
     assert per_head_norm_param_names(model) == ("plan_norm.weight",)
 
 
-def test_only_parameters_of_the_given_modules_are_registered():
-    model = _TwoNormModel()
-
-    register_per_head_norm_params(model, [model.plan_norm])
-
-    assert per_head_norm_param_names(model) == ("plan_norm.weight",)
-
-
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

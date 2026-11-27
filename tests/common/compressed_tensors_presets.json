@@ -1,0 +1,131 @@
+{
+  "vllm": "0.32.0",
+  "compressed_tensors": "0.17.0",
+  "targets": [
+    "re:(?:.*\\.)?layers\\.(?:0)\\.mlp\\.gate_proj$"
+  ],
+  "presets": {
+    "mxfp8": {
+      "config_groups": {
+        "group_0": {
+          "targets": [
+            "re:(?:.*\\.)?layers\\.(?:0)\\.mlp\\.gate_proj$"
+          ],
+          "weights": {
+            "num_bits": 8,
+            "type": "float",
+            "symmetric": true,
+            "group_size": 32,
+            "strategy": "group",
+            "block_structure": null,
+            "dynamic": false,
+            "actorder": null,
+            "scale_dtype": "torch.uint8",
+            "zp_dtype": null,
+            "observer": "memoryless_minmax",
+            "observer_kwargs": {}
+          },
+          "input_activations": {
+            "num_bits": 8,
+            "type": "float",
+            "symmetric": true,
+            "group_size": 32,
+            "strategy": "group",
+            "block_structure": null,
+            "dynamic": true,
+            "actorder": null,
+            "scale_dtype": "torch.uint8",
+            "zp_dtype": null,
+            "observer": null,
+            "observer_kwargs": {}
+          },
+          "output_activations": null,
+          "format": "mxfp8-quantized"
+        }
+      },
+      "quant_method": "compressed-tensors",
+      "kv_cache_scheme": null,
+      "format": "mxfp8-quantized",
+      "quantization_status": "compressed",
+      "global_compression_ratio": null,
+      "ignore": []
+    },
+    "mxfp4": {
+      "config_groups": {
+        "group_0": {
+          "targets": [
+            "re:(?:.*\\.)?layers\\.(?:0)\\.mlp\\.gate_proj$"
+          ],
+          "weights": {
+            "num_bits": 4,
+            "type": "float",
+            "symmetric": true,
+            "group_size": 32,
+            "strategy": "group",
+            "block_structure": null,
+            "dynamic": false,
+            "actorder": null,
+            "scale_dtype": "torch.uint8",
+            "zp_dtype": null,
+            "observer": "memoryless_minmax",
+            "observer_kwargs": {}
+          },
+          "input_activations": {
+            "num_bits": 4,
+            "type": "float",
+            "symmetric": true,
+            "group_size": 32,
+            "strategy": "group",
+            "block_structure": null,
+            "dynamic": true,
+            "actorder": null,
+            "scale_dtype": "torch.uint8",
+            "zp_dtype": null,
+            "observer": null,
+            "observer_kwargs": {}
+          },
+          "output_activations": null,
+          "format": "mxfp4-pack-quantized"
+        }
+      },
+      "quant_method": "compressed-tensors",
+      "kv_cache_scheme": null,
+      "format": "mxfp4-pack-quantized",
+      "quantization_status": "compressed",
+      "global_compression_ratio": null,
+      "ignore": []
+    },
+    "nvfp4": {
+      "config_groups": {
+        "group_0": {
+          "targets": [
+            "re:(?:.*\\.)?layers\\.(?:0)\\.mlp\\.gate_proj$"
+          ],
+          "weights": {
+            "num_bits": 4,
+            "type": "float",
+            "symmetric": true,
+            "group_size": 16,
+            "strategy": "tensor_group",
+            "block_structure": null,
+            "dynamic": false,
+            "actorder": null,
+            "scale_dtype": "torch.float8_e4m3fn",
+            "zp_dtype": null,
+            "observer": "memoryless_minmax",
+            "observer_kwargs": {}
+          },
+          "input_activations": null,
+          "output_activations": null,
+          "format": "nvfp4-pack-quantized"
+        }
+      },
+      "quant_method": "compressed-tensors",
+      "kv_cache_scheme": null,
+      "format": "nvfp4-pack-quantized",
+      "quantization_status": "compressed",
+      "global_compression_ratio": null,
+      "ignore": []
+    }
+  }
+}

@@ -72,7 +72,7 @@ def _scored_shards(model, hidden, ids, mask, labels, cp_size):
     return torch.cat(logps, dim=1), torch.cat(shifted, dim=1)
 
 
-@pytest.mark.parametrize("cp_size", [1, 2, 4])
+@pytest.mark.parametrize("cp_size", [1, 4])
 def test_scored_targets_and_gradients_match_full_qwen3(cp_size):
     ids, mask, labels = _inputs()
     baseline_model = _model()

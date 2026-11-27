@@ -76,7 +76,13 @@ class _Tokenizer:
 
 
 TOKENS = {f"t{i}": i for i in range(VOCAB)}
-_LOSS_KNOBS = ("distill_loss", "apply_hard_labels", "distill_jsd_beta", "distill_topk")
+_LOSS_KNOBS = (
+    "distill_loss",
+    "apply_hard_labels",
+    "distill_jsd_beta",
+    "distill_topk",
+    "use_chunked_distillation_loss",
+)
 
 
 def _args(**overrides) -> types.SimpleNamespace:
@@ -95,6 +101,7 @@ def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALP
         distill_alpha=alpha,
         distill_temperature=TEMPERATURE,
         apply_hard_labels=apply_hard_labels,
+        use_chunked_distillation_loss=False,
     )
     trainer.distillation_loss_fn = teacher_distillation.require_distill_loss(
         _args(distill_loss=distill_loss, apply_hard_labels=apply_hard_labels)
@@ -424,7 +431,7 @@ def test_the_text_collator_keeps_the_real_eos_label_when_pad_is_eos():
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     tokenizer.pad_token = tokenizer.eos_token
     args = types.SimpleNamespace(train_on_completions_only=False, assistant_message_template=None)
-    collator = teacher_distill_script._text_distill_collator(args, tokenizer, None)
+    collator = teacher_distill_script._text_distill_collator(args, tokenizer, None, None)
     rows = [{"input_ids": [11, 12, 13, tokenizer.eos_token_id]}, {"input_ids": [21, tokenizer.eos_token_id]}]
     labels = collator(rows)["labels"]
     assert labels[:, -1].tolist() == [tokenizer.eos_token_id, LABEL_IGNORE_INDEX]

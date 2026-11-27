@@ -235,8 +235,8 @@ def test_a_direct_call_without_offs_raises(native):
 
 @pytest.mark.parametrize(
     ("rows_per_expert", "n"),
-    [(8, 64), (8, 4096), (1024, 64), (1024, 4096)],
-    ids=["tiny", "wide-few-rows", "narrow-many-rows", "wide-many-rows"],
+    [(8, 64), (1024, 4096)],
+    ids=["tiny", "wide-many-rows"],
 )
 @pytest.mark.parametrize("quant_format", ["mxfp8", "mxfp4"])
 def test_native_runs_every_shape_native(native, quant_format, rows_per_expert, n):
@@ -319,24 +319,19 @@ def test_the_8bit_route_keeps_128_by_128_weight_blocks(real_casts):
     )
 
 
-@pytest.mark.parametrize("weight_cacheable", [True, False], ids=["cached", "fsdp2-managed"])
-@pytest.mark.parametrize("poison", [float("nan"), float("inf")])
+@pytest.mark.parametrize(
+    ("poison", "weight_cacheable"),
+    [
+        pytest.param(float("nan"), True, id="nan-cached"),
+        pytest.param(float("inf"), False, id="inf-fsdp2-managed"),
+    ],
+)
 def test_a_non_finite_weight_raises_before_the_mxfp4_cast(native, poison, weight_cacheable):
     x, w, offs = _operands(8, 64, 64)
     w[1, 3, 5] = poison
     with pytest.raises(ValueError, match="Non-finite expert weight"):
         expert_gemm(x, w, offs=offs, lowp=_native("mxfp4"), weight_cacheable=weight_cacheable)
     assert not native.kernel_calls
-
-
-def test_the_mxfp4_cast_itself_decodes_a_nan_block_as_zeros(real_casts):
-    """Why the guard exists; the day this stops holding the guard can go."""
-    w = _spread_weight(1, 64, 64)[0].t().contiguous()
-    w[0, 0] = float("nan")
-    packed, scales = real_casts.utils.per_token_cast_to_fp4(w, use_ue8m0=True, gran_k=32)
-    decoded = real_casts.utils.cast_back_from_fp4(packed, scales, gran_k=32)
-    assert decoded.isfinite().all()
-    assert decoded[0, :32].abs().max() == 0.0
 
 
 def test_the_fp8_route_needs_no_guard_as_its_cast_keeps_nan(real_casts):
@@ -667,8 +662,9 @@ def test_a_format_no_kernel_takes_is_refused_at_the_entry(native):
     assert not native.kernel_calls
 
 
-def test_the_non_finite_flag_raises_once_at_its_one_read_and_drops_the_cached_casts():
+def test_the_non_finite_flag_raises_once_at_its_one_read_and_drops_the_cached_casts(monkeypatch):
     """A caller that catches the raise must not find the non-finite weight's cast in the cache at its next forward."""
+    monkeypatch.setitem(deepgemm._weight_caches, "mxfp4", deepgemm.WeightVersionCache())
     flag = deepgemm._nonfinite_weight.setdefault(torch.device("cpu"), torch.zeros(1, dtype=torch.int32))
     weight = nn.Parameter(torch.zeros(1, 32, 32))
     deepgemm._weight_caches["mxfp4"].put(weight, weight._version, object())

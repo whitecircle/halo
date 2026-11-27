@@ -54,6 +54,30 @@ def _trainer(tmp_path, *, grpo: dict | None = None, **config) -> DistributedAsyn
     return trainer
 
 
+@pytest.mark.parametrize(
+    ("grpo", "config", "price", "match"),
+    [
+        ({"scale_rewards": "group"}, {}, 0.0, r"use_maxrl with scale_rewards='group'"),
+        ({"scale_rewards": "none"}, {"scale_rewards_std_floor": 0.05}, 0.0, r"use_maxrl with scale_rewards_std_floor"),
+        ({"scale_rewards": "none"}, {}, 0.5, "use_maxrl with reasoning_price on"),
+        ({"scale_rewards": "none"}, {"reasoning_floor": 0.2}, 0.0, "use_maxrl with reasoning_floor on"),
+    ],
+    ids=["std-scaling", "std-floor", "reasoning-price", "reasoning-floor"],
+)
+def test_each_maxrl_refusal_fires_when_the_rollout_state_is_configured(tmp_path, grpo, config, price, match):
+    """Every refusal from the config alone, so a run that would divide by a mean it cannot trust never starts."""
+    trainer = _trainer(tmp_path, grpo=grpo, use_maxrl=True, rollout_stop_tokens=[_STOP], **config)
+    trainer._rollout_env.reasoning_terms_for_effort = lambda level: (256, price)
+    with pytest.raises(ValueError, match=match):
+        trainer._configure_rollout_state()
+
+
+def test_maxrl_without_a_conflict_configures(tmp_path):
+    trainer = _trainer(tmp_path, grpo={"scale_rewards": "none"}, use_maxrl=True, rollout_stop_tokens=[_STOP])
+    trainer._configure_rollout_state()
+    assert trainer.async_config.use_maxrl
+
+
 def _callbacks(trainer, cls) -> list:
     return [callback for callback in trainer.callback_handler.callbacks if isinstance(callback, cls)]
 
@@ -351,15 +375,30 @@ def test_a_delivery_to_a_full_output_queue_raises_instead_of_waiting_and_the_wor
 
 @pytest.fixture(params=[False, True], ids=["cancel-raises", "cancel-swallowed"])
 def retraining(prefetching, monkeypatch, request):
-    """``prefetching`` with a held round in flight and a join too short for it to finish."""
+    """``prefetching`` with a held round in flight and a join too short for it to finish. The poll outlasts the join,
+    so the stopped worker still has one in flight when the next run submits."""
     monkeypatch.setattr(async_rollouts, "_PREFETCH_JOIN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(async_rollouts, "_PREFETCH_POLL_TIMEOUT_S", 1.0)
     prefetching._rollout_manager = _HeldRolloutManager(finishes_when_cancelled=request.param)
     prefetching.state = SimpleNamespace(global_step=0)
     prefetching._sync_weights_to_engine_fenced = lambda force=False: True
     prefetching._start_rollout_generation()
     prefetching._submit_for_prefetch(["a"], [None])
     assert prefetching._rollout_manager.entered.wait(_WORKER_WAIT_S)
-    return prefetching
+    yield prefetching
+    # A restarted worker is mid-poll at the teardown's stop, which then waits the poll out instead of leaving it.
+    monkeypatch.setattr(async_rollouts, "_PREFETCH_JOIN_TIMEOUT_S", _WORKER_WAIT_S)
+
+
+def test_a_stopped_worker_takes_no_later_submission(retraining):
+    """No new worker is started, so only the stopped one, its poll still in flight, could take the submission."""
+    old_worker = retraining._prefetch_thread
+    retraining._cleanup_async_components()
+    retraining._submit_for_prefetch(["b"], [None])
+    retraining._rollout_manager.release.set()
+    old_worker.join(_WORKER_WAIT_S)
+    assert not old_worker.is_alive()
+    assert retraining._prefetch_input_queue.qsize() == 1, "the stopped worker took the next run's submission"
 
 
 def test_a_restarted_worker_runs_the_next_trains_rounds(retraining):

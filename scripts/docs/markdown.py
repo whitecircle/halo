@@ -28,10 +28,13 @@ _WRAPPED_CODE_SPAN = re.compile(_CODE_SPAN.pattern, re.DOTALL)
 _LINK = re.compile(r"\]\(([^)]+)\)")
 _HTML_ANCHOR = re.compile(r"""<a\s[^>]*?\b(?:id|name)\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 _HTML_HEADING = re.compile(r"<h([1-6])\b[^>]*>(.*?)</h\1\s*>", re.IGNORECASE)
-_AUTOLINK = re.compile(r"<((?:https?|mailto):[^>\s]*)>")
+# CommonMark's autolinks: an absolute URI of any scheme, or an email address.
+_AUTOLINK = re.compile(r"<([A-Za-z][A-Za-z0-9+.-]{1,31}:[^<>\s]*|[^<>\s@]+@[^<>\s@]+)>")
 _INLINE_LINK = re.compile(r"(!?)\[([^\]]*)\]\([^)]*\)")
 _REFERENCE_LINK = re.compile(r"\[([^\]]*)\]\[[^\]]*\]")
 _HTML_TAG = re.compile(r"</?[A-Za-z][^>]*>")
+# A tag or the opening of a comment; a backslash before the ``<`` makes it text.
+_RAW_HTML = re.compile(rf"(?<!\\)(?:{_HTML_TAG.pattern}|<!--)")
 _UNDERSCORE_EMPHASIS = re.compile(r"(?<![\w\\])(_{1,3})(?=\S)(.+?)(?<=\S)(?<!\\)\1(?!\w)")
 _ESCAPE = re.compile(r"\\([!-/:-@\[-`{-~])")
 
@@ -41,6 +44,7 @@ class Document(NamedTuple):
     heading_attributes: tuple[tuple[int, str], ...]
     links: tuple[tuple[int, str], ...]
     code: tuple[tuple[int, str], ...]
+    html_tags: tuple[tuple[int, str], ...]
 
 
 class Table(NamedTuple):
@@ -113,8 +117,20 @@ def code_spans(paragraph: list[tuple[int, str]]) -> list[tuple[int, str]]:
     ]
 
 
+def html_tags(paragraph: list[tuple[int, str]]) -> list[tuple[int, str]]:
+    """``(line, tag)`` for each raw HTML tag or comment opening outside the code spans of a paragraph's
+    ``(line, text)`` rows. An autolink (``<https://…>``) is markdown, not a tag."""
+    if not paragraph:
+        return []
+    text = "\n".join(line for _lineno, line in paragraph)
+    first = paragraph[0][0]
+    prose = _AUTOLINK.sub("", _WRAPPED_CODE_SPAN.sub(lambda match: "\n" * match.group().count("\n"), text))
+    return [(first + prose.count("\n", 0, match.start()), match.group()) for match in _RAW_HTML.finditer(prose)]
+
+
 def parse_markdown(text: str) -> Document:
-    """Anchors, ``{#id}`` attributes, ``(line, target)`` links and ``(line, code)`` code (spans, fenced lines)."""
+    """Anchors, ``{#id}`` attributes, ``(line, target)`` links, ``(line, code)`` code (spans, fenced lines) and
+    ``(line, tag)`` raw HTML outside code."""
     lines = text.splitlines()
     start = 0
     if lines and lines[0] == "---":
@@ -123,9 +139,16 @@ def parse_markdown(text: str) -> Document:
     attributes: list[tuple[int, str]] = []
     links: list[tuple[int, str]] = []
     code: list[tuple[int, str]] = []
+    tags: list[tuple[int, str]] = []
     paragraph: list[tuple[int, str]] = []
     explicit: set[str] = set()
     fence = ""
+
+    def end_paragraph() -> None:
+        code.extend(code_spans(paragraph))
+        tags.extend(html_tags(paragraph))
+        paragraph.clear()
+
     for lineno, raw in enumerate(lines[start:], start + 1):
         line = _BLOCKQUOTE.sub("", raw)
         marker = _FENCE.match(line)
@@ -141,8 +164,7 @@ def parse_markdown(text: str) -> Document:
         opens_fence = marker and not (marker.group(1)[0] == "`" and "`" in marker.group(2))
         # A blank line, a fence or a heading ends the paragraph a wrapped code span can run through.
         if not line.strip() or opens_fence or heading:
-            code.extend(code_spans(paragraph))
-            paragraph = []
+            end_paragraph()
         if opens_fence:
             fence = marker.group(1)
             continue
@@ -157,10 +179,11 @@ def parse_markdown(text: str) -> Document:
             if attribute:
                 attributes.append((lineno, attribute.group(0)))
             headings.append(heading_text(source))
-            code.extend(code_spans(paragraph))
-            paragraph = []
-    code.extend(code_spans(paragraph))
-    return Document(frozenset(unique_slugs(headings)) | explicit, tuple(attributes), tuple(links), tuple(code))
+            end_paragraph()
+    end_paragraph()
+    return Document(
+        frozenset(unique_slugs(headings)) | explicit, tuple(attributes), tuple(links), tuple(code), tuple(tags)
+    )
 
 
 def parse_tables(text: str) -> list[Table]:

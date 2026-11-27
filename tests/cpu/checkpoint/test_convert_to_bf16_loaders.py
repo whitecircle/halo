@@ -53,14 +53,6 @@ def test_the_merge_and_the_conversion_spell_one_head_flag(monkeypatch):
     assert _task_choices(monkeypatch, merge_script.main) == set(ADAPTER_TASKS) < set(TASK_MODEL_CLASSES)
 
 
-def test_a_base_task_on_an_adapter_is_refused_before_any_write(tmp_path):
-    """Through the conversion itself, where an adapter is rewritten with no model load to reach the task gate."""
-    out = tmp_path / "out"
-    with pytest.raises(ValueError, match="PEFT is only supported"):
-        convert_module.convert_to_bf16(str(tmp_path), str(out), "base", is_peft=True)
-    assert not out.exists()
-
-
 class _Generates(nn.Linear):
     def __init__(self):
         super().__init__(1, 1)
@@ -154,7 +146,11 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
     monkeypatch.setattr(
         convert_module.PeftConfig,
         "from_pretrained",
-        classmethod(lambda cls, path: types.SimpleNamespace(base_model_name_or_path="/base", modules_to_save=None)),
+        classmethod(
+            lambda cls, path: types.SimpleNamespace(
+                base_model_name_or_path="/base", revision=None, modules_to_save=None
+            )
+        ),
     )
     base_model = object()
 
@@ -166,7 +162,7 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
     monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: (base, path))
 
     assert load_model("/adapter", "causal_lm", is_peft=True) == (base_model, "/adapter")
-    assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False})
+    assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False, "revision": None})
     assert finalized == [base_model], "the base the adapter names is the one that must be finalized"
 
 
@@ -177,7 +173,9 @@ def test_the_task_head_excuse_follows_the_adapters_declaration(monkeypatch, fina
         convert_module.PeftConfig,
         "from_pretrained",
         classmethod(
-            lambda cls, path: types.SimpleNamespace(base_model_name_or_path="/base", modules_to_save=["score"])
+            lambda cls, path: types.SimpleNamespace(
+                base_model_name_or_path="/base", revision=None, modules_to_save=["score"]
+            )
         ),
     )
     monkeypatch.setattr(

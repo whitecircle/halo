@@ -17,7 +17,7 @@ per_device_train_batch_size: 2
 per_device_eval_batch_size: 2
 num_train_epochs: 1.0
 gradient_accumulation_steps: 8
-gradient_checkpointing: false   # ~35 GB of activations per micro-batch (2 x 4,096 tokens); set true on one 80 GB GPU
+gradient_checkpointing: false   # ~37 GiB of activations per micro-batch (2 x 4,096 tokens); set true on one 80 GB GPU
 gradient_checkpointing_kwargs:   # applies once GC is turned on
   use_reentrant: false
 learning_rate: 2.0e-05

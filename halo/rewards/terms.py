@@ -70,6 +70,13 @@ class RewardModelBackend(StrEnum):
     SGLANG = "sglang"
 
 
+class WhiteCircleRegion(StrEnum):
+    """The White Circle API's regional servers, ``https://<region>.whitecircle.com``."""
+
+    US = "us"
+    EU = "eu"
+
+
 def component_key(name: str) -> str:
     return REWARD_COMPONENT_PREFIX + name
 
@@ -159,6 +166,11 @@ class RewardTerm:
     @property
     def owner(self) -> str:
         return f"{self.source} reward term {self.name!r}"
+
+    @property
+    def reads_answer(self) -> bool:
+        """The term reads the row's answer column, so a run with it needs that column."""
+        return False
 
     def shape(self, score: float) -> float:
         """The shaped score before the weight, what a TRL reward function returns."""
@@ -335,6 +347,10 @@ class JudgeTerm(ScoredTerm):
     def is_veto(self) -> bool:
         return bool(self.checks)
 
+    @property
+    def reads_answer(self) -> bool:
+        return self.include_reference
+
     @classmethod
     def from_config(cls, spec: Mapping[str, Any]) -> Self:
         spec = dict(spec)
@@ -409,11 +425,57 @@ class RewardModelTerm(ScoredTerm):
         return math.exp(z) / (1.0 + math.exp(z))
 
 
+# A checklist's completion counts as flagged once at least this fraction of its items is hit.
+CHECKLIST_FLAG_CONFIDENCE = 0.5
+
+
+@dataclass(frozen=True, kw_only=True)
+class WhiteCircleTerm(ScoredTerm):
+    """The White Circle API's policy check of the completion in its conversation (``POST /api/events``) against the
+    policies of ``environment_id``. With nothing listed the score is 1 unless the completion was flagged, else 0; with
+    ``policies`` listed (policy ids) it is the fraction of them the completion did not violate. A ``checklist`` (the
+    policy ids of its items) is one judgment instead: its confidence is the fraction of items hit, its score 1 minus
+    that, and the completion counts as flagged at a confidence of :data:`CHECKLIST_FLAG_CONFIDENCE` or more. A term lists
+    ``policies`` or a ``checklist``, not both. ``max_retries`` bounds the retries of a rate-limited or failed request,
+    ``retry_wait`` the first backoff in seconds."""
+
+    source: ClassVar[str] = "whitecircle"
+    views: ClassVar[tuple[View, ...]] = (View.FINAL, View.FULL)
+
+    name: str = "whitecircle"
+    environment_id: str
+    policies: tuple[str, ...] = ()
+    checklist: tuple[str, ...] = ()
+    region: WhiteCircleRegion = WhiteCircleRegion.US
+    max_retries: int = 4
+    retry_wait: float = 1.0
+    request_timeout: float = 30.0
+    max_concurrency: int = 8
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        owner = self.owner
+        require_text(owner, environment_id=self.environment_id)
+        for field in ("policies", "checklist"):
+            ids = getattr(self, field)
+            if isinstance(ids, str) or not isinstance(ids, Sequence):
+                raise ValueError(f"{owner}: {field} must be a list of policy ids, got {ids!r}")
+            object.__setattr__(self, field, tuple(ids))
+            for policy in getattr(self, field):
+                require_text(owner, policy=policy)
+            validate_unique_names(f"{owner}: {field} entry", list(getattr(self, field)))
+        if self.policies and self.checklist:
+            raise ValueError(f"{owner}: list policies or a checklist, not both")
+        _coerce_enum(self, "region", WhiteCircleRegion)
+        require_int(owner, ge=0, max_retries=self.max_retries)
+        require_finite(owner, ge=0, retry_wait=self.retry_wait)
+
+
 def sources_of(*term_types: type[RewardTerm]) -> dict[str, type[RewardTerm]]:
     return {term_type.source: term_type for term_type in term_types}
 
 
-ENVIRONMENT_REWARD_SOURCES = sources_of(EnvironmentTerm, JudgeTerm, RewardModelTerm)
+ENVIRONMENT_REWARD_SOURCES = sources_of(EnvironmentTerm, JudgeTerm, RewardModelTerm, WhiteCircleTerm)
 
 
 def read_context_files(raw: Any) -> Any:

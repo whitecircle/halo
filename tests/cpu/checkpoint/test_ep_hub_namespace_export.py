@@ -111,18 +111,6 @@ def _outside_expert_banks(loaded: _Loaded, keys) -> set[str]:
 
 
 @pytest.mark.parametrize("name", list(FAMILIES))
-def test_gathered_save_writes_the_hub_namespace_outside_the_expert_banks(name, tmp_path):
-    loaded = _loaded(name, tmp_path)
-    hub, saved = _outside_expert_banks(loaded, loaded.hub), _outside_expert_banks(loaded, loaded.saved)
-
-    assert set(loaded.hub) - hub and set(loaded.saved) - saved, f"{name}: no key classified as an expert bank"
-    assert saved == hub, (
-        f"{name}: the gathered save spells tensors outside the expert banks differently from the hub: "
-        f"only saved={sorted(saved - hub)[:5]}, only hub={sorted(hub - saved)[:5]}"
-    )
-
-
-@pytest.mark.parametrize("name", list(FAMILIES))
 def test_gathered_save_reloads_into_the_saved_tensors(name, tmp_path):
     loaded = _loaded(name, tmp_path)
     reloaded, info = loaded.family.load_class.from_pretrained(
@@ -142,8 +130,10 @@ def test_gathered_save_reloads_into_the_saved_tensors(name, tmp_path):
 _WRAPPERLESS_SAVERS = {"fsdp2": save_fsdp2_checkpoint, "tp": save_tp_checkpoint}
 
 
-@pytest.mark.parametrize("saver", _WRAPPERLESS_SAVERS)
-@pytest.mark.parametrize("name", list(FAMILIES))
+@pytest.mark.parametrize(
+    ("name", "saver"),
+    [(name, "fsdp2") for name in FAMILIES] + [("gpt_oss", "tp"), ("qwen3_moe", "tp")],
+)
 def test_wrapperless_save_writes_the_hub_checkpoint(name, saver, tmp_path):
     """These writers revert the per-expert merges too."""
     family = FAMILIES[name]

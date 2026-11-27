@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Precision ceilings</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 480px;
+    --bar-h: 34px;
+    --tick: 6px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .row,
+  .group-head {
+    display: grid;
+    grid-template-columns: var(--label-col) 1fr;
+    align-items: center;
+  }
+
+  .group-head .name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 33px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    color: var(--heading);
+  }
+
+  .group-head + .row { margin-top: var(--heading-gap); }
+
+  .row + .row { margin-top: 22px; }
+
+  .row + .group-head { margin-top: var(--group-gap); }
+
+  .key {
+    display: flex;
+    gap: 32px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key span { display: inline-flex; align-items: center; gap: 10px; }
+
+  .key i {
+    width: 30px;
+    height: 20px;
+    border-radius: 5px;
+    background: var(--halo-blue);
+  }
+
+  .key i.burst {
+    width: 3px;
+    height: 28px;
+    border-radius: 0;
+    background: var(--text);
+  }
+
+  .label .format {
+    font-size: 25px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .label .how {
+    margin-top: 1px;
+    font-size: 20px;
+    line-height: 1.25;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .track {
+    position: relative;
+    height: var(--bar-h);
+  }
+
+  .track .fill {
+    position: absolute;
+    inset: 0 auto 0 0;
+    border-radius: 7px;
+    background: var(--halo-blue);
+  }
+
+  /* The rate in the first 40 ms: a tick past the end of the sustained bar. */
+  .track .burst {
+    position: absolute;
+    top: -4px;
+    bottom: -4px;
+    width: 3px;
+    margin-left: -1.5px;
+    background: var(--text);
+  }
+
+  .track .value {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 21px;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    color: var(--secondary);
+    white-space: nowrap;
+  }
+
+  .track .value b {
+    font-weight: 500;
+    color: var(--text);
+  }
+
+  /* The bars print their values, so the plot draws no gridlines: an axis line under them carries the scale. */
+  .ticks {
+    position: relative;
+    height: 34px;
+    margin: 24px 0 0 var(--label-col);
+    font-size: 19px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks .axis { position: absolute; top: 0; left: 0; right: 0; border-top: 1px solid var(--line); }
+
+  .ticks i { position: absolute; top: 0; height: var(--tick); border-left: 1px solid var(--line); }
+
+  .ticks span { position: absolute; top: calc(var(--tick) + 4px); transform: translateX(-50%); white-space: nowrap; }
+
+  .axis-title {
+    margin-left: var(--label-col);
+    font-size: 19px;
+    line-height: 1.2;
+    color: var(--secondary);
+  }
+
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure">
+    <div class="plot" id="plot"></div>
+    <div class="ticks" id="ticks"></div>
+    <p class="axis-title">Rate, TFLOP/s</p>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">One B300, an 8192³ GEMM: a bar is the median of back-to-back calls, with the board at its power limit.</span>
+      <span class="s" id="uncapped"></span>
+      <span class="s">The second group’s operands are quantized before the timed call.</span>
+      <span class="s">The two groups are two runs: torch.mm in the first, scaled_mm in the second.</span>
+      <span class="s" id="long"></span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  // Measured on one B300, an 8192³ GEMM.
+  // The runs, each named by its --output:
+  //   python tests/gpu/profiling/benchmark_roofline.py --output roofline.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections peaks --peak_dims 4096 8192 12288 16384 24576
+  //     32768 --peak_dtypes bf16 fp16 tf32 --cooldown 1.0 --repeat_seconds 0.01 --repeats 10 --output
+  //     peaks-burst.json
+  //   python tests/gpu/profiling/benchmark_roofline.py --sections peaks --peak_dims 8192 16384 --peak_dtypes bf16
+  //     --repeat_seconds 0.5 --repeats 10 --output peaks-sustained.json
+  // Stored formats, by tests/gpu/profiling/benchmark_roofline.py --sections peaks (torch.mm): `sustained` is
+  // roofline.json, sections.peaks[] with m = 8192, eager.tflops_median, the median of 7 repeats of back-to-back
+  // calls, and `capped` whether state.clock_event_reasons after it is the driver's power cap (4). `burst` is
+  // peaks-burst.json, the same row, eager.tflops_median, samples of 10 ms after a second of rest (no fp32 row).
+  // tf32 is fp32 at float32 matmul precision "high", fp32 the same at "highest".
+  const STORED = [
+    { id: "bf16", sustained: 1432, burst: 1793, capped: true },
+    { id: "fp16", sustained: 1346, burst: 1694, capped: true },
+    { id: "tf32", sustained: 761.1, burst: 955.2, capped: true },
+    { id: "fp32", sustained: 68.32, burst: null, capped: false },
+  ];
+  // Quantized operands, by tests/gpu/profiling/benchmark_lowp_kernels.py --groups square --iters 2000:
+  // lowp-square-sustained.jsonl, the rows with k = n = rows_per_expert = 8192, 2 × 8192³ FLOPs over median_s.
+  // Arms bf16_forward, torch_scaled_fp8_tensorwise_forward, torch_scaled_mxfp8_forward, torch_scaled_nvfp4_forward
+  // (torch.nn.functional.scaled_mm). The operands are quantized before the timed call.
+  const QUANTIZED = [
+    { id: "bf16", sustained: 1404 },
+    { id: "fp8", sustained: 2644 },
+    { id: "mxfp8", sustained: 2608 },
+    { id: "nvfp4", sustained: 5565 },
+  ];
+  /** The shortest and the longest sample of the stored formats' rows, in ms: a row's calls_per_repeat × median. */
+  const STORED_SAMPLE_MS = [59.2, 80.5];
+  /** The calls each quantized arm is the median of: the script's --iters. */
+  const QUANTIZED_CALLS = 2000;
+  // The same bf16 GEMM in longer samples: peaks-sustained.json, the 8192³ bf16 row, eager.tflops_median, with the
+  // sample length its command gives as --repeat_seconds.
+  const LONG_SAMPLES = { seconds: 0.5, rate: 1388 };
+  /** What each format's row says under its name. */
+  const NAMES = {
+    stored: {
+      bf16: ["bf16", "On the tensor cores"],
+      fp16: ["fp16", "On the tensor cores"],
+      tf32: ["fp32 with TF32", "Rounded to 10 mantissa bits, on the tensor cores"],
+      fp32: ["fp32 at full precision", "On the CUDA cores"],
+    },
+    quantized: {
+      bf16: ["bf16", "This group’s reference"],
+      fp8: ["fp8", "One scale per tensor"],
+      mxfp8: ["mxfp8", "One scale per 32 values"],
+      nvfp4: ["nvfp4", "One scale per 16 values and one per tensor"],
+    },
+  };
+  const GROUPS = [
+    { heading: "Formats a tensor is stored in", names: NAMES.stored, rows: STORED },
+    { heading: "Quantized operands", names: NAMES.quantized, rows: QUANTIZED },
+  ];
+  /** Distance from a mark's edge to the value beside it. */
+  const LABEL_GAP = 12;
+
+  const fmt = (v) => Math.round(v).toLocaleString("en-US");
+  const all = GROUPS.flatMap((group) => group.rows);
+  const slowest = all.reduce((a, b) => (a.sustained < b.sustained ? a : b));
+  const fastest = all.reduce((a, b) => (a.sustained > b.sustained ? a : b));
+  const nameOf = (row) => GROUPS.find((group) => group.rows.includes(row)).names[row.id][0];
+
+  document.getElementById("title").textContent =
+    `The same GEMM runs at ${fmt(slowest.sustained)} TFLOP/s in ${nameOf(slowest).replace(/^fp32 at full precision$/, "full-precision fp32")} and at ${fmt(fastest.sustained)} in ${nameOf(fastest)}`;
+  const free = STORED.filter((row) => !row.capped);
+  document.getElementById("uncapped").textContent =
+    `${free.map((row) => NAMES.stored[row.id][0]).join(" and ")} stays under the limit, so it has no separate first reading.`;
+
+  // The two groups are two runs, and the bf16 rate at the power limit moves with the length of a sample: each
+  // group's key names its own, and the notes tie both to the longer samples of the sustained GEMM peak.
+  const tens = (v) => Math.round(v / 10) * 10;
+  const [storedReference, quantizedReference] = [STORED, QUANTIZED].map((rows) => rows.find((row) => row.id === "bf16"));
+  const KEYS = [
+    `<span><i></i>Back-to-back calls, in samples of ${STORED_SAMPLE_MS.map(tens).join(" to ")} ms</span><span><i class="burst"></i>In the first 40 ms from a cool start</span>`,
+    `<span><i></i>Back-to-back calls, the median of ${fmt(QUANTIZED_CALLS)}</span>`,
+  ];
+  document.getElementById("long").textContent =
+    `bf16 reads ${fmt(storedReference.sustained)} in one and ${fmt(quantizedReference.sustained)} in the other, and ${fmt(LONG_SAMPLES.rate)}, the sustained GEMM peak, in samples of ${LONG_SAMPLES.seconds} s.`;
+
+  const plot = document.getElementById("plot");
+  const marks = [];
+
+  GROUPS.forEach((group, g) => {
+    const head = el("div", "group-head");
+    const key = el("div", "key");
+    key.innerHTML = KEYS[g];
+    head.append(el("div", "name", group.heading), key);
+    plot.append(head);
+    const reference = group.rows.find((row) => row.id === "bf16");
+
+    for (const row of group.rows) {
+      const [format, how] = group.names[row.id];
+      const node = el("div", "row");
+      const label = el("div", "label");
+      label.append(el("div", "format", format), el("div", "how", how));
+      const track = el("div", "track");
+      node.append(label, track);
+      plot.append(node);
+      // The quantized group states each rate against its own bf16 run.
+      const ratio = g === 1 && row !== reference ? `${(row.sustained / reference.sustained).toFixed(1)} times bf16` : null;
+      marks.push({ track, row, ratio });
+    }
+  });
+
+  const width = marks[0].track.clientWidth;
+
+  /** Draws each row on an axis to `max`: its bar, its first-40-ms tick, and the values past the further of the two. */
+  function draw(max) {
+    const x = (value) => (value / max) * width;
+
+    for (const { track, row, ratio } of marks) {
+      const fill = el("div", "fill");
+      fill.style.width = `${x(row.sustained)}px`;
+      track.replaceChildren(fill);
+      const value = el("div", "value");
+      value.append(el("b", undefined, fmt(row.sustained)));
+
+      if (row.burst != null) {
+        const tick = el("div", "burst");
+        tick.style.left = `${x(row.burst)}px`;
+        track.append(tick);
+        value.append(` · ${fmt(row.burst)} at first`);
+      }
+
+      if (ratio !== null) {
+        value.append(` · ${ratio}`);
+      }
+
+      value.style.left = `${x(Math.max(row.sustained, row.burst ?? 0)) + LABEL_GAP}px`;
+      track.append(value);
+    }
+  }
+
+  // The axis from zero ends at the smallest maximum that holds every bar and value inside the plot.
+  const axis = niceAxis(Math.max(...all.map((row) => Math.max(row.sustained, row.burst ?? 0))), (max) => {
+    draw(max);
+    const right = marks[0].track.getBoundingClientRect().right;
+
+    return marks.every(({ track }) => [...track.children].every((node) => node.getBoundingClientRect().right <= right));
+  });
+
+  drawAxis(document.getElementById("ticks"), axis, (v) => v.toLocaleString("en-US"));
+</script>
+</body>
+</html>

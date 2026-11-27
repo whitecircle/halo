@@ -7,6 +7,7 @@ from trl import SFTConfig
 
 from halo.callbacks.generate_examples import GenerateExamplesCallback
 from halo.callbacks.mtp import MtpAcceptanceGate
+from halo.callbacks.token_mix_checkpoint import TokenMixCheckpointCallback
 from halo.config_validation import reject_non_default_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
@@ -35,11 +36,15 @@ from halo.entrypoints.data_setup import (
     apply_vision_options,
     disable_trl_dataset_prep,
     load_script_datasets,
+    load_token_sources,
     log_script_dataset_examples,
     prepare_chat_text_split,
     prepare_raw_vlm_split,
+    reject_resume_from_a_token_run,
     reject_trl_dataset_prep_args,
+    reject_unsupported_token_source_options,
     resolve_vlm_run,
+    verify_token_sources_fit_model,
 )
 from halo.entrypoints.model_setup import (
     apply_max_length,
@@ -62,6 +67,7 @@ from halo.model_loading.parallel.loader import resolve_policy_attn_implementatio
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
+from halo.model_loading.tokenizer_setup import mark_processor_rendered_rows
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.tree import (
     install_tree_attention,
@@ -95,7 +101,7 @@ def _reject_empty_split(dataset, split: str, max_length: int) -> None:
         )
 
 
-def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_kwargs):
+def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, generation_config, **processor_kwargs):
     """``processor_kwargs`` are the render and map arguments of the flat path."""
     reject_unusable_response_marker(
         tokenizer, args.assistant_message_template, args.train_on_completions_only, "tree packing"
@@ -106,7 +112,7 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
         sft_config.max_length,
         share_markers=tuple(args.tree_share_markers),
         share_requires=args.tree_share_requires,
-        eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
+        eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config, generation_config),
         assistant_message_template=args.assistant_message_template,
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         **processor_kwargs,
@@ -114,7 +120,7 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
     return ds["train"], ds["test"]
 
 
-def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
+def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config, generation_config):
     """COLLECTIVE: ``(train, eval, generate)``, one chat-template tokenize as flat rows or trees, then the packing."""
     render_kwargs = text_render_kwargs(args)
     num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
@@ -127,6 +133,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
                 tokenizer=tokenizer,
                 max_length=sft_config.max_length,
                 add_generation_prompt=True,
+                eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config, generation_config),
                 **render_kwargs,
             ),
             desc="Processing generate dataset",
@@ -135,11 +142,11 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
         )
     if args.tree_packing:
         train_dataset, eval_dataset = _prepare_tree_rows(
-            ds, args, sft_config, tokenizer, hf_config, **render_kwargs, num_proc=num_proc
+            ds, args, sft_config, tokenizer, hf_config, generation_config, **render_kwargs, num_proc=num_proc
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, sft_config, desc="Processing dataset"
+            ds, tokenizer, args, sft_config, hf_config, generation_config, desc="Processing dataset"
         )
     _reject_empty_split(train_dataset, "training", sft_config.max_length)
     if sft_config.packing:
@@ -151,7 +158,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
     return train_dataset, eval_dataset, generate_dataset
 
 
-def _verify_metadata(metadata, args, sft_config, model_config, processing_class) -> None:
+def _verify_metadata(metadata, args, sft_config, model_config, processing_class, eos_token_ids) -> None:
     verify_preprocessed_dataset(
         metadata,
         required_max_length=sft_config.max_length,
@@ -160,6 +167,7 @@ def _verify_metadata(metadata, args, sft_config, model_config, processing_class)
         render_args=args,
         required_packing=sft_config.packing,
         run_processing_class=processing_class,
+        required_eos_token_ids=eos_token_ids,
     )
 
 
@@ -167,6 +175,31 @@ def _packs_rows(sft_config, metadata) -> bool:
     """A pre-processed corpus as it was baked, since offline-packed rows still need the packing collator's per-document
     position_ids; a raw one as ``packing`` says."""
     return metadata.packed if metadata is not None else sft_config.packing
+
+
+def _flat_text_collator(
+    args, sft_config, tokenizer, parallelism_config, hf_config, generation_config, *, packs_rows, masks_completions
+):
+    """The collator of flat text rows, packed or not."""
+    # TRL's own setting outside CP: the full-sequence route then returns the collator TRL would build.
+    pad_to_multiple_of = parallelism_config.cp_size if parallelism_config.is_cp_mode else sft_config.pad_to_multiple_of
+    return select_data_collator(
+        tokenizer=tokenizer,
+        padding_free=sft_config.padding_free,
+        packing=packs_rows,
+        train_on_completions_only=masks_completions,
+        assistant_message_template=args.assistant_message_template,
+        pad_to_multiple_of=pad_to_multiple_of,
+        use_context_parallel=parallelism_config.is_cp_mode,
+        train_on_last_assistant_only=args.train_on_last_assistant_only,
+        model_config=hf_config,
+        generation_config=generation_config,
+        per_device_train_batch_size=sft_config.per_device_train_batch_size,
+        per_device_eval_batch_size=evaluation_batch_size(sft_config),
+        keeps_packed_rows=parallelism_config.pp_size > 1,
+        allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+        emit_varlen_one_document=True,
+    )
 
 
 def _prepare_text_data(
@@ -179,14 +212,22 @@ def _prepare_text_data(
     tokenizer,
     parallelism_config,
     hf_config,
+    generation_config,
 ):
     """Pre-processed splits as baked, or raw ones tokenized and packed; ``(train, eval, generate, collator)``."""
     if metadata is not None:
-        _verify_metadata(metadata, args, sft_config, model_config, processing_class)
+        _verify_metadata(
+            metadata,
+            args,
+            sft_config,
+            model_config,
+            processing_class,
+            resolve_eos_token_ids(tokenizer, hf_config, generation_config),
+        )
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
         train_dataset, eval_dataset, generate_dataset = _prepare_raw_text_splits(
-            ds, args, sft_config, tokenizer, hf_config
+            ds, args, sft_config, tokenizer, hf_config, generation_config
         )
 
     if args.tree_packing:
@@ -196,40 +237,54 @@ def _prepare_text_data(
             tokenizer, full_form=args.tree_full_attention, **resolve_tree_plan_options(hf_config)
         )
         return train_dataset, eval_dataset, generate_dataset, collator
-    # TRL's own setting outside CP: the full-sequence route then returns the collator TRL would build.
-    pad_to_multiple_of = parallelism_config.cp_size if parallelism_config.is_cp_mode else sft_config.pad_to_multiple_of
-    collator = select_data_collator(
-        tokenizer=tokenizer,
-        padding_free=sft_config.padding_free,
-        packing=_packs_rows(sft_config, metadata),
+    collator = _flat_text_collator(
+        args,
+        sft_config,
+        tokenizer,
+        parallelism_config,
+        hf_config,
+        generation_config,
+        packs_rows=_packs_rows(sft_config, metadata),
         # Preprocessed labels are baked; re-masking a chunk whose marker landed in the previous chunk would drop
         # trained tokens.
-        train_on_completions_only=args.train_on_completions_only and metadata is None,
-        assistant_message_template=args.assistant_message_template,
-        pad_to_multiple_of=pad_to_multiple_of,
-        use_context_parallel=parallelism_config.is_cp_mode,
-        train_on_last_assistant_only=args.train_on_last_assistant_only,
-        model_config=hf_config,
-        per_device_train_batch_size=sft_config.per_device_train_batch_size,
-        per_device_eval_batch_size=evaluation_batch_size(sft_config),
-        keeps_packed_rows=parallelism_config.pp_size > 1,
-        allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
-        emit_varlen_one_document=True,
+        masks_completions=args.train_on_completions_only and metadata is None,
     )
     return train_dataset, eval_dataset, generate_dataset, collator
 
 
 def _prepare_vlm_data(
-    ds, metadata: PreprocessedDatasetMetadata | None, args, sft_config, model_config, processor, tokenizer, hf_config
+    ds,
+    metadata: PreprocessedDatasetMetadata | None,
+    args,
+    sft_config,
+    model_config,
+    processor,
+    tokenizer,
+    hf_config,
+    generation_config,
 ):
     """The pre-processed splits as baked, or the raw VLM map; returns ``(train, eval, None, collator)``, since
     GenerateExamplesCallback needs tokenized input_ids."""
     if metadata is None:
         train_dataset, eval_dataset, collator = prepare_raw_vlm_split(
-            ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"
+            ds,
+            args,
+            sft_config,
+            processor,
+            tokenizer,
+            hf_config,
+            generation_config,
+            desc="Processing train/eval dataset",
         )
         return train_dataset, eval_dataset, None, collator
-    _verify_metadata(metadata, args, sft_config, model_config, processor)
+    _verify_metadata(
+        metadata,
+        args,
+        sft_config,
+        model_config,
+        processor,
+        resolve_eos_token_ids(tokenizer, hf_config, generation_config),
+    )
     if not metadata.is_vlm:
         raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
     collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
@@ -242,6 +297,9 @@ def main():
     )
 
     reject_unsupported_sft_data_options(sft_config, dist_args)
+    token_run = args.token_sources is not None
+    if token_run:
+        reject_unsupported_token_source_options(args, sft_config, dist_args)
     if args.tree_packing:
         reject_unsupported_tree_packing(args, sft_config, dist_args)
         # A tree row's plan segments the linear-attention layers of every family tree packing admits.
@@ -320,9 +378,17 @@ def main():
             quantization_config=resolve_quantization_config(model_config, sft_config),
         )
 
-    (ds, is_preprocessed), dataset_presharded = load_script_datasets(
-        args, parallelism_config, loader=load_datasets_auto, conversation_field=args.conversation_field
-    )
+    if token_run:
+        # Before the model load, so a folder that cannot be read or a changed mix fails without paying for one.
+        token_mix, token_eval = load_token_sources(
+            args, sft_config, parallelism_config, resume_checkpoint=context.resume_checkpoint
+        )
+        ds, is_preprocessed, dataset_presharded = None, False, False
+    else:
+        reject_resume_from_a_token_run(context.resume_checkpoint)
+        (ds, is_preprocessed), dataset_presharded = load_script_datasets(
+            args, parallelism_config, loader=load_datasets_auto, conversation_field=args.conversation_field
+        )
     if is_preprocessed:
         # Both splits are used as baked, so eval_packing has nothing to decide.
         reject_non_default_args("Halo SFT on a pre-processed dataset", sft_config, "eval_packing")
@@ -333,9 +399,13 @@ def main():
 
     # Before the model load, which needs the checkpoint's processor only for an image run: a multimodal checkpoint
     # carrying text-only rows is a text run, its model class unchanged.
-    is_vlm = resolve_vlm_run(
-        args, model_config, ds, text_only_model=args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
-    )
+    if token_run:
+        # Token windows are text: a multimodal checkpoint trains them through its own class, as it does text rows.
+        is_vlm = False
+    else:
+        is_vlm = resolve_vlm_run(
+            args, model_config, ds, text_only_model=args.text_only_model, vlm_checkpoint=is_vlm_checkpoint
+        )
     if is_vlm:
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
         # Ahead of the load; the wrapper would refuse only at the first image batch.
@@ -363,6 +433,8 @@ def main():
         mtp_head=args.mtp_head_request,
     )
     model = policy.model
+    if is_vlm:
+        mark_processor_rendered_rows(policy.tokenizer)
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)
@@ -376,9 +448,32 @@ def main():
             model, dtype=resolve_training_dtype(sft_config), full_form=args.tree_full_attention
         )
 
-    if is_vlm:
+    if token_run:
+        verify_token_sources_fit_model(
+            token_mix, token_eval, model.config.get_text_config().vocab_size, tokenizer.name_or_path
+        )
+        train_dataset, eval_dataset, generate_dataset = token_mix, token_eval, None
+        collator = _flat_text_collator(
+            args,
+            sft_config,
+            tokenizer,
+            parallelism_config,
+            model.config,
+            model.generation_config,
+            packs_rows=True,
+            masks_completions=False,
+        )
+    elif is_vlm:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_vlm_data(
-            ds, metadata, args, sft_config, model_config, processing_class, tokenizer, model.config
+            ds,
+            metadata,
+            args,
+            sft_config,
+            model_config,
+            processing_class,
+            tokenizer,
+            model.config,
+            model.generation_config,
         )
     else:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_text_data(
@@ -391,6 +486,7 @@ def main():
             tokenizer,
             parallelism_config,
             model.config,
+            model.generation_config,
         )
 
     log_script_dataset_examples(
@@ -412,6 +508,8 @@ def main():
         packed_rows=_packs_rows(sft_config, metadata),
         multimodal_rows=is_vlm,
     )
+    if token_run:
+        callbacks.append(TokenMixCheckpointCallback(token_mix.fingerprint()))
     if args.gates_mtp_acceptance:
         # The baseline: a resume scores the head it restored too, and the gate reads the log's first reading.
         sft_config.eval_on_start = True

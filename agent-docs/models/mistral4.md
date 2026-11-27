@@ -13,18 +13,15 @@ Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` 
 - Routing: the EP layer calls `Mistral4TopkRouter` and keeps only its logits (the router also returns weights and indices, which balancing and routing replay have to recompute); `route_tokens_to_experts` then does softmax + group-topk inline, mirroring the router's own arithmetic. No `e_score_correction_bias` (unlike GLM-4); `norm_topk_prob` and `routed_scaling_factor` are honored.
 - Load balancing: Mistral4 has **no bias slot** (a plain softmax router, no correction-bias tensor), so `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the trainer-only opt-in ([balancing modes](../training-methods/callbacks.md#moe-balancing-modes)). `Mistral4ForCausalLM.forward` declares no `output_router_logits` parameter either, so `aux_loss` cannot work and `auto` resolves to `none` with a warning naming the transient opt-in.
 - Routed experts: `Mistral4Experts`, fused `gate_up_proj [E, 2M, H]` (F.linear convention; matmul-internal form `[E, H, 2M]`) and `down_proj [E, H, M]`. Same layout as Qwen3.5 / GLM-4, so the shared `EPMoELayerBase` fused-GLU helpers cover compute (Grouped GEMM on SM90+).
-- Shared expert: `Mistral4MLP`, replicated per rank, summed after DeepEP combine. Intermediate size = `moe_intermediate_size * n_shared_experts`, as wide as a routed expert, so the shipped config launches with `HALO_EP_SHARED_OVERLAP=1`, which computes it on a side stream during the dispatch all-to-all ([DeepEP](../infrastructure/deepep.md#dispatch-cost)).
+- Shared expert: `Mistral4MLP`, replicated per rank, summed after DeepEP combine. Intermediate size = `moe_intermediate_size * n_shared_experts`, as wide as a routed expert. The shipped config launches with `HALO_EP_SHARED_OVERLAP=1`, which computes it on a side stream during the dispatch all-to-all; whether that shortens the step depends on the shape ([DeepEP](../infrastructure/deepep.md#dispatch-cost)).
 - Checkpoints: weights stored in matmul convention internally; the export's `FUSED` expert layout transposes back to F.linear convention at save so `from_pretrained` reloads as-is. The public `mistralai/Mistral-Small-4-119B-*` checkpoint ships every language-model weight in FP8 — dequantize once with `scripts/before_training/convert_mistral4_bf16.py` (streams shard-by-shard, handles scalar and per-expert `_scale_inv` layouts) before training.
 - Activation: the routed-expert SwiGLU runs through the fused Triton kernel (`halo/kernels/fused_glu.py`) when the gate is a genuine SiLU, logged as `glu_combine=silu`.
 
 ## Packing
 
-Packed documents stay isolated on both paths, but flash needs a toolkit patch:
-`Mistral4Attention.forward` takes `position_ids` as an explicit parameter and forwards only
-`**kwargs` to the attention interface, so the varlen detection never sees them.
-`patch_mistral4_flash_packed_position_ids` (`halo/models/families/mistral4.py`) re-injects them
-and is applied at load whenever the resolved implementation is a flash one. The dense path builds the
-packed mask itself and is clean to grouped-GEMM reduction noise.
+Packed documents stay isolated on both paths. `Mistral4Attention.forward` hands `position_ids` to the
+attention interface, so flash takes the varlen path per document. The dense path builds the packed mask itself
+and is clean to grouped-GEMM reduction noise.
 
 ## CP wrapper
 

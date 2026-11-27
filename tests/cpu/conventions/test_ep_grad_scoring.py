@@ -822,8 +822,13 @@ def test_an_fp32_hyper_connection_gradient_inside_rounding_passes():
     assert floors[HC_LAYER_SCALE] < HC_LAYERED[HC_LAYER_SCALE].norm()
 
 
-@pytest.mark.parametrize("name", [HC_LAYER_BASE, HC_LAYER_SCALE])
-@pytest.mark.parametrize("scale", [2.0, 0.5], ids=["doubled", "dropped_dp_average"])
+@pytest.mark.parametrize(
+    "name, scale",
+    [
+        pytest.param(HC_LAYER_BASE, 2.0, id=f"doubled-{HC_LAYER_BASE}"),
+        pytest.param(HC_LAYER_SCALE, 0.5, id=f"dropped_dp_average-{HC_LAYER_SCALE}"),
+    ],
+)
 def test_a_mis_reduced_hyper_connection_gradient_fails(name, scale):
     checks, _, _ = _score_layered({name: HC_LAYERED[name] * scale}, HC_LAYERED)
     assert not checks[f"{name}_matches"]

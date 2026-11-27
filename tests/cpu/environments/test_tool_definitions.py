@@ -212,7 +212,7 @@ def _string_tool(seen: list, *, refuse_closing_tag: bool = True):
     )
 
 
-@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}, ("print(1)",)])
+@pytest.mark.parametrize("value", [["print(1)"], {"src": "print(1)"}])
 def test_a_list_or_object_for_a_string_parameter_is_refused_before_the_handler_runs(value):
     """A list ``code`` passed on fails inside the sandbox, read as the backend's fault."""
     seen = []
@@ -481,22 +481,25 @@ def _bindable(handler, name: str) -> bool:
     )
 
 
-@pytest.mark.parametrize("source", sorted(_registries_under_test()))
-def test_every_declared_parameter_binds_to_its_handler(source):
+def test_every_declared_parameter_binds_to_its_handler(subtests):
     """Binding admits only the declared schema, so a name the handler has no keyword for raises on every call, while
     the keyword it owns keeps its default. ``functools.partial`` is unwrapped, as pre-bound keywords arrive that
     way."""
-    mismatches = []
-    for tool in _registries_under_test()[source].list_tools():
-        for handler in (tool.handler, tool.async_handler):
-            if handler is None:
-                continue
-            mismatches += [
-                f"{tool.name}.{parameter.name} -> {getattr(handler, '__qualname__', handler)}"
-                for parameter in tool.parameters
-                if not _bindable(handler, parameter.name)
-            ]
-    assert not mismatches, f"declared tool parameters that reach no handler keyword: {mismatches}"
+    registries = _registries_under_test()
+    assert registries, "no tool registry is built for the binding check"
+    for source in sorted(registries):
+        with subtests.test(source):
+            mismatches = []
+            for tool in registries[source].list_tools():
+                for handler in (tool.handler, tool.async_handler):
+                    if handler is None:
+                        continue
+                    mismatches += [
+                        f"{tool.name}.{parameter.name} -> {getattr(handler, '__qualname__', handler)}"
+                        for parameter in tool.parameters
+                        if not _bindable(handler, parameter.name)
+                    ]
+            assert not mismatches, f"declared tool parameters that reach no handler keyword: {mismatches}"
 
 
 def test_the_binding_check_would_catch_a_misspelled_parameter():

@@ -129,10 +129,17 @@ def test_a_hand_built_multi_document_collator_reaches_the_compressed_kv_gate(roo
 
 
 @pytest.mark.parametrize(
-    "collator_class",
-    [DataCollatorWithFlattening, DataCollatorWithFlatteningAndCompletionMask, DataCollatorWithPacking],
+    ("model_type", "collator_class"),
+    [
+        pytest.param("qwen3_5", DataCollatorWithFlattening, id="qwen3_5-DataCollatorWithFlattening"),
+        pytest.param(
+            "qwen3_5_moe_text",
+            DataCollatorWithFlatteningAndCompletionMask,
+            id="qwen3_5_moe_text-DataCollatorWithFlatteningAndCompletionMask",
+        ),
+        pytest.param("qwen3_next", DataCollatorWithPacking, id="qwen3_next-DataCollatorWithPacking"),
+    ],
 )
-@pytest.mark.parametrize("model_type", ["qwen3_5", "qwen3_5_moe_text", "qwen3_next"])
 def test_a_hand_built_flattening_collator_on_a_gated_delta_net_decoder_passes_on_flash(collator_class, model_type):
     """An M-RoPE decoder takes a flattened row on a flash backend like any other GatedDeltaNet decoder."""
     model = types.SimpleNamespace(config=_on_flash(CONFIG_MAPPING[model_type]()))

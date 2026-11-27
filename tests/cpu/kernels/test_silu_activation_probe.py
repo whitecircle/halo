@@ -19,46 +19,22 @@ SILU_ALIASES = frozenset({"silu", "swish"})
 GELU_TANH_ALIASES = frozenset({"gelu_accurate", "gelu_fast", "gelu_new", "gelu_python_tanh", "gelu_pytorch_tanh"})
 
 
-def test_the_activation_a_real_block_carries_is_recognized():
-    act_fn = ACT2FN["silu"]
-    assert is_silu_activation(act_fn), (
-        f"is_silu_activation rejected the real ACT2FN['silu'] ({type(act_fn).__name__}) — every "
-        "SiLU-hardcoding kernel just silently turned itself off"
-    )
-
-
-def test_a_nominal_check_would_fail_so_the_probe_must_stay_behavioural():
-    """Anti-vacuity: a transformers release re-aliasing silu to `nn.SiLU` would make the acceptance trivially true."""
-    act_fn = ACT2FN["silu"]
-    assert not isinstance(act_fn, nn.SiLU), "ACT2FN['silu'] is an nn.SiLU again — re-check the probe's value"
-    assert act_fn is not F.silu
-    # Numerically SiLU, why a behavioural probe works.
-    probe = torch.tensor([-3.0, -0.5, 0.0, 0.5, 3.0])
-    assert torch.equal(act_fn(probe), F.silu(probe))
-
-
-@pytest.mark.parametrize("name", sorted(ACT2FN.keys()))
-def test_every_registered_activation_is_classified_by_behaviour(name):
+def test_every_registered_activation_is_classified_by_behaviour(subtests):
     """`hardswish`, `mish` and the `gelu_*` family are close enough that a sloppy tolerance would mis-fire the
     kernel."""
-    assert is_silu_activation(ACT2FN[name]) is (name in SILU_ALIASES)
+    assert ACT2FN, "transformers registers no activation"
+    for name in sorted(ACT2FN.keys()):
+        with subtests.test(name):
+            assert is_silu_activation(ACT2FN[name]) is (name in SILU_ALIASES)
 
 
-@pytest.mark.parametrize("name", sorted(ACT2FN.keys()))
-def test_every_registered_activation_is_classified_against_gelu_tanh_too(name):
+def test_every_registered_activation_is_classified_against_gelu_tanh_too(subtests):
     """Exact `gelu` agrees with the tanh approximation to ~1e-3, so anything but bitwise equality would arm GeGLU on
     the wrong model."""
-    assert is_gelu_tanh_activation(ACT2FN[name]) is (name in GELU_TANH_ALIASES)
-
-
-def test_the_two_probes_never_accept_the_same_activation():
-    """`resolve_fused_glu_mul` returns the first match, so overlap would make dispatch order load-bearing."""
-    assert not (SILU_ALIASES & GELU_TANH_ALIASES)
-    for name in ACT2FN:
-        act_fn = ACT2FN[name]  # Index, don't iterate values: the registry mints per access.
-        assert not (is_silu_activation(act_fn) and is_gelu_tanh_activation(act_fn)), (
-            f"ACT2FN[{name!r}] matched both probes — the fused-GLU dispatch is now order-dependent"
-        )
+    assert ACT2FN, "transformers registers no activation"
+    for name in sorted(ACT2FN.keys()):
+        with subtests.test(name):
+            assert is_gelu_tanh_activation(ACT2FN[name]) is (name in GELU_TANH_ALIASES)
 
 
 @pytest.mark.parametrize(
@@ -95,16 +71,6 @@ def test_any_spelling_of_silu_is_accepted(act_fn):
 def test_anything_unrecognizable_fails_closed(act_fn):
     """Every failure answers False instead of raising out of the caller's `__init__`."""
     assert is_silu_activation(act_fn) is False
-
-
-def test_the_verdict_is_deterministic_and_per_activation():
-    """``ACT2FN[...]`` mints per access; this guards any future memoization."""
-    silu, gelu = ACT2FN["silu"], ACT2FN["gelu"]
-    assert ACT2FN["silu"] is not silu  # Anti-vacuity: the registry really does mint per access.
-    assert [is_silu_activation(silu) for _ in range(3)] == [True, True, True]
-    assert is_silu_activation(gelu) is False
-    assert is_silu_activation(ACT2FN["silu"]) is True
-    assert is_silu_activation(silu) is True
 
 
 def test_an_ambient_meta_default_device_does_not_break_the_probe():

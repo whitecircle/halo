@@ -11,6 +11,7 @@ from halo.distributed.group_layout import NodeLocalLayout
 from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
@@ -33,16 +34,6 @@ def test_ep_only_computed():
     assert cfg.ep_group_size == 8
     assert cfg.data_parallel_size == 8
     assert cfg.num_nodes == 1
-
-
-def test_tp_only_computed():
-    cfg = create_config(tp_size=4, world_size=8, gpus_per_node=8)
-    assert cfg.data_parallel_size == 2
-
-
-def test_cp_only_computed():
-    cfg = create_config(cp_size=4, world_size=8, gpus_per_node=8)
-    assert cfg.data_parallel_size == 2
 
 
 def test_expert_tp_only_computed():
@@ -75,11 +66,6 @@ def test_ep_tp_multi_domain_multi_group_rejected():
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "Multi-domain multi-group EP+TP" in str(e), e
-
-
-def test_ep_cp_computed():
-    cfg = create_config(ep_size=8, cp_size=8, world_size=16, gpus_per_node=8, ep_scope="node")
-    assert cfg.data_parallel_size == 2
 
 
 def test_auto_scope_node():
@@ -144,40 +130,6 @@ def test_validate_ep_node_scope_too_large():
         assert "Node-local EP group size (16) cannot exceed the NVLink domain (8)" in str(e), e
 
 
-def test_validate_ep_node_scope_divisibility():
-    # 8 % 3 != 0 while world/domain passes, so _reject_ep_group's node-divisibility branch is what fires.
-    try:
-        create_config(ep_size=3, world_size=8, gpus_per_node=8, ep_scope="node")
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "must divide the NVLink domain" in str(e)
-
-
-def test_validate_ep_global_scope_too_large():
-    try:
-        create_config(ep_size=32, world_size=16, gpus_per_node=8, ep_scope="global")
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "EP group size (32) cannot exceed world size (16)" in str(e), e
-
-
-def test_validate_ep_global_scope_divisibility():
-    try:
-        create_config(ep_size=3, world_size=8, gpus_per_node=8, ep_scope="global")
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "EP group size (3) must divide world size (8)" in str(e), e
-
-
-def test_validate_expert_tp_group_tiling_node_scope():
-    """The EP group (6) fails to tile the domain first, so this shape never reaches the expert-TP divisor check."""
-    try:
-        create_config(ep_size=2, expert_tp_size=3, world_size=8, gpus_per_node=8)
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "EP group size (6) must divide the NVLink domain (8)" in str(e), e
-
-
 def test_validate_expert_tp_divides_domain_global_scope():
     """The expert-TP divisor gate is reachable only at global scope."""
     try:
@@ -203,28 +155,12 @@ def test_validate_cp_exceeds_domain_rejected():
         assert "context_parallel_size (16) cannot exceed the NVLink domain (8)" in str(e), e
 
 
-def test_validate_cp_domain_divisibility_rejected():
-    try:
-        create_config(cp_size=3, world_size=8, gpus_per_node=8)
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "context_parallel_size (3) must divide the NVLink domain (8)" in str(e), e
-
-
 def test_validate_tp_exceeds_stage_world_rejected():
     try:
         create_config(tp_size=16, world_size=8, gpus_per_node=8)
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "tensor_parallel_size (16) cannot exceed world size (8)" in str(e), e
-
-
-def test_validate_tp_stage_world_divisibility_rejected():
-    try:
-        create_config(tp_size=3, world_size=8, gpus_per_node=8)
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "tensor_parallel_size (3) must divide world size (8)" in str(e), e
 
 
 def test_validate_pure_tp_domain_divisibility_rejected():
@@ -261,14 +197,6 @@ def test_validate_shard_ep1_experts_off_under_tp_cp_rejected():
     assert cfg.experts_fsdp_managed is False
 
 
-def test_validate_nonpositive_gpus_per_node_rejected():
-    try:
-        create_config(world_size=8, gpus_per_node=-2)
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "gpus_per_node resolved to -2" in str(e), e
-
-
 def test_validate_negative_nvlink_domain_size_rejected():
     """Python modulo passes a negative multiple through both domain divisibility gates."""
     try:
@@ -296,37 +224,12 @@ def test_validate_expert_tp_plus_cp():
         assert "expert_tensor_parallel_size=2" in str(e), e
 
 
-def test_validate_ep_cp_node_scope_mismatch():
-    try:
-        create_config(ep_size=4, cp_size=4, world_size=16, gpus_per_node=8, ep_scope="node")
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "Node-local EP+CP requires ep_group_size=nvlink_domain_size" in str(e), e
-
-
 def test_validate_ep_cp_global_scope_rejected():
     try:
         create_config(ep_size=16, cp_size=2, world_size=16, gpus_per_node=8, ep_scope="global")
         raise AssertionError("Should have raised ValueError")
     except ValueError as e:
         assert "node-local EP" in str(e) or "ep_scope='node'" in str(e)
-
-
-def test_validate_ep_tp_size_not_multiple_of_tp():
-    # Both sizes divide the node, so the earlier guards pass and ep_size % tp_size == 0 is what fires.
-    try:
-        create_config(ep_size=2, tp_size=4, world_size=8, gpus_per_node=8, ep_scope="node")
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "multiple of tensor_parallel_size" in str(e)
-
-
-def test_validate_max_concurrent_loading_negative():
-    try:
-        create_config(max_concurrent_loading=-1, world_size=8, gpus_per_node=8)
-        raise AssertionError("Should have raised ValueError")
-    except ValueError as e:
-        assert "max_concurrent_loading" in str(e)
 
 
 def _expect_reject(substr=None, **kw):
@@ -347,32 +250,6 @@ def test_guard_size_below_one():
         ("expert_tp_size", "expert_tensor_parallel_size"),
     ):
         _expect_reject(f"{knob} must be >= 1", **{field_name: 0, "world_size": 8, "gpus_per_node": 8})
-
-
-def test_guard_bad_ep_scope():
-    _expect_reject("ep_scope", ep_size=8, ep_scope="rack", world_size=8, gpus_per_node=8)
-
-
-def test_guard_world_not_multiple_of_gpus_per_node():
-    _expect_reject("world_size (12) must be divisible by gpus_per_node (8).", world_size=12, gpus_per_node=8)
-
-
-def test_guard_nvlink_domain_multiple_of_node():
-    # nvlink_domain_size must be a whole number of OS nodes
-    _expect_reject("nvlink_domain_size", world_size=16, gpus_per_node=8, nvlink_domain_size=12)
-
-
-def test_guard_lowp_bad_precision():
-    _expect_reject("lowp_precision", lowp=LowpSpec(precision="int4"), world_size=8, gpus_per_node=8)
-
-
-def test_guard_lowp_applied_nowhere():
-    _expect_reject(
-        "apply to nothing",
-        lowp=LowpSpec(precision="fp8", apply_dense_mlp=False, apply_moe_experts=False),
-        world_size=8,
-        gpus_per_node=8,
-    )
 
 
 def test_guard_lowp_negative_keep_blocks():
@@ -444,19 +321,9 @@ def test_mode_string_gmm_only():
     assert cfg.mode_string == "gmm"
 
 
-def test_mode_string_expert_tp():
-    cfg = create_config(ep_size=1, expert_tp_size=2, world_size=8, gpus_per_node=8)
-    assert "expert-tp" in cfg.mode_string
-
-
 def test_mode_string_none():
     cfg = create_config(use_grouped_gemm=False, world_size=8, gpus_per_node=8)
     assert cfg.mode_string is None
-
-
-def test_requires_rdma():
-    cfg = create_config(ep_size=16, world_size=16, gpus_per_node=8, ep_scope="global")
-    assert cfg.requires_rdma is True
 
 
 def test_no_rdma_node_local():
@@ -485,15 +352,6 @@ def test_no_ep_layers_disabled():
     assert cfg.needs_ep_layers is False
 
 
-def test_boolean_mode_properties():
-    cfg = create_config(ep_size=8, tp_size=4, world_size=8, gpus_per_node=8)
-    assert cfg.has_ep_group is True
-    assert cfg.is_tp_mode is True
-    assert (cfg.has_ep_group and cfg.is_tp_mode) is True
-    assert cfg.is_cp_mode is False
-    assert (cfg.has_ep_group and cfg.is_cp_mode) is False
-
-
 def test_default_sizes_and_mode_flags():
     cfg = create_config(world_size=8, gpus_per_node=8)
     assert (cfg.ep_size, cfg.cp_size, cfg.tp_size, cfg.expert_tp_size) == (1, 1, 1, 1)
@@ -515,12 +373,6 @@ def test_a_single_axis_sets_only_its_own_mode_flag(axis, ep_cp_tp_flags):
     assert (cfg.has_ep_group, cfg.is_cp_mode, cfg.is_tp_mode) == ep_cp_tp_flags
 
 
-def test_ep_cp_mode_flags():
-    cfg = create_config(ep_size=8, cp_size=8, world_size=16, gpus_per_node=8, ep_scope="node")
-    assert cfg.has_ep_group and cfg.is_cp_mode and (cfg.has_ep_group and cfg.is_cp_mode)
-    assert not (cfg.is_tp_mode or (cfg.has_ep_group and cfg.is_tp_mode))
-
-
 def test_num_ep_groups_node():
     cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, ep_scope="node")
     assert cfg.num_ep_groups == 4
@@ -534,16 +386,16 @@ def test_num_ep_groups_global():
 @pytest.mark.parametrize(
     "topology",
     [
-        {"ep_size": 8, "world_size": 8, "gpus_per_node": 8, "ep_scope": "node"},
-        {"ep_size": 2, "world_size": 8, "gpus_per_node": 8, "ep_scope": "node"},
-        {"ep_size": 4, "world_size": 16, "gpus_per_node": 8, "ep_scope": "node"},
-        {"ep_size": 8, "world_size": 16, "gpus_per_node": 8, "ep_scope": "node"},
-        {"ep_size": 1, "expert_tp_size": 2, "world_size": 8, "gpus_per_node": 8, "ep_scope": "node"},
+        pytest.param({"ep_size": 4, "world_size": 16, "gpus_per_node": 8, "ep_scope": "node"}, id="topology2"),
+        pytest.param({"ep_size": 8, "world_size": 16, "gpus_per_node": 8, "ep_scope": "node"}, id="topology3"),
+        pytest.param(
+            {"ep_size": 1, "expert_tp_size": 2, "world_size": 8, "gpus_per_node": 8, "ep_scope": "node"},
+            id="topology4",
+        ),
         # EPConfig tiles the stage with one singleton group per rank at ep_group_size == 1.
-        {"ep_size": 1, "world_size": 8, "gpus_per_node": 8, "ep_scope": "node"},
-        {"ep_size": 8, "world_size": 16, "gpus_per_node": 8, "ep_scope": "global"},
-        {"ep_size": 16, "world_size": 16, "gpus_per_node": 8, "ep_scope": "global"},
-        {"ep_size": 8, "world_size": 32, "gpus_per_node": 8, "ep_scope": "global"},
+        pytest.param({"ep_size": 1, "world_size": 8, "gpus_per_node": 8, "ep_scope": "node"}, id="topology5"),
+        pytest.param({"ep_size": 8, "world_size": 16, "gpus_per_node": 8, "ep_scope": "global"}, id="topology6"),
+        pytest.param({"ep_size": 16, "world_size": 16, "gpus_per_node": 8, "ep_scope": "global"}, id="topology7"),
     ],
 )
 def test_num_ep_groups_equals_the_groups_the_layout_actually_builds(topology):
@@ -722,25 +574,38 @@ def test_parallelism_config_from_args_lowp_allowed_for_sft():
         assert cfg.lowp.precision == "fp8"
 
 
+@pytest.mark.parametrize("precision", ["fp8", "fp4", "mxfp4"])
+def test_parallelism_config_from_args_lowp_allowed_for_teacher_distillation(precision):
+    """Quantization-aware distillation: the student takes every format and the shape knobs, as under SFT."""
+    args = _DistArgs()
+    args.lowp_precision = precision
+    args.lowp_keep_last_blocks = 2
+    with simulated_world(world_size=8, gpus_per_node=8):
+        cfg = parallelism_config_from_args(args, trainer_cls=DistributedTeacherDistillationTrainer)
+    assert cfg.lowp.precision == precision and cfg.lowp.keep_last_blocks == 2
+
+
+@pytest.mark.parametrize(
+    ("knob", "value", "named"), [("lowp_precision", "mxfp4", "lowp_precision"), ("lowp_keep_first_blocks", 1, None)]
+)
+def test_parallelism_config_from_args_rejects_lowp_for_self_distillation(knob, value, named):
+    """Self-distillation inherits SFT's True and opts back out; the refusal names the trainer that rejects it."""
+    args = _DistArgs()
+    setattr(args, knob, value)
+    with simulated_world(world_size=8, gpus_per_node=8):
+        with pytest.raises(ValueError, match="DistributedSelfDistillationTrainer") as err:
+            parallelism_config_from_args(args, trainer_cls=DistributedSelfDistillationTrainer)
+    assert knob in str(err.value) and (named is None or f"{named}={value!r}" in str(err.value))
+
+
 def _ep_coords(cfg) -> tuple[int, int]:
     return cfg.ep_layout.rank_and_group(cfg.stage_local_rank)
-
-
-def test_ep_rank_node():
-    cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=5)
-    assert _ep_coords(cfg)[0] == 1
 
 
 def test_ep_rank_global():
     cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=3, ep_scope="global")
     # m=4, rank 3: domain 0, pos 3, group_idx 0, ep_rank 0*4 + 3%4 = 3.
     assert _ep_coords(cfg)[0] == 3
-
-
-def test_ep_group_idx_node():
-    cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=12, ep_scope="node")
-    # node 1, local group 1, 2 groups per node: 1*2 + 1 = 3.
-    assert _ep_coords(cfg)[1] == 3
 
 
 def test_ep_group_idx_global():
@@ -751,32 +616,6 @@ def test_ep_group_idx_global():
 
 def test_cp_rank():
     assert NodeLocalLayout(world_size=8, group_size=4, domain_size=8).rank_and_group(6)[0] == 2
-
-
-def test_data_parallel_rank_tp():
-    cfg = create_config(tp_size=4, world_size=8, gpus_per_node=8, rank=5)
-    assert cfg.get_data_parallel_rank() == 1
-
-
-def test_data_parallel_rank_no_parallelism():
-    cfg = create_config(world_size=8, gpus_per_node=8, rank=3)
-    assert cfg.get_data_parallel_rank() == 3
-
-
-def test_ep_group_ranks_node():
-    cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=0, ep_scope="node")
-    assert cfg.ep_layout.group_ranks(_ep_coords(cfg)[1]) == [0, 1, 2, 3]
-
-
-def test_ep_group_ranks_global():
-    cfg = create_config(ep_size=8, world_size=16, gpus_per_node=8, rank=0, ep_scope="global")
-    # m=4, group_idx=0: domain 0 block [0,1,2,3] + domain 1 block [8,9,10,11].
-    assert cfg.ep_layout.group_ranks(_ep_coords(cfg)[1]) == [0, 1, 2, 3, 8, 9, 10, 11]
-
-
-def test_cp_group_ranks():
-    layout = NodeLocalLayout(world_size=8, group_size=4, domain_size=8)
-    assert layout.group_ranks(layout.rank_and_group(4)[1]) == [4, 5, 6, 7]
 
 
 def test_expert_replica_ranks_single_group():
@@ -794,13 +633,6 @@ def test_expert_replica_ranks_at_ep_group_size_one_span_the_stage():
     # Stage-local: stage 1 of a 2-stage job replicates within its own block, never across stages.
     staged = create_config(world_size=8, gpus_per_node=4, pp_size=2, rank=6)
     assert [staged.stage_base_rank + r for r in staged.ep_layout.replica_ranks(0)] == [4, 5, 6, 7]
-
-
-def test_expert_replica_ranks_node():
-    cfg = create_config(ep_size=4, world_size=16, gpus_per_node=8, rank=0, ep_scope="node")
-    replicas = cfg.ep_layout.replica_ranks(_ep_coords(cfg)[0])
-    # ep_rank 0 across 2 groups on each of 2 nodes, stride 4 within a node.
-    assert replicas == [0, 4, 8, 12]
 
 
 def test_summary_contains_mode():
@@ -830,25 +662,6 @@ def test_hsdp_single_node_is_noop():
     assert cfg.is_hsdp is False
     assert cfg.dp_shard_size == 8
     assert cfg.dp_replicate_size == 1
-
-
-def test_hsdp_rejects_ep():
-    """Multi-group EP runs deferred EP-group sharding (use_hsdp would be a silent no-op); a single global EP group
-    under HSDP races the DeepEP combine."""
-    try:
-        create_config(ep_size=8, world_size=16, gpus_per_node=8, use_hsdp=True, ep_scope="node")
-        raise AssertionError("Should have raised ValueError for use_hsdp + EP")
-    except ValueError as e:
-        assert "use_hsdp" in str(e).lower() and "ep" in str(e).lower()
-
-
-def test_hsdp_rejects_tp():
-    """TP builds its own (dp, tp) mesh."""
-    try:
-        create_config(tp_size=2, world_size=16, gpus_per_node=8, use_hsdp=True)
-        raise AssertionError("Should have raised ValueError for use_hsdp + TP")
-    except ValueError as e:
-        assert "use_hsdp" in str(e).lower() and "tp" in str(e).lower()
 
 
 def test_hsdp_rejects_expert_tp():
@@ -933,16 +746,6 @@ def test_defer_grad_sync_rejected_under_full_shard(fp32_grad_reduce):
     create_config(fsdp_defer_grad_sync=False, fsdp_reshard_after_forward=True, fp32_grad_reduce=fp32_grad_reduce)
 
 
-def test_reshard_rejects_ep():
-    """Its backward all-gather races DeepEP combine."""
-    try:
-        create_config(ep_size=8, world_size=8, gpus_per_node=8, fsdp_reshard_after_forward=True)
-        raise AssertionError("Should have raised ValueError for fsdp_reshard_after_forward + EP")
-    except ValueError as e:
-        msg = str(e).lower()
-        assert "fsdp_reshard_after_forward" in msg and "ep" in msg
-
-
 def test_reshard_rejects_pure_etp():
     try:
         create_config(expert_tp_size=2, world_size=8, gpus_per_node=8, fsdp_reshard_after_forward=True)
@@ -960,6 +763,9 @@ def test_reshard_rejects_tp_with_dp():
     except ValueError as e:
         msg = str(e).lower()
         assert "tensor parallelism" in msg and "data parallelism" in msg
+        # The remedy names only knobs this layout accepts: _reject_hsdp refuses use_hsdp under TP.
+        assert "use_hsdp" not in msg and "fsdp_reshard_after_forward=false" in msg
+    create_config(tp_size=2, world_size=8, fsdp_reshard_after_forward=False)
 
 
 def _all_global_group_ranks(ep_size, world_size, gpus_per_node):

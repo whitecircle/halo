@@ -215,12 +215,30 @@ def _peak_gradient_planes(one_pass: bool) -> float:
     return (host_peak_rss_gib() - baseline) / plane_gib
 
 
+def _send_peak_gradient_planes(sender, one_pass: bool) -> None:
+    sender.send(_peak_gradient_planes(one_pass))
+
+
+def _peak_gradient_planes_in_a_fresh_process(one_pass: bool) -> float:
+    """Raises with the exit code when the process dies without an answer, which a pool waits on forever."""
+    context = multiprocessing.get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(target=_send_peak_gradient_planes, args=(sender, one_pass))
+    process.start()
+    sender.close()
+    try:
+        return receiver.recv()
+    except EOFError:
+        process.join()
+        raise RuntimeError(f"the measuring process exited with code {process.exitcode} before it answered") from None
+    finally:
+        process.join()
+
+
 def test_one_pass_builds_one_student_gradient_plane_fewer():
     """Two passes hold the divergence's student gradient while building the cross-entropy's, about one plane more."""
-    with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:
-        one_pass = pool.apply(_peak_gradient_planes, (True,))
-    with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:
-        two_passes = pool.apply(_peak_gradient_planes, (False,))
+    one_pass = _peak_gradient_planes_in_a_fresh_process(True)
+    two_passes = _peak_gradient_planes_in_a_fresh_process(False)
     assert two_passes - one_pass > 0.5, f"peak above the logits: one pass {one_pass:.2f}, two {two_passes:.2f} planes"
 
 

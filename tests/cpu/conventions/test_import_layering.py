@@ -376,21 +376,22 @@ def test_the_sweep_sees_every_agnostic_tree():
         assert any(path.is_relative_to(_PACKAGE_ROOT / directory) for path in _AGNOSTIC_FILES), directory
 
 
-@pytest.mark.parametrize("path", _AGNOSTIC_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
-def test_the_sharding_agnostic_layer_imports_no_distributed_module(path):
-    offending = sorted(
-        {
-            found.module
-            for found in _imports_of(path)
-            if any(_is_within(found.module, root) for root in _FORBIDDEN_ROOTS)
-        }
-    )
-    assert not offending, (
-        f"{path.relative_to(REPO_ROOT)} imports {offending}. This layer is shared by the standalone "
-        f"conversion tools and by every parallel save/load path, so it can hold no collective and no "
-        f"parallelism knowledge — take the verdict as a parameter from the caller that owns it, or "
-        f"move the function to the caller's side."
-    )
+def test_the_sharding_agnostic_layer_imports_no_distributed_module(subtests):
+    for path in _AGNOSTIC_FILES:
+        with subtests.test(str(path.relative_to(REPO_ROOT))):
+            offending = sorted(
+                {
+                    found.module
+                    for found in _imports_of(path)
+                    if any(_is_within(found.module, root) for root in _FORBIDDEN_ROOTS)
+                }
+            )
+            assert not offending, (
+                f"{path.relative_to(REPO_ROOT)} imports {offending}. This layer is shared by the standalone "
+                f"conversion tools and by every parallel save/load path, so it can hold no collective and no "
+                f"parallelism knowledge — take the verdict as a parameter from the caller that owns it, or "
+                f"move the function to the caller's side."
+            )
 
 
 def test_the_sweep_sees_the_dispatch_and_every_parallelism_package():
@@ -405,16 +406,21 @@ def test_the_sweep_sees_the_dispatch_and_every_parallelism_package():
     } <= swept
 
 
-@pytest.mark.parametrize("path", _BELOW_DISPATCH_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
-def test_no_distributed_package_imports_the_loader_dispatch(path):
-    offending = sorted(
-        {found.module for found in _imports_of(path) if _is_within(_in_package(found.module) or "", _DISPATCH_PACKAGE)}
-    )
-    assert not offending, (
-        f"{path.relative_to(REPO_ROOT)} imports {offending}. halo/model_loading/parallel/ dispatches to "
-        f"every parallelism package, so an import back closes a package cycle — move what both sides "
-        f"need into the lower package (the expert-key plan and fuser live in expert_parallel/)."
-    )
+def test_no_distributed_package_imports_the_loader_dispatch(subtests):
+    for path in _BELOW_DISPATCH_FILES:
+        with subtests.test(str(path.relative_to(REPO_ROOT))):
+            offending = sorted(
+                {
+                    found.module
+                    for found in _imports_of(path)
+                    if _is_within(_in_package(found.module) or "", _DISPATCH_PACKAGE)
+                }
+            )
+            assert not offending, (
+                f"{path.relative_to(REPO_ROOT)} imports {offending}. halo/model_loading/parallel/ dispatches to "
+                f"every parallelism package, so an import back closes a package cycle — move what both sides "
+                f"need into the lower package (the expert-key plan and fuser live in expert_parallel/)."
+            )
 
 
 def test_the_cycle_finder_finds_every_cycle():
@@ -469,15 +475,17 @@ def test_the_packages_import_their_members_acyclically(package, node, required):
     )
 
 
-@pytest.mark.parametrize("path", _ENV_SWEPT_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
-def test_toolkit_env_vars_are_read_only_through_the_env_helpers(path):
-    if path == _ENV_OWNER:
-        return
-    offending = sorted(set(_env_literals_read_directly(path)))
-    assert not offending, (
-        f"{path.relative_to(REPO_ROOT)} reads {offending} from the environment directly; route it "
-        f"through halo/env.py (env_flag / env_int / env_float / env_str), which owns the default."
-    )
+def test_toolkit_env_vars_are_read_only_through_the_env_helpers(subtests):
+    assert _ENV_SWEPT_FILES, "the env sweep found no file under halo/ or scripts/"
+    for path in _ENV_SWEPT_FILES:
+        if path == _ENV_OWNER:
+            continue
+        with subtests.test(str(path.relative_to(REPO_ROOT))):
+            offending = sorted(set(_env_literals_read_directly(path)))
+            assert not offending, (
+                f"{path.relative_to(REPO_ROOT)} reads {offending} from the environment directly; route it "
+                f"through halo/env.py (env_flag / env_int / env_float / env_str), which owns the default."
+            )
 
 
 def test_a_module_outside_every_row_has_no_place():

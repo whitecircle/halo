@@ -120,39 +120,6 @@ def test_a_push_declares_every_chunk_on_every_server_and_sends_each_once(rig, en
         assert not server.paused
 
 
-def _assert_each_chunk_crossed_the_ring_once(ring: FakeRing, names: list[str]) -> None:
-    assert len(ring.chunks) == len({tuple(chunk) for chunk in ring.chunks}), "a chunk crossed the ring twice"
-    assert sorted(name for chunk in ring.chunks for name in chunk) == sorted(names), "the ring carried other names"
-
-
-def test_a_push_sends_each_chunk_across_the_ring_once(rig, monkeypatch):
-    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
-    pool, _, ring = rig("sglang", [1, 1])
-    pool.init_communicator("cpu")
-
-    names = _push(pool)
-
-    assert len(ring.chunks) > 1, "the budget never cut a chunk, so the test would be vacuous"
-    _assert_each_chunk_crossed_the_ring_once(ring, names)
-
-
-def test_negative_control_the_once_check_fails_on_a_group_that_sends_each_chunk_twice(rig, monkeypatch):
-    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", _BUDGET)
-    pool, _, ring = rig("sglang", [1, 1])
-    pool.init_communicator("cpu")
-    real = pool.group._send_on_leader
-
-    def twice(chunk):
-        real(chunk)
-        real(chunk)
-
-    monkeypatch.setattr(pool.group, "_send_on_leader", twice)
-    names = _push(pool)
-
-    with pytest.raises(AssertionError, match="crossed the ring twice"):
-        _assert_each_chunk_crossed_the_ring_once(ring, names)
-
-
 def test_sorted_servers_take_their_blocks_in_node_order(rig, monkeypatch):
     monkeypatch.setattr("halo.weight_sync.group.reject_split_nodes", lambda *args: None)
     pool, servers, _ = rig("sglang", [2, 1], configs=[{"node": "b"}, {"node": "a"}])

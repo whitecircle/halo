@@ -22,7 +22,7 @@ from halo.kernels.moe_permute import MoEGatherPermute, build_inv_map
 from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind, to_hub_expert_tensors
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from tests.common.datasets import CHAT_TEMPLATE_NOW
+from tests.common.datasets import render_chat
 from tests.common.memory import cleanup_memory
 from tests.common.numerics import cos_sim
 from tests.common.rank_log import log_all
@@ -606,18 +606,15 @@ def fixed_chat_batch(
     conversation: int = 0,
     broadcast: bool = False,
 ):
-    """Deterministic right-padded chat batch; padding is labelled ``-100``. The date is pinned to
-    :data:`CHAT_TEMPLATE_NOW`: a render kwarg named ``strftime_now`` shadows the jinja global transformers injects."""
+    """Deterministic right-padded chat batch with the fixed template clock; padding is labelled ``-100``."""
     torch.manual_seed(seed)
     user, assistant = FIXED_CONVERSATIONS[conversation % len(FIXED_CONVERSATIONS)]
-    text = tokenizer.apply_chat_template(
+    text = render_chat(
+        tokenizer,
         [
             {"role": "user", "content": user},
             {"role": "assistant", "content": assistant},
         ],
-        tokenize=False,
-        add_generation_prompt=False,
-        strftime_now=CHAT_TEMPLATE_NOW.strftime,
     )
     tokens = tokenizer(text, return_tensors="pt", padding="max_length", max_length=seq_len, truncation=True)
     input_ids = tokens["input_ids"].to(device)

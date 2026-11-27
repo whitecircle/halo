@@ -1,14 +1,15 @@
 #!/usr/bin/env python
-"""The docs link gate checks heading anchors the way GitHub generates them, and the code its pages cite. The
-expected slugs are the ids GitHub's renderer emits for the same headings."""
+"""The docs link gate checks heading anchors the way GitHub generates them and the code its pages cite, and refuses
+raw HTML in the plain-markdown trees. The expected slugs are the ids GitHub's renderer emits for the same headings."""
 
 import re
 import subprocess
 
 import pytest
 
+from scripts.docs.check_links import check_file
 from scripts.docs.markdown import parse_markdown
-from scripts.docs.references import PACKAGE
+from scripts.docs.references import PACKAGE, RepoIndex
 from tests.common.repo import REPO_ROOT
 
 _DOC_TREES = ("agent-docs", "human-docs", "skills")
@@ -71,6 +72,32 @@ def test_heading_id_attribute_is_refused():
     assert document.heading_attributes == ((3, "{#section}"),)
 
 
+def test_raw_html_outside_code_is_listed():
+    """Front matter, a fence and a code span, wrapped or not, hold text; an autolink is markdown and a backslash
+    makes the ``<`` text."""
+    document = parse_markdown(
+        "---\ndescription: support <model>\n---\n"
+        '<a id="old"></a>\n'
+        "\n"
+        "<details>\n<summary>Answers</summary>\n"
+        "\n"
+        "Text `<kept>` and a `wrapped\n<span>` code span, <https://example.com> and \\<escaped>.\n"
+        "Autolinks of another scheme <ftp://example.com/file> and of an address <team@example.com>.\n"
+        "\n"
+        "```html\n<p>fenced</p>\n```\n"
+        "> A '<split>' placeholder <!-- and a note -->\n"
+    )
+    assert document.html_tags == (
+        (4, '<a id="old">'),
+        (4, "</a>"),
+        (6, "<details>"),
+        (7, "<summary>"),
+        (7, "</summary>"),
+        (16, "<split>"),
+        (16, "<!--"),
+    )
+
+
 def _run_gate(tree):
     return subprocess.run(
         ["bash", str(REPO_ROOT / "scripts/docs/check_links.sh"), str(tree)],
@@ -126,6 +153,19 @@ def test_gate_fails_on_a_missing_target_and_a_heading_id(tmp_path):
     page = tmp_path / "page.md"
     assert f"HEADING ID  {page}:1  {{#section}}" in result.stdout
     assert f"BROKEN  {page}:3  ->  missing.md" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("tree", "refused"), [("agent-docs", True), ("human-docs", True), ("skills", False), ("", False)]
+)
+def test_gate_refuses_raw_html_in_the_plain_markdown_trees_only(tmp_path, tree, refused):
+    """A page at the repo root, as the README is, may lay itself out in HTML, and so may a skill."""
+    page = tmp_path / tree / "page.md"
+    page.parent.mkdir(exist_ok=True)
+    page.write_text('# Page\n\n<a id="old"></a>\n\n`<kept>` in code\n')
+    problems = check_file(page, RepoIndex(tmp_path))
+    tags = [f'RAW HTML  {page}:3  <a id="old">', f"RAW HTML  {page}:3  </a>"]
+    assert [problem.split("  (")[0] for problem in problems] == (tags if refused else [])
 
 
 def test_code_spans_and_fenced_lines_are_the_code_a_page_names():
