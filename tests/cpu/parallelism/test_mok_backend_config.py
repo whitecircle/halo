@@ -360,6 +360,30 @@ def test_the_mxfp8_cast_is_redone_after_a_write_to_a_bank_and_only_then(monkeypa
     assert len(casts) == 12, "a rebound bank"
 
 
+def test_the_mxfp8_casts_reach_the_forward_and_the_backward_in_moks_operand_order(monkeypatch):
+    """``mxfp8_quantize`` returns ``(data, scales, data_t, scales_t)`` of a layer-layout bank, whose transposed cast is
+    MoK's normal one. The forward takes that pair of every bank; the backward takes all four of gate and up, that pair
+    first, and the layer-layout pair of down."""
+    casts = []
+
+    def quantize(w, normal, transposed):
+        casts.append(tuple(torch.empty(0) for _ in range(4)))
+        return casts[-1]
+
+    monkeypatch.setattr(mok, "_mxfp8_quantize", lambda: quantize)
+    banks = tuple(nn.Parameter(torch.randn(2, 256, 256)) for _ in range(2))
+    served = mok._mxfp8_banks(banks)
+
+    def ids(operands):
+        return [[id(tensor) for tensor in operand] for operand in operands]
+
+    assert ids(served.forward) == ids((data_t, scales_t) for _, _, data_t, scales_t in casts)
+    (gate, up, down) = casts
+    assert ids(served.backward) == ids(
+        ((gate[2], gate[3], gate[0], gate[1]), (up[2], up[3], up[0], up[1]), (down[0], down[1]))
+    )
+
+
 def test_an_absent_package_is_refused_at_build(monkeypatch):
     with pytest.raises(RuntimeError, match="needs the mok package"):
         _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch, available=False)
