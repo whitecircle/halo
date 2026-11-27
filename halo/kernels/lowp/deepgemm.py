@@ -26,6 +26,7 @@ from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec, QuantFormat
 
 DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = tuple(r.quant_format for r in LOWP_RECIPES.values() if r.native)
 
+_MIN_VERSION = (2, 8, 2)  # the first release whose fp8 wgrad fills its whole output; the Dockerfile pins it
 _ALIGN = TILE  # the contiguous layout pads each expert's row (M) segment to whole scale tiles
 _FP4_K_ALIGN = 256  # the fp4 kernel's contraction (K) multiple, two e2m1 per byte
 _WGRAD_MAX_GROUPS = 128  # the k-grouped kernel's scale-layout transform takes at most this many experts per call
@@ -53,6 +54,23 @@ def _deep_gemm():
 
 def deepgemm_available() -> bool:
     return _deep_gemm() is not None
+
+
+def verify_deepgemm() -> None:
+    """Raise unless ``deep_gemm`` is installed at a version the native path computes correctly on."""
+    modules = _deep_gemm()
+    if modules is None:
+        raise RuntimeError(
+            "lowp_backend='native' needs the deep_gemm package, built into the Blackwell image only (its kernels are "
+            "SM100 block-scaled). Run on that image, or set lowp_backend='simulated'."
+        )
+    version = modules[0].__version__
+    if tuple(int(part) for part in version.split("+")[0].split(".")) < _MIN_VERSION:
+        raise RuntimeError(
+            f"lowp_backend='native' needs deep_gemm {'.'.join(map(str, _MIN_VERSION))} or newer, and this image has "
+            f"{version}: an older build leaves part of the fp8 weight gradient unwritten and rounds the MXFP4 cast "
+            "differently. Pull or rebuild the Blackwell image, or set lowp_backend='simulated'."
+        )
 
 
 def ensure_contiguous_alignment() -> None:
