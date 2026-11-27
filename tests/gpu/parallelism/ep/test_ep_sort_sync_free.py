@@ -21,8 +21,10 @@ from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.kernels import moe_route_sort
+from halo.kernels.lowp.deepgemm import seed_aligned_layout
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 from halo.kernels.moe_permute import MoEExpertBiasGather, MoEGatherPermute, warm_permute_kernels
-from halo.kernels.moe_route_sort import sort_routing_by_expert, warm_route_sort_kernels
+from halo.kernels.moe_route_sort import padded_group_rows, sort_routing_by_expert, warm_route_sort_kernels
 from tests.common.ep_reference import (
     GroupedSortLayer,
     dispatched_receive_counts,
@@ -40,6 +42,7 @@ from tests.common.route_sort_reference import (
     CASES,
     case_findings,
     compiled_sort_binaries,
+    padded_argsort,
     pinned_host_requests,
     receive,
     receive_counts,
@@ -196,10 +199,22 @@ def trips_the_detector(fn) -> bool:
     return False
 
 
+def _padded_sort(experts, weights, local_experts, counts):
+    """The padded sort and what the layer runs on its result before the GEMMs: the seeded row layout, and the token
+    and bias gathers over the -1 padding rows."""
+    outputs = sort_routing_by_expert(experts, weights, local_experts, counts, GROUP_ROW_ALIGN)
+    token_idx, _, expert_ids, offs, inv_map = outputs
+    seed_aligned_layout(offs, padded_group_rows(counts, GROUP_ROW_ALIGN))
+    tokens = torch.zeros((experts.shape[0], LAZY_LOAD_HIDDEN), device=experts.device, dtype=torch.bfloat16)
+    MoEGatherPermute.apply(tokens, token_idx, inv_map, True)
+    MoEExpertBiasGather.apply(tokens.new_zeros((local_experts, LAZY_LOAD_HIDDEN)), expert_ids, True)
+    return outputs
+
+
 def check_counting_sort(device) -> dict[str, bool]:
     """Each reference case after its layer warm-up: sync-free, bit-identical to the torch construction, served by the
-    warmed binaries, no pinned host block. The receive and reference are built outside the detector, whose host copies
-    sync."""
+    warmed binaries, no pinned host block, and the same with each group padded to whole GEMM segments where receive
+    counts size the sort. The receive and reference are built outside the detector, whose host copies sync."""
     checks = {}
     warm_up_counted = False
     pinned = 0
@@ -226,6 +241,31 @@ def check_counting_sort(device) -> dict[str, bool]:
         checks[f"{case.name}_sync_free"] = True
         checks[f"{case.name}_equals_torch_construction_bitwise"] = not mismatched
         checks[f"{case.name}_compiles_nothing_past_the_warm_up"] = compiled_sort_binaries() == warm
+        if inputs.counts is None:
+            continue
+        rows = sum(-(-count // GROUP_ROW_ALIGN) * GROUP_ROW_ALIGN for count in inputs.counts)
+        generator = torch.Generator(device=device).manual_seed(index)
+        padded_inputs = inputs._replace(upstream=torch.randn(rows, device=device, generator=generator))
+        want = sort_with_grad(padded_argsort, case, padded_inputs)
+        warm_route_sort_kernels(case.top_k, case.local_experts, device, pad_align=GROUP_ROW_ALIGN)
+        warm_permute_kernels(_WARMUP_TOKENS, LAZY_LOAD_HIDDEN, case.top_k, device, torch.bfloat16, padded=True)
+        warm = compiled_sort_binaries()
+        torch.cuda.synchronize()
+        requests = pinned_host_requests()
+        try:
+            with cuda_syncs_are_errors():
+                got = sort_with_grad(_padded_sort, case, padded_inputs)
+            torch.cuda.synchronize()
+        except RuntimeError as exc:
+            log(f"[padded counting sort] {case.name} raised {exc}")
+            checks[f"{case.name}_padded_sync_free"] = False
+            continue
+        pinned += pinned_host_requests() - requests
+        mismatched = result_mismatches(case, got, want)
+        log(f"[padded counting sort] {case.name}: {rows} rows; mismatched={mismatched}")
+        checks[f"{case.name}_padded_sync_free"] = True
+        checks[f"{case.name}_padded_equals_torch_construction_bitwise"] = not mismatched
+        checks[f"{case.name}_padded_compiles_nothing_past_the_warm_up"] = compiled_sort_binaries() == warm
     # The count is not blind: some warm-up compiled a shape no earlier sort had.
     checks["warm_up_compiles_are_counted"] = warm_up_counted
     checks["counting_sort_takes_no_pinned_host_memory"] = pinned == 0
@@ -286,6 +326,11 @@ def lazy_load_findings(device) -> list[str]:
     for top_k, local_experts in LAZY_LOAD_SHAPES:
         warm_route_sort_kernels(top_k, local_experts, device)
         warm_permute_kernels(_WARMUP_TOKENS, LAZY_LOAD_HIDDEN, top_k, device, torch.bfloat16)
+        # The padded groups' kernels, and the seeded layout as the layer's GEMM warm-up builds it.
+        warm_route_sort_kernels(top_k, local_experts, device, pad_align=GROUP_ROW_ALIGN)
+        warm_permute_kernels(_WARMUP_TOKENS, LAZY_LOAD_HIDDEN, top_k, device, torch.bfloat16, padded=True)
+        segment_ends = torch.arange(1, local_experts + 1, device=device, dtype=torch.int32) * GROUP_ROW_ALIGN
+        seed_aligned_layout(segment_ends, [GROUP_ROW_ALIGN] * local_experts)
         biases = [
             torch.zeros((local_experts, LAZY_LOAD_HIDDEN), device=device, dtype=dtype)
             for dtype in (torch.bfloat16, torch.float32)
@@ -306,6 +351,14 @@ def lazy_load_findings(device) -> list[str]:
                 MoEGatherPermute.apply(tokens, token_idx, inv_map)
                 for bias in biases:
                     MoEExpertBiasGather.apply(bias, expert_ids)
+                if counts is not None:
+                    token_idx, _, expert_ids, offs, inv_map = sort_routing_by_expert(
+                        experts, weights, local_experts, counts, GROUP_ROW_ALIGN
+                    )
+                    seed_aligned_layout(offs, padded_group_rows(counts, GROUP_ROW_ALIGN))
+                    MoEGatherPermute.apply(tokens, token_idx, inv_map, True)
+                    for bias in biases:
+                        MoEExpertBiasGather.apply(bias, expert_ids, True)
 
         findings += [
             f"top_k {top_k}, {local_experts} local experts: CUDA loaded {name} past the warm-up"

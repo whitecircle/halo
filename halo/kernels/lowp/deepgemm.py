@@ -24,12 +24,12 @@ from halo.kernels.lowp.deepgemm_cast_triton import (
     cast_weight_rows_to_mxfp4,
 )
 from halo.kernels.lowp.quantization import WeightVersionCache
-from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec, QuantFormat
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN, LOWP_RECIPES, LowpSpec, QuantFormat
+from halo.kernels.moe_route_sort import padded_group_rows
 
 DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = tuple(r.quant_format for r in LOWP_RECIPES.values() if r.native)
 
 _MIN_VERSION = (2, 8, 2)  # the first release whose fp8 wgrad fills its whole output; the Dockerfile pins it
-_ALIGN = TILE  # the contiguous layout pads each expert's row (M) segment to whole scale tiles
 _FP4_K_ALIGN = 256  # the fp4 kernel's contraction (K) multiple, two e2m1 per byte
 _WGRAD_MAX_GROUPS = 128  # the k-grouped kernel's scale-layout transform takes at most this many experts per call
 # DeepGEMM JIT-compiles a second k-grouped kernel (one TMA store stage) once a call's experts average this many
@@ -78,7 +78,7 @@ def verify_deepgemm() -> None:
 
 def ensure_contiguous_alignment() -> None:
     """Set DeepGEMM's process-wide M/K alignment of the contiguous layout, which its grouped kernels assert."""
-    _deep_gemm()[1].set_mk_alignment_for_contiguous_layout(_ALIGN)
+    _deep_gemm()[1].set_mk_alignment_for_contiguous_layout(GROUP_ROW_ALIGN)
 
 
 def _align_up(n, multiple: int):
@@ -94,11 +94,12 @@ class _RowLayout(NamedTuple):
     """Each expert's tokens at the start of its own 128-aligned segment of the ``rows``-row operand."""
 
     dst: torch.Tensor  # [T] int64, the operand row of each token
-    src: torch.Tensor  # [rows] int32, the token of each row, -1 on padding
-    m_indices: torch.Tensor  # [rows] int32, the expert of each row, -1 on padding
+    src: torch.Tensor  # [rows] int32, the token of each row, -1 on the rows this layout pads
+    m_indices: torch.Tensor  # [rows] int32, the expert of each row, -1 on the rows this layout pads
     segments: list[int]  # each expert's segment length
     segments_dev: torch.Tensor  # the same, int32 on the device
     rows: int
+    aligned: bool  # every group already a whole number of segments: the operand is the tokens themselves
 
 
 class _Memo:
@@ -113,13 +114,20 @@ class _Memo:
     def __call__(self, tensor: torch.Tensor, *extra):
         if tensor.is_inference():  # no version counter to key on
             return self._derive(tensor, *extra)
-        key = (tensor.device, tensor.dtype, tensor.untyped_storage().data_ptr(), tensor.storage_offset(),
-               tuple(tensor.shape), tensor.stride(), tensor._version,
-               *(e if isinstance(e, int) else id(e) for e in extra))  # fmt: skip
-        if self._held is None or key != self._key:
-            self._value = self._derive(tensor, *extra)
-            self._held, self._key = (tensor.detach(), extra), key
+        if self._held is None or self._key_of(tensor, extra) != self._key:
+            self.put(self._derive(tensor, *extra), tensor, *extra)
         return self._value
+
+    def put(self, value, tensor: torch.Tensor, *extra) -> None:
+        """Answer the next ask about ``tensor`` and ``extra`` with ``value``; an inference tensor is never held."""
+        if not tensor.is_inference():
+            self._value, self._held, self._key = value, (tensor.detach(), extra), self._key_of(tensor, extra)
+
+    @staticmethod
+    def _key_of(tensor: torch.Tensor, extra: tuple) -> tuple:
+        return (tensor.device, tensor.dtype, tensor.untyped_storage().data_ptr(), tensor.storage_offset(),
+                tuple(tensor.shape), tensor.stride(), tensor._version,
+                *(e if isinstance(e, int) else id(e) for e in extra))  # fmt: skip
 
     def clear(self) -> None:
         self._held = self._key = self._value = None
@@ -135,9 +143,9 @@ def _row_layout(offs: torch.Tensor, num_tokens: int, num_experts: int) -> _RowLa
             f"at T={num_tokens}; got {ends}. Rows outside the covered span are never written and would be "
             f"returned uninitialized."
         )
-    segments = [_align_up(b - a, _ALIGN) for a, b in zip([0, *ends[:-1]], ends, strict=True)]
+    segments = padded_group_rows((b - a for a, b in zip([0, *ends[:-1]], ends, strict=True)), GROUP_ROW_ALIGN)
     counts = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
-    segments_dev = _align_up(counts, _ALIGN)
+    segments_dev = torch.tensor(segments, device=offs.device)
     expert = torch.repeat_interleave(torch.arange(num_experts, device=offs.device), counts, output_size=num_tokens)
     shift = (segments_dev.cumsum(0) - segments_dev) - (counts.cumsum(0) - counts)
     dst = torch.arange(num_tokens, device=offs.device) + shift[expert]
@@ -146,7 +154,19 @@ def _row_layout(offs: torch.Tensor, num_tokens: int, num_experts: int) -> _RowLa
     src[dst] = torch.arange(num_tokens, device=offs.device, dtype=torch.int32)
     m_indices = torch.full((rows,), -1, device=offs.device, dtype=torch.int32)
     m_indices[dst] = expert.to(torch.int32)
-    return _RowLayout(dst, src, m_indices, segments, segments_dev.to(torch.int32), rows)
+    aligned = rows == num_tokens
+    return _RowLayout(dst, src, m_indices, segments, segments_dev.to(torch.int32), rows, aligned)
+
+
+def _aligned_row_layout(offs: torch.Tensor, segments: list[int]) -> _RowLayout:
+    """The layout of groups already whole segments of host-side lengths ``segments``, ending at ``offs``, built with
+    nothing read back: what :func:`_row_layout` returns for such ``offs``."""
+    rows = sum(segments)
+    segments_dev = torch.diff(offs, prepend=offs.new_zeros(1))
+    row = torch.arange(rows, device=offs.device, dtype=torch.int32)
+    expert = torch.arange(len(segments), device=offs.device, dtype=torch.int32)
+    m_indices = torch.repeat_interleave(expert, segments_dev.long(), output_size=rows)
+    return _RowLayout(row, row, m_indices, segments, segments_dev, rows, aligned=True)
 
 
 class _SharedTiles:
@@ -172,8 +192,21 @@ class _SharedTiles:
 # One host read of ``offs`` per expert FFN, not per projection; the gate and up GEMMs cast the same activation. The
 # memo alone holds the forward's 1x128 rows, so no graph keeps an FP8 copy of an activation.
 _layouts = _Memo(_row_layout)
+
+
+def seed_aligned_layout(offs: torch.Tensor, segments: list[int]) -> None:
+    """Hand the GEMMs over ``offs`` (int32 group ends) their row layout: a padded routing sort already placed every
+    group in whole segments, whose host-side lengths are ``segments``, so the adapter reads no group end back."""
+    _layouts.put(_aligned_row_layout(offs, segments), offs, sum(segments), len(segments))
+
+
 _row_casts = _Memo(lambda x, layout, width: cast_rows_to_fp8(x, layout.src, width))
 _shared_tiles = _Memo(_SharedTiles)
+
+
+def _token_rows(d: torch.Tensor, layout: _RowLayout) -> torch.Tensor:
+    """The ``[T, N]`` token rows of a ``[rows, N]`` kernel output."""
+    return d if layout.aligned else d.index_select(0, layout.dst)
 
 
 def _launch(kernel, *args, what: str, **kwargs) -> None:
@@ -301,7 +334,7 @@ def _deepgemm_forward(x, w, layout: _RowLayout, a_op, fmt: QuantFormat, weight_c
         recipe_b=recipe_b,
         what=f"{fmt} grouped GEMM on M={layout.rows} N={N} K={K} E={E}",
     )
-    return d.index_select(0, layout.dst)
+    return _token_rows(d, layout)
 
 
 def _fp8_dgrad(grad: torch.Tensor, w_fp8, layout: _RowLayout, k: int) -> torch.Tensor:
@@ -316,7 +349,7 @@ def _fp8_dgrad(grad: torch.Tensor, w_fp8, layout: _RowLayout, k: int) -> torch.T
         layout.m_indices,
         what=f"fp8 dgrad on M={layout.rows} N={k} K={grad.shape[1]}",
     )
-    return d.index_select(0, layout.dst)
+    return _token_rows(d, layout)
 
 
 def _launch_wgrad(x_op, g_op, segments: list[int], segments_dev: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:

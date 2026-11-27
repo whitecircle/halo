@@ -12,6 +12,7 @@ import triton
 from triton.runtime.interpreter import InterpretedFunction
 
 from halo.kernels import moe_route_sort
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 from halo.kernels.moe_route_sort import (
     NONLOCAL_EXPERT_ID_MESSAGE,
     RECEIVE_COUNTS_DISAGREE,
@@ -134,9 +135,55 @@ def case_findings(case: Case, inputs: Receive) -> list[str]:
     return findings
 
 
+def pad_routing_groups(
+    sorted_token_idx: torch.Tensor,
+    sorted_weights: torch.Tensor,
+    sorted_expert_ids: torch.Tensor,
+    offs: torch.Tensor,
+    inv_map: torch.Tensor,
+    align: int,
+    counts: tuple[int, ...] | None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The padded layout the counting sort places, built in torch from an unpadded sort's outputs: each expert's group
+    zero-padded to a multiple of ``align`` rows, a padding row holding token -1, weight 0 and expert -1, ``offs`` the
+    padded group ends and ``inv_map`` pointing each slot at its padded row, the padded row count as its sentinel.
+    ``counts`` (host-side) sizes the output; None reads the group ends back."""
+    if counts is None:
+        ends = offs.tolist()
+        counts = tuple(b - a for a, b in zip([0, *ends[:-1]], ends, strict=True))
+    segments = [-(-c // align) * align for c in counts]
+    rows = sum(segments)
+    n_sorted = sorted_token_idx.shape[0]
+    group = torch.diff(offs.long(), prepend=offs.new_zeros(1, dtype=torch.long))
+    padded = (group + align - 1) // align * align
+    # Counts that disagree with the sorted groups would place rows past the output they sized, or describe a layout
+    # other than the placed one.
+    torch._assert_async((padded == padded.new_tensor(segments)).all(), RECEIVE_COUNTS_DISAGREE)
+    shift = (padded.cumsum(0) - padded) - (group.cumsum(0) - group)
+    pos = torch.arange(n_sorted, device=offs.device) + shift.index_select(0, sorted_expert_ids.long())
+    token_idx = sorted_token_idx.new_full((rows,), -1).index_copy_(0, pos, sorted_token_idx)
+    weights = sorted_weights.new_zeros(rows).index_copy(0, pos, sorted_weights)
+    expert_ids = sorted_expert_ids.new_full((rows,), -1).index_copy_(0, pos, sorted_expert_ids)
+    if n_sorted:
+        slot_rows = pos.index_select(0, inv_map.clamp(max=n_sorted - 1).reshape(-1)).view_as(inv_map)
+        inv_map = torch.where(inv_map < n_sorted, slot_rows, rows)
+    else:
+        inv_map = torch.full_like(inv_map, rows)
+    return token_idx, weights, expert_ids, padded.cumsum(0).to(torch.int32), inv_map
+
+
+def padded_counting_sort(experts, weights, local_experts, counts):
+    return _counting_sort(experts, weights, local_experts, counts, GROUP_ROW_ALIGN)
+
+
+def padded_argsort(experts, weights, local_experts, counts):
+    return pad_routing_groups(*_argsort_routing(experts, weights, local_experts, counts), GROUP_ROW_ALIGN, counts)
+
+
 def counting_sort_mismatches(device) -> list[str]:
-    """Every :data:`CASES` output and gradient where the counting sort differs from torch's, and each case that
-    exercised less than it claims."""
+    """Every :data:`CASES` output and gradient where the counting sort differs from torch's, unpadded and with each
+    group padded to :data:`GROUP_ROW_ALIGN` rows (a receive with counts; at ``ep_size`` 1 the padding follows the sort), and
+    each case that exercised less than it claims."""
     findings = []
     for index, case in enumerate(CASES):
         inputs = receive(case, device, seed=index)
@@ -144,13 +191,23 @@ def counting_sort_mismatches(device) -> list[str]:
         findings += case_findings(case, inputs) + result_mismatches(
             case, sort_with_grad(_counting_sort, case, inputs), want
         )
+        if inputs.counts is not None:
+            rows = sum(-(-count // GROUP_ROW_ALIGN) * GROUP_ROW_ALIGN for count in inputs.counts)
+            generator = torch.Generator(device=device).manual_seed(index)
+            padded_inputs = inputs._replace(upstream=torch.randn(rows, device=device, generator=generator))
+            padded = result_mismatches(
+                case,
+                sort_with_grad(padded_counting_sort, case, padded_inputs),
+                sort_with_grad(padded_argsort, case, padded_inputs),
+            )
+            findings += [f"padded {finding}" for finding in padded]
     return findings
 
 
 def control_findings() -> list[str]:
     """The CPU controls, each named when it fails: counts a slot off raise, a count moved between two experts passes
-    (the sort reads only the sum). At ``ep_size`` 1 a stray id raises in both constructions; a swapped entry and a
-    one-bit gradient change are both reported."""
+    (the sort reads only the sum), and padded it raises once it moves a group's end. At ``ep_size`` 1 a stray id raises
+    in both constructions; a swapped entry and a one-bit gradient change are both reported."""
     findings = []
     case = CASES[1]
     inputs = receive(case, "cpu")
@@ -185,6 +242,26 @@ def control_findings() -> list[str]:
         except RuntimeError as exc:
             if message not in str(exc):
                 findings.append(f"{name} raised something else: {exc}")
+    # Padded, the total alone is not enough: 127 and 129 slots under counts of 128 each keep it and move the second
+    # group a whole segment past the output. A slot moved inside the segments still passes.
+    split = torch.tensor([0] * 127 + [1] * 129).view(-1, 1)
+    weights = torch.arange(256.0).view(-1, 1)
+    for name, sort in (("counting sort", padded_counting_sort), ("torch padding", padded_argsort)):
+        try:
+            sort(split, weights, 2, (128, 128))
+            findings.append(f"padded {name}: a slot moved across a segment boundary was not refused")
+        except RuntimeError as exc:
+            if RECEIVE_COUNTS_DISAGREE not in str(exc):
+                findings.append(f"padded {name}: a slot moved across a segment boundary raised something else: {exc}")
+        try:  # both totals kept, the two groups' segments traded: the layout seeded from the counts would be wrong
+            sort(split, weights, 2, (129, 127))
+            findings.append(f"padded {name}: two groups trading segments was not refused")
+        except RuntimeError as exc:
+            if RECEIVE_COUNTS_DISAGREE not in str(exc):
+                findings.append(f"padded {name}: two groups trading segments raised something else: {exc}")
+        moved_within, true_counts = sort(split, weights, 2, (126, 130)), sort(split, weights, 2, (127, 129))
+        if not all(torch.equal(got, want) for got, want in zip(moved_within, true_counts, strict=True)):
+            findings.append(f"padded {name}: a slot moved within the padded segments changed the sort")
     outputs, grad = sort_with_grad(_counting_sort, case, inputs)
     same_expert = (outputs[2] == outputs[2][0]).nonzero().flatten()[:2]
     swapped = [t.clone() for t in outputs]
@@ -236,6 +313,8 @@ def launch_key_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES) -> 
             for rows, n_valid, inputs in swept_receives(top_k, local_experts):
                 launches.clear()
                 _counting_sort(inputs.experts, inputs.weights, local_experts, inputs.counts)
+                if inputs.counts is not None:  # the padded groups, a runtime align on the same binaries
+                    padded_counting_sort(inputs.experts, inputs.weights, local_experts, inputs.counts)
                 for name, names, key in launches:
                     moved = moved_arguments(names, key, warm[name])
                     if moved:

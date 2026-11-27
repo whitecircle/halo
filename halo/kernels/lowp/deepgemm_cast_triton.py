@@ -10,8 +10,9 @@ import triton.language as tl
 
 from halo.kernels.lowp.fake_quant_triton import e2m1_round, mul_rn
 from halo.kernels.lowp.quantization import E2M1_MAX, E4M3_MAX, FORMAT_BLOCK_SIZE
+from halo.kernels.lowp.spec import GROUP_ROW_ALIGN
 
-TILE = 128  # DeepGEMM's fp8 scale granularity along either axis
+TILE = GROUP_ROW_ALIGN  # DeepGEMM's fp8 scale granularity along either axis; a row segment is whole tiles
 # Tuned on DeepSeek-V3's EP4 operands on B300 (SM103): 16 rows on one warp (1x128), 64 columns on four (128x1).
 _ROWS_PER_PROGRAM, _ROWS_WARPS = 16, 1
 _COLS_PER_PROGRAM, _COLS_WARPS = 64, 4

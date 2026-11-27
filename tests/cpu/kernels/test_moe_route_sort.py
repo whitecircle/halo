@@ -56,7 +56,7 @@ def test_the_launch_key_check_fails_its_negative_control():
     )
     findings = probe_findings(probe, _MARKER)
     assert findings and all(finding.startswith("_place_kernel") for finding in findings), findings
-    assert any("n_rows" in finding for finding in findings) and any("n_valid" in finding for finding in findings)
+    assert any("n_rows" in finding for finding in findings) and any("n_sorted" in finding for finding in findings)
 
 
 def test_every_receive_size_backward_launches_only_kernels_the_warm_up_loaded():

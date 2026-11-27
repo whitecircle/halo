@@ -41,6 +41,19 @@ def _gather_reduce_kernel(
     tl.store(out_ptr + row * hidden + cols, acc, mask=col_mask)
 
 
+# ``src_stride`` is ``hidden``, or the wire width of a receive DeepEP padded: unspecialized, as the unpermute backward's
+# row stride is, so one binary reads either in place.
+@triton.jit(do_not_specialize=["src_stride"])
+def _take_padded_rows_kernel(src_ptr, index_ptr, out_ptr, src_stride, hidden, BLOCK_H: tl.constexpr):
+    # out[row] = src[index[row]], zeros where the index is -1.
+    row = tl.program_id(0).to(tl.int64)
+    cols = tl.program_id(1) * BLOCK_H + tl.arange(0, BLOCK_H)
+    mask = cols < hidden
+    token = tl.load(index_ptr + row)
+    vals = tl.load(src_ptr + token * src_stride + cols, mask=mask & (token >= 0), other=0.0)
+    tl.store(out_ptr + row * hidden + cols, vals, mask=mask)
+
+
 # ``weight_grad`` is a runtime branch, so the one binary the EP warm-up compiles serves both cases.
 @triton.jit(do_not_specialize=["grad_out_stride", "weight_grad"])
 def _weighted_unpermute_bwd_kernel(
@@ -55,7 +68,8 @@ def _weighted_unpermute_bwd_kernel(
     weight_grad,
     BLOCK_H: tl.constexpr,
 ):
-    # One program per sorted row j: grad_expert[j] = w[j] * grad_out[tok[j]], grad_w[j] = <grad_out[tok[j]], y[j]>.
+    # One program per sorted row j: grad_expert[j] = w[j] * grad_out[tok[j]], grad_w[j] = <grad_out[tok[j]], y[j]>;
+    # a padding row (token -1) takes zeros.
     row = tl.program_id(0).to(tl.int64)
     token = tl.load(token_idx_ptr + row).to(tl.int64)
     weight = tl.load(weight_ptr + row).to(tl.float32)
@@ -63,7 +77,8 @@ def _weighted_unpermute_bwd_kernel(
     for start in range(0, hidden, BLOCK_H):
         cols = start + tl.arange(0, BLOCK_H)
         mask = cols < hidden
-        grad = tl.load(grad_out_ptr + token * grad_out_stride + cols, mask=mask, other=0.0).to(tl.float32)
+        grad = tl.load(grad_out_ptr + token * grad_out_stride + cols, mask=mask & (token >= 0), other=0.0)
+        grad = grad.to(tl.float32)
         tl.store(grad_expert_ptr + row * hidden + cols, grad * weight, mask=mask)
         if weight_grad:
             y = tl.load(expert_out_ptr + row * hidden + cols, mask=mask, other=0.0).to(tl.float32)
@@ -127,18 +142,39 @@ def gather_reduce_rows(src: torch.Tensor, inv_map: torch.Tensor, weight: torch.T
     return padded_gather_reduce(src, inv_map, weight)
 
 
+def take_padded_rows(src: torch.Tensor, index: torch.Tensor) -> torch.Tensor:
+    """``src[index]`` with a zero row wherever ``index`` is -1. On CUDA ``src`` may be a row-strided view, read in
+    place."""
+    if not src.is_cuda:
+        return torch.where((index >= 0).unsqueeze(-1), src.index_select(0, index.clamp(min=0)), 0)
+    hidden = src.shape[-1]
+    out = torch.empty((index.shape[0], hidden), device=src.device, dtype=src.dtype)
+    if index.shape[0] == 0:
+        return out
+    if src.stride(-1) != 1:
+        src = src.contiguous()
+    grid = (index.shape[0], triton.cdiv(hidden, _BLOCK_H))
+    _take_padded_rows_kernel[grid](src, index.contiguous(), out, src.stride(0), hidden, BLOCK_H=_BLOCK_H)
+    return out
+
+
 class MoEGatherPermute(torch.autograd.Function):
-    """``sorted = tokens[sorted_token_idx]`` with an atomic-free gather-reduce backward over ``inv_map``."""
+    """``sorted = tokens[sorted_token_idx]`` with an atomic-free gather-reduce backward over ``inv_map``. ``padded``:
+    the index holds -1 padding rows, which gather as zeros."""
 
     @staticmethod
-    def forward(ctx, tokens: torch.Tensor, sorted_token_idx: torch.Tensor, inv_map: torch.Tensor):
+    def forward(
+        ctx, tokens: torch.Tensor, sorted_token_idx: torch.Tensor, inv_map: torch.Tensor, padded: bool = False
+    ):
         ctx.save_for_backward(inv_map)
+        if padded:
+            return take_padded_rows(tokens, sorted_token_idx)
         return tokens.index_select(0, sorted_token_idx)
 
     @staticmethod
     def backward(ctx, grad_sorted):
         (inv_map,) = ctx.saved_tensors
-        return gather_reduce_rows(grad_sorted, inv_map), None, None
+        return gather_reduce_rows(grad_sorted, inv_map), None, None, None
 
 
 class MoEWeightedUnpermute(torch.autograd.Function):
@@ -158,7 +194,9 @@ class MoEWeightedUnpermute(torch.autograd.Function):
     def backward(ctx, grad_out):
         expert_out, weights, sorted_token_idx = ctx.saved_tensors
         if not grad_out.is_cuda:
-            gathered = grad_out.index_select(0, sorted_token_idx)
+            gathered = grad_out.index_select(0, sorted_token_idx.clamp(min=0))
+            # -1 is a padding row: zeros, whatever row 0 holds (a product would turn its inf into NaN).
+            gathered = torch.where((sorted_token_idx >= 0).unsqueeze(-1), gathered, 0)
             grad_expert = gathered * weights.unsqueeze(-1).to(gathered.dtype)
             if not ctx.weight_grad:
                 return grad_expert, None, None, None
@@ -192,12 +230,16 @@ class MoEWeightedUnpermute(torch.autograd.Function):
 class MoEExpertBiasGather(torch.autograd.Function):
     """``bias[eids]`` to expert-sorted tokens. The default index_add_ backward is a bf16 atomic scatter that
     serializes, as all of an expert's tokens hit one bias row; here ``grad_bias`` is the one GEMM
-    ``onehot(eids)ᵀ @ grad_out``, accumulated in fp32 (on the tensor cores for a bf16 bias)."""
+    ``onehot(eids)ᵀ @ grad_out``, accumulated in fp32 (on the tensor cores for a bf16 bias). ``padded``: ``eids``
+    holds -1 padding rows, which take a zero bias and give it no gradient; a flag, so the dense path keeps its one
+    ``index_select``."""
 
     @staticmethod
-    def forward(ctx, bias: torch.Tensor, eids: torch.Tensor):
+    def forward(ctx, bias: torch.Tensor, eids: torch.Tensor, padded: bool = False):
         ctx.save_for_backward(eids)
         ctx.num_experts = bias.shape[0]
+        if padded:  # -1 wraps to the appended zero row
+            return torch.cat([bias, bias.new_zeros(1, *bias.shape[1:])]).index_select(0, eids % (bias.shape[0] + 1))
         return bias.index_select(0, eids)
 
     @staticmethod
@@ -205,22 +247,31 @@ class MoEExpertBiasGather(torch.autograd.Function):
         (eids,) = ctx.saved_tensors
         # onehot[e, t] = 1 where token t routed to expert e; ([E, N] @ [N, I]) sums grad per expert.
         onehot = (torch.arange(ctx.num_experts, device=eids.device).unsqueeze(1) == eids).to(grad_out.dtype)
-        return onehot @ grad_out, None
+        return onehot @ grad_out, None, None
 
 
-def warm_permute_kernels(num_tokens: int, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype) -> None:
+def warm_permute_kernels(
+    num_tokens: int, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype, padded: bool = False
+) -> None:
     """Call with grad enabled. The operands are zeros, drawn from no generator, so a call inside a recompute region
-    leaves the RNG where the recompute expects it; the kernels compile on shape and dtype alone."""
+    leaves the RNG where the recompute expects it; the kernels compile on shape and dtype alone. ``padded`` warms the
+    gather of an index holding -1 padding rows, the one the padded expert groups run."""
     sorted_token_idx = torch.arange(num_tokens, device=device).repeat_interleave(top_k)
     inv_map = build_inv_map(sorted_token_idx, num_tokens, top_k)
+    if padded:
+        sorted_token_idx = torch.cat([sorted_token_idx, sorted_token_idx.new_full((1,), -1)])
     n_sorted = sorted_token_idx.numel()
     tokens = torch.zeros((num_tokens, hidden), device=device, dtype=dtype, requires_grad=True)
     expert_out = torch.zeros((n_sorted, hidden), device=device, dtype=dtype, requires_grad=True)
     weights = torch.zeros((n_sorted,), device=device, dtype=dtype, requires_grad=True)
-    permuted = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
+    permuted = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map, padded)
     unpermuted = MoEWeightedUnpermute.apply(expert_out, weights, sorted_token_idx, inv_map)
     torch.autograd.grad(permuted.sum() + unpermuted.sum(), (tokens, expert_out, weights))
     _warm_index_select(hidden, device, dtype)
+    if padded:  # the bias gather over -1 ids appends a zero row first, at the bias dtypes above
+        for value_dtype in dict.fromkeys((dtype, torch.float32)):
+            bias = torch.zeros((1, hidden), device=device, dtype=value_dtype)
+            MoEExpertBiasGather.apply(bias, sorted_token_idx[-1:], True)
 
 
 def _warm_index_select(width: int, device: torch.device, dtype: torch.dtype) -> None:

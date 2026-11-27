@@ -199,6 +199,21 @@ def _forward_on_a_kernel_raising(monkeypatch, error: Exception):
     return deepgemm._deepgemm_forward(x, torch.zeros(E, K, N), _layout([10, 20, 30, T]), (x, None), "mxfp8", False)
 
 
+@pytest.mark.parametrize("segments", [[256, 128, 384], [128, 0, 256, 0], [0, 0, 128]])
+def test_the_seeded_layout_is_the_one_read_back_from_the_same_group_ends(segments):
+    """A padded sort hands the adapter its groups' host-side lengths, and the layout built from them with no read
+    back must be the one ``_row_layout`` derives from ``offs``, empty groups included."""
+    offs = torch.tensor(segments, dtype=torch.int32).cumsum(0, dtype=torch.int32)
+    seeded = deepgemm._aligned_row_layout(offs, segments)
+    derived = deepgemm._row_layout(offs, sum(segments), len(segments))
+    for field in ("dst", "src", "m_indices", "segments_dev"):
+        assert torch.equal(getattr(seeded, field), getattr(derived, field)), field
+    assert seeded.m_indices.dtype == derived.m_indices.dtype == torch.int32
+    assert seeded.segments_dev.dtype == derived.segments_dev.dtype == torch.int32
+    assert (seeded.segments, seeded.rows, seeded.aligned) == (derived.segments, derived.rows, True)
+    assert derived.aligned
+
+
 def test_an_oom_in_the_native_kernel_is_not_taken_for_a_rejected_shape(monkeypatch):
     """OutOfMemoryError is a RuntimeError, so without the re-raise a full GPU would read as a shape the kernel refused."""
     with pytest.raises(torch.cuda.OutOfMemoryError):

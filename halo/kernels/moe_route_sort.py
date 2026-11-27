@@ -3,6 +3,8 @@ the dispatch's host-side receive counts or, at ``ep_size`` 1, by every slot; off
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import torch
 import torch.nn.functional as F
 import triton
@@ -16,6 +18,7 @@ _BLOCK_SLOTS = 1024
 _LANE_BITS = (_BLOCK_SLOTS - 1).bit_length()
 # Elements of one scan tile, blocks x padded local experts.
 _SCAN_TILE = 2048
+_CHECKSUM_MASK = 0x7FFFFFFF  # the scan's group checksum stays an int32 launch scalar at any receive size
 RECEIVE_COUNTS_DISAGREE = "DeepEP receive counts disagree with the received expert ids"
 # At ep_size 1 no dispatch pads, so an id outside the local range came from the routing itself.
 NONLOCAL_EXPERT_ID_MESSAGE = (
@@ -54,22 +57,40 @@ def _histogram_kernel(
     tl.store(hist_ptr + tl.program_id(0).to(tl.int64) * E_PAD + tl.arange(0, E_PAD), counts)
 
 
-@triton.jit(do_not_specialize=["n_blocks", "n_valid"])
+# ``align`` is 1, or the expert GEMM's row segment when it pads the groups: one binary serves both.
+@triton.jit(do_not_specialize=["n_blocks", "n_valid", "n_sorted", "n_weighted", "align"])
 def _scan_kernel(
-    hist_ptr, offs_ptr, shift_ptr, ok_ptr, n_blocks, n_local, n_valid, E_PAD: tl.constexpr, CHUNK: tl.constexpr
+    hist_ptr,
+    offs_ptr,
+    shift_ptr,
+    ok_ptr,
+    n_blocks,
+    n_local,
+    n_valid,
+    n_sorted,
+    n_weighted,
+    align,
+    E_PAD: tl.constexpr,
+    CHUNK: tl.constexpr,
 ):
-    # offs[e] = the end of expert e's group, its slots and every lower expert's summed over the blocks.
+    # offs[e] = the end of expert e's group, its slots and every lower expert's summed over the blocks, each group
+    # rounded up to a multiple of align.
     # shift[b, e] = where block b's first expert-e slot lands, minus that slot's position in the block's sorted order.
-    # ok = the local slots number n_valid, the host count that sized the outputs.
+    # ok = the local slots number n_valid, their groups end at n_sorted and, weighted by expert, sum to n_weighted
+    # (31 bits; -1 unpadded), the host counts that sized the outputs and the padded layout: padded, one
+    # count off by a slot can move its group a whole segment with the total unchanged, and two can trade segments
+    # with the padded total unchanged too. The two sums are a checksum, not an equality with the host layout: three
+    # groups moving by (+1, -2, +1) segments keep both.
     e = tl.arange(0, E_PAD)
     totals = tl.zeros((E_PAD,), dtype=tl.int32)
     for b0 in range(0, n_blocks, CHUNK):
         b = b0 + tl.arange(0, CHUNK)
         h = tl.load(hist_ptr + b[:, None] * E_PAD + e[None, :], mask=(b < n_blocks)[:, None], other=0)
         totals += tl.sum(h, axis=0)
-    end = tl.cumsum(totals, axis=0)
+    groups = tl.cdiv(totals, align) * align
+    end = tl.cumsum(groups, axis=0)
     tl.store(offs_ptr + e, end, mask=e < n_local)
-    running = end - totals
+    running = end - groups
     for b0 in range(0, n_blocks, CHUNK):
         b = b0 + tl.arange(0, CHUNK)
         tile = b[:, None] * E_PAD + e[None, :]
@@ -79,10 +100,12 @@ def _scan_kernel(
         first_in_block = tl.cumsum(h, axis=1) - h
         tl.store(shift_ptr + tile, block_start - first_in_block, mask=in_range)
         running += tl.sum(h, axis=0)
-    tl.store(ok_ptr, (tl.sum(totals, axis=0) == n_valid).to(tl.int32))
+    ok = (tl.sum(totals, axis=0) == n_valid) & (tl.sum(groups, axis=0) == n_sorted)
+    ok &= (n_weighted < 0) | ((tl.sum(groups * (e + 1), axis=0) & 0x7FFFFFFF) == n_weighted)
+    tl.store(ok_ptr, ok.to(tl.int32))
 
 
-@triton.jit(do_not_specialize=["n_rows", "n_valid"])
+@triton.jit(do_not_specialize=["n_rows", "n_sorted"])
 def _place_kernel(
     experts_ptr,
     weights_ptr,
@@ -94,7 +117,7 @@ def _place_kernel(
     inv_map_ptr,
     n_rows,
     n_local,
-    n_valid,
+    n_sorted,
     TOP_K: tl.constexpr,
     K_PAD: tl.constexpr,
     ROWS: tl.constexpr,
@@ -111,14 +134,14 @@ def _place_kernel(
     s_lane = packed - (s_key << LANE_BITS)
     s_local = s_key < n_local
     shift = tl.load(shift_ptr + pid * E_PAD + s_key, mask=s_local, other=0).to(tl.int64)
-    s_dest = tl.where(s_local, shift + lane, n_valid)
+    s_dest = tl.where(s_local, shift + lane, n_sorted)
     s_row = pid * ROWS + s_lane // K_PAD
     s_slot = s_row * TOP_K + s_lane % K_PAD
     tl.store(sorted_token_ptr + s_dest, s_row, mask=s_local)
     tl.store(sorted_weight_ptr + s_dest, tl.load(weights_ptr + s_slot, mask=s_local), mask=s_local)
     tl.store(sorted_expert_ptr + s_dest, s_key, mask=s_local)
     # Back in slot order by a sort on the lane (every lane distinct), then each row's sorted positions ascending, its
-    # non-local slots last as the sentinel n_valid.
+    # non-local slots last as the sentinel n_sorted, the sorted rows' count.
     dest = tl.sort((s_lane << 32) | s_dest) - (lane.to(tl.int64) << 32)
     tl.store(dest_ptr + slot, dest.to(tl.int32), mask=exists)
     row_dest = tl.sort(tl.reshape(dest, ROWS, K_PAD), dim=1)
@@ -126,11 +149,17 @@ def _place_kernel(
 
 
 class _CountingSort(torch.autograd.Function):
-    """Only the gate weights carry a gradient, each slot's read back at its sorted position."""
+    """Only the gate weights carry a gradient, each slot's read back at its sorted position. ``pad_align`` places
+    each group in whole multiples of it, the rows past its slots holding token -1, weight 0 and expert -1."""
 
     @staticmethod
     def forward(
-        ctx, weights: torch.Tensor, experts: torch.Tensor, num_local_experts: int, counts: tuple[int, ...] | None
+        ctx,
+        weights: torch.Tensor,
+        experts: torch.Tensor,
+        num_local_experts: int,
+        counts: tuple[int, ...] | None,
+        pad_align: int | None,
     ):
         n_rows, top_k = experts.shape
         device = experts.device
@@ -139,22 +168,42 @@ class _CountingSort(torch.autograd.Function):
         e_pad = triton.next_power_of_2(num_local_experts)
         n_blocks = triton.cdiv(n_rows, rows)
         n_valid = n_rows * top_k if counts is None else sum(counts)
+        align = 1 if pad_align is None else pad_align
+        groups = None if pad_align is None else padded_group_rows(counts, pad_align)
+        n_sorted = n_valid if groups is None else sum(groups)
+        n_weighted = -1 if groups is None else sum(e * g for e, g in enumerate(groups, 1)) & _CHECKSUM_MASK
         experts, weights = experts.contiguous(), weights.contiguous()
         hist = torch.empty((n_blocks, e_pad), dtype=torch.int32, device=device)
         shift = torch.empty_like(hist)
         offs = torch.empty(num_local_experts, dtype=torch.int32, device=device)
         ok = torch.empty(1, dtype=torch.int32, device=device)
         dest = torch.empty(n_rows * top_k, dtype=torch.int32, device=device)
-        sorted_token_idx = torch.empty(n_valid, dtype=torch.long, device=device)
-        sorted_weights = torch.empty(n_valid, dtype=weights.dtype, device=device)
-        sorted_expert_ids = torch.empty(n_valid, dtype=experts.dtype, device=device)
+        if pad_align is None:  # the placement writes every row
+            sorted_token_idx = torch.empty(n_sorted, dtype=torch.long, device=device)
+            sorted_weights = torch.empty(n_sorted, dtype=weights.dtype, device=device)
+            sorted_expert_ids = torch.empty(n_sorted, dtype=experts.dtype, device=device)
+        else:  # and leaves the padding rows as filled here
+            sorted_token_idx = torch.full((n_sorted,), -1, dtype=torch.long, device=device)
+            sorted_weights = torch.zeros(n_sorted, dtype=weights.dtype, device=device)
+            sorted_expert_ids = torch.full((n_sorted,), -1, dtype=experts.dtype, device=device)
         inv_map = torch.empty((n_rows, top_k), dtype=torch.long, device=device)
         block = {"TOP_K": top_k, "K_PAD": k_pad, "ROWS": rows, "E_PAD": e_pad}
         _histogram_kernel[(n_blocks,)](experts, hist, n_rows, num_local_experts, **block)
         _scan_kernel[(1,)](
-            hist, offs, shift, ok, n_blocks, num_local_experts, n_valid, E_PAD=e_pad, CHUNK=max(1, _SCAN_TILE // e_pad)
+            hist,
+            offs,
+            shift,
+            ok,
+            n_blocks,
+            num_local_experts,
+            n_valid,
+            n_sorted,
+            n_weighted,
+            align,
+            E_PAD=e_pad,
+            CHUNK=max(1, _SCAN_TILE // e_pad),
         )
-        # Before the placement, as a wrong total would write past the outputs the counts sized or leave them short.
+        # Before the placement, as wrong counts would write past the outputs they sized or leave them short.
         torch._assert_async(ok, NONLOCAL_EXPERT_ID_MESSAGE if counts is None else RECEIVE_COUNTS_DISAGREE)
         _place_kernel[(n_blocks,)](
             experts,
@@ -167,7 +216,7 @@ class _CountingSort(torch.autograd.Function):
             inv_map,
             n_rows,
             num_local_experts,
-            n_valid,
+            n_sorted,
             LANE_BITS=_LANE_BITS,
             **block,
         )
@@ -181,21 +230,28 @@ class _CountingSort(torch.autograd.Function):
     @staticmethod
     def backward(ctx, _token_grad, sorted_weights_grad, _expert_grad, _offs_grad, _inv_map_grad):
         if sorted_weights_grad is None:
-            return None, None, None, None
+            return None, None, None, None, None
         (dest,) = ctx.saved_tensors
-        # The zero padded on at n_valid is every non-local slot's gradient. gather, as index_select takes a separate
+        # The zero padded on at n_sorted is every non-local slot's gradient. gather, as index_select takes a separate
         # kernel for an index of up to 16 rows: one kernel at every receive size, loaded by the warm-up.
         grad = F.pad(sorted_weights_grad, (0, 1)).gather(0, dest)
-        return grad.view(ctx.weights_shape), None, None, None
+        return grad.view(ctx.weights_shape), None, None, None, None
 
 
 # Eager under torch.compile, as its kernels are already fused and, traced, the host counts would become graph inputs
 # that change every step.
 @torch.compiler.disable
 def _counting_sort(
-    experts: torch.Tensor, weights: torch.Tensor, num_local_experts: int, counts: tuple[int, ...] | None
+    experts: torch.Tensor,
+    weights: torch.Tensor,
+    num_local_experts: int,
+    counts: tuple[int, ...] | None,
+    pad_align: int | None = None,
 ):
-    return _CountingSort.apply(weights, experts, num_local_experts, counts)
+    """``pad_align`` needs ``counts``, which size the padded output."""
+    if pad_align is not None and counts is None:
+        raise ValueError("a padded counting sort needs the per-expert counts that size its output")
+    return _CountingSort.apply(weights, experts, num_local_experts, counts, pad_align)
 
 
 def _argsort_routing(
@@ -227,28 +283,59 @@ def _argsort_routing(
     return sorted_token_idx, flat_weights[order], sorted_expert_ids, offs, inv_map
 
 
+def padded_group_rows(counts: Iterable[int], align: int) -> list[int]:
+    """Each group's rows rounded up to ``align``: the segments a padded sort places, which its caller's row layout
+    and the adapter's must match."""
+    return [-(-count // align) * align for count in counts]
+
+
+def local_expert_counts(experts: torch.Tensor, num_local_experts: int) -> tuple[int, ...]:
+    """Each local expert's slot count, read back from the device: what sizes a padded sort where no receive counts
+    exist (``ep_size`` 1, every id local). Raises on an id outside them, as the dense sort's device assert does."""
+    counts = torch.bincount(experts.flatten().clamp(min=-1) + 1, minlength=num_local_experts + 1).tolist()
+    if counts[0] or len(counts) > num_local_experts + 1:
+        raise RuntimeError(NONLOCAL_EXPERT_ID_MESSAGE)
+    return tuple(counts[1:])
+
+
 def sort_routing_by_expert(
-    experts: torch.Tensor, weights: torch.Tensor, num_local_experts: int, counts: tuple[int, ...] | None
+    experts: torch.Tensor,
+    weights: torch.Tensor,
+    num_local_experts: int,
+    counts: tuple[int, ...] | None,
+    pad_align: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Each local expert's slots in slot order, ids outside ``[0, num_local_experts)`` (DeepEP's ``-1``) dropped,
     ``offs`` the int32 group ends. ``counts[e]`` is the host-side slot count of expert ``e``, None when every id is
-    local; a size that disagrees with the ids trips a device-side assert. On CUDA nothing is read back and the kernels
-    take only unspecialized launch scalars, so one compile serves every receive, where the torch argsort picks kernels
-    by slot count. A per-sort copy of the counts would stage through a pinned host block and grow the pinned pool. Both
-    paths return the same integers in the same order."""
+    local; counts that disagree with the ids trip a device-side assert. ``pad_align`` (CUDA, with counts) places each
+    group in whole multiples of it: a padding row holds token -1, weight 0 and expert -1, ``offs`` are the padded group
+    ends and ``inv_map``'s sentinel the padded row count. On CUDA nothing is read back and the kernels take only
+    unspecialized launch scalars, so one compile serves every receive, where the torch argsort picks kernels by slot
+    count. A per-sort copy of the counts would stage through a pinned host block and grow the pinned pool. Unpadded,
+    both paths return the same integers in the same order."""
     if counts is not None and len(counts) != num_local_experts:
         raise ValueError(f"{len(counts)} receive counts for {num_local_experts} local experts")
-    if experts.is_cuda:
-        return _counting_sort(experts, weights, num_local_experts, counts)
-    return _argsort_routing(experts, weights, num_local_experts, counts)
+    if pad_align is None:
+        sort = _counting_sort if experts.is_cuda else _argsort_routing
+        return sort(experts, weights, num_local_experts, counts)
+    if pad_align < 1:
+        raise ValueError(f"pad_align must be a positive row count, got {pad_align}")
+    if not experts.is_cuda:
+        raise ValueError("padded groups are placed by the CUDA counting sort; the CPU sort has no padded layout")
+    return _counting_sort(experts, weights, num_local_experts, counts, pad_align)
 
 
-def warm_route_sort_kernels(top_k: int, num_local_experts: int, device: torch.device) -> None:
+def warm_route_sort_kernels(
+    top_k: int, num_local_experts: int, device: torch.device, pad_align: int | None = None
+) -> None:
     """Sort one synthetic receive forward and backward with grad enabled; one call covers every receive size, with
-    counts or without. The ids and weights carry the dtypes the expert compute is handed: int64 (DeepEP's
-    ``topk_idx_t``, the routers' top-k) and fp32 (DeepEP's, and every family's routing casts to it)."""
+    counts or without, and padded to ``pad_align`` rows per group when the expert GEMM pads, with the count readback
+    an ``ep_size`` 1 layer sizes it by. The ids and weights carry the dtypes the expert compute is handed: int64
+    (DeepEP's ``topk_idx_t``, the routers' top-k) and fp32 (DeepEP's, and every family's routing casts to it)."""
     experts = torch.zeros((1, top_k), dtype=torch.long, device=device)
     weights = torch.zeros((1, top_k), dtype=torch.float32, device=device, requires_grad=True)
-    counts = (top_k,) + (0,) * (num_local_experts - 1)
-    sorted_weights = sort_routing_by_expert(experts, weights, num_local_experts, counts)[1]
+    counts = (
+        local_expert_counts(experts, num_local_experts) if pad_align else (top_k,) + (0,) * (num_local_experts - 1)
+    )
+    sorted_weights = sort_routing_by_expert(experts, weights, num_local_experts, counts, pad_align)[1]
     torch.autograd.grad(sorted_weights.sum(), weights)

@@ -180,8 +180,12 @@ def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(subtests):
         (moe_route_sort._histogram_kernel, "n_rows"),
         (moe_route_sort._scan_kernel, "n_blocks"),
         (moe_route_sort._scan_kernel, "n_valid"),
+        (moe_route_sort._scan_kernel, "n_sorted"),
+        (moe_route_sort._scan_kernel, "n_weighted"),
+        (moe_route_sort._scan_kernel, "align"),
         (moe_route_sort._place_kernel, "n_rows"),
-        (moe_route_sort._place_kernel, "n_valid"),
+        (moe_route_sort._place_kernel, "n_sorted"),
+        (moe_permute._take_padded_rows_kernel, "src_stride"),
     )
     assert rows, "the sweep found no kernel argument"
     for kernel, row_count in rows:
@@ -227,7 +231,11 @@ def test_the_routing_sort_and_permute_kernels_are_warmed_where_the_compute_path_
     calls = _record_permute_backwards(monkeypatch)
     sorts = []
     real_warm = compute.warm_route_sort_kernels
-    monkeypatch.setattr(compute, "warm_route_sort_kernels", lambda *args: sorts.append(args[:2]) or real_warm(*args))
+    monkeypatch.setattr(
+        compute,
+        "warm_route_sort_kernels",
+        lambda *args, **kwargs: sorts.append(args[:2]) or real_warm(*args, **kwargs),
+    )
     layer = _RecordingLayer(ep_size=ep_size)
     layer._use_grouped_mm = grouped_mm
     flat = torch.randn(3, HIDDEN)
@@ -235,6 +243,30 @@ def test_the_routing_sort_and_permute_kernels_are_warmed_where_the_compute_path_
     layer._dispatch_compute_combine(flat, experts, torch.ones(3, top_k), torch.float32)
     assert set(calls) == (_PERMUTE_BACKWARDS if warmed else set())
     assert sorts == ([(top_k, LOCAL_EXPERTS)] if warmed else [])
+
+
+@pytest.mark.parametrize("pads", (True, False), ids=("padded_expert_groups", "dense_expert_groups"))
+@pytest.mark.parametrize("family", tuple(GEMM_FAMILIES))
+def test_a_layer_padding_its_expert_groups_warms_the_padded_sort_gather_and_ffn(monkeypatch, family, pads):
+    """Padded, the sort prefills and places whole segments, the permute runs the padded gather's kernel and the FFN
+    meets whole 128-row groups with -1 expert ids on their padding (a zero bias row, on GPT-OSS): each compiles or
+    loads on its first launch, which must be the warm-up's. A dense layer warms none of them."""
+    layer = gemm_layer(family, "ep2", "defaults")
+    layer._uses_padded_groups = pads
+    sorts, permutes, ffns = [], [], []
+    monkeypatch.setattr(compute, "warm_route_sort_kernels", lambda *args, **kwargs: sorts.append(kwargs))
+    monkeypatch.setattr(compute, "warm_permute_kernels", lambda *args, **kwargs: permutes.append(kwargs))
+
+    def ffn(self, tokens, offs, expert_ids, dtype):
+        ffns.append((tokens.shape[0] // self.experts_per_rank, bool((expert_ids < 0).any())))
+        return tokens
+
+    monkeypatch.setattr(type(layer), "_grouped_expert_ffn", ffn)
+    layer._warm_expert_kernels(torch.device("cpu"), torch.bfloat16, layer.hidden_dim, layer.top_k)
+    segment = compute.GROUP_ROW_ALIGN
+    assert sorts == [{"pad_align": segment if pads else None}]
+    assert permutes == [{"padded": pads}]
+    assert ffns == [(1, False), (GROUPED_MM_SMALL_TILE_DIM + 1, False), *([(segment, True)] if pads else [])]
 
 
 def test_a_first_forward_under_inference_mode_warms_every_kernel(monkeypatch):
@@ -382,7 +414,7 @@ def test_every_backward_of_the_grouped_compute_runs_in_the_warm_up(monkeypatch, 
 @pytest.mark.parametrize("layout", ("ep1", "etp2"))
 def test_the_backward_check_fails_without_the_permute_warm_up(monkeypatch, layout):
     """A layer with no dispatch group warms only its GEMM, whose FFN runs no permute."""
-    monkeypatch.setattr(compute, "warm_permute_kernels", lambda *args: None)
+    monkeypatch.setattr(compute, "warm_permute_kernels", lambda *args, **kwargs: None)
     cold = _cold_backwards(monkeypatch, gemm_layer("qwen3_5_moe", layout, "defaults"))
     assert cold == {"MoEGatherPermute", "MoEWeightedUnpermute"}, cold
 

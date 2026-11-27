@@ -2,13 +2,21 @@
 """Fused MoE permute/unpermute kernels match an fp64 ``index_add_`` reference, forward and backward.
 
 Kernels walk sentinel-padded ``inv_map`` instead of materializing ``[recv_N, top_k, H]``, so cases cover sentinel
-slots, token-less rows and empty dispatch.
+slots, token-less rows and empty dispatch. Expert groups padded to whole GEMM segments add rows of token -1: the gather
+gives them zeros and copies every other row bit for bit off a row-strided receive, and the unpermute backward gives
+them no gradient, whatever the upstream gradient's first row holds.
 """
 
 import torch
 
 from halo.kernels import moe_permute
-from halo.kernels.moe_permute import MoEWeightedUnpermute, build_inv_map, gather_reduce_rows
+from halo.kernels.moe_permute import (
+    MoEGatherPermute,
+    MoEWeightedUnpermute,
+    build_inv_map,
+    gather_reduce_rows,
+    take_padded_rows,
+)
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import fro_rel_err, max_abs_rel_err
 
@@ -171,6 +179,95 @@ def test_one_compile_serves_every_row_count():
     assert len(kernel.device_caches[torch.cuda.current_device()][0]) == warm, "a row count compiled a new binary"
 
 
+def _padded_index(n_tokens: int, generator: torch.Generator) -> torch.Tensor:
+    """Every token once, in a shuffled order, with a -1 padding row after every seventh."""
+    order = torch.randperm(n_tokens, generator=generator, device="cuda")
+    padded = torch.cat([order.view(-1, 7), order.new_full((n_tokens // 7, 1), -1)], dim=1).reshape(-1)
+    assert (padded < 0).sum() == n_tokens // 7
+    return padded
+
+
+def test_the_padded_gather_copies_rows_bit_for_bit_and_zeros_the_padding():
+    """Off a contiguous receive and off the row-strided view DeepEP's padded wire width leaves, with -0.0, inf and NaN
+    among the values: a copy keeps each, where a sum with zero would lose the sign of -0.0."""
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    n_tokens, hidden = 7 * 300, 1100
+    index = _padded_index(n_tokens, generator)
+    for dtype in (torch.bfloat16, torch.float32):
+        for wire in (hidden, hidden + 180):
+            receive = torch.randn(n_tokens, wire, generator=generator, device="cuda", dtype=dtype)
+            receive[0, :4] = torch.tensor(
+                [-0.0, float("inf"), float("-inf"), float("nan")], device="cuda", dtype=dtype
+            )
+            tokens = receive[:, :hidden]
+            out = take_padded_rows(tokens, index)
+            real = index >= 0
+            bits = torch.int16 if dtype == torch.bfloat16 else torch.int32
+            assert torch.equal(out[real].view(bits), tokens[index[real]].contiguous().view(bits)), f"{dtype} {wire}"
+            assert out[~real].view(bits).count_nonzero() == 0, f"{dtype} wire {wire}: a padding row is not +0.0"
+
+
+def test_the_padded_permute_backward_sums_each_tokens_rows_and_skips_the_padding():
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    n_tokens, hidden = 7 * 40, 96
+    index = _padded_index(n_tokens, generator)
+    tokens = torch.randn(n_tokens, hidden, generator=generator, device="cuda", requires_grad=True)
+    inv_map = torch.full((n_tokens, 1), index.numel(), device="cuda")
+    inv_map[index[index >= 0], 0] = (index >= 0).nonzero().squeeze(1)
+    grad = torch.randn(index.numel(), hidden, generator=generator, device="cuda")
+    MoEGatherPermute.apply(tokens, index, inv_map, True).backward(grad)
+    expected = torch.zeros_like(tokens).index_add_(0, index[index >= 0], grad[index >= 0])
+    assert torch.equal(tokens.grad, expected)
+
+
+def test_the_unpermute_backward_gives_a_padding_row_no_gradient():
+    """A padding row's token is -1: read as an index it is the row before the upstream gradient's first, here an inf
+    row of the buffer the gradient is a view into. Its expert-output and gate-weight gradients are zero, not the NaN
+    of inf times its zero weight, and every real row's equal the unpadded backward's."""
+    generator = torch.Generator(device="cuda").manual_seed(0)
+    n_tokens, hidden = 7 * 40, 96
+    index = _padded_index(n_tokens, generator)
+    real = index >= 0
+    inv_map = torch.full((n_tokens, 1), index.numel(), device="cuda")
+    inv_map[index[real], 0] = real.nonzero().squeeze(1)
+    dense_inv_map = torch.empty_like(inv_map)
+    dense_inv_map[index[real], 0] = torch.arange(n_tokens, device="cuda")
+    for dtype in (torch.bfloat16, torch.float32):
+        expert_out = torch.randn(index.numel(), hidden, generator=generator, device="cuda", dtype=dtype)
+        weights = torch.rand(index.numel(), generator=generator, device="cuda", dtype=dtype)
+        # As the padded layout has them: a zero output and a zero gate weight on every padding row.
+        expert_out[~real], weights[~real] = 0, 0
+        buffer = torch.randn(n_tokens + 1, hidden, generator=generator, device="cuda", dtype=dtype)
+        buffer[0] = float("inf")
+        grad = buffer[1:]
+
+        def backward(out_rows, weight_rows, token_idx, token_map, upstream=grad):
+            out_rows, weight_rows = out_rows.clone().requires_grad_(True), weight_rows.clone().requires_grad_(True)
+            MoEWeightedUnpermute.apply(out_rows, weight_rows, token_idx, token_map).backward(upstream)
+            return out_rows.grad, weight_rows.grad
+
+        want_out, want_w = backward(expert_out[real], weights[real], index[real], dense_inv_map)
+        got_out, got_w = backward(expert_out, weights, index, inv_map)
+        assert torch.equal(got_out[real], want_out) and torch.equal(got_w[real], want_w), f"{dtype}: a real row moved"
+        assert not got_out[~real].any() and not got_w[~real].any(), f"{dtype}: a padding row took a gradient"
+
+
+def test_one_padded_gather_compile_serves_every_row_stride_and_count():
+    kernel = moe_permute._take_padded_rows_kernel
+    generator = torch.Generator(device="cuda").manual_seed(0)
+
+    def run(n_tokens: int, row_stride: int) -> None:
+        receive = torch.randn(n_tokens, row_stride, generator=generator, device="cuda", dtype=torch.bfloat16)
+        take_padded_rows(receive[:, :360], _padded_index(n_tokens, generator))
+
+    kernel.device_caches.clear()
+    run(14, 360)
+    warm = len(kernel.device_caches[torch.cuda.current_device()][0])
+    for n_tokens, row_stride in ((7, 360), (7 * 16, 384), (7 * 73, 361), (7 * 3, 3072)):
+        run(n_tokens, row_stride)
+    assert len(kernel.device_caches[torch.cuda.current_device()][0]) == warm, "a stride or a count compiled a binary"
+
+
 @gpu_test_main(exact_world_size=1, prefix="moe_permute", partial_state=False)
 def run(ctx) -> dict:
     checks: dict[str, bool] = {}
@@ -191,6 +288,26 @@ def run(ctx) -> dict:
     record_check(checks, "gather_reduce_sums_only_real_rows", test_gather_reduce_sums_only_real_rows)
     record_check(checks, "gather_reduce_takes_a_strided_weight", test_gather_reduce_takes_a_strided_weight)
     record_check(checks, "empty_dispatch", test_empty_dispatch)
+    record_check(
+        checks,
+        "padded_gather_copies_rows_bit_for_bit_and_zeros_the_padding",
+        test_the_padded_gather_copies_rows_bit_for_bit_and_zeros_the_padding,
+    )
+    record_check(
+        checks,
+        "padded_permute_backward_sums_each_tokens_rows_and_skips_the_padding",
+        test_the_padded_permute_backward_sums_each_tokens_rows_and_skips_the_padding,
+    )
+    record_check(
+        checks,
+        "unpermute_backward_gives_a_padding_row_no_gradient",
+        test_the_unpermute_backward_gives_a_padding_row_no_gradient,
+    )
+    record_check(
+        checks,
+        "one_padded_gather_compile_serves_every_row_stride_and_count",
+        test_one_padded_gather_compile_serves_every_row_stride_and_count,
+    )
     record_check(checks, "one_compile_serves_every_row_count", test_one_compile_serves_every_row_count)
     record_check(
         checks,
