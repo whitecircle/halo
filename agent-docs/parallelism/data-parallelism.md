@@ -467,6 +467,7 @@ MoE.
 | QLoRA / `load_in_4bit` | supported on a **dense** model. On a MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default) — set `use_grouped_gemm: false`, under either launcher. QLoRA skips FSDP2, so `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` and `fsdp_defer_grad_sync` raise under it | `model_loading/parallel/load_rules.py`, `reject_fsdp_knobs_under_qlora` |
 | `use_peft` / LoRA, `packing`, `padding_free`, `torch_compile`, `gradient_checkpointing` | supported and ungated — plain DP is the mode with the widest knob surface | — |
 | `lowp_precision != "bf16"` | SFT and teacher distillation (student only) | `parallelism_config_from_args` |
+| `lowp_backend: native` | SFT only | `parallelism_config_from_args` |
 | `init_from_scratch` | SFT only; refuses QLoRA and every EP/CP/TP/ETP/PP mode, so plain DP is the one mode it runs in | `parallelism_config_from_args`, `model_loading/parallel/load_rules.py` |
 
 ## Common issues
