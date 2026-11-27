@@ -32,6 +32,11 @@ def is_hopper_gpu() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 9
 
 
+def supports_flash_attention() -> bool:
+    """Ampere (SM80) or newer, the floor of every FlashAttention build."""
+    return torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+
+
 def supports_grouped_mm() -> bool:
     """SM90+ compute capability. A failing read propagates: the answer picks the expert weight layout, and a rank
     answering differently from its peers would hang the expert all-gather."""

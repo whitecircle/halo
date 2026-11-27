@@ -1,6 +1,6 @@
 # Flash Attention & Attention Backends
 
-`load_distributed_model` (`halo/model_loading/parallel/loader.py`) auto-detects the backend per GPU and model: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, `flash_attention_2` otherwise. Pass `attn_implementation` only to override it. The detection line names only that GPU default, which the model-level checks below may move; the run's start log names the backend the policy was built with (`Attention:`).
+`load_distributed_model` (`halo/model_loading/parallel/loader.py`) auto-detects the backend per GPU and model: `flash_attention_4` on Blackwell, `flash_attention_3` on Hopper, `flash_attention_2` on Ampere and Ada, and `sdpa` on an older GPU, where no FlashAttention build runs. Pass `attn_implementation` only to override it. The detection line names only that GPU default, which the model-level checks below may move; the run's start log names the backend the policy was built with (`Attention:`).
 
 FA2 is the detector's terminal default, with no availability probe — every shipped image carries it, and a host without it raises at model build. A route from FA4 to FA2 for a model FA4 cannot train ([below](#model-specific-handling)) does probe, and refuses on such a host, naming `flex_attention` and `eager`. Context Parallelism hard-requires flash-attn and raises `ImportError` when it is missing.
 
@@ -40,7 +40,8 @@ On B300 (Halo 1.1.0 or earlier), CP on FA4 measures 1.2–3× FA2 at ≥32k toke
 
 1. `major >= 10` (Blackwell SM100/SM103): `flash_attention_4` if `flash_attn.cute` imports, else `flash_attention_2`. A build that is present but unusable warns before degrading.
 2. `major == 9` (Hopper): `flash_attention_3` if `flash_attn_interface` (else `flash_attn_3`) provides the varlen kernel, else `flash_attention_2`.
-3. Anything older, or any exception: `flash_attention_2`.
+3. `major == 8` (Ampere, Ada), or any exception: `flash_attention_2`.
+4. `major < 8`: `sdpa` (`supports_flash_attention`), since FA2 raises on these GPUs in its first forward. A pinned `flash_attention_2` stays pinned and fails there with FA2's own message.
 
 The detection above, the sink probe and the FA4 warm-up resolve kernels through `flash_kernel(attn_impl, varlen=...)`: one module table in transformers' dispatch order (FA3 through `flash_attn_interface` first), FA4 imported only after `ensure_fa4_kernel_cache_env`. A build missing the entry point reads as absent. Context parallelism resolves its kernel through `flash_kernel` too, in `preferred_flash_impl`'s order under its FA4 flag, then FA2 ([above](#supported-backends)); the trainable-sink rescale imports `flash_attn.cute` directly.
 

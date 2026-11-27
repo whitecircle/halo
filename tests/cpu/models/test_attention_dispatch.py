@@ -79,7 +79,9 @@ def test_detect_attn_impl_stays_quiet_when_fa4_is_merely_absent():
 @pytest.mark.parametrize(
     ("capability", "probe", "detected", "line"),
     [
+        ((7, 5), None, "sdpa", "sdpa is this GPU's attention backend (FlashAttention needs SM80 or newer);"),
         ((8, 0), None, "flash_attention_2", "flash_attention_2 is this GPU's flash backend;"),
+        ((8, 9), None, "flash_attention_2", "flash_attention_2 is this GPU's flash backend;"),
         (
             (10, 0),
             None,
@@ -94,7 +96,7 @@ def test_detect_attn_impl_stays_quiet_when_fa4_is_merely_absent():
         ),
         ((10, 0), RuntimeError("broken"), "flash_attention_2", "flash_attn.cute IS present but unusable"),
     ],
-    ids=["fa2_gpu", "fa4_installed", "fa4_absent", "fa4_broken"],
+    ids=["pre_ampere", "ampere", "ada", "fa4_installed", "fa4_absent", "fa4_broken"],
 )
 def test_one_detection_logs_one_line_naming_the_gpu_default(caplog, capability, probe, detected, line):
     """Worded as the GPU's default, because later model checks may move a model off it."""
@@ -107,6 +109,31 @@ def test_one_detection_logs_one_line_naming_the_gpu_default(caplog, capability, 
         assert attention_mod._detect_attention_impl() == detected
     messages = [record.getMessage() for record in caplog.records if record.name == attention_mod.logger.name]
     assert len(messages) == 1 and messages[0].startswith(line), messages
+
+
+@pytest.mark.parametrize(
+    ("capability", "requested", "resolved"),
+    [
+        ((7, 5), None, "sdpa"),
+        ((8, 6), None, "flash_attention_2"),
+        ((7, 5), "flash_attention_2", "flash_attention_2"),
+    ],
+    ids=["pre_ampere_unpinned", "ampere_unpinned", "pre_ampere_pinned_fa2"],
+)
+def test_below_sm80_only_an_unpinned_pick_moves_off_fa2(capability, requested, resolved):
+    """FA2 raises in its first forward below SM80, after the weights load; a pinned FA2 is left to raise there."""
+    config = Qwen3Config(
+        num_hidden_layers=1, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_key_value_heads=2
+    )
+    with (
+        patch.object(hardware.torch.cuda, "is_available", lambda: True),
+        patch.object(hardware.torch.cuda, "get_device_capability", lambda *a, **k: capability),
+        patch.object(attention_mod.logger, "info"),
+    ):
+        selected = attention_mod.resolve_attn_implementation(
+            config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+    assert selected == resolved
 
 
 @pytest.mark.parametrize(
