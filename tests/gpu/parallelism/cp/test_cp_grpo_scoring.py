@@ -211,7 +211,8 @@ def run(ctx) -> dict:
     )
     checks["fsdp2_gc_enabled"] = bool(model.model.is_gradient_checkpointing)
     layer_calls = {"count": 0}
-    hook = model.model.model.layers[0].register_forward_pre_hook(
+    # Inside the checkpointed body: the layer's own hooks run outside it, so they miss the recompute.
+    hook = model.model.model.layers[0].input_layernorm.register_forward_pre_hook(
         lambda _module, _args: layer_calls.__setitem__("count", layer_calls["count"] + 1)
     )
     scorer = LogprobScoringMixin()

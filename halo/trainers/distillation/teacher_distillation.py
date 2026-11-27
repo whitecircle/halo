@@ -1,8 +1,10 @@
 """Off-policy teacher→student knowledge distillation: a separate frozen teacher scores fixed dataset completions. EP/TP
 on the student; CP unsupported (would require wrapping both models)."""
 
+import functools
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
@@ -13,11 +15,14 @@ from transformers import (
     PreTrainedTokenizerBase,
     Trainer,
 )
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.trainer_callback import TrainerCallback
 
 from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.dtype import resolve_training_dtype
+from halo.model_loading.parallel.lowp_compute import lowp_converted_modules
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
@@ -29,10 +34,12 @@ from halo.models.attention.gpt_oss_sinks import (
 )
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distillation.divergences import (
+    ProjectedTarget,
     hard_labels_coefficient,
     logits_forward_inputs,
     place_frozen_scorer,
     pooled_token_mean,
+    projected_distillation_terms,
     reject_topk_covering_vocab,
     require_divergence,
     shifted_token_cross_entropy,
@@ -41,9 +48,26 @@ from halo.trainers.distillation.divergences import (
     uses_hard_labels,
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.full_logits_memory import LogitsWidth, warn_if_full_logits_large
+from halo.trainers.head_projection import HeadProjector
+from halo.trainers.hidden_state_forward import (
+    HiddenStateForwardMixin,
+    ProjectedModel,
+    reject_metrics_reading_logits,
+)
 from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 
 logger = logging.getLogger(__name__)
+
+# Logits planes the full-logits path holds at its peak, each in the run's precision: both models' logits, and the
+# student's gradient plane in the backward.
+_FULL_LOGITS_PLANES = 3
+
+
+@dataclass(frozen=True)
+class _ChunkedLossModules:
+    student: ProjectedModel
+    teacher: ProjectedModel
 
 
 def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
@@ -58,12 +82,31 @@ def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
     return loss_fn
 
 
-class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
+def reject_lowp_teacher(teacher_model: nn.Module) -> None:
+    """Refuse a teacher holding low-precision modules. ``lowp_precision`` fake-quantizes the student only: the
+    teacher's logits are the target, and a quantized target would train the student toward its own rounding."""
+    converted = lowp_converted_modules(teacher_model)
+    if converted:
+        shown = ", ".join(converted[:3]) + (f" and {len(converted) - 3} more" if len(converted) > 3 else "")
+        raise ValueError(
+            f"The teacher holds {len(converted)} low-precision module(s) ({shown}). lowp_precision applies to the "
+            f"student only, so the teacher must compute in its load dtype. Load it through "
+            f"load_frozen_auxiliary_model, which applies no lowp_precision."
+        )
+
+
+class DistributedTeacherDistillationTrainer(
+    HiddenStateForwardMixin, StoredMetricsMixin, DistributedTrainerMixin, Trainer
+):
     """Loss is ``distill_alpha * L_distill + (1 - distill_alpha) * L_clm``, each term one mean over the micro-batch's
     supervised tokens. The teacher is not parallelized and runs no-grad."""
 
     _tag_names = ["trl", "distillation", "knowledge-distillation"]
     LOSS_IS_OWN_MEAN = True
+    _chunked_loss_modules: _ChunkedLossModules | None = None
+    # Quantization-aware distillation: the student loads through the SFT loader, which applies lowp; the teacher loads
+    # frozen through a path that never does, and the constructor refuses one that holds a converted module.
+    SUPPORTS_LOWP_PRECISION = True
 
     PP_REFUSAL = (
         "each microbatch needs a second forward through a distinct frozen teacher network whose "
@@ -116,6 +159,14 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
                 f"reset_sinks=False (load_frozen_auxiliary_model), on a sink-carrying attention implementation "
                 f"({SINK_CARRYING_ATTN_HINT})."
             )
+        reject_lowp_teacher(teacher_model)
+        if isinstance(student_model, str) and parallelism_config is not None and parallelism_config.lowp.enabled:
+            raise ValueError(
+                f"student_model is a path ({student_model!r}), and the trainer loads a path without "
+                f"lowp_precision={parallelism_config.lowp.precision!r}, so the student would train unquantized. Load it "
+                f"with load_distributed_model under this parallelism_config, as scripts/training/distillation/"
+                f"teacher_distill.py does, and pass the model."
+            )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.
         student_model = resolve_trainer_model(student_model, args, parallelism_config=parallelism_config)
@@ -158,8 +209,49 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
             self.teacher_model, self.model, resolve_tokenizer(self.processing_class), teacher_tokenizer
         )
         reject_topk_covering_vocab(self.args.distill_topk, self._vocab_width, self.model)
+        if self.args.use_chunked_distillation_loss:
+            self._reject_unchunkable_loss()
+        self._warn_if_full_logits_large()
         if is_global_main_process():
             logger.info(f"Teacher model moved to {device} and set to eval mode")
+
+    def _reject_unchunkable_loss(self) -> None:
+        """Raise where ``use_chunked_distillation_loss`` cannot reproduce the full-logits loss, before the first step.
+        Reads module types and configs only, so every rank reaches the same verdict."""
+        reject_metrics_reading_logits(self.compute_metrics, self.preprocess_logits_for_metrics)
+        self._resolve_chunked_loss_modules()
+
+    def _warn_if_full_logits_large(self) -> None:
+        """Run after the teacher is placed. Rows are padded to the longest row in the batch, so ``max_length``
+        (the context window when unset) is an upper limit the data may never reach. Skipped on the chunked path, with
+        no CUDA device or with no ``max_length``."""
+        args = self.args
+        if args.use_chunked_distillation_loss or not torch.cuda.is_available() or (args.max_length or 0) <= 0:
+            return
+        # Each model's forward returns all its head rows, more than the compared width when the two differ.
+        vocab = max(
+            model.config.get_text_config().vocab_size
+            for model in (self.accelerator.unwrap_model(self.model), self.teacher_model)
+        )
+        warn_if_full_logits_large(
+            args,
+            LogitsWidth(args.max_length, "max_length"),
+            vocab,
+            self.accelerator.device,
+            bytes_per_logit=_FULL_LOGITS_PLANES * resolve_training_dtype(args).itemsize,
+            loss="distillation loss",
+            remedy="Set use_chunked_distillation_loss: true to project the logits a chunk of positions at a time",
+        )
+
+    def _resolve_chunked_loss_modules(self) -> _ChunkedLossModules:
+        """Resolved once, as each lookup unwraps a model through its whole module tree. Raises where the projection
+        cannot reproduce a model's output embedding."""
+        if self._chunked_loss_modules is None:
+            self._chunked_loss_modules = _ChunkedLossModules(
+                student=self._resolve_projected_model(self.model),
+                teacher=self._resolve_projected_model(self.teacher_model),
+            )
+        return self._chunked_loss_modules
 
     def compute_loss(
         self,
@@ -177,7 +269,40 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         supervised[real_rows:] = False
 
         model_inputs = logits_forward_inputs(inputs)
+        if self.args.use_chunked_distillation_loss:
+            student_outputs = CausalLMOutputWithPast()
+            distillation_loss, token_cross_entropy, gate = self._projected_loss_terms(
+                model, model_inputs, hard_labels, supervised
+            )
+            # The terms are taken at the supervised positions alone, so each one counts.
+            supervised = torch.ones_like(distillation_loss, dtype=torch.bool)
+        else:
+            student_outputs, distillation_loss, token_cross_entropy, gate = self._full_logits_loss_terms(
+                model, model_inputs, hard_labels
+            )
+        metrics = {}
 
+        if self.args.apply_hard_labels:
+            distillation_loss = gate * distillation_loss
+            metrics["distillation_coef"] = pooled_token_mean(gate, supervised)
+
+        distillation_loss = pooled_token_mean(distillation_loss, supervised)
+        sft_loss = pooled_token_mean(token_cross_entropy, supervised)
+
+        loss = self.args.distill_alpha * distillation_loss
+        if self.args.distill_alpha != 1.0:
+            loss = loss + (1 - self.args.distill_alpha) * sft_loss
+
+        metrics.update(distillation_loss=distillation_loss.detach(), sft_loss=sft_loss.detach())
+        self.store_batch_metrics(metrics, "train" if self.model.training else "eval", real_rows)
+
+        if return_outputs:
+            return loss, student_outputs
+        return loss
+
+    def _full_logits_loss_terms(self, model, model_inputs, hard_labels):
+        """``(student outputs, distillation, cross-entropy, gate or None)`` per position, from both models' full
+        logits."""
         with peft_bf16_autocast(self._peft_has_been_casted_to_bf16, self.accelerator.device):
             student_outputs = model(**model_inputs)
         # Shifted logits stay VIEWS: a [B, S, V] .contiguous() would copy gigabytes per microbatch.
@@ -189,31 +314,80 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         # The CLM term is METRIC-ONLY at distill_alpha=1.0: a grad-carrying cross-entropy there would be built and
         # backward-ed for a summand of zero. In the loss it shares the divergence's chunked pass, so backward builds
         # one gradient plane of the student logits.
-        clm_in_loss = self.args.distill_alpha != 1.0
         divergence_args = (self.distillation_loss_fn, student_logits, teacher_logits, self.args.distill_temperature)
-        if clm_in_loss:
+        if self.args.distill_alpha != 1.0:
             distillation_loss, token_cross_entropy = token_divergence_and_cross_entropy(*divergence_args, hard_labels)
         else:
             distillation_loss = token_divergence(*divergence_args, hard_labels)
             with torch.no_grad():
                 token_cross_entropy = shifted_token_cross_entropy(student_logits, hard_labels)
-        metrics = {}
+        gate = (
+            hard_labels_coefficient(student_logits, teacher_logits, hard_labels)
+            if self.args.apply_hard_labels
+            else None
+        )
+        return student_outputs, distillation_loss, token_cross_entropy, gate
 
-        if self.args.apply_hard_labels:
-            gate = hard_labels_coefficient(student_logits, teacher_logits, hard_labels)
-            distillation_loss = gate * distillation_loss
-            metrics["distillation_coef"] = pooled_token_mean(gate, supervised)
+    def _projected_loss_terms(self, model, model_inputs, hard_labels, supervised):
+        """``(distillation, cross-entropy, gate or None)`` per supervised position, the only ones projected, with no
+        ``[tokens, V]`` logits built. A micro-batch with none still runs its backward through the head and the backbone,
+        and every collective in them, through the empty selection."""
+        modules = self._resolve_chunked_loss_modules()
+        # One host read of the mask: integer positions keep every later selection, and its backward, off the host.
+        rows, columns = supervised.nonzero().unbind(-1)
+        positions = rows * (supervised.size(1) + 1) + columns
+        with torch.no_grad():
+            teacher_hidden = modules.teacher.backbone(**model_inputs).last_hidden_state
+            teacher_head = modules.teacher.head.projector(self._vocab_width)
+            teacher_rows = teacher_head.head_inputs_at(teacher_hidden, positions)
+        unwrapped = self.accelerator.unwrap_model(model)
+        # The teacher's tensors ride in a closure: as forward arguments FSDP2 would cast them to the student's dtype.
+        student_terms = functools.partial(
+            self._projected_student_terms, teacher_head=teacher_head, teacher_rows=teacher_rows
+        )
+        # Keyword arguments only: the wrapper's forward pre-hooks read the batch, the no-image refusal included.
+        terms = self._chunked_forward_redirection(
+            model,
+            unwrapped,
+            student_terms,
+            hard_labels=hard_labels[rows, columns],
+            positions=positions,
+            **model_inputs,
+        )
+        cross_entropy, distillation, *gate = terms.unbind(-1)
+        return distillation, cross_entropy, gate[0] if gate else None
 
-        distillation_loss = pooled_token_mean(distillation_loss, supervised)
-        sft_loss = pooled_token_mean(token_cross_entropy, supervised)
+    def _projected_student_terms(
+        self,
+        *,
+        hard_labels: torch.Tensor,
+        positions: torch.Tensor,
+        teacher_head: HeadProjector,
+        teacher_rows: list[torch.Tensor],
+        **model_inputs,
+    ) -> torch.Tensor:
+        """Run inside the redirected forward, where FSDP2 has gathered the student's head; the projector holds those
+        tensors for the backward's recompute."""
+        modules = self._resolve_chunked_loss_modules()
+        autocast = functools.partial(peft_bf16_autocast, self._peft_has_been_casted_to_bf16, self.accelerator.device)
+        with autocast():
+            hidden = self._backbone_last_hidden_state(modules.student.backbone, **model_inputs)
+            student_head = modules.student.head.projector(self._vocab_width)
+            student_rows = student_head.head_inputs_at(hidden, positions)
 
-        loss = self.args.distill_alpha * distillation_loss
-        if clm_in_loss:
-            loss = loss + (1 - self.args.distill_alpha) * sft_loss
+        def student_logits(*rows: torch.Tensor) -> torch.Tensor:
+            with autocast():
+                return student_head.project(*rows)
 
-        metrics.update(distillation_loss=distillation_loss.detach(), sft_loss=sft_loss.detach())
-        self.store_batch_metrics(metrics, "train" if self.model.training else "eval", real_rows)
-
-        if return_outputs:
-            return loss, student_outputs
-        return loss
+        teacher = ProjectedTarget(
+            self.distillation_loss_fn, teacher_head.project, teacher_rows, gates=self.args.apply_hard_labels
+        )
+        return projected_distillation_terms(
+            student_logits,
+            student_rows,
+            [teacher],
+            hard_labels,
+            self.args.distill_temperature,
+            vocab=student_head.width,
+            trains_cross_entropy=self.args.distill_alpha != 1.0,
+        )

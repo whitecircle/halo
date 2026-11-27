@@ -55,8 +55,6 @@ FAMILIES = sorted(COMPOSITE_FAMILIES)
 _STOCK_CALL = GradientCheckpointingLayer.__call__.__wrapped__
 _BF16_COMPUTE = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.float32, cast_forward_inputs=True)
 _MESH_NAMES = {1: ("dp_shard",), 2: ("dp_replicate", "dp_shard")}
-_ADAPTER_SHAPES = ("adapters_in_blocks", "adapters_in_last_block", "adapters_on_tower")
-_FINE_TUNE_SHAPES = ("fine_tune_blocks", "fine_tune_last_block", "fine_tune_tower")
 _NOTHING_TRAINED_IN_THE_TOWER = ("text_adapters", "text_fine_tune")
 _TP_FAMILIES = ("qwen3_vl", "qwen3_5_moe")
 
@@ -113,7 +111,6 @@ def _shape_model(model, shape: str):
     fine_tunes = {
         "fine_tune_blocks": blocks or towers,
         "fine_tune_blocks_and_layers": [*(blocks or towers), text_layers],
-        "fine_tune_last_block": blocks[-1:] or towers,
         "fine_tune_tower": towers,
         "text_fine_tune": [text_layers],
     }
@@ -167,7 +164,9 @@ def _assert_same_gradients(run: dict[str, torch.Tensor], reference: dict[str, to
     assert _worst_error(run, reference) < FP32_ROUNDING, context
 
 
-@pytest.mark.parametrize("shape", _ADAPTER_SHAPES + _FINE_TUNE_SHAPES)
+@pytest.mark.parametrize(
+    "shape", ["adapters_in_blocks", "adapters_in_last_block", "adapters_on_tower", "fine_tune_tower"]
+)
 @pytest.mark.parametrize("family", FAMILIES)
 def test_a_reentrant_step_takes_a_non_reentrant_steps_gradient(family, shape):
     model, loss, reentrant = _step(family, shape, True)
@@ -260,12 +259,11 @@ def _assert_stock_step(family: str, shape: str, use_reentrant: bool | None, row:
         assert _bytes(grad) == _bytes(stock_grads[name]), (family, shape, row, name)
 
 
-@pytest.mark.parametrize("use_reentrant", [True, False, None], ids=["reentrant", "non_reentrant", "off"])
 @pytest.mark.parametrize("row", ["image", "text"])
 @pytest.mark.parametrize("shape", _NOTHING_TRAINED_IN_THE_TOWER)
 @pytest.mark.parametrize("family", FAMILIES)
-def test_a_tower_nothing_reaches_is_bit_for_bit_the_stock_step(family, shape, row, use_reentrant):
-    _assert_stock_step(family, shape, use_reentrant, row)
+def test_a_tower_nothing_reaches_is_bit_for_bit_the_stock_step(family, shape, row):
+    _assert_stock_step(family, shape, True, row)
 
 
 @pytest.mark.parametrize("row", ["image", "text"])

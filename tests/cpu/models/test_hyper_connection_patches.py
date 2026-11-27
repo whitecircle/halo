@@ -35,8 +35,11 @@ _DEEPSEEK_V4_CLASSES = (
 
 
 def _upstream(owner: type):
+    """Through the replacement, and through the checkpoint wrapper around a decoder layer's."""
     forward = owner.forward
-    return forward.__wrapped__ if getattr(forward, _PATCHED_ATTR, False) else forward
+    while getattr(forward, _PATCHED_ATTR, False):
+        forward = forward.__wrapped__
+    return forward
 
 
 @pytest.fixture(autouse=True)

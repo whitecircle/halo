@@ -213,6 +213,7 @@ def save_full_checkpoint(
     processing_class=None,
     source_dir=None,
     *,
+    source_revision: str | None = None,
     include_resume_sidecars: bool = True,
     carried_tensors: Mapping[str, torch.Tensor] | None = None,
     **save_kwargs,
@@ -220,7 +221,8 @@ def save_full_checkpoint(
     """``save_pretrained`` plus a tool output's non-weight files, for full models only. The order is the contract:
     ``source_dir``'s files copy before the save so the live config and tokenizer overwrite them, stale weights are
     swept after it, and carried legacy tokenizer files the fresh processing class did not rewrite are dropped.
-    ``carried_tensors`` are written beside the model's own."""
+    ``source_revision`` pins a Hub ``source_dir``, whose config schema the export may carry. ``carried_tensors`` are
+    written beside the model's own."""
     if is_peft_model(model):
         raise ValueError(
             "save_full_checkpoint writes full model directories; an unmerged PEFT adapter save must "
@@ -238,7 +240,9 @@ def save_full_checkpoint(
         # A copied generation config would advertise sampling defaults this head has no forward for.
         with contextlib.suppress(FileNotFoundError):
             os.remove(os.path.join(output_dir, GENERATION_CONFIG_NAME))
-    finalize_exported_config(model.config, output_dir, source=source_dir or config_schema_source(model))
+    finalize_exported_config(
+        model.config, output_dir, source=source_dir or config_schema_source(model), revision=source_revision
+    )
     if processing_class is not None:
         carried = _file_versions(output_dir, _LEGACY_TOKENIZER_SIDECARS)
         processing_class.save_pretrained(output_dir)
@@ -261,6 +265,28 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
         local_files_only=is_offline_mode(),
         ignore_patterns=list(WEIGHT_DUMP_IGNORE_PATTERNS),
     )
+
+
+def resolve_adapter_base_revision(base_path: str, recorded: str | None, override: str | None = None) -> str | None:
+    """The Hub revision to read an adapter's base at: ``override`` where given, else the commit the adapter's save
+    ``recorded``. A Hub base with neither is read at its default branch, with a warning, as the adapter cannot say
+    which commit it was trained on (stock PEFT records none unless asked); a local directory has no revision."""
+    if os.path.isdir(base_path):
+        return None
+    if override is not None:
+        if recorded is not None and override != recorded:
+            logger.warning(
+                f"The adapter records revision {recorded} of its base {base_path} and the caller names {override}: "
+                f"reading the base at {override}, which is not the commit the adapter was trained on."
+            )
+        return override
+    if recorded is None:
+        logger.warning(
+            f"The adapter records no revision of its base {base_path}, so the base is read at the repo's default "
+            f"branch. That is not the commit the adapter was trained on if the run pinned model_revision or the repo "
+            f"has moved since; --base_revision of merge_peft_adapters.py and export_engine_adapter.py names the commit."
+        )
+    return recorded
 
 
 def _class_load_ignores(model) -> tuple[str, ...]:

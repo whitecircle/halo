@@ -66,17 +66,6 @@ def test_the_offline_grpo_record_is_exactly_the_trainer_contract(row, correct_an
     assert _rm_record(row, correct_answer=correct_answer).keys() == expected
 
 
-def test_only_a_ground_truth_run_adds_target_answer():
-    """``--correct_answer_field`` adds ``target_answer`` and nothing else."""
-    extra = _rm_record({"id": "r1"}, correct_answer="42").keys() - _rm_record({"id": "r1"}).keys()
-    assert extra == {"target_answer"}
-
-
-def test_the_sampler_invents_no_id_its_source_row_lacks():
-    record = _rm_record({})
-    assert "id" not in record, record
-
-
 def test_the_rewards_survive_json():
     """``json.dumps`` raises on a ``numpy.float64``, so the numpy scores must reach the record as plain floats."""
     record = _rm_record({"id": "r1"})

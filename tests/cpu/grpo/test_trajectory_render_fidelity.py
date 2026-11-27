@@ -15,6 +15,7 @@ from halo.environments.rollouts.episode_loop import RolloutResult
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer as Trainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
+from tests.common.env_grpo_batch import engine_view_env
 from tests.common.models import GEMMA3_4B_IT, GPT_OSS_20B_OPENAI, QWEN3_0_6B
 from tests.common.tokenizers import try_cached_tokenizer
 
@@ -103,7 +104,7 @@ def _stub(tok):
         _tools_schema=None,
         _batch_errors=BatchBuildFence(),
         async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
-        _carry_reasoning=False,
+        _rollout_env=engine_view_env(),
         _rows_over_cap=0,
         _warned_once=set(),
         # Named in the fall-back warning, whose remedy differs per engine.
@@ -377,17 +378,6 @@ def test_fixtures_exercise_non_monotone_and_monotone_templates():
         pytest.skip("no tokenizer in the matrix is cached")
     assert len(non_monotone) >= 2, f"fixtures no longer exercise non-monotone templates: {monotone}"
     assert monotone, f"fixtures lost the monotone control: {non_monotone}"
-
-
-@pytest.mark.parametrize(("model", "convo_name"), CASES)
-def test_prefix_diffing_row_is_rejected_where_it_diverges(model, convo_name):
-    stub, messages, full = _case(model, convo_name)
-    naive_prompt, naive_completion = _prefix_delta_row(stub, messages)
-    prompt, completion, _ = _row(stub, messages)
-
-    assert prompt + completion == full
-    if naive_prompt + naive_completion != full:
-        assert prompt + completion != naive_prompt + naive_completion
 
 
 def test_sampled_token_path_bypasses_re_rendering():

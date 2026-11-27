@@ -55,15 +55,15 @@ def _live_head():
 
 
 @pytest.mark.parametrize(
-    ("overrides", "match"),
+    ("build", "overrides", "match"),
     [
-        ({"labelled_forward": False}, "no labels forward"),
-        ({"is_cp_mode": True}, "labels=None"),
-        ({"pops_labels": True}, "takes the labels"),
+        pytest.param(
+            _live_head, {"labelled_forward": False}, "no labels forward", id="native_head-unlabelled_trainer"
+        ),
+        pytest.param(lambda: _RemoteHeadModel(0.3), {"is_cp_mode": True}, "labels=None", id="remote_head-cp"),
+        pytest.param(_live_head, {"pops_labels": True}, "takes the labels", id="native_head-label_smoother"),
     ],
-    ids=["unlabelled_trainer", "cp", "label_smoother"],
 )
-@pytest.mark.parametrize("build", [_live_head, lambda: _RemoteHeadModel(0.3)], ids=["native_head", "remote_head"])
 def test_a_term_nothing_would_add_is_refused(build, overrides, match):
     with pytest.raises(ValueError, match=match):
         _reject(build(), **overrides)

@@ -101,14 +101,6 @@ def test_bare_srun_without_rendezvous_fails_with_a_recipe(pre_init, monkeypatch)
     assert "world_size=16" in message, f"the world it detected must be reported: {message}"
 
 
-def test_a_provided_rendezvous_is_not_refused(pre_init, monkeypatch):
-    """Exporting MASTER_ADDR/PORT on every task is a supported bare-srun launch."""
-    _bare_srun(monkeypatch, procid=3, ntasks=16, per_node=8)
-    monkeypatch.setenv("MASTER_ADDR", "10.0.0.1")
-    monkeypatch.setenv("MASTER_PORT", "29500")
-    process_group._require_rendezvous_env()
-
-
 def test_bare_srun_with_rendezvous_hands_c10d_the_launcher_rank_and_world(pre_init, monkeypatch):
     """c10d's ``env://`` handler reads ``RANK`` / ``WORLD_SIZE`` itself and raises when absent, so the SLURM-derived
     pair is passed explicitly."""

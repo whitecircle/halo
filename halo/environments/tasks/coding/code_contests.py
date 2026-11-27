@@ -4,7 +4,6 @@ submits through ``submit_solution``, which grades 1 when the submission passes e
 import json
 import logging
 from collections.abc import Sequence
-from dataclasses import replace
 from typing import Any
 
 from halo.config_validation import require_finite, require_int
@@ -18,21 +17,24 @@ from halo.environments.episodes.episode_keys import (
     SOLVE_RATE_KEY,
 )
 from halo.environments.episodes.episode_scoring import EpisodeGrade
-from halo.environments.episodes.messages import TRUNCATION_MARKER, StepOutcome, Trajectory
+from halo.environments.episodes.messages import TRUNCATION_MARKER, Message, StepOutcome, Trajectory
 from halo.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.factory import build_sandbox, warn_if_unisolated
 from halo.environments.sandbox.languages import LanguageSpec, require_language
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.tasks.coding.code_contests_prompts import (
-    AUDIT_CHECKS,
+    FIRST_RUN_REFUSAL_NOTE,
     IDENTICAL_RESUBMISSION_NOTE,
+    LATER_RUN_REFUSAL_NOTE,
     MISLABELLED_LANGUAGE_REPLY,
+    NO_RUN_LEFT_NOTE,
     NO_STDIN_NOTE,
     SCRATCHPAD_TIME_LIMIT_NOTE,
     SUBMISSION_AFTER_ACCEPT_REPLY,
     SUBMIT_TOOL,
     UNSTATED_TIME_LIMIT_NOTE,
+    audit_checks,
     build_contest_tools,
     default_system_prompt,
 )
@@ -45,6 +47,7 @@ from halo.environments.tasks.coding.submission_record import (
     GRADED_PROGRAMS_KEY,
     IDENTICAL_RESUBMISSIONS_KEY,
     RUN_PROGRAMS_KEY,
+    RUN_REFUSAL_SHOWN_KEY,
     SUBMISSION_PASS_FRACS_KEY,
     TURN_RUN_PROGRAMS_KEY,
     TURN_RUNS_LEFT_KEY,
@@ -65,10 +68,25 @@ from halo.environments.tools.definitions import (
     ToolArgumentError,
     ToolCallRefused,
 )
+from halo.environments.tools.notes import (
+    NOTES_SAVED_PREFIX,
+    NOTES_TOOL,
+    NotesConfig,
+    build_notes_tool,
+    notes_after_call,
+    notes_from_messages,
+    notes_saved_reply,
+    notes_size,
+    notes_view,
+)
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_REASONING_EFFORT = "medium"
+
+# The notes harness's per-episode stamps: the notes as the episode's calls leave them, and turns of text alone.
+NOTES_KEY = "notes"
+TEXT_TURNS_KEY = "text_turns"
 
 # Used when neither a run's config nor its protocol sets the knob.
 EVAL_PROTOCOL_KNOB_DEFAULTS: dict[str, int] = {"max_submissions": 2, "max_test_calls": 5}
@@ -129,10 +147,24 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         "nothing was recorded, and only a solution sent with submit_solution is graded. Make the call again, "
         "keeping your reasoning out of the program's comments."
     )
+    LENGTH_CUTOFF_IN_CALL_NUDGE_NO_REASONING = (
+        "Your previous turn reached its length limit while writing a tool call, so the call was not run and "
+        "nothing was recorded, and only a solution sent with submit_solution is graded. Make the call again, "
+        "keeping your working out of the program's comments."
+    )
     EMPTY_TURN_NUDGE = (
         "Your previous turn ended without a tool call (one written inside your reasoning is not run), so "
         "nothing was recorded, and only a solution sent with submit_solution is graded. Make your tool call "
         "now with the best solution you have."
+    )
+    EMPTY_TURN_NUDGE_NO_REASONING = (
+        "Your previous turn ended without a tool call, so nothing was recorded, and only a solution sent with "
+        "submit_solution is graded. Make your tool call now with the best solution you have."
+    )
+    # Under notes, after a turn of text alone: the turn was working, so the episode goes on.
+    TEXT_TURN_NUDGE = (
+        "Your turn made no tool call, so nothing ran. Go on: update your notes if they need it and make your next tool "
+        "call; only a solution sent with submit_solution is graded."
     )
 
     # The task's own profile keys over the base's: per-episode interaction budgets, so effort buys iteration as well as
@@ -147,6 +179,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         sandbox: SandboxExecutor | None = None,
         sandbox_backend: str | None = None,
         sandbox_url: str | None = None,
+        sandbox_options: dict | None = None,
         language: str | Sequence[str] = "python",
         output_comparison: str = "exact",
         verdict_detail: str = VERDICT_DETAIL_OUTCOME,
@@ -161,6 +194,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
+        notes: dict[str, Any] | None = None,
         **kwargs,
     ):
         if kwargs.get("tool_budgets"):
@@ -199,7 +233,9 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self.resubmission_penalty = resubmission_penalty
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
-        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
+        self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url, **(sandbox_options or {}))
+        # An executor passed in may serve other environments; one built here is closed with this one.
+        self._owns_sandbox = sandbox is None
         warn_if_unisolated(self.sandbox, type(self).__name__)
         # The one reader of these knobs, so every submission and the offline re-grade (``to_meta``) share it.
         self.grading_spec = GradingSpec(
@@ -216,13 +252,16 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         )
         test_tool, submit_tool = build_contest_tools(specs, self.sandbox, run_test=self._run_test, submit=self._submit)
         self.test_tool_name = test_tool.name
-        # What a veto judge listing ``checks: environment`` audits with.
-        self.JUDGE_CHECKS = tuple(
-            replace(check, description=check.description.format(test_tool=test_tool.name)) for check in AUDIT_CHECKS
-        )
+        self.notes = None if notes is None else NotesConfig(**notes)
+        self.JUDGE_CHECKS = audit_checks(test_tool.name, notes=self.notes is not None)
+        registry = NativeToolRegistry().register(test_tool).register(submit_tool)
+        if self.notes is not None:
+            registry.register(build_notes_tool(self._update_notes))
+            self.rewrites_history_in_view = True
         super().__init__(
-            tool_registry=NativeToolRegistry().register(test_tool).register(submit_tool),
-            system_prompt=system_prompt or default_system_prompt(specs, self.test_tool_name, self.grading_spec),
+            tool_registry=registry,
+            system_prompt=system_prompt
+            or default_system_prompt(specs, self.test_tool_name, self.grading_spec, notes=self.notes is not None),
             reasoning_effort=reasoning_effort,
             reasoning_effort_profiles=reasoning_effort_profiles,
             **kwargs,
@@ -233,6 +272,14 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             level: without_eval_protocol_pins(entry, eval_protocol, f"reasoning_effort_profiles[{level!r}]")
             for level, entry in self.reasoning_effort_profiles.items()
         }
+        marker_chars = len(NOTES_SAVED_PREFIX)
+        if self.notes is not None and 0 < self.max_observation_chars < marker_chars:
+            raise ValueError(
+                f"notes with max_observation_chars={self.max_observation_chars}: the notes view replays a call only "
+                f"from a reply that opens with {NOTES_SAVED_PREFIX!r}, which a cap below {marker_chars} characters "
+                f"cuts, so every prompt's notes would drop calls the episode applied. Set max_observation_chars to at "
+                f"least {marker_chars}, or to 0 (uncapped)."
+            )
 
     @staticmethod
     def _resolve_eval_protocol_knobs(eval_protocol: str, **configured: int | None) -> dict[str, int]:
@@ -270,13 +317,31 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             return None
         return find_evident_language(code, language, self.languages)
 
+    def reject_settings_without_thinking(self) -> None:
+        super().reject_settings_without_thinking()
+        if self.notes is None:
+            raise ValueError(
+                "code contests with rollout_thinking: false needs the notes harness (environment_kwargs.notes): without "
+                "it the reply rule allows a brief summary only and the audit vetoes working-out in the visible reply, so "
+                "a policy with no reasoning step has nowhere to work. Set notes: {}, or rollout_thinking: true."
+            )
+
+    def observation_view(self, messages: Sequence[Message]) -> list[Message]:
+        view = super().observation_view(messages)
+        return view if self.notes is None else notes_view(view, self.notes, self.registry.get(NOTES_TOOL))
+
     def _reset_single(
         self,
         prompt: str | list[dict[str, str]],
         context: dict[str, Any] | None = None,
     ) -> Trajectory:
-        """A payload with no time limit gets the one each test runs under stated in the task message."""
+        """A payload with no time limit gets the one each test runs under stated in the task message. A prompt carrying
+        earlier turns may hold saved notes calls, which the view replays, so the episode's notes start from them."""
         traj = super()._reset_single(prompt, context)
+        if self.notes is not None:
+            traj.info[NOTES_KEY] = notes_from_messages(
+                traj.messages, self.registry.get(NOTES_TOOL), self.notes.max_chars
+            )
         self._store_problem_data(traj, context or {})
         statement = prompt if isinstance(prompt, str) else "\n".join(str(m.get("content") or "") for m in prompt)
         traj.info["_stated_tolerance"] = find_stated_float_tolerance(statement)
@@ -339,6 +404,27 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         info[TURN_RUNS_LEFT_KEY] = self._exhausted_tool_cap(trajectory, self.test_tool_name) is None
         info[TURN_RUN_PROGRAMS_KEY] = len(info.get(RUN_PROGRAMS_KEY, []))
         return super()._execute_tool_calls(tool_calls, trajectory)
+
+    def _record_tool_interaction(self, results: list[NativeToolResult], trajectory: Trajectory) -> dict[str, Any]:
+        """Marks for the judge each scratchpad call refused for the spent budget, told apart by whether an earlier
+        reply had said so, and each submission whose turn began with no run left, a refusal shown or not."""
+        recorded = super()._record_tool_interaction(results, trajectory)
+        info = trajectory.info
+        refusal_note = LATER_RUN_REFUSAL_NOTE if info.get(RUN_REFUSAL_SHOWN_KEY) else FIRST_RUN_REFUSAL_NOTE
+        marks = {}
+        for result in results:
+            if result.name == self.test_tool_name and result.budget_spent:
+                info[RUN_REFUSAL_SHOWN_KEY] = True
+                mark = refusal_note
+            elif result.name == SUBMIT_TOOL and not info[TURN_RUNS_LEFT_KEY]:
+                mark = NO_RUN_LEFT_NOTE
+            else:
+                continue
+            if result.tool_call_id:
+                marks[result.tool_call_id] = mark
+        if marks:
+            trajectory.last_assistant_message().call_notes = marks
+        return recorded
 
     def _run_test(self, code: str, language: str | None = None, stdin: str = "") -> str:
         """Run a scratchpad test under the per-test limit the episode's problem is graded at; outside an episode it
@@ -405,6 +491,27 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             marker = len(TRUNCATION_MARKER.format(dropped=len(output)))
             output = self._truncate_observation(output, max(1, cap - len(tail) - marker))
         return output + tail
+
+    def _update_notes(self, text: str, mode: str | None = None) -> str:
+        """Applies one notes call to the episode's notes, which persist across turns as the base every later call
+        applies to. They equal the view's replay of the history, since both apply the saved calls in call order."""
+        trajectory = self.active_trajectory()
+        if trajectory is None:
+            raise ValueError("notes called outside an active episode.")
+        updated = notes_after_call(trajectory.info.get(NOTES_KEY, {}), text, mode, self.notes.max_chars)
+        trajectory.info[NOTES_KEY] = updated
+        return notes_saved_reply(updated)
+
+    def _finalize_text_response(self, trajectory: Trajectory, action: str, *, last_turn: bool) -> StepOutcome:
+        """With notes, a turn of text alone is working, not a final answer: the episode goes on, nudged to act, within
+        ``max_turns``."""
+        if self.notes is None:
+            return super()._finalize_text_response(trajectory, action, last_turn=last_turn)
+        trajectory.info[TEXT_TURNS_KEY] = trajectory.info.get(TEXT_TURNS_KEY, 0) + 1
+        ended = last_turn or trajectory.num_turns >= self.max_turns
+        if not ended:
+            trajectory.add_message(Message.user(self.TEXT_TURN_NUDGE))
+        return StepOutcome(trajectory=trajectory, reward=0.0, done=ended, truncated=ended, info={})
 
     def _submit(self, code: str, language: str | None = None) -> str:
         """Grade against the episode's tests. The protocol keeps the ``max_submissions`` count and increments it
@@ -556,6 +663,10 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             fracs = info.get(SUBMISSION_PASS_FRACS_KEY, [])
             improved = sum(1 for i in range(1, len(fracs)) if fracs[i] > max(fracs[:i]))
             metrics["episode/resubmission_improved"] = improved / (submissions - 1)
+        if self.notes is not None:
+            metrics["episode/notes_calls"] = float(self._tool_calls_made(trajectory, NOTES_TOOL))
+            metrics["episode/notes_chars"] = float(notes_size(info.get(NOTES_KEY, {})))
+            metrics["episode/text_turns"] = float(info.get(TEXT_TURNS_KEY, 0))
         if self.chooses_language:
             metrics["episode/language_switches"] = float(info.get("language_switches", 0))
         if graded:
@@ -565,3 +676,8 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             metrics["episode/tests_graded_frac"] = info.get("tests_graded", 0) / tests_total
             metrics["episode/grading_budget_hit"] = 1.0 if info.get("grading_budget_hit") else 0.0
         return metrics
+
+    def close(self) -> None:
+        if self._owns_sandbox:
+            self.sandbox.close()
+        super().close()

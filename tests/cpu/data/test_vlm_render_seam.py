@@ -1,13 +1,14 @@
 #!/usr/bin/env python
-"""Every VLM render goes through ``render_vlm_text``: ``add_generation_prompt=False``, and a ``tools`` branch where
-``is None`` and falsiness differ. A re-spelled call opts out of both, so one conversation can tokenize
-differently in a preference pair than in SFT. Pins the kwargs, which a stub can see."""
+"""Every VLM render goes through ``render_vlm_text`` with ``add_generation_prompt=False``, and a mapped row declares
+its template variables through ``vlm_row_template_kwargs``, whose ``tools`` branch tells ``is None`` from falsiness.
+A re-spelled call opts out of both, so one conversation can tokenize differently in a preference pair than in SFT.
+Pins the kwargs, which a stub can see."""
 
 import pytest
 from PIL import Image
 
 from halo.data.pipeline.preferences import render_vlm_preference_row, tokenize_vlm_preference_row
-from halo.data.vlm_render import render_vlm_text
+from halo.data.vlm_render import render_vlm_text, vlm_row_template_kwargs
 
 IMAGE_TOKEN = "<image>"
 
@@ -96,15 +97,26 @@ def test_the_smpo_vlm_row_renders_through_the_seam(monkeypatch):
         assert call == contract, f"SMPO VLM render used {call}, the seam passes {contract}"
 
 
-def test_the_seam_declares_tools_only_when_the_row_has_them():
-    """An explicit ``tools=[]`` still declares the key, so the row renders under the template's tool branch."""
+@pytest.mark.parametrize(
+    ("row", "declared"),
+    [
+        ({"tools_json": "[]", "reasoning_effort": None}, {"tools": []}),
+        ({"tools_json": None, "reasoning_effort": None}, {}),
+        ({"tools_json": None, "reasoning_effort": "high"}, {"reasoning_effort": "high"}),
+        ({}, {}),
+    ],
+    ids=["empty-tools", "none", "level", "unmapped"],
+)
+def test_a_mapped_row_declares_only_the_variables_it_carries(row, declared):
+    """An explicit ``tools: []`` still declares the key, so the row renders under the template's tool branch; a null
+    level declares none, so a template's own default applies."""
     processor = _RecordingProcessor()
 
-    render_vlm_text(processor, [{"role": "user", "content": "x"}], tools=[])
-    render_vlm_text(processor, [{"role": "user", "content": "x"}], tools=None)
+    render_vlm_text(processor, [{"role": "user", "content": "x"}], **vlm_row_template_kwargs(row))
 
-    assert processor.calls[0]["tools"] == []
-    assert "tools" not in processor.calls[1]
+    assert {key: processor.calls[0][key] for key in ("tools", "reasoning_effort") if key in processor.calls[0]} == (
+        declared
+    )
 
 
 if __name__ == "__main__":

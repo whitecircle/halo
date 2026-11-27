@@ -34,8 +34,6 @@ No trainer refuses EP, TP or ETP ([Trainer Compatibility](../reference/trainer-a
 
 Pipeline parallelism is declare-to-enable the same way (`PP_REFUSAL = None`): SFT, SMPO, DPO and KTO (precompute-only), offline GRPO, reward and classification support it ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
 
-Full trainer × mode matrix: [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
-
 ## Experiment tracking
 
 Every script reports to the backend named by `report_to`, logging loss, learning rate and gradient norm automatically. The toolkit callbacks add throughput, MoE expert load, eval-time generations and parameter stats ([Training Callbacks](callbacks.md)).

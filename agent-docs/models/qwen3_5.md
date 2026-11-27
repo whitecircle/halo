@@ -2,7 +2,7 @@
 
 A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSparseMoeBlock`, `Qwen3_5MoeAttention`). Three traits drive parallelism: a sigmoid-gated shared expert, a double-width `q_proj` fusing query with a sigmoid gate, and a hybrid `layer_types` scheme interleaving full attention with `Qwen3_5MoeGatedDeltaNet` linear-attention layers.
 
-Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). Dense text towers have an [unpacked CP2 SFT path](../parallelism/context-parallelism.md#dense-hybrid-sft); MoE hybrid CP remains refused. Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Each decoder layer is *either* full softmax attention *or* a linear-attention bl
 | RoPE | Partial — only the first `head_dim * partial_rotary_factor` channels rotate (default `0.25`) |
 | Heads | 16 Q heads, 2 KV heads (GQA factor 8), which caps TP at `tp_size=2` |
 
-> **FlashAttention-4 trains this family on Blackwell on its head_dim-256 path: the general forward kernel and the dedicated head_dim-256 backward.** The partial-rotary `torch.cat` leaves q/k head-major, which that path reads as it is ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The dedicated backward's deterministic mode is not validated here, so a `full_determinism` run demotes FA4 to SDPA (`supports_fa4_backward`, `halo/models/attention/selection.py`). SFT multi-document rows take FA2 when `attn_implementation` is unset, and under `full_determinism` even with `flash_attention_4` pinned ([Configs](#configs)); the padded scripts (preference, reward, classification, teacher distillation, GRPO) take FA4 when unpinned, and their shipped recipes pin `sdpa`. The self-distillation recipe trains one row per batch, which FA4's dense kernel runs, so it leaves attention unset. The verdict reads the head widths, so Qwen3.6, which reuses the 3.5 classes and types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower), and [Qwen3-Next](qwen3-next.md) resolve alike.
+> **FlashAttention-4 trains this family on Blackwell on its head_dim-256 path: the general forward kernel and the dedicated head_dim-256 backward.** The partial-rotary `torch.cat` leaves q/k head-major, which that path reads as it is ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The dedicated backward's deterministic mode is not validated here, so a `full_determinism` run demotes FA4 to SDPA (`supports_fa4_backward`, `halo/models/attention/selection.py`). SFT multi-document rows take FA2 when `attn_implementation` is unset, and under `full_determinism` even with `flash_attention_4` pinned ([Configs](#configs)); the padded scripts (preference, reward, classification, teacher distillation, GRPO) take FA4 when unpinned; their shipped recipes pin `sdpa`, the GRPO ones `flash_attention_2`. The self-distillation recipe trains one row per batch, which FA4's dense kernel runs, so it leaves attention unset. The verdict reads the head widths, so Qwen3.6, which reuses the 3.5 classes and types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower), and [Qwen3-Next](qwen3-next.md) resolve alike.
 
 On Hopper the standard detector picks FA3 when installed, else FA2.
 
@@ -28,15 +28,26 @@ A gated delta-rule recurrent attention with a sequence-axis causal Conv1d on the
 
 The imports reach the layer through transformers' hub-kernel funnel, whose package resolution attribute-walks a bare package import. `fla` exports nothing at root, so upstream alone silently captures the torch scan, far slower than the kernel.
 
-`halo/kernels/hub_kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. It sends a CPU call to the torch body, and the `halo` package init re-decorates through it whatever a modeling module imported before `halo` already bound, so import order does not decide which path a forward takes. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair.
+`halo/kernels/hub_kernel_dispatch.py` imports the mapped submodule chain before decoration so the real kernel is captured, and warns when a capture still lands on the torch body with its package installed; that warning in a training log is a throughput alarm. It sends a CPU call to the torch body, and the `halo` package init re-decorates through it whatever a modeling module imported before `halo` already bound, so import order does not decide which path a forward takes. GLM-5-Next's fla-backed KDA ops ride the same funnel and repair. transformers 5.23 passes the gated delta rule the model's `linear_num_key_heads` query/key heads for `linear_num_value_heads` value heads and leaves the grouping to the kernel, which fla does from 0.5.0; fla 0.4 indexes key and decay by the value head and reads past them (a forward off by orders of magnitude, NaN gradients on key, decay and beta), so the pin's floor is 0.6.0.
 
-On Blackwell the delta rule's state kernel (`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`, shared by the gated delta rule and KDA) autotunes only over its `num_warps=2` configs: `finalize_loaded_model` restricts it at the end of every load (`apply_fla_launch_options`, `halo/kernels/fla_launch.py`), so it holds whether the kernel is later reached through this funnel or a remote-code module's own `fla` import. Under the image's Triton 3.6 its `num_warps=4` configs give run-to-run different, at some positions wrong, outputs and gradients on packed (`cu_seqlens`) rows, and on B300 also on larger unpacked batches; the stock autotuner picks them at this family's shapes. Upstream applies the same restriction from fla 0.5.2 (fla #953). Triton keys its autotune cache on the config list, so a pick cached by an earlier run is not reused. `tests/gpu/kernels/test_fla_blackwell_autotune.py` pins it, with a `num_warps=4` control that must still miss.
+On Blackwell fla autotunes the delta rule's state kernel (`chunk_gated_delta_rule_fwd_kernel_h_blockdim64`, shared by the gated delta rule and KDA) only over its `num_warps=2` configs (fla #953, from 0.5.2), whether the kernel is reached through this funnel or a remote-code module's own `fla` import. Under the image's Triton 3.6 its `num_warps=4` configs give run-to-run different, at some positions wrong, outputs and gradients on packed (`cu_seqlens`) rows, and on B300 also on larger unpacked batches. `tests/gpu/kernels/test_fla_blackwell_autotune.py` pins the restriction, with a `num_warps=4` control that must still miss.
+
+fla 0.6 forms the gradient of the decay `g` as the difference of two separately rounded dot products, so the gradient carries their rounding where the two nearly cancel. That is under strong decay, which a random-init tiny model has throughout (`g` down to -21): there the fp32 `A_log` and `dt_bias` gradients sit 1 to 4 times their own norm from an fp64 recurrence and move by percents for a 1e-7 change of the input. The rounding comes from Triton's default fp32 dot precision (TF32, 10 mantissa bits): with `TRITON_F32_DEFAULT=ieee` the same `A_log` gradient is 5.0e-4 from fp64 on fla 0.6.0 and 3.6e-4 on 0.4.2 (upstream report: [fla #1802](https://github.com/fla-org/flash-linear-attention/issues/1802)). On released weights the effect is inside the dtype's rounding in bf16. In fp32 it is not: the `A_log` and `dt_bias` gradients sit up to 4.4e-2 and 3.5e-2 from fp64, where `q`/`k`/`v` stay within 2.2e-3. For an fp32 run set `TRITON_F32_DEFAULT=ieee`, under which the two sit within 4.5e-3 and 4.8e-3. One step of Qwen3.5-4B on 2,048 tokens of text, each of its 24 layers' calls replayed on a B300 against the fp64 recurrence, worst layer:
+
+| Gradient | bf16 | fp32 |
+|---|---|---|
+| decay `g` | 2.4e-2 | 2.0e-3 |
+| `A_log` | 1.2e-2 | 4.4e-2 |
+| `dt_bias` | 1.6e-2 | 3.5e-2 |
+| `q` / `k` / `v` | 6.5e-3 / 8.4e-3 / 6.2e-3 | 1.4e-3 / 2.2e-3 / 1.6e-3 |
+
+A test that compares fp32 gradients of two runs of a tiny model bounds `A_log`, `dt_bias` and `in_proj_a` apart from the rest (`tests/gpu/kernels/test_gated_residual_kernels.py`).
 
 FLA's kernels for the q/k l2norm inside the delta rule and for the gated output norm (which the Liger spec installs) take `NB = cdiv(tokens × heads, 65536)` as an autotune-key constexpr their bodies never read, so each new value compiles and benchmarks every autotune config: one every 2,048 tokens at Qwen3.5-35B-A3B's 32 value heads, to which q/k are repeated. The binaries and FLA's autotune picks (`FLA_CACHE_RESULTS`, default on) persist in the Triton disk cache anchored on `HF_HOME`, so this is paid once per value per volume, as for [Bailing's KDA kernels](bailing.md#remote-code-compatibility). Picks differ across fresh caches, and so does bf16 rounding ([Docker](../infrastructure/docker.md#baked-in-environment-variables)). `HALO_FLA_L2NORM_FIXED_NB=1` ([Configuration Reference](../reference/configuration-reference.md#environment-variables)) holds `NB` out of the l2norm kernels' key and launches them with a constant one, so one binary and one tuned config per width and dtype serve every row count; `finalize_loaded_model` then compiles and tunes it at the `head_k_dim` of each gated-delta-rule module of the model, on 65,536 rows. It leaves the gated output norm as it is, and a launch's reduction order can differ from the per-bucket pick, not its value beyond fp32 rounding.
 
 The torch fallback matches the kernels only on single-document rows: it takes neither `seq_idx` nor `cu_seq_lens_q`, so a multi-document row mixes through both the conv and the delta-rule scan while attention stays isolated. The collator factory therefore **refuses** `packing` and `padding_free` for this family when either wheel is missing, and SMPO refuses its own `padding_free` likewise ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
-These layers need no CP for memory: the recurrent state is independent of `S`, per-layer activations are `O(B·S·d)`, and the Conv1d left-context is a 3-token state. The long-context ceiling comes from the 10 full-attention layers — 33K on a single B200/B300 rank at `num_heads=16, head_dim=256, num_kv_heads=2`.
+These layers need no CP for memory: the recurrent state is independent of `S`, per-layer activations are `O(B·S·d)`, and the Conv1d left-context is a 3-token state. The long-context ceiling comes from the 10 full-attention layers (`num_heads=16, head_dim=256, num_kv_heads=2`): the 35B recipe trains 33K rows, and rows of 65,536 at EP8 and 128k packed have trained on one node ([Throughput Benchmarks](../optimization/throughput-benchmarks.md)).
 
 ## Model loading
 
@@ -76,20 +87,25 @@ Both classes drop the Hub checkpoints' `mtp.*` MTP head at load, so a run's expo
 
 Correctness coverage against a synthetic all-full-attention config: `tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family qwen3_5_moe_text`.
 
-## Why CP is blocked on real checkpoints
+Dense `Qwen3_5GatedDeltaNet` is claimed by `ULYSSES_GATED_DELTA_MAP` through
+`Qwen3_5UlyssesGatedDelta` in `halo/distributed/context_parallel/gated_delta.py`. It redistributes
+projected head groups before the causal convolution and delta recurrence, then returns each rank's
+sequence chunk. Its admitted scope is [dense hybrid CP2 SFT](../parallelism/context-parallelism.md#dense-hybrid-sft).
 
-Every released checkpoint ships hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
+## Why MoE hybrid CP is refused
+
+MoE checkpoints ship hybrid `layer_types`, and both of `Qwen3_5MoeGatedDeltaNet`'s sequence-axis ops cross Ulysses chunk boundaries:
 
 - **`causal_conv1d_fn`** kernel 4 — output `t` depends on `t..t-3`, so each rank's first 3 positions need the previous rank's last 3 input tokens. Without a halo exchange the kernel sees zero-padding.
 - **`chunk_gated_delta_rule`** is a recurrent scan — chunk `c+1` must start from chunk `c`'s final state, which a CP rank cannot recover.
 
-`reject_unsupported_ulysses_model` rejects any model whose `layer_types` contains `"linear_attention"`. `fla` 0.4.2, the pinned line, carries CP-aware variants of both ops (`cp_context` on the chunked delta rule, `fla/modules/conv/cp/` for the conv), but the Ulysses path does not call them. Workarounds: train at the single-rank ceiling (32K–33K on B200/B300, EP=8, no CP), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards all pretrained linear-attention weights, so from-init only).
+The validator refuses MoE GatedDeltaNet and unclaimed linear-attention layers. Dense CP2 SFT instead redistributes heads before these sequence operations ([Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft)); it does not use FLA's CP context. For MoE, train without CP (the 35B recipe runs 33K rows at EP=8, and 65,536-token rows have trained on one 8× B300 node), or train from scratch with `layer_types=['full_attention'] * num_hidden_layers` (discards pretrained linear-attention weights).
 
 ## TP and ETP
 
 Attention-only TP covers the MoE: `Qwen3_5MoeAttention` is in the TP accept-list, and the MoE block is skipped because EP owns it. The double-width `q_proj` shards colwise: the split is per head, so each head keeps its full `head_dim * 2` (query + gate) on one rank.
 
-Only the full-attention layers shard there: the linear-attention layers stay replicated on every rank, so the per-rank footprint falls by far less than `1/tp_size` (the TP path warns). A dense checkpoint takes HF-native `tp_plan="auto"`, whose plan also shards the MLP ([Tensor Parallelism](../parallelism/tensor-parallelism.md#supported-models)). Its five linear-attention projections are `colwise_gather_output` (transformers 5.20.2): their matmuls shard, but every rank all-gathers each output, so on the linear-attention layers (3 of every 4) the causal conv and the delta rule, with their activations, run full-width on every rank, behind five all-gathers per layer. Where a dense Qwen3.5/3.6 model fits under FSDP2, prefer FSDP2 to TP.
+Only the full-attention layers shard there: the linear-attention layers stay replicated on every rank, so the per-rank footprint falls by far less than `1/tp_size` (the TP path warns). A dense checkpoint takes HF-native `tp_plan="auto"`, whose plan also shards the MLP ([Tensor Parallelism](../parallelism/tensor-parallelism.md#supported-models)). Its five linear-attention projections are `colwise_gather_output` (transformers 5.23.0): their matmuls shard, but every rank all-gathers each output, so on the linear-attention layers (3 of every 4) the causal conv and the delta rule, with their activations, run full-width on every rank, behind five all-gathers per layer. Where a dense Qwen3.5/3.6 model fits under FSDP2, prefer FSDP2 to TP.
 
 ETP is supported: the routed experts use the fused-GLU contiguous-halves layout, so `_init_fused_glu_params` splits the halves before sharding and stores `gate_proj` / `up_proj` / `down_proj` separately when `expert_tp_size > 1`. The sigmoid-gated shared expert stays replicated. See the [ETP guide](../parallelism/expert-tensor-parallelism.md#limitations).
 
@@ -111,7 +127,7 @@ Examples under `examples/sft/qwen3_5/`:
 
 Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` (code contests, plus the `-aime-`, `-exam-qa-` and `-react-math-` ep4 task recipes) and the `sglang/` ep1 siblings; both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn), and the Qwen3.6 MTP recipes `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`, as a reply with no think block reads far worse ([MTP heads](../optimization/mtp-heads.md#recipes)). On `qwen3-multiturn.jinja` a first-step loss near 3.3 is that missing block: Qwen3.6-35B reads 3.3 at step 0 and 0.83 after two optimizer steps. Train and serve under one render. `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (tool-call `arguments` must be a parsed mapping). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
+Chat templates: the shipped SFT configs pin `jinja-templates/qwen3/qwen3-multiturn.jinja` (ultrachat is multi-turn), and the Qwen3.6 MTP recipes `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja`, as a reply with no think block reads far worse ([MTP heads](../optimization/mtp-heads.md#recipes)). On `qwen3-multiturn.jinja` a first-step loss near 3.3 is that missing block: Qwen3.6-35B reads 3.3 at step 0 and 0.83 after two optimizer steps. Train and serve under one render. `jinja-templates/qwen3/qwen3.5-native.jinja` is the verbatim upstream `Qwen/Qwen3.5-35B-A3B` template — system messages, XML-form tools, thinking, and the VLM vision placeholders — for runs that must match the served render exactly (a call's `arguments`: [Tool-call arguments](../data/dataset-formats.md#tool-call-arguments)). Qwen3's own upstream template ships as `qwen3/qwen3-native.jinja`.
 
 The family also carries the per-method canonical examples: Qwen3.5-9B (dense) for DPO/SMPO/KTO (`examples/preference/qwen3_5/`), reward, classification, and distillation; Qwen3.6-35B-A3B for the GRPO task configs.
 
@@ -135,7 +151,8 @@ Pin a Halo template with `force_chat_template` where those renders are not the t
 The Qwen3.6 code-contests async GRPO recipes pin `jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja` with
 `force_chat_template: true`, and the servers run `--chat-template` on the same file
 (`VLLM_CHAT_TEMPLATE` in the compose file). It is the hub template reduced to text-only tool use —
-thinking always on, carried reasoning always rendered, the vision branch and the
-`enable_thinking`/`preserve_thinking` switches dropped — plus a system-block line stating the episode's
-`reasoning_effort`, which the hub template has no variable for
-([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)).
+carried reasoning always rendered, the vision branch and the `preserve_thinking` switch dropped — plus a
+system-block line stating the episode's `reasoning_effort`, which the hub template has no variable for
+([Effort templates](../training-methods/async-grpo/reasoning.md#effort-templates)). It keeps the hub's
+`enable_thinking` switch: `false` closes the reasoning block in the generation prompt
+([Thinking off](../training-methods/async-grpo/reasoning.md#thinking-off)).

@@ -4,7 +4,8 @@
 
 Only SFT (text and VLM) supports offline pre-processing. DPO, SMPO, GRPO, and Classification use
 different data formats and tokenize during training. The script is **single-process** — run it with
-plain `python`, not `torchrun`; `--num_proc` sets HF `map` workers, not ranks. Its flags are the
+plain `python`; a `torchrun` or `accelerate` launch of several processes exits before the input loads.
+`--num_proc` sets HF `map` workers, not ranks. Its flags are the
 `PreprocessingConfig` fields (`halo/data/preprocessed/metadata.py`) plus the tool's own
 `PrepareDatasetArguments`, spelled like the training YAML keys; a YAML file of them works as the first
 argument, with `--key=value` overrides after it.
@@ -26,8 +27,9 @@ nothing about the artifact, and the prepared value is what trained. The rendered
 still applies.
 
 Two groups are compared. The chat-render knobs are `--conversation_field`, `--system_prompt`,
-`--model_supports_system_role false`, `--tools_field`, `--interleaved_thinking`, `--images_field`, and, under
-completion masking, `--assistant_message_template`. The tokenizer mutations — `--pad_token`,
+`--model_supports_system_role false`, `--tools_field`, `--reasoning_effort_field`, `--interleaved_thinking`,
+`--images_field`, and, under completion masking, `--assistant_message_template`. A stamp that predates
+`--reasoning_effort_field` reads as baked without one. The tokenizer mutations — `--pad_token`,
 `--eos_token`, `--bos_token`, `--chat_template` — change the ids themselves: an EOS override moves
 the completion-mask boundaries, and a template override re-renders every turn. `--chat_template` is
 recorded as resolved template *text*, so a path and the text it names compare equal.
@@ -39,12 +41,30 @@ training applies `chat_template` over a shipped one only with `force_chat_templa
 one without it, so a `--chat_template` bake trains with the same `chat_template` plus that flag. A stamp without `rendered_chat_template` is held to its
 recorded `--chat_template` outside `--is_vlm`, and to nothing otherwise.
 
+A chat or `--is_vlm` bake also records the turn terminators it closed each row's last assistant turn and
+ended its completion spans against (`eos_token_ids` in `metadata.json`, the set `resolve_label_eos_token_ids`
+resolves). SFT refuses such a bake when the run's own set (`resolve_eos_token_ids` over its tokenizer, model config
+and generation config) differs, and as `IncompatiblePreprocessedDataset` when it records none: such a bake has no
+set to check, and on a template that leaves the last turn open (GLM's) its rows may end where a raw run's would not. Either way,
+re-run `prepare_dataset.py` with the run's model and `eos_token`.
+
+It records, too, the token that closed a row's last assistant turn where the template leaves it open
+(`final_turn_closer_ids`, per kind of turn: `answer`, `call`, each also `_with_tools`;
+[Collators](collators.md#eos-pad-and-the-response-template)), read off the processor's template under `--is_vlm`.
+SFT reads the same closers off its own tokenizer or processor and refuses a bake whose record differs. A bake that
+records none closed every such turn with the tokenizer's eos: SFT takes it where the run closes them with the eos
+too, as on a template that closes its last turn itself, and refuses it as `IncompatiblePreprocessedDataset` where the
+run closes one otherwise (GLM's `<|user|>` and `<|observation|>`). Re-run `prepare_dataset.py` to record them.
+
 The checked set is every `PreprocessingConfig` field outside `_UNCOMPARED_FIELDS`, so a new knob is
 compared by default, and a knob the metadata does not record warns instead. `--mode text`
-artifacts render no template and skip the render check entirely. A training config setting
+artifacts render no template, so only `--eos_token` and `--bos_token`, which the tokenizer writes into
+their ids, are checked. A training config setting
 `packing: true` against an unpacked artifact warns — preprocessed rows are never packed at runtime.
-A `model_name_or_path` other than the prep `--model_name_or_path` only warns, unless the template the run
-exports differs from the rows' (which raises, see above), so train with the tokenizer the rows were baked with.
+A `model_name_or_path` other than the prep `--model_name_or_path` only warns, but a run tokenizer whose
+length differs from the recorded `tokenizer_vocab_size` raises, in either mode: the baked ids would mean
+other text. A run that adds tokens (`added_special_tokens`) therefore bakes from a checkpoint already
+holding them (`patch_vocab.py`).
 
 `--mode` is validated on the config, not only by the CLI's choices: an unvalidated typo like `txt`
 falls through every `mode == "text"` branch and chat-templates a raw pretraining corpus. A knob belonging
@@ -67,9 +87,9 @@ dataset that trains zero tokens.
 
 The same two values are also a **training** config field, `tokenizer_backend` (default `hf`). It resolves in `configure_run_tokenizer`, so every training method that tokenizes rows honors it with no preparation pass; embedding training rejects a non-`hf` value, since SentenceTransformer owns its own tokenization.
 
-With `--train_on_completions_only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start.
+With `--train_on_completions_only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start and the next turn of another role, and a span restarting after a block the template writes into the model's own turn (Gemma 4's tool reply, [Collators](collators.md#eos-pad-and-the-response-template)).
 
-That is `PADDED_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack_sequences`, where a turn with no terminator anywhere ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
+That is `PADDED_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack_sequences`, where a turn with no terminator anywhere, and no other role's turn after it, ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
 
 Baked labels are authoritative at training time. The SFT script disables runtime completion re-masking for preprocessed data: a re-mask would overwrite them, e.g. re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
 
@@ -119,10 +139,10 @@ vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to
 A row carrying a video or audio part raises rather than drops, since no collator feeds one and a dropped
 row would leave an artifact that looks whole.
 
-Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field` or
-`--interleaved_thinking` (the offline render would diverge from the runtime one), and a processor
-emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids` and the like —
-the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8-27B, Qwen3.8-Flash-Next and Gemma 4 processors all emit it, so
+Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field`,
+`--reasoning_effort_field` or `--interleaved_thinking` (the offline render would diverge from the runtime
+one), and a processor emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids`
+and the like — the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8-27B, Qwen3.8-Flash-Next and Gemma 4 processors all emit it, so
 their image rows train through the runtime VLM path and `--is_vlm` bakes only their text rows.
 
 VLM sequences are never truncated, since cutting expanded placeholders while `pixel_values` keeps
@@ -148,7 +168,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 |-----------|---------|-------------|
 | `--input` | *required* | Input: S3 URI, Hub ID, or local path |
 | `--output` | *required* | Output: S3 URI, `hf://org/name`, or local path |
-| `--model_name_or_path` | *required* | Model name/path for the tokenizer; completion-only masking also reads its `config.json` for the turn-terminator ids, so it must be the model checkpoint, not a bare tokenizer |
+| `--model_name_or_path` | *required* | Model name/path for the tokenizer; a chat or VLM bake also reads its `config.json` and `generation_config.json` for the turn-terminator ids, which close a row's last assistant turn ([Collators](collators.md#eos-pad-and-the-response-template)) and end each completion span, so it must be the model checkpoint, not a bare tokenizer |
 | `--max_length` | `8192` | Maximum sequence length |
 | `--trust_remote_code` / `--no-trust_remote_code` | `False` | Execute the checkpoint's own tokenizer/processor and config code when loading them — off, since `--model_name_or_path` may be a Hub repo; pass it for a remote-code family (Bailing/Ling, Laguna) you trust ([Scripts](../reference/scripts-reference.md#input-guards)) |
 | `--mode` | `chat` | `chat` = apply chat template to `--conversation_field` (SFT); `text` = raw-text causal-LM for (continued) pre-training (tokenize `--text_field`, append EOS per document). See [Pre-training](../training-methods/pretraining.md). |
@@ -157,6 +177,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--conversation_field` | `prompt` | Conversation field name (mode=chat). Matches the training-side default |
 | `--system_prompt` | `None` | System prompt to prepend |
 | `--tools_field` | `None` | Dataset field holding a tool list (list of dicts or JSON string), forwarded into `apply_chat_template` — must match the `tools_field` used at training time. Rejected with `--is_vlm` |
+| `--reasoning_effort_field` | `None` | Dataset field holding each row's reasoning-effort level, forwarded into `apply_chat_template` as `reasoning_effort` — must match the `reasoning_effort_field` used at training time. Refused before tokenizing under a template that renders no level, as at training ([Dataset Formats](dataset-formats.md#required-columns-by-method)). Rejected with `--is_vlm` |
 | `--interleaved_thinking` | off | Keep thinking blocks in non-final assistant turns (`clear_thinking=False`), matching the live path's `interleaved_thinking`. Rejected with `--is_vlm` |
 | `--model_supports_system_role` | `True` | `false` merges the system prompt into the first user message (models without a system role) |
 | `--train_on_completions_only` | `True` in `--mode chat`, `False` in `--mode text` | Mask user turns; train only on assistant responses. The chat default matches the training side and requires `--assistant_message_template`; asking for masking under `--mode text` is rejected (raw documents have no assistant turns) |
@@ -170,7 +191,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |
 | `--num_proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. With neither set, every CPU the process may use but two, since the tool runs alone ([`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables)) |
 | `--tokenizer_backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |
-| `--test_size` | `None` | Test split fraction (e.g. `0.01`), cut from `train`. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num_shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
+| `--test_size` | `None` | Test split fraction (e.g. `0.01`), cut from `train` at a fixed seed; the split's index files go to `HF_DATASETS_CACHE`, so a read-only input works. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num_shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
 | `--pad_token` / `--eos_token` / `--bos_token` | `None` | Override pad / EOS / BOS token. Recorded in `metadata.json` and re-checked at training time |
 | `--chat_template` | `None` | Override chat template (Jinja2 string, or a path to a `.jinja`/`.jinja2`/`.j2` file), applied whatever template the tokenizer ships. The resolved text is recorded and re-checked; training applies it over a shipped template only with `force_chat_template: true` |
 | `--overwrite` | `False` | Replace an existing output. Only the local writer keeps the previous dataset intact through a failed publish (see below) |
@@ -235,13 +256,21 @@ legitimate.
 `metadata.json` is also the **completion marker** — `is_preprocessed_dataset` keys on it — so it is
 written last and a publish never leaves it beside an incomplete payload. A local output is baked once,
 straight into a sibling of the destination (`<output>.halo-staging`, on its filesystem), and swapped in
-by rename, leaving the previous dataset intact if the bake fails; an existing output without
-`--overwrite` is refused before the bake. An S3 or Hub output is baked into a `TMPDIR` temp directory
-and uploaded from it.
+by rename, leaving the previous dataset intact if the bake fails.
+
+An S3 or Hub output is baked beside the scratch directory below (`prepare-dataset-<md5>.halo-staging` under `HF_DATASETS_CACHE`) and uploaded from it; a
+failed upload keeps it and names it until the next run to that output, and `s3.py push <dir> <uri> --overwrite`
+finishes an S3 publish with the same marker-last order. Every destination is checked before the input loads: an
+existing one without `--overwrite` is refused, and the probe of an S3 one also catches a missing bucket and
+credentials that may not read it; credentials that may read but not write fail at the upload.
+
+A second run to an output exits before the input loads while another bakes it with the same `HF_DATASETS_CACHE`
+(the lock sits beside the scratch directory). Bakes of one output from hosts with different caches are not
+serialized.
 
 Each tokenize, filter, label and pack step writes a full copy of the corpus. The tool writes them to a
 scratch directory under `HF_DATASETS_CACHE`, removed when the bake ends, so peak disk there is those
-copies and nothing stays behind. The directory is named after `--output`, so a rerun to the same
+copies, plus the baked dataset for an S3 or Hub output. The directory is named after `--output`, so a rerun to the same
 output first removes the copies a killed bake left there. Completion-only labels are stored at the integer
 width of `input_ids` (`int32`).
 
@@ -256,13 +285,16 @@ holds `input_ids` and `seq_lengths` alone, about 4 bytes per token.
 
 Hub and S3 `--overwrite` both delete the marker first and re-upload it after the payload, so an
 interrupted upload reads as *raw* (a loud failure) rather than as a silently truncated preprocessed
-dataset. The S3 writer never clears the prefix up front: it overwrites objects in place and sweeps
-the ones the new tree does not carry only after the upload completed.
+dataset. Neither clears the destination up front. The S3 writer overwrites objects in place and sweeps
+the ones the new tree does not carry after the payload and before the marker; the Hub upload deletes the old
+bake's `dataset_dict.json`, `train/` and `test/` files it does not replace, keeping the dataset card.
 
 Training does not read a Hub-published dataset in place: `load_dataset` on a saved tree returns its
 sidecar files as rows, so a preprocessed dataset named by its Hub id (`org/name`) is refused at startup.
-Download it first (`hf download org/name --repo-type dataset --local-dir <dir>`) and point `dataset:`
-at the directory.
+Download it first, into an empty directory (`hf download org/name --repo-type dataset --local-dir <dir>`), and
+point `dataset:` at it. A copy over an earlier bake (that download, `rsync` without `--delete`) can leave one bake's
+shard index beside another's rows; training refuses a dataset whose shard index disagrees with its stamp's
+`num_shards`.
 
 ## Sharded loading
 

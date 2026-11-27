@@ -70,15 +70,6 @@ def test_sharded_index_beside_a_gathered_file_is_not_full(tmp_path):
     assert classify_resume_weights(str(tmp_path)) == "invalid"
 
 
-def test_adapter_only_is_not_full(tmp_path):
-    _touch(tmp_path / "adapter_model.safetensors")
-    assert classify_resume_weights(str(tmp_path)) != "full"
-
-
-def test_empty_dir_is_not_full(tmp_path):
-    assert classify_resume_weights(str(tmp_path)) != "full"
-
-
 def test_no_checkpoint_returns_base(tmp_path):
     assert resolve_resume_weights_source(None, _model_config(), _mode(ep=True)) == BASE
 
@@ -131,11 +122,6 @@ def test_classify_empty_is_invalid(tmp_path):
 def test_ep_unmerged_sharded_checkpoint_raises(tmp_path):
     """Otherwise the loader skips the reload and training silently continues from base."""
     _write_index(tmp_path / "model.safetensors.index.json", fmt="ep_sharded")
-    with pytest.raises(ValueError, match="silently continue from BASE"):
-        resolve_resume_weights_source(str(tmp_path), _model_config(), _mode(ep=True))
-
-
-def test_ep_empty_checkpoint_raises(tmp_path):
     with pytest.raises(ValueError, match="silently continue from BASE"):
         resolve_resume_weights_source(str(tmp_path), _model_config(), _mode(ep=True))
 

@@ -42,7 +42,7 @@ from halo.optimizers.stochastic_rounding import SR_BLOCK_SIZE, sr_param_index, s
 from tests.common.adamw_bf16_reference import _per_parameter_kernel
 from tests.common.repo import probe_findings
 
-_HPARAMS = (0.9, 0.999, 1.0 / 3.0, 0.1, 1e-8, 1.0 - 1e-3)
+_HPARAMS = (0.9, 0.999, 1.0 / 3.0, 0.1, 1e-8, 1.0 - 1e-3, 1.0 - 0.9, 1.0 - 0.999)
 _MARKER = "FUSED_ADAMW_MISMATCHES:"
 _PROBE = f"""
 import os
@@ -60,6 +60,19 @@ os.environ["TRITON_INTERPRET"] = "1"
 from tests.common.adamw_bf16_reference import lookup_mismatches
 print({_LOOKUP_MARKER!r} + "|".join(lookup_mismatches()))
 """
+_FIRST_STEP_MARKER = "ADAMW_FIRST_STEP_MISMATCHES:"
+_CANCELLATION_PROBE = f"""
+import os
+os.environ["TRITON_INTERPRET"] = "1"
+from tests.common.adamw_bf16_reference import first_step_cancellation_mismatches
+print({_FIRST_STEP_MARKER!r} + "|".join(first_step_cancellation_mismatches()))
+"""
+_FUSED_VS_EAGER_PROBE = f"""
+import os
+os.environ["TRITON_INTERPRET"] = "1"
+from tests.common.adamw_bf16_reference import first_step_eager_mismatches
+print({_FIRST_STEP_MARKER!r} + "|".join(first_step_eager_mismatches()))
+"""
 _TARGETS = tuple(GPUTarget("cuda", arch, 32) for arch in (90, 100, 103))
 # Hopper, the two Blackwell capabilities the multi-tensor launch is gated to, and two Blackwell ones outside it.
 _CAPABILITIES = ((9, 0), (10, 0), (10, 3), (11, 0), (12, 0))
@@ -74,18 +87,25 @@ _GLOBAL_ACCESS = re.compile(r"^\s+(?:@%p\d+\s+)?((?:ld|st)\.global[\w.]*)", re.M
 _FLOAT_OP = re.compile(r"^\s*(?:@%p\d+\s+)?((?:fma|mul|add|sub|div|sqrt|rcp|cvt|max|min|neg|abs|mad)\.[\w.]+)\s", re.M)
 _TABLE_LOADS = ("ld.global.b64", "ld.global.v2.b64", "ld.global.v4.b64", "ld.global.b32")
 _SKIP_FLAG_LOAD = "ld.global.b8"
-# (grad dtype, grad scale, _FusedUpdate.divisible): what step() meets, two other partial alignments, and none.
+# (grad dtype, grad scale, _FusedUpdate.divisible, skip flag): what step() meets, two other partial alignments, and none.
 _SPECIALIZATIONS = (
-    ("bf16", False, (True, True, True, True, True)),
-    ("bf16", True, (False, True, True, True, True)),
-    ("bf16", False, (True, True, False, True, True)),
-    ("bf16", True, (False, False, False, True, True)),
-    ("bf16", True, (True, False, False, True, True)),
-    ("fp32", True, (False, True, False, True, True)),
-    ("bf16", True, (True, False, False, True, False)),
-    ("bf16", False, (True, False, True, False, False)),
-    ("bf16", True, (False, False, False, False, False)),
+    ("bf16", False, (True, True, True, True, True), True),
+    ("bf16", True, (False, True, True, True, True), False),
+    ("bf16", False, (True, True, False, True, True), True),
+    ("bf16", True, (False, False, False, True, True), False),
+    ("bf16", True, (True, False, False, True, True), True),
+    ("fp32", True, (False, True, False, True, True), False),
+    ("bf16", True, (True, False, False, True, False), True),
+    ("bf16", False, (True, False, True, False, False), False),
+    ("bf16", True, (False, False, False, False, False), True),
 )
+# sm103 compiles the multi-tensor launch of sm100 under another target string, so one cell builds it there.
+_COMPILED_CELLS = [
+    (*specialization, target)
+    for specialization in _SPECIALIZATIONS
+    for target in _TARGETS
+    if target.arch != 103 or specialization == _SPECIALIZATIONS[0]
+]
 
 
 def _update(
@@ -203,8 +223,8 @@ def test_tables_address_every_tensor_and_count_its_programs():
 
 def test_tables_keep_per_tensor_scalars_and_seeds():
     """Params at different steps (a resumed run) share a launch."""
-    first = _update(torch.zeros(4, dtype=torch.bfloat16), 5, hparams=(0.9, 0.999, 0.5, 0.25, 1e-8, 1.0))
-    second = _update(torch.zeros(4, dtype=torch.bfloat16), 6, hparams=(0.8, 0.99, 0.125, 0.75, 1e-6, 0.9))
+    first = _update(torch.zeros(4, dtype=torch.bfloat16), 5, hparams=(0.9, 0.999, 0.5, 0.25, 1e-8, 1.0, 0.1, 0.001))
+    second = _update(torch.zeros(4, dtype=torch.bfloat16), 6, hparams=(0.8, 0.99, 0.125, 0.75, 1e-6, 0.9, 0.2, 0.01))
 
     index, hparams, _ = _launch_tables([first, second])
 
@@ -313,6 +333,8 @@ def test_fused_update_carries_its_param_step_scalars_and_seed():
                 math.sqrt(1.0 - beta2**step),
                 eps,
                 1.0 - lr * wd,
+                1.0 - beta1,
+                1.0 - beta2,
             ), name
             assert update.seed == sr_seed_pair(_SR_KEY, step, sr_param_index(name))[0], name
             checked += 1
@@ -457,12 +479,13 @@ def test_a_changing_set_of_gradients_compiles_one_variant_per_specialization(mon
     )
 
 
-@pytest.mark.parametrize("target", _TARGETS, ids=lambda target: f"sm{target.arch}")
-@pytest.mark.parametrize("has_skip", [False, True], ids=["no_skip", "skip"])
 @pytest.mark.parametrize(
-    ("grad_dtype", "has_scale", "divisible"),
-    _SPECIALIZATIONS,
-    ids=[f"{g}-{'scale' if s else 'no_scale'}-{''.join(str(int(f)) for f in d)}" for g, s, d in _SPECIALIZATIONS],
+    ("grad_dtype", "has_scale", "divisible", "has_skip", "target"),
+    _COMPILED_CELLS,
+    ids=[
+        f"{g}-{'scale' if s else 'no_scale'}-{''.join(str(int(f)) for f in d)}-{'skip' if k else 'no_skip'}-sm{t.arch}"
+        for g, s, d, k, t in _COMPILED_CELLS
+    ],
 )
 def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, divisible, has_skip, target):
     """The PTX schedule may place ops around the table loads and block loop; the skip flag adds its one read and
@@ -472,7 +495,10 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
         "p_ptr": "*bf16",
         "grad_ptr": f"*{grad_dtype}",
         **dict.fromkeys(("ea_ptr", "easq_ptr"), "*bf16"),
-        **dict.fromkeys(("beta1", "beta2", "step_size", "bc2_sqrt", "eps", "wd_factor"), "fp32"),
+        **dict.fromkeys(
+            ("beta1", "beta2", "step_size", "bc2_sqrt", "eps", "wd_factor", "one_minus_beta1", "one_minus_beta2"),
+            "fp32",
+        ),
         "n_elements": "i32",
         "seed": "i32",
         "grad_scale_ptr": scale_ptr,
@@ -545,6 +571,16 @@ def test_lookup_matches_the_block_scan_interpreted():
 
 def test_fused_kernel_matches_per_parameter_kernel_interpreted():
     assert probe_findings(_PROBE, _MARKER) == []
+
+
+def test_fused_first_step_lands_where_float64_adamw_does_interpreted():
+    """At beta2 0.999 and 0.9999: ``p = -lr`` under a negative gradient lands on 0 after step 1."""
+    assert probe_findings(_CANCELLATION_PROBE, _FIRST_STEP_MARKER) == []
+
+
+def test_fused_first_step_matches_the_eager_step_interpreted():
+    """At beta2 0.99999, against the eager step, which takes 1 - beta from the float64 betas."""
+    assert probe_findings(_FUSED_VS_EAGER_PROBE, _FIRST_STEP_MARKER) == []
 
 
 if __name__ == "__main__":

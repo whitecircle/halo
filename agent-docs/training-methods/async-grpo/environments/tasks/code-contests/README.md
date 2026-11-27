@@ -42,10 +42,11 @@ rewards:
 | `max_time_limit` | 15 s | Clamp on every per-test limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's limit |
 | [`max_grading_seconds`](grading.md#grading-budget) | `None` | Wall-clock budget for one grade |
-| `max_output_size` | 1 MB | Bytes, at least 1. Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
+| `max_output_size` | 1,000,000 | Stdout characters, at least 1. Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
 | `stop_on_first_failure` | `false` | Stop at the first failing test. The grade is unchanged; `outcome/test_pass_frac` becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level, and set here rather than in `tool_budgets`, which raises. The tuning lever; `max_turns` (15) is a backstop |
 | [`eval_protocol`](evaluation.md#evaluation-protocols) | `harness` | `leaderboard` pins both tool budgets |
+| [`notes`](tools.md#notes) | `null` | `{}`, or `{max_chars: <int>}` for the notes' size cap (6000 characters, section names included): the notes harness, for policies that train without a reasoning step |
 
 `timeout_per_test`, `max_time_limit` and `compiled_time_limit_scale` must be finite and > 0; a non-positive
 `max_grading_seconds` raises too, at construction.
@@ -68,9 +69,9 @@ Two profile keys make a higher level buy iteration, not only reasoning: `max_sub
 
 ## Shipped recipes
 
-Every recipe runs one economy, pinned by a CPU test ([Economy invariants](reward.md#economy-invariants)). The
-curriculum recipes are the three Qwen3.6 vLLM stages
-(`*-stage1-codeforces`, `*-stage2-hard`, `*-stage3-extra-hard`).
+The thinking recipes share one economy; the no-thinking curriculum below departs from it where it says. A CPU test
+pins both ([Economy invariants](reward.md#economy-invariants)). The table's curriculum recipes are the three thinking
+Qwen3.6 vLLM stages, `qwen3.6-35b-a3b-code-contests-full-ep1-stage{1-codeforces,2-hard,3-extra-hard}.yaml`.
 
 | Setting | Value |
 |---|---|
@@ -82,9 +83,37 @@ curriculum recipes are the three Qwen3.6 vLLM stages
 | [`rollout_max_answer_tokens`](../../../reasoning.md#answer-room) | 8192 on vLLM, so the engine closes a turn's reasoning at 21,808 tokens (30,000 in the curriculum recipes); unset on SGLang |
 | [`rollout_max_episode_tokens`](../../../episodes.md#episode-output-budget) | 131072 over all turns; 128000 on gpt-oss, so the prompt and tool schema fit its 131072 window; 160000 in the curriculum recipes, 200000 in stage 3 |
 | [`rollout_stop_tokens`](../../../episodes.md#tool-calls) | `<\|im_start\|>` on the Qwen3.6 vLLM recipes, so a model past a forced close cannot open a chat turn whose `<think>` restarts the reasoning cap; `<\|call\|>` on the gpt-oss recipes (the harmony tool-call terminator) |
-| [`judge` term `audit`](reward.md#audit-judge) | `openai/gpt-6-luna`, `view: full`, `max_view_chars: 900000`, nine checks (six vetoes), `weight: -0.7`, `on_error: invalid` |
+| [`judge` term `audit`](reward.md#audit-judge) | `openai/gpt-6-luna`, `view: full`, `max_view_chars: 900000`, nine checks (six vetoes; eleven under [notes](tools.md#notes), the two added logged), `weight: -0.7`, `on_error: invalid` |
 | [Shaping](reward.md#reward-ladder) (`environment_kwargs`) | `submission_reward` 0.1, `resubmission_penalty` 0.2, `no_tool_use_penalty` 0.2, `turn_overflow_penalty` 0.35, `length_cutoff_penalty` 0.08 with `max_length_cutoff_recoveries: 2`, `tool_error_penalty` 0.05 |
 | [`language`](tools.md#languages) | `python`; `[python, cpp]` in the curriculum recipes |
+
+The no-thinking curriculum,
+`qwen3.6-35b-a3b-code-contests-notes-no-thinking-full-ep1-stage{1-codeforces,2-hard,3-extra-hard}.yaml`, runs the same
+stages with [`rollout_thinking: false`](../../../reasoning.md#thinking-off) and the [notes harness](tools.md#notes), from
+a [notes SFT checkpoint](#notes-sft-checkpoint). It has no length terms: the profiles keep only `max_submissions` /
+`max_test_calls`, and there is no floor, price cap or answer room. `rollout_max_tokens` is 16384 and
+`rollout_max_episode_tokens` 98304, all of it visible output; the [audit judge](reward.md#audit-judge) reads
+`notes-no-thinking.txt` as its context. Shaping and check prices are the thinking curriculum's, except
+`resubmission_penalty` 0.1: a failure there has no free stop, so spending every submission left must cost less than
+running out ([Economy invariants](reward.md#economy-invariants)).
+
+`qwen3.6-35b-a3b-code-contests-notes-full-ep1-codeforces.yaml` runs the stage-1 pool with the notes harness and the
+reasoning step on, from the base. It keeps the thinking curriculum's caps and length terms, with the notes recipes'
+`resubmission_penalty` 0.1, so its `reasoning_floor` (0.15) and `reasoning_price_cap` (0.18) stay under one more failed
+submission at 0.2, and its per-level prices (0.005, 0.004, 0.003 per 1,000 tokens) fall with the cap. No turn sees an
+earlier turn's reasoning (`carry_reasoning` stays off): the notes carry what later turns need, and the judge reads
+`notes-thinking.txt` as its context.
+
+Every notes recipe grades with `stop_on_first_failure: true`. Each test runs in a fresh sandbox jail, so grading a wrong
+program to the end would spend the [grading budget](grading.md#grading-budget) on tests already decided.
+
+### Notes SFT checkpoint
+
+The model fine-tuned on teacher episodes of the notes harness, rendered with the recipe's chat template, one row per
+assistant turn. Its last checkpoint, a `text_only_model` export, goes through
+`scripts/after_training/reattach_vision_tower.py` ([Post-training scripts](../../../../../reference/scripts-reference.md#post-training-scripts)),
+which restores the composite layout and MTP head the servers load, since the weight sync forwards parameter names
+verbatim. Stage 1's `model_name_or_path` is a placeholder for it.
 
 ## Pages
 

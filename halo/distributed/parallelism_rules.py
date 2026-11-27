@@ -489,8 +489,9 @@ def _reject_hsdp(pc: ParallelismConfig) -> None:
     if pc.tp_size > 1 or pc.expert_tp_size > 1:
         raise ValueError(
             f"use_hsdp=True is not supported with TP (tensor_parallel_size={pc.tp_size}) or Expert-TP "
-            f"(expert_tensor_parallel_size={pc.expert_tp_size}); those modes build their own (dp, tp) "
-            f"device mesh. Use HSDP on the standard DP path (pure DP or CP)."
+            f"(expert_tensor_parallel_size={pc.expert_tp_size}): TP shards on its own (dp, tp) device mesh, and an "
+            f"Expert-TP run keeps its non-expert parameters on the EP path's 1-D FSDP. Use HSDP on the standard DP "
+            f"path (pure DP or CP)."
         )
     if pc.ep_size > 1:
         raise ValueError(
@@ -567,8 +568,8 @@ def _reject_fsdp_settings(pc: ParallelismConfig) -> None:
             f"data_parallel_size={pc.data_parallel_size}): FSDP2's backward re-gather issues a plain "
             f"c10d all-gather on the TP-sharded DTensor params, which has no registered DTensor sharding "
             f"strategy (NotImplementedError mid-step). Use fsdp_reshard_after_forward=False (SHARD_GRAD_OP / "
-            f"ZeRO-2), which keeps params gathered between forward and backward, or use_hsdp for replica "
-            f"memory savings."
+            f"ZeRO-2), which keeps params gathered between forward and backward, and lower peak memory with "
+            f"gradient_checkpointing; ZeRO-3 itself needs a run without tensor parallelism (pure DP or CP)."
         )
 
 

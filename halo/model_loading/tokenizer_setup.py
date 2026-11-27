@@ -8,11 +8,12 @@ import os
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from jinja2 import TemplateError
 from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer, PreTrainedTokenizerBase
 from transformers.utils import cached_file
 
 from halo.model_loading.tokenizer_backend import resolve_tokenizer_backend
-from halo.models.introspection.config_access import set_config_field
+from halo.models.introspection.config_access import configs_declaring
 from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.models.mtp.head import find_mtp_head
@@ -31,38 +32,46 @@ _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
 # Marks a chat template the run chose, which its processor then adopts; a checkpoint's template stays each one's.
 _RUN_CHAT_TEMPLATE_ATTR = "_halo_run_chat_template"
 
+# Marks the tokenizer of a run whose rows render through the processor holding it, with that processor's template.
+_PROCESSOR_RENDERS_ROWS_ATTR = "_halo_processor_renders_rows"
+
 # Marks a model grown past its checkpoint's rows; those rows exist in no base, so every adapter save carries them.
 _GROWN_VOCABULARY_ATTR = "_halo_grown_vocabulary"
 
 _TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json", "vocab.json", "tokenizer.model")
 
 
-def _holds_no_tokenizer(processing_class, path: str) -> bool:
+def _holds_no_tokenizer(processing_class, path: str, revision: str | None) -> bool:
     """transformers 5 builds a ``model_type``'s tokenizer class with no file behind it, a vocabulary of its special
     tokens alone."""
     tokenizer = resolve_tokenizer(processing_class)
     if not isinstance(tokenizer, PreTrainedTokenizerBase) or len(tokenizer) > len(set(tokenizer.all_special_tokens)):
         return False
     lookup = {"_raise_exceptions_for_missing_entries": False, "_raise_exceptions_for_connection_errors": False}
-    return not any(cached_file(path, name, **lookup) for name in _TOKENIZER_FILES)
+    return not any(cached_file(path, name, revision=revision, **lookup) for name in _TOKENIZER_FILES)
 
 
-def load_processing_class(path: str, *, trust_remote_code: bool = False):
-    """``AutoProcessor`` for multimodal, else ``AutoTokenizer``, else ``None`` when the directory holds no tokenizer.
+def load_processing_class(path: str, *, trust_remote_code: bool = False, revision: str | None = None):
+    """``AutoProcessor`` for multimodal, else ``AutoTokenizer``, else ``None`` when the directory holds no tokenizer;
+    ``revision`` pins a Hub ``path``.
     Re-save utilities must persist this, as a tokenizer-only VLM save is unloadable; any other failure must propagate
     rather than ship a resized model beside the checkpoint's stale tokenizer."""
     try:
         try:
-            processing_class = AutoProcessor.from_pretrained(path, trust_remote_code=trust_remote_code)
+            processing_class = AutoProcessor.from_pretrained(
+                path, trust_remote_code=trust_remote_code, revision=revision
+            )
         except (OSError, ValueError) as e:
             # The two ways a repo reports no processor, the ordinary text-only path, hence info.
             if is_global_main_process():
                 logger.info(f"No processor at {path} ({type(e).__name__}: {e}); falling back to the tokenizer.")
-            processing_class = AutoTokenizer.from_pretrained(path, trust_remote_code=trust_remote_code)
+            processing_class = AutoTokenizer.from_pretrained(
+                path, trust_remote_code=trust_remote_code, revision=revision
+            )
     except (OSError, ValueError) as e:
         reason = f"{type(e).__name__}: {e}"
     else:
-        if not _holds_no_tokenizer(processing_class, path):
+        if not _holds_no_tokenizer(processing_class, path, revision):
             return processing_class
         reason = "it holds no tokenizer file"
     if is_global_main_process():
@@ -128,13 +137,79 @@ def reject_dropped_chat_template(args: CommonScriptArguments, tokenizer: PreTrai
     )
 
 
+def _render_reasoning_effort_probe(processing_class, level: str | None, *, open_turn: bool) -> str | None:
+    """The probe conversation closed by an assistant turn, or open on the generation prompt; ``None`` where the
+    template raises."""
+    conversation = [{"role": "user", "content": "q"}]
+    if not open_turn:
+        conversation.append({"role": "assistant", "content": "a"})
+    try:
+        return processing_class.apply_chat_template(
+            conversation,
+            tokenize=False,
+            add_generation_prompt=open_turn,
+            **({} if level is None else {"reasoning_effort": level}),
+        )
+    except (TemplateError, ValueError):  # a template refusing the level, or no template at all
+        return None
+
+
+def reject_unrendered_reasoning_effort(processing_class, reasoning_effort_field: str | None) -> None:
+    """Refuse ``reasoning_effort_field`` under a chat template rendering a conversation alike at no level, ``none``,
+    ``low``, ``medium`` and ``high``, both closed by an assistant turn and open on the generation prompt, which would
+    drop every row's level from its render. A form raising at some level reads it; one raising at every level leaves
+    the template to the row render."""
+    if not reasoning_effort_field:
+        return
+    # A template may read the level in one form alone (Cohere Command A, only 'none' and only in its generation
+    # prompt), and may refuse a level it does not take (Mistral 4 'low', Qwen3.8 'high').
+    for open_turn in (False, True):
+        renders = {
+            _render_reasoning_effort_probe(processing_class, level, open_turn=open_turn)
+            for level in (None, "none", "low", "medium", "high")
+        }
+        if len(renders) > 1 or None in renders:
+            return
+    tokenizer = resolve_tokenizer(processing_class)
+    template = (
+        "the run's chat_template"
+        if getattr(tokenizer, _RUN_CHAT_TEMPLATE_ATTR, False)
+        else f"the chat template {tokenizer.name_or_path or 'the checkpoint'} ships"
+    )
+    raise ValueError(
+        f"reasoning_effort_field='{reasoning_effort_field}' hands each row's level to the chat template as "
+        f"reasoning_effort, but {template} renders a conversation alike at no level, 'none', 'low', 'medium' and "
+        f"'high', whether closed by an assistant turn or open on its generation prompt, so no row's level would reach "
+        f"its render. Set chat_template to a template that states the level, such as "
+        f"jinja-templates/qwen3/qwen3.6-reasoning-effort.jinja or jinja-templates/gemma4/gemma4-reasoning-effort.jinja "
+        f"(with force_chat_template: true over a shipped template), or drop reasoning_effort_field."
+    )
+
+
+def _record_token_id(level, field: str, token_id) -> None:
+    """A level that lists several ids, ``token_id`` among them, keeps its list: GLM names the role markers that end a
+    turn beside its eos, and a scalar there would end no span at them and export a model that stops at none."""
+    listed = getattr(level, field, None)
+    if not (isinstance(listed, (list, tuple)) and token_id in listed):
+        setattr(level, field, token_id)
+
+
+def record_special_token_id(config, field: str, token_id) -> list:
+    """Record ``token_id`` on every level of ``config`` declaring ``field``, a level whose list holds it keeping the
+    list; returns those levels."""
+    levels = configs_declaring(config, field)
+    for level in levels:
+        _record_token_id(level, field, token_id)
+    return levels
+
+
 def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -> None:
     """Record a special-token id on every config level declaring ``field`` and the generation config. Composite
     families need the per-level write: pooling keys on ``get_text_config().pad_token_id``, so a top-level-only write
     leaves the decoder's id unset (batch > 1 raises) or stale (pooling picks the wrong last token)."""
     if model is None:
         return
-    recorded = set_config_field(model.config, field, token_id, only_declared=True)
+    recorded = record_special_token_id(model.config, field, token_id)
     if not recorded and is_global_main_process():
         logger.warning(
             f"{type(model.config).__name__} declares no '{field}' at either the top level or on its "
@@ -143,7 +218,7 @@ def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -
         )
     generation_config = getattr(model, "generation_config", None)
     if generation_config is not None:
-        setattr(generation_config, field, token_id)
+        _record_token_id(generation_config, field, token_id)
 
 
 def reject_stale_eos_copies(model: PreTrainedModel | None, eos_token_id) -> None:
@@ -244,6 +319,9 @@ def configure_run_tokenizer(
     reject_dropped_chat_template(args, tokenizer)
     if tokenizer.chat_template is None or (args.chat_template is not None and args.force_chat_template):
         set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
+    # A VLM run's rows render through its processor, whose own template the row pipeline probes.
+    if not getattr(tokenizer, _PROCESSOR_RENDERS_ROWS_ATTR, False):
+        reject_unrendered_reasoning_effort(tokenizer, args.reasoning_effort_field)
 
     return resolve_tokenizer_backend(tokenizer, args.tokenizer_backend)
 
@@ -291,6 +369,12 @@ def set_run_chat_template(tokenizer: PreTrainedTokenizerBase, template: str | No
     """Set the chat template the run chose on ``tokenizer``, marked for its processor to adopt."""
     tokenizer.chat_template = template
     setattr(tokenizer, _RUN_CHAT_TEMPLATE_ATTR, True)
+
+
+def mark_processor_rendered_rows(tokenizer: PreTrainedTokenizerBase) -> None:
+    """Mark ``tokenizer`` as held by the processor a VLM run renders its rows through, so its own template, which
+    renders none of them, is not probed for the level in that processor's stead."""
+    setattr(tokenizer, _PROCESSOR_RENDERS_ROWS_ATTR, True)
 
 
 def adopt_tokenizer_chat_template(processing_class) -> None:

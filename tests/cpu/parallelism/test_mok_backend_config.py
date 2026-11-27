@@ -29,6 +29,7 @@ from halo.model_loading.parallel import load_rules
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.grpo.rounds.packed_rules import reject_undispatchable_budget, resolve_dispatch_ceiling
 from tests.common.ep_stubs import stubbed_rank_ep_layer
 from tests.common.parallelism import create_config
 
@@ -228,6 +229,20 @@ def test_an_evaluating_run_sizes_mok_buffers_for_its_eval_batch(backend, rows, c
     assert (config.ep_rows_per_device, config.ep_declared_max_length) == (rows, 1024)
     warned = [r.getMessage() for r in caplog.records if "pads every forward" in r.getMessage()]
     assert len(warned) == (backend == "mok") and all("8.0x its own tokens" in message for message in warned)
+
+
+def test_packed_grpo_is_held_to_the_capacity_the_built_config_declares():
+    """The packed budget and the planner's ceiling read ``ParallelismConfig.mok_token_capacity`` of a config built from
+    arguments: one 8,192-token row."""
+    config = parallelism_config_from_args(
+        ParallelismArguments(moe_backend="mok", fsdp_shard_ep1_experts=False),
+        trainer_cls=DistributedTrainerMixin,
+        training_config=SimpleNamespace(per_device_train_batch_size=1, max_length=8192),
+    )
+    assert resolve_dispatch_ceiling(config) == config.mok_token_capacity == 8192
+    reject_undispatchable_budget(config, 8192)
+    with pytest.raises(ValueError, match="packed_microbatch_tokens=8193 exceeds the 8192 tokens"):
+        reject_undispatchable_budget(config, 8193)
 
 
 def test_an_eval_batch_no_larger_than_the_training_one_warns_nothing(caplog):

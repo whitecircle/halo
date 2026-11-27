@@ -1,21 +1,16 @@
-"""Launch options for FLA's autotuned Triton kernels, set before a loaded model's first launch: the delta rule's state
-kernel on its ``num_warps=2`` configs on Blackwell, and, under ``HALO_FLA_L2NORM_FIXED_NB``, the q/k L2 norm on one
-compiled kernel and one tuned config per feature width and dtype."""
+"""Launch options for FLA's autotuned Triton kernels, set before a loaded model's first launch: under
+``HALO_FLA_L2NORM_FIXED_NB``, the q/k L2 norm on one compiled kernel and one tuned config per feature width and
+dtype."""
 
 import ast
 
 import torch
 import torch.nn as nn
 from fla.modules import l2norm as fla_l2norm
-from fla.ops.common import chunk_delta_h
 from triton.runtime.autotuner import Autotuner
 
 from halo.env import env_flag
 
-_BLACKWELL_MAJOR = 10
-_BLACKWELL_NUM_WARPS = 2
-# Every caller (gated delta rule, KDA, delta rule, the backward's recompute) launches this one kernel object.
-_STATE_KERNEL = (chunk_delta_h, "chunk_gated_delta_rule_fwd_kernel_h_blockdim64")
 _L2NORM_KERNELS = ("l2norm_fwd_kernel", "l2norm_bwd_kernel")
 _L2NORM_LAUNCH_NB = 1
 # One FLA NB bucket of rows (``cdiv(rows, 2048 * 32)``): the single tuned config is picked at a size a packed run reaches.
@@ -111,32 +106,8 @@ def warm_fla_l2norm(model: nn.Module) -> None:
         _warm_l2norm_width(width, device)
 
 
-def _restrict_state_kernel() -> None:
-    """Under Triton 3.6 the state kernel's ``num_warps=4`` configs give run-to-run different, at some positions wrong,
-    outputs and gradients on packed rows, and on B300 also on larger unpacked batches; the autotuner picks them at
-    Qwen3.5/3.6 shapes. fla #953 (first released in 0.5.2) makes this a no-op. Triton's disk cache keys on the config
-    list."""
-    if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != _BLACKWELL_MAJOR:
-        return
-    module, kernel_name = _STATE_KERNEL
-    autotuner = triton_autotuner(getattr(module, kernel_name, None))
-    if autotuner is None:
-        raise RuntimeError(
-            f"{module.__name__}.{kernel_name} is not an autotuned FLA kernel here; re-check the Blackwell restriction"
-        )
-    kept = [config for config in autotuner.configs if config.num_warps == _BLACKWELL_NUM_WARPS]
-    if not kept:
-        raise RuntimeError(f"{kernel_name} has no num_warps={_BLACKWELL_NUM_WARPS} config left to autotune")
-    autotuner.configs = kept
-    # A launch before this call may already have picked a dropped config for its shape.
-    autotuner.cache = {
-        key: config for key, config in autotuner.cache.items() if config.num_warps == _BLACKWELL_NUM_WARPS
-    }
-
-
 def apply_fla_launch_options() -> None:
-    """Idempotent; run before a loaded model's first FLA launch: the Blackwell state-kernel restriction, and the
-    constant-NB q/k norm under ``HALO_FLA_L2NORM_FIXED_NB``, whose kernels the restriction does not touch."""
-    _restrict_state_kernel()
+    """Idempotent; run before a loaded model's first FLA launch: the constant-NB q/k norm under
+    ``HALO_FLA_L2NORM_FIXED_NB``."""
     if uses_fla_l2norm_fixed_nb():
         patch_fla_l2norm_nb()

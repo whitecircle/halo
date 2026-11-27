@@ -33,6 +33,9 @@ _EXIT_BAD_LAUNCH = 2
 # causal_conv1d's default backward sums conv weight gradients with atomics, so two identical steps can round apart and
 # an exact replay diverges. Set unless the caller exported its own value.
 _DETERMINISTIC_KERNEL_ENV = {"CAUSAL_CONV1D_DETERMINISTIC": "1"}
+# The block-sparse QSA kernel sums dK and dV with fp32 atomics, so no run replays itself on it: an exact replay attends
+# on the tiled path, as full_determinism does.
+_EXACT_REPLAY_ENV = {"HALO_QSA_KERNEL": "off"}
 
 
 def _efficiency_callback(trainer) -> EfficiencyCallback | None:
@@ -123,6 +126,22 @@ def cuda_syncs_are_errors() -> Iterator[None]:
         yield
     finally:
         torch.cuda.set_sync_debug_mode("default")
+
+
+@contextlib.contextmanager
+def exact_replay() -> Iterator[None]:
+    """:data:`_EXACT_REPLAY_ENV` over the body, with only those variables put back after, for a body that compares a
+    run with its replay."""
+    previous = {name: os.environ.get(name) for name in _EXACT_REPLAY_ENV}
+    os.environ.update(_EXACT_REPLAY_ENV)
+    try:
+        yield
+    finally:
+        for name, value in previous.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 def skip_unless_local_checkpoint(path: str, env_var: str) -> None:

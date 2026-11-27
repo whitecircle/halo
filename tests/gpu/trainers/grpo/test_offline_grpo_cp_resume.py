@@ -13,40 +13,47 @@ import torch
 import torch.distributed as dist
 from transformers import AutoTokenizer, Qwen3Config, Qwen3ForCausalLM
 
+from halo.checkpoint.config_export import restore_model_type
 from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.checkpoint.reading import load_full_state_dict
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.model_loading.finalization import finalize_loaded_model
 from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
-    apply_sinks_policy,
     is_sink_key,
     neutralized_sink_value,
     stamped_sinks_policy,
     uses_gpt_oss_sinks,
 )
 from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.runtime.collectives import combine_across_ranks
 from halo.trainers.grpo.offline.reference import OfflineGRPOReferenceMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
+from tests.common.adapters import unwrap
+from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.dp_layout import dp_layout_checks, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
+    agree_kl_rows,
     build_offline_grpo_trainer,
     completion_logps,
     doubled_head_kl_verdict,
     doubled_output_head,
+    eager_oracle,
+    kl_oracle_training_set,
     make_offline_tokenizer,
     offline_grpo_config,
     offline_grpo_dataset,
     pure_kl_batch,
     pure_kl_objective,
+    routing_clear_rows,
+    sweep_batches,
     token_logps,
 )
 from tests.common.offline_grpo_reference import restore_reference
@@ -59,6 +66,9 @@ SEED = 721
 STEPS = 3
 CHECKPOINT_STEP = 2
 KL_BETA = 0.05
+# Fewest training rows with routing headroom the unsharded reference comparison holds: two groups. Over 21 CPU seeds of
+# each family's base checkpoint, with eager and sdpa oracles, the fewest of the 144 was 7 (Mistral 4).
+REFERENCE_HEADROOM_ROWS = 4
 MOE_FAMILIES = tuple(family for family, tiny in TINY_MOE_FAMILIES.items() if tiny.ulysses_cp)
 
 
@@ -124,6 +134,8 @@ def _save_tiny_model(path, family="qwen3"):
         )
     )
     model.to(torch.bfloat16).save_pretrained(path)
+    # As a real export does: Bailing's remote config class leaves ``model_type`` unset, so the save drops it.
+    restore_model_type(model.config, path)
     fast.save_pretrained(path)
 
 
@@ -157,23 +169,6 @@ def _build_trainer(ctx, source, output_dir, tokenizer, train, evaluation, *, fie
     return trainer
 
 
-def _eager_oracle(source, device="cpu"):
-    """The sink-free policy with full-row eager attention, finalized as production loads are: a remote-code rotary
-    table is otherwise the uninitialized memory transformers 5 leaves in non-persistent buffers."""
-    model, info = TINY.load_class.from_pretrained(
-        source,
-        dtype=torch.bfloat16,
-        attn_implementation="eager",
-        output_loading_info=True,
-        trust_remote_code=TINY.trust_remote_code,
-    )
-    assert not loading_problems(info), f"incomplete oracle/export checkpoint: {loading_problems(info)}"
-    model.to(device)
-    finalize_loaded_model(model, source)
-    apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
-    return model.eval()
-
-
 def _sink_checks(model, checkpoint=None):
     if not uses_gpt_oss_sinks(model.config):
         return {}
@@ -192,7 +187,7 @@ def _reference_rows(dataset):
 
 
 def _unsharded_reference_error(source, dataset, swept_rows, device):
-    model = _eager_oracle(source, device)
+    model = eager_oracle(source, device, family=TINY)
     errors = []
     with torch.inference_mode():
         for row, swept in zip(dataset, swept_rows, strict=True):
@@ -204,7 +199,26 @@ def _unsharded_reference_error(source, dataset, swept_rows, device):
             unsharded = logits.log_softmax(dim=-1).gather(-1, targets).view(-1).cpu()
             errors.append(float((unsharded - swept).abs().max()))
     del model
-    return max(errors)
+    return max(errors, default=math.inf)
+
+
+def _cp_boundary_rows(trainer, cp_size) -> set[int]:
+    """Training rows whose completion starts at or before the CP chunk boundary of their sweep batch and ends past
+    it."""
+    dataset = trainer.train_dataset
+    dp_size, _ = trainer.dp_shard_geometry()
+    crossing = set()
+    for indices in sweep_batches(len(dataset), trainer.args.per_device_train_batch_size, dp_size):
+        batch = [dataset[index] for index in indices]
+        chunk_width = trainer.data_collator(batch)["input_ids"].size(1) // cp_size
+        crossing.update(
+            index
+            for index, row in zip(indices, batch, strict=True)
+            if len(row["prompt_input_ids"])
+            <= chunk_width
+            < len(row["prompt_input_ids"]) + len(row["completion_input_ids"])
+        )
+    return crossing
 
 
 def _record_training_rows(trainer):
@@ -227,11 +241,13 @@ def _record_training_rows(trainer):
 
 
 def _kl_oracle(ctx, trainer, export):
-    batch = pure_kl_batch(trainer)
+    """``(rows clear the bf16 routing noise, oracle nonzero, trainer loss matches it)``."""
+    rows = agree_kl_rows(partial(eager_oracle, export, ctx.device, family=TINY), trainer.train_dataset)
+    batch = pure_kl_batch(trainer, rows.rows)
     cp = trainer.parallelism_config.is_cp_mode
     expected = torch.zeros((), device=ctx.device)
     if ctx.rank == 0:
-        oracle = _eager_oracle(export, ctx.device)
+        oracle = eager_oracle(export, ctx.device, family=TINY)
         with doubled_output_head(oracle), torch.no_grad():
             if cp:
                 policy = token_logps(oracle, batch["input_ids"], batch["attention_mask"])
@@ -245,7 +261,7 @@ def _kl_oracle(ctx, trainer, export):
         del oracle
         cleanup_memory()
     dist.broadcast(expected, src=0)
-    return doubled_head_kl_verdict(
+    return rows.clear, *doubled_head_kl_verdict(
         trainer, batch, lambda _model: expected, f"CP{trainer.parallelism_config.cp_size} nonzero KL oracle"
     )
 
@@ -313,7 +329,7 @@ def _export_comparison(checkpoint, continuous_export, resumed_export):
     resume_error = torch.linalg.vector_norm(
         torch.cat([(continuous[name].float() - resumed[name].float()).flatten() for name in continuous])
     )
-    model = _eager_oracle(resumed_export)
+    model = eager_oracle(resumed_export, family=TINY)
     with torch.no_grad():
         logits = model(torch.tensor([[3, 4, 5]], dtype=torch.long)).logits
     log(f"Step-3 export: checkpoint-to-step delta={step_change:.5g}, resume error={resume_error:.5g}")
@@ -372,9 +388,14 @@ def run(ctx) -> dict:
         _save_tiny_model(base, args.family)
     dist.barrier()
     tokenizer = AutoTokenizer.from_pretrained(base)
-    train, evaluation = offline_grpo_dataset(8), offline_grpo_dataset(4, 6)
+    train, evaluation = kl_oracle_training_set(8, SEED), offline_grpo_dataset(4, 6)
 
     trainer = _build_trainer(ctx, base, output, tokenizer, train, evaluation, fields=FIELDS, save=True)
+    initial_masters = {}
+    if fp32_masters:
+        # The construction's reference sweep is a forward, which leaves unsharded parameters registered.
+        reshard_fsdp2_modules(unwrap(trainer.model))
+        initial_masters = _expert_masters(trainer.model)
     saved_state = _OptimizerSnapshot("save", trainer, capture_optimizer=True)
     trainer.add_callback(saved_state)
     checks = {"run_start_reference_swept": REF_PER_TOKEN_LOGPS_COLUMN in trainer.train_dataset.column_names}
@@ -382,20 +403,24 @@ def run(ctx) -> dict:
     initial_train_rows = _reference_rows(trainer.train_dataset)
     initial_eval_rows = _reference_rows(trainer.eval_dataset)
     if ctx.rank == 0:
-        completion_lengths = {len(row["completion_input_ids"]) for row in trainer.train_dataset}
-        first_batch = [trainer.train_dataset[index] for index in range(2)]
-        oracle_error = _unsharded_reference_error(base, trainer.train_dataset, initial_train_rows, ctx.device)
+        # The sweep's kernels are not the eager oracle's, so only rows whose routing leads bf16 noise with headroom
+        # compare.
+        compared = routing_clear_rows(
+            partial(eager_oracle, base, ctx.device, family=TINY), trainer.train_dataset
+        ).headroom
+        oracle_error = _unsharded_reference_error(
+            base, trainer.train_dataset.select(compared), [initial_train_rows[index] for index in compared], ctx.device
+        )
+        checks["reference_rows_clear_routing_noise"] = len(compared) >= REFERENCE_HEADROOM_ROWS
+        completion_lengths = {len(trainer.train_dataset[index]["completion_input_ids"]) for index in compared}
         checks["variable_length_reference_rows"] = len(completion_lengths) >= 2
         if cp_size > 1:
-            chunk_width = trainer.data_collator(first_batch)["input_ids"].size(1) // cp_size
-            checks["reference_crosses_cp_boundary"] = any(
-                len(row["prompt_input_ids"])
-                <= chunk_width
-                < len(row["prompt_input_ids"]) + len(row["completion_input_ids"])
-                for row in first_batch
-            )
+            checks["reference_crosses_cp_boundary"] = not _cp_boundary_rows(trainer, cp_size).isdisjoint(compared)
         checks["reference_matches_unsharded"] = oracle_error < TOL.logprob_atol
-        log(f"initial CP{cp_size} reference vs unsharded max logp error={oracle_error:.5g}")
+        log(
+            f"initial CP{cp_size} reference vs unsharded max logp error={oracle_error:.5g} over {len(compared)}/"
+            f"{len(initial_train_rows)} rows with routing headroom"
+        )
     settings = trainer._reference_settings()
     tokenized = trainer.train_dataset.remove_columns(REF_PER_TOKEN_LOGPS_COLUMN)
     uninterrupted_rows = _record_training_rows(trainer)
@@ -427,8 +452,8 @@ def run(ctx) -> dict:
     checks.update(
         {f"continuous_{name}": value for name, value in _sink_checks(trainer.model, continuous_export).items()}
     )
-    checks["kl_oracle_nonzero"], checks["kl_matches_unsharded_after_update"] = _kl_oracle(
-        ctx, trainer, continuous_export
+    checks["kl_rows_clear_routing_noise"], checks["kl_oracle_nonzero"], checks["kl_matches_unsharded_after_update"] = (
+        _kl_oracle(ctx, trainer, continuous_export)
     )
     checks["row_reorder_rejected"], checks["missing_reference_rejected"] = _negative_sidecar_checks(
         ctx, checkpoint, tokenized, settings
@@ -452,10 +477,19 @@ def run(ctx) -> dict:
     if fp32_masters:
         expected_masters = at_save.get("expert_masters", {})
         restored_masters = _expert_masters(resumed.model)
+        off_grid = {
+            name for name, value in expected_masters.items() if not torch.equal(value, value.bfloat16().float())
+        }
+        trained = {name for name, value in expected_masters.items() if not torch.equal(value, initial_masters[name])}
+        log(f"fp32 expert masters: {len(trained)}/{len(expected_masters)} trained, {len(off_grid)} off the bf16 grid")
+        some_rank_off_grid = combine_across_ranks(bool(off_grid), any, what="fp32 expert masters off the bf16 grid")
+        # A group-limited router can send three steps of tokens to one rank's experts alone, and a master no step
+        # touched stays on the grid it loaded on: every trained one must have left it, and some rank must hold one.
         checks["fp32_expert_masters_off_bf16_grid"] = (
             bool(expected_masters)
             and all(value.dtype == torch.float32 for value in expected_masters.values())
-            and any(not torch.equal(value, value.bfloat16().float()) for value in expected_masters.values())
+            and trained <= off_grid
+            and some_rank_off_grid
         )
         checks["fp32_expert_masters_exact_before_resumed_forward"] = (
             expected_masters.keys() == restored_masters.keys()

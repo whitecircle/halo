@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from tokenizers import Tokenizer, models
-from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedModel, PreTrainedTokenizerFast
+from transformers import LlamaConfig, LlamaForCausalLM, PreTrainedTokenizerFast
 from transformers.models.llama.modeling_llama import LlamaModel
 
 from halo.checkpoint.format import SAFETENSORS_FAMILY_GLOB
@@ -127,11 +127,6 @@ def test_the_trainers_base_save_reaches_every_node(tmp_path):
     )
     for rank in range(WORLD_SIZE):
         assert _weight_files(str(tmp_path / f"trainer-node{rank}")), f"node {rank} holds no weights"
-
-
-def test_the_save_rank_override_needs_the_transformers_hook():
-    """The override replaces a private transformers method; a bump that renames it must fail here, not on node 1."""
-    assert callable(getattr(PreTrainedModel, "should_save_on_this_rank", None))
 
 
 def test_a_nested_save_restores_the_outer_override():

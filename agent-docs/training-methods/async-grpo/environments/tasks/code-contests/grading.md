@@ -8,7 +8,7 @@ and runs without `max_grading_seconds` ([Re-grading](../../../evaluation.md#re-g
 
 ## Grading rules
 
-- One sandbox session serves the whole grade: on `local` and `bubblewrap` a compiled submission builds once, and
+- One sandbox session serves the whole grade: on every backend but `remote` a compiled submission builds once, and
   the session resets after every test.
 - The verdict lists non-passing tests only, one entry per distinct verdict with the tests that failed the same way
   folded in, at most five.
@@ -22,7 +22,7 @@ and `bubblewrap`.
 |---|---|---|---|
 | `bubblewrap` | Compiler's first error | Compiler's first error | First error in both modes, no run |
 | `local` | Verdict class alone | Compiler's first error | First error in both modes, no run |
-| `remote` | Verdict class alone | Compiler's first error | Runs; graded as the service reports it |
+| `remote`, `modal`, `baseten` | Verdict class alone | Compiler's first error | Runs; graded as the sandbox reports it |
 
 - `bubblewrap` shows the error: its one build runs before any test, on an empty stdin.
 - `local` hides it: a program can force a rebuild that reads a test's input.

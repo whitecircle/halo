@@ -286,6 +286,8 @@ class NativeToolResult:
     unknown_tool: bool = False
     # Refused and nothing ran (:func:`is_refused_unrun`); structural like ``unknown_tool``.
     refused: bool = False
+    # Answered for the episode's spent or zero budget for this tool: no handler ran.
+    budget_spent: bool = False
     # Booked by type (infra or agent-caused) rather than as a tool error; it ends the episode.
     sandbox_fault: SandboxFault | None = None
 

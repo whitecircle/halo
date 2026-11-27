@@ -66,8 +66,11 @@ exit hangs.
     infeasible, so a live but saturated training node would pin every actor there and stall instead
     of spilling onto the CPU actor tier.
 
-- **Lazy environment build**: the env is constructed inside the actor on its first episode. A broken
-  environment constructor surfaces as per-episode errors, not a startup crash.
+- **Environment build at start**: each actor builds its environment and reward scorers as the pool
+  starts, so a constructor that fails on a node, or a `whitecircle` term whose key the node lacks, fails
+  the run's start on every rank instead of erroring each episode there. A judge reads its key per
+  request, so a node without it books outages instead
+  ([Outages](../training-methods/grpo/rewards/README.md#outages)).
 
 The actor and the offline eval driver (`run_episode` in `halo/environments/rollouts/eval_runner.py`) play one
 episode loop, `play_episode` in `halo/environments/rollouts/episode_loop.py`: reset, the per-turn caps, the step
@@ -184,10 +187,13 @@ The toolkit configures no other Ray ports; upstream defaults apply. What must ho
   `exam_qa`; `npx`/`uvx` for `mcp`. The per-env list:
   [Environments](../training-methods/async-grpo/environments/README.md).
 
-- **Actor processes inherit the `ray start` daemon's environment, not the trainer's.** Export
-  `HALO_SANDBOX_*`, `TMPDIR`, search/MCP keys (`SERPER_API_KEY` / `BRAVE_API_KEY` /
-  `TAVILY_API_KEY` / `KEENABLE_API_KEY`), and any HF/proxy vars *before* `ray start` on each node;
-  nothing forwards the trainer's env to remote actors.
+- **Actor processes inherit the `ray start` daemon's environment, not the trainer's.** Export `TMPDIR`,
+  search/MCP keys (`SERPER_API_KEY` / `BRAVE_API_KEY` / `TAVILY_API_KEY` / `KEENABLE_API_KEY`), the
+  reward terms' keys (a judge's `OPENROUTER_API_KEY`, `OPENAI_API_KEY` or `api_key_env`,
+  `WHITECIRCLE_API_KEY`), a hosted sandbox's credentials, and any HF/proxy vars *before* `ray start` on
+  each node: the actors score the reward terms themselves. Of the trainer's variables only
+  `HALO_SANDBOX_BACKEND`, `HALO_SANDBOX_URL`, `HALO_SANDBOX_REPL` and `HALO_SANDBOX_MAX_CONCURRENCY`
+  travel with the job to remote actors.
 
 ## Data through the object store
 

@@ -12,6 +12,7 @@ from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from halo.distributed.expert_parallel.families.inkling2 import EPInkling2MoELayer
 from halo.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
@@ -74,6 +75,7 @@ FAMILIES = [
     (EPLagunaMoELayer, "e_score_correction_bias", True),
     (EPDeepseekV4MoELayer, "e_score_correction_bias", False),
     (EPInklingMoELayer, "e_score_correction_bias", True),
+    (EPInkling2MoELayer, "e_score_correction_bias", False),
     (EPNemotronHMoELayer, "e_score_correction_bias", False),
     (EPStep3p7MoELayer, "e_score_correction_bias", False),
 ]

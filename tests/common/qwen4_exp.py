@@ -12,6 +12,7 @@ from torch.utils._pytree import tree_leaves
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import PrefixChange
+from transformers.modeling_layers import GradientCheckpointingLayer
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
 from halo.model_loading.checkpoint_keys import is_expert_bank_merge
@@ -94,7 +95,9 @@ def transformers_forwards():
     patch_qwen4_exp_document_forwards()
     installed = {cls: cls.forward for cls in _DOCUMENT_FORWARD_CLASSES}
     for cls, forward in installed.items():
-        cls.forward = forward.__wrapped__
+        # A checkpointing layer's replacement sits inside transformers' checkpoint wrapper.
+        replacement = forward.__wrapped__ if issubclass(cls, GradientCheckpointingLayer) else forward
+        cls.forward = replacement.__wrapped__
     try:
         yield
     finally:

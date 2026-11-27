@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Custom optimizers stay LR-scheduler-compatible: ``patch_track_step_called`` reads ``step.__func__``, so ``step``
-must be a bound method. FlashAdamW refuses CPU params, so it runs on CUDA when present."""
+must be a bound method."""
 
 import inspect
 
@@ -10,7 +10,6 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import LambdaLR
 
 from halo.optimizers.adamw_bf16 import AdamWBF16
-from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
 from halo.optimizers.muon import build_muon_optimizer
 
 BASE_LR = 1e-2
@@ -61,16 +60,6 @@ def test_muon_scheduler_compat():
     # momentum kernel is Triton.
     opt = build_muon_optimizer(model, lr=BASE_LR)
     _assert_scheduler_drives_lr(opt, model, grad_max_ndim=1)
-
-
-def test_flash_adamw_scheduler_compat():
-    pytest.importorskip("flashoptim", reason="flashoptim not installed")
-    if not torch.cuda.is_available():
-        pytest.skip("flashoptim refuses CPU params at construction (quantized states need CUDA)")
-
-    model = _tiny_model().cuda()
-    opt = build_flash_adamw_optimizer(model, lr=BASE_LR)
-    _assert_scheduler_drives_lr(opt, model)
 
 
 def test_plain_function_step_breaks_scheduler_premise():

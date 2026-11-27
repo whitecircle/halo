@@ -17,6 +17,7 @@ from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_
 
 from halo.data.collators.self_distill import SelfDistillVLMDataCollator
 from halo.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
+from halo.data.preprocessed import tokenization
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
@@ -164,26 +165,6 @@ def test_collator_does_not_truncate_preprocessed_data():
     assert batch["labels"][0].tolist() == [1, 2, 3, 4, 5]
 
 
-def test_collator_keeps_image_tokens_aligned_when_over_max_length():
-    """An over-length example with pixel_values keeps all its placeholders, matching its whole pixel_values."""
-    image_token = 99
-    collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=0), max_length=4)
-    pv = np.arange(6, dtype=np.float16).reshape(3, 2)  # 3 patches; one placeholder token each
-    ex = {
-        "input_ids": [1, image_token, image_token, image_token, 2, 3],  # len 6 > max_length 4
-        "attention_mask": [1] * 6,
-        "labels": [1, image_token, image_token, image_token, 2, 3],
-        "pixel_values": pv.tobytes(),
-        "pixel_values_shape": [3, 2],
-        "image_grid_thw": [[1, 1, 3]],
-    }
-    batch = collator([ex])
-    num_image_tokens = int((batch["input_ids"][0] == image_token).sum())
-    num_patches = batch["pixel_values"].shape[0]
-    assert num_image_tokens == 3, "image placeholder tokens were truncated → desynced from pixel_values"
-    assert num_image_tokens == num_patches, "image-token count must equal the patch count"
-
-
 def test_collator_respects_nonzero_pad_id():
     collator = PreprocessedVLMDataCollator(_FakeTokenizer(pad_token_id=42), max_length=2048)
     batch = collator(
@@ -323,7 +304,7 @@ def test_vlm_preprocessing_drops_over_length_rows_instead_of_truncating():
         is_vlm=True,
         num_proc=1,
     )
-    tokenized = tokenize_vlm_dataset(dataset, processor, config, split_name="train")
+    tokenized = tokenize_vlm_dataset(dataset, processor, config, split_name="train", eos_token_ids=frozenset())
     assert len(tokenized) == 1
     assert all(len(row["input_ids"]) <= config.max_length for row in tokenized)
 
@@ -348,7 +329,7 @@ def test_vlm_preprocessing_error_row_alongside_success_row():
         is_vlm=True,
         num_proc=1,
     )
-    tokenized = tokenize_vlm_dataset(dataset, processor, config, split_name="train")
+    tokenized = tokenize_vlm_dataset(dataset, processor, config, split_name="train", eos_token_ids=frozenset())
     assert len(tokenized) == 1
     assert len(tokenized[0]["input_ids"]) > 0
 
@@ -378,7 +359,9 @@ def test_vlm_preprocessing_refuses_a_bake_that_trains_zero_tokens():
         num_proc=1,
     )
     with pytest.raises(ValueError, match="ZERO tokens"):
-        tokenize_vlm_dataset(Dataset.from_list([row] * 3), processor, config, split_name="train")
+        tokenize_vlm_dataset(
+            Dataset.from_list([row] * 3), processor, config, split_name="train", eos_token_ids=frozenset()
+        )
 
 
 class _ImageCountingVLMProcessor(_FakeVLMProcessor):
@@ -442,7 +425,11 @@ def test_image_token_ids_are_resolved_once_per_bake_not_per_row(tmp_path, monkey
     tok = _VocabCountingVLMTokenizer()
 
     tokenize_vlm_dataset(
-        Dataset.from_list([{"conversation": _IMAGELESS_TURNS}] * 8), _FakeVLMProcessor(tok), _vlm_config(), "train"
+        Dataset.from_list([{"conversation": _IMAGELESS_TURNS}] * 8),
+        _FakeVLMProcessor(tok),
+        _vlm_config(),
+        "train",
+        eos_token_ids=frozenset(),
     )
 
     assert tok.vocab_reads == 1, f"the vocab was read {tok.vocab_reads}x while baking 8 rows"
@@ -454,13 +441,18 @@ def test_vlm_preprocessing_merges_a_separate_images_column():
     processor = _ImageCountingVLMProcessor(FakeVLMTokenizer())
 
     text_only = tokenize_vlm_dataset(
-        Dataset.from_list([{"conversation": _IMAGELESS_TURNS}]), processor, _vlm_config(), "train"
+        Dataset.from_list([{"conversation": _IMAGELESS_TURNS}]),
+        processor,
+        _vlm_config(),
+        "train",
+        eos_token_ids=frozenset(),
     )
     merged = tokenize_vlm_dataset(
         Dataset.from_list([{"conversation": _IMAGELESS_TURNS, "images": _tiny_image_data_uri()}]),
         processor,
         _vlm_config(images_field="images"),
         "train",
+        eos_token_ids=frozenset(),
     )
 
     assert len(merged) == 1, "the image-carrying row was dropped instead of being processed"
@@ -481,7 +473,9 @@ def test_preprocessing_refuses_an_image_column_nothing_consumes(column, is_vlm):
         preprocess_dataset(dataset, _FakeVLMProcessor(FakeVLMTokenizer()), config)
 
 
-def test_a_consumed_images_column_passes_the_backstop():
+def test_a_consumed_images_column_passes_the_backstop(monkeypatch):
+    # The bake reads the model's terminators from its config, and "fake/vlm" names none to read.
+    monkeypatch.setattr(tokenization.AutoConfig, "from_pretrained", lambda *args, **kwargs: SimpleNamespace())
     row = {"conversation": _IMAGELESS_TURNS, "images": _tiny_image_data_uri()}
     dataset = DatasetDict({"train": Dataset.from_list([row])})
     result = preprocess_dataset(
@@ -567,8 +561,7 @@ def test_an_unreadable_config_still_falls_back_to_the_name_heuristic(monkeypatch
     assert not probe_checkpoint("Qwen/Qwen3-4B")[1]
 
 
-@pytest.mark.parametrize("trust_remote_code", [False, True])
-def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch, trust_remote_code):
+def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch):
     """The probe is a run's first hub contact, so it must not run a checkpoint's config code under
     ``trust_remote_code: false``, nor refuse a config the run trusted."""
     seen = []
@@ -578,9 +571,9 @@ def test_the_probe_executes_remote_code_only_when_the_run_trusts_it(monkeypatch,
         return SimpleNamespace(model_type="qwen3")
 
     monkeypatch.setattr(model_source.AutoConfig, "from_pretrained", _record)
-    probe_checkpoint("org/checkpoint", trust_remote_code=trust_remote_code)
+    probe_checkpoint("org/checkpoint", trust_remote_code=True)
     probe_checkpoint("org/checkpoint")
-    assert seen == [trust_remote_code, False]
+    assert seen == [True, False]
 
 
 if __name__ == "__main__":

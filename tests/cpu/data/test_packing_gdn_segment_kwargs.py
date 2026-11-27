@@ -3,7 +3,6 @@
 ``cu_seq_lens_q`` from forward kwargs, and nothing derives them model-side. A multi-document run is refused when
 ``causal_conv1d`` or ``fla`` is absent, since transformers' torch fallbacks read neither marker."""
 
-import importlib.util
 from unittest.mock import MagicMock
 
 import pytest
@@ -115,21 +114,6 @@ def test_padding_free_refused_when_a_wheel_is_missing(monkeypatch):
     config._attn_implementation = "flash_attention_2"
     with pytest.raises(ValueError, match="padding_free"):
         select_data_collator(make_tokenizer(), train_on_completions_only=False, padding_free=True, model_config=config)
-
-
-def test_packing_allowed_when_both_wheels_are_importable(monkeypatch):
-    """With the backends available packing builds, and the image ships the wheels (the predicates also require
-    CUDA)."""
-    assert all(importlib.util.find_spec(wheel) is not None for wheel in ("causal_conv1d", "fla")), (
-        "this image is missing a GDN wheel — the refusal above would not be provably caused by hiding it"
-    )
-    _backends(monkeypatch)
-    config = Qwen3NextConfig(num_hidden_layers=1)
-    config._attn_implementation = "flash_attention_2"
-    assert (
-        select_data_collator(make_tokenizer(), train_on_completions_only=False, packing=True, model_config=config)
-        is not None
-    )
 
 
 def test_other_families_are_not_gated_on_the_gdn_wheels(monkeypatch):

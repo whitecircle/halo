@@ -13,6 +13,7 @@ import pytest
 from halo.environments.episodes.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY, REWARD_COMPONENTS_KEY
 from halo.environments.episodes.reasoning_effort import bind_episode_effort
 from halo.environments.rollout_config import (
+    VALID_REASONING_EFFORTS,
     find_reasoning_end_ids,
     resolve_reasoning_end_ids,
     resolve_reasoning_end_token_id,
@@ -232,8 +233,29 @@ def test_effort_level_at_reset_contract():
     env = _make_env(reasoning_effort="medium")
     assert env.effort_level_at_reset({"reasoning_effort": "high"}) == "high"
     assert env.effort_level_at_reset(None) == "medium"
-    assert env.effort_level_at_reset({"reasoning_effort": "random"}) is None
     assert _make_env(reasoning_effort="random").effort_level_at_reset(None) is None
+
+
+@pytest.mark.parametrize("cell", ["random", "extreme", "", "High"])
+def test_a_row_cell_outside_the_levels_raises_naming_it(cell):
+    """A row's ``random`` would draw per episode across a group that shares one conditioning, and an unknown level
+    reaches the template as text: both raise at reset and at the episode's bind, naming the cell and the levels."""
+    env = _make_env(reasoning_effort="medium")
+    for read in (
+        lambda: env.effort_level_at_reset({"reasoning_effort": cell}),
+        lambda: bind_episode_effort({"reasoning_effort": cell}, env, max_tokens=1000),
+    ):
+        with pytest.raises(ValueError, match=re.escape(f"cell reads {cell!r}")) as refused:
+            read()
+        assert all(repr(level) in str(refused.value) for level in VALID_REASONING_EFFORTS)
+
+
+@pytest.mark.parametrize("cell", [*VALID_REASONING_EFFORTS, None])
+def test_a_row_cell_at_a_level_or_null_binds(cell):
+    env = _make_env(reasoning_effort="medium")
+    expected = cell or "medium"
+    assert env.effort_level_at_reset({"reasoning_effort": cell}) == expected
+    assert bind_episode_effort({"reasoning_effort": cell}, env, max_tokens=1000).level == expected
 
 
 def test_context_level_overrides_env_level():

@@ -8,8 +8,10 @@
   tensor maxima at and past a global-scale boundary, a lone maximum in the last block, fp32 maxima where
   the reciprocal multiply and true division disagree, and a maximum whose global scale is CUDA's inexact
   ``exp2(-127)``,
-- ``fake_quant`` routes CUDA / contiguous / last-axis through them and everything else to eager, and to
-  eager on GPUs too old for a kernel's types (mxfp8 and nvfp4 below SM 8.9, mxfp4 below SM 8.0),
+- ``fake_quant`` routes a real CUDA tensor through them and everything else to eager, and to eager on GPUs too
+  old for a kernel's types (mxfp8 and nvfp4 below SM 8.9, mxfp4 below SM 8.0),
+- a non-last axis or a non-contiguous tensor, such as the ``[E, K, N]`` expert bank ``expert_gemm`` quantizes on
+  axis 1 every forward under FSDP2, moves the axis last, takes the kernel once and moves back, bit-exact,
 - the cached nvfp4 expert-weight round trip on axis 1 goes through its kernel, bit-exact,
 - nvfp4's two launches never sync with the host,
 - a new token count never compiles a new kernel variant, which under EP would stall the other ranks,
@@ -24,6 +26,9 @@ import triton.language as tl
 
 import halo.kernels.lowp.fake_quant_triton as fq
 import halo.kernels.lowp.quantization as q
+from halo.hardware import supports_grouped_mm
+from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.grouped_mm import grouped_mm
 from halo.kernels.lowp.fake_quant_triton import fake_quant_triton
 from halo.kernels.lowp.quantization import (
     _AMAX_FLOOR,
@@ -287,7 +292,7 @@ def test_bit_exact_against_eager():
 
 
 def test_routing():
-    """fake_quant takes the fast path only for CUDA / contiguous / real / last-axis / K % block size == 0."""
+    """fake_quant takes the fast path for a real CUDA tensor whose blocked axis divides by the block size."""
     t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
     fp8 = int(_kernel_supported())  # below SM 8.9 mxfp8 and nvfp4 run eager
     expected = {"mxfp8": fp8, "mxfp4": 1, "nvfp4": fp8}
@@ -296,8 +301,6 @@ def test_routing():
             _assert_bits_equal(fake_quant(t, fmt), _block_round_trip(t, fmt, -1), f"{fmt} wired")
         assert s.calls == expected, f"fast-path calls {s.calls}, expected {expected}"
         for fmt in FUSED:
-            fake_quant(t, fmt, axis=0)  # non-last axis → eager
-            fake_quant(t.t().contiguous().t(), fmt)  # non-contiguous → eager
             fake_quant(t.cpu(), fmt)  # CPU → eager
             c = t.to(torch.complex64)  # complex → eager, which keeps the real part
             assert torch.equal(fake_quant(c, fmt), _block_round_trip(c, fmt, -1).to(c.dtype)), f"{fmt}: complex"
@@ -319,6 +322,54 @@ def test_routing():
     print("  routing and fallbacks — OK")
 
 
+def test_a_non_last_axis_or_layout_takes_the_kernel():
+    """An ``[E, K, N]`` bank on axis 1, as ``expert_gemm`` quantizes an FSDP2-managed ep1 weight every forward, a
+    ``[64, K]`` tensor on axis 0 and a non-contiguous last-axis view each take the kernel once, bit-exact with eager,
+    back in the input's shape and dtype and contiguous."""
+    torch.manual_seed(0)
+    t = torch.randn(64, K, device=DEV, dtype=torch.bfloat16)
+    cases = [
+        *(
+            (f"bank axis 1 {dtype}", torch.randn(4, 256, 96, device=DEV, dtype=dtype) * 0.02, 1)
+            for dtype in (torch.bfloat16, torch.float32)
+        ),
+        ("axis 0", t, 0),
+        ("non-contiguous last axis", t.t().contiguous().t(), -1),
+    ]
+    for fmt in FUSED:
+        if fmt in _FP8_FORMATS and not _kernel_supported():
+            print(f"  {fmt}: below SM 8.9 — skipped")
+            continue
+        for name, x, axis in cases:
+            with _Spy() as s:
+                out = fake_quant(x, fmt, axis=axis)
+            _assert_bits_equal(out, _block_round_trip(x, fmt, axis).to(x.dtype), f"{fmt} {name}")
+            assert s.calls[fmt] == 1, f"{fmt} {name}: {s.calls[fmt]} kernel calls, expected 1"
+            assert out.shape == x.shape and out.dtype == x.dtype and out.is_contiguous(), f"{fmt} {name}: layout"
+    print("  a non-last axis and a non-contiguous layout through the kernel — OK")
+
+
+def test_uncached_expert_gemm_takes_the_kernel():
+    """``expert_gemm(..., weight_cacheable=False)``, the FSDP2-managed ep1 call, quantizes the activations and the
+    axis-1 weight bank through the kernel, and its output is the grouped GEMM of the eager round trips, bit for bit."""
+    if not supports_grouped_mm():
+        print("  expert_gemm: below SM 9.0, no grouped GEMM — skipped")
+        return
+    torch.manual_seed(1)
+    x = torch.randn(96, 256, device=DEV, dtype=torch.bfloat16)
+    w = torch.randn(4, 256, 128, device=DEV, dtype=torch.bfloat16) * 0.02
+    offs = torch.tensor([16, 48, 48, 96], device=DEV, dtype=torch.int32)
+    for fmt in FUSED:
+        with _Spy() as s:
+            out = expert_gemm(x, w, offs=offs, quant_format=fmt, weight_cacheable=False)
+        ref = grouped_mm(
+            _block_round_trip(x, fmt, -1).to(x.dtype), _block_round_trip(w, fmt, 1).to(w.dtype), offs=offs
+        )
+        _assert_bits_equal(out, ref, f"{fmt} expert_gemm")
+        assert s.calls[fmt] == 2, f"{fmt} expert_gemm: {s.calls[fmt]} kernel calls, expected 2 (activations, weight)"
+    print("  uncached expert_gemm through the kernel — OK")
+
+
 def test_pre_sm89_falls_back():
     """A GPU below SM 8.9 cannot compile Triton's fp8 type, so mxfp8 and nvfp4 run eager there. mxfp4 uses no fp8
     type and keeps its kernel down to SM 8.0, the oldest with a bf16 conversion. The capability is faked, so this
@@ -337,8 +388,13 @@ def test_pre_sm89_falls_back():
                     assert s.calls[fmt] == 0, f"{sm} took the fp8 Triton path for {fmt}"
                 _assert_bits_equal(_round_trip(w, "nvfp4", 1), _block_round_trip(w, "nvfp4", 1), f"{sm} nvfp4 weight")
                 assert s.calls["nvfp4"] == 0, f"{sm} took the nvfp4 kernel for a weight"
+                for fmt in _FP8_FORMATS:
+                    ref = _block_round_trip(w, fmt, 1).to(w.dtype)
+                    _assert_bits_equal(fake_quant(w, fmt, axis=1), ref, f"{sm} {fmt} weight on axis 1")
+                    assert s.calls[fmt] == 0, f"{sm} took the {fmt} kernel for a weight on axis 1"
                 _assert_bits_equal(fake_quant(t, "mxfp4"), _block_round_trip(t, "mxfp4", -1), f"{sm} mxfp4")
-                assert s.calls["mxfp4"] == mxfp4_calls, f"{sm}: {s.calls['mxfp4']} mxfp4 kernel calls"
+                fake_quant(w, "mxfp4", axis=1)
+                assert s.calls["mxfp4"] == 2 * mxfp4_calls, f"{sm}: {s.calls['mxfp4']} mxfp4 kernel calls"
     finally:
         torch.cuda.get_device_capability = orig
         q._device_capability.cache_clear()
@@ -444,6 +500,8 @@ def run(ctx) -> dict:
     record_check(checks, "bit_exact_against_eager", test_bit_exact_against_eager)
     record_check(checks, "nvfp4_global_scale_sweep", test_nvfp4_global_scale_matches_eager_on_every_fp32_amax)
     record_check(checks, "routing", test_routing)
+    record_check(checks, "non_last_axis_takes_the_kernel", test_a_non_last_axis_or_layout_takes_the_kernel)
+    record_check(checks, "uncached_expert_gemm_takes_the_kernel", test_uncached_expert_gemm_takes_the_kernel)
     record_check(checks, "pre_sm89_falls_back", test_pre_sm89_falls_back)
     record_check(checks, "nvfp4_weight_round_trip", test_nvfp4_weight_round_trip_through_the_kernel)
     record_check(checks, "nvfp4_launches_do_not_sync", test_nvfp4_launches_do_not_sync)

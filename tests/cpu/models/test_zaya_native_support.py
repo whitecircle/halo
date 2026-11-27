@@ -148,11 +148,13 @@ def test_discarded_tokens_count_toward_the_discard_slot():
     assert counter[:-1].sum().item() == 0.0, "discarded tokens leaked into real experts' loads"
 
 
-def test_gradient_checkpointing_is_refused():
+@pytest.mark.parametrize("enable", ["activation_checkpointing_enable", "gradient_checkpointing_enable"])
+def test_gradient_checkpointing_is_refused(enable):
+    """Both spellings: transformers' Trainer calls the first, TRL the deprecated second."""
     patch_zaya_gradient_checkpointing_refusal()
     model = _tiny_model()
-    with pytest.raises(ValueError, match="gradient checkpointing"):
-        model.gradient_checkpointing_enable()
+    with pytest.raises(ValueError, match="does not support activation checkpointing"):
+        getattr(model, enable)()
 
 
 def test_flash_interface_receives_position_ids_only_with_the_patch(upstream_zaya):

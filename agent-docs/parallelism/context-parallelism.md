@@ -2,9 +2,9 @@
 
 CP splits long sequences across GPUs using Ulysses sequence parallelism with all-to-all
 communication in attention layers. Use it when a sequence is too long to fit in single-GPU
-activation memory. CP runs standalone or combined with EP (MoE models). Why sequence length, not
-parameter count, drives that memory:
-[GPU Training Theory §8](../reference/gpu-training-theory.md#activations-the-memory-sharding-doesnt-touch).
+activation memory. CP runs standalone or combined with EP (MoE models). Why activation memory grows
+with the tokens a GPU holds and does not shrink when the parameters are split:
+[GPU Training Theory → Activations](../reference/gpu-training-theory.md#activations).
 
 `data_parallel_size = world_size / cp_size`; gradient sync always spans all `world_size` ranks.
 CP is **not compatible with TP** — both partition the same contiguous rank blocks, and TP has
@@ -18,7 +18,7 @@ and V swaps that to the full `S` tokens but `H/cp_size` heads for the attention 
 swaps the output back. The backward runs the same two in reverse.
 Multi-head attention is independent across heads, which is what makes this exact.
 
-Packing Q, K and V into one exchange takes two collectives per layer each way where one per tensor takes three. On
+Packing Q, K and V into one exchange takes two collectives per layer each way where one per tensor takes four. On
 8× B300 (1.2.0, three rounds) that runs Qwen3-8B CP2 at s4096 4.4% and gpt-oss-20b ep8 × cp2 3.7% faster, and leaves
 long sequences flat (cp4 at s16384 −0.4%, ep8 × cp8 at s32768 −0.1%).
 
@@ -51,7 +51,7 @@ CP computes loss per chunk with two corrections:
 2. **Globally-normalized sum loss** — completion-only training distributes tokens unevenly across
    chunks, so per-rank `reduction='mean'` biases gradients. Each rank computes
    `loss_i = cp_size * local_sum / global_tokens` with `global_tokens` the all-reduced non-masked
-   token count. After FSDP2's `1/cp_size` gradient averaging every token contributes equally. The
+   token count. FSDP2's gradient average over the CP ranks cancels the `cp_size` factor, so every token of a CP group's rows weighs the same. The
    fp32 `local_sum` runs over checkpointed chunks of the rank's logits (`chunked_token_sum`, as the
    pipeline's last stage scores them), so no fp32 copy of the chunk's logits plane is built.
 
@@ -92,7 +92,7 @@ entropy, as FLCE does without CP. On GLM-4.7-Flash at ep8 × cp4 and 65,536 toke
 46.99 GiB (−11.8%), step-1 loss within 7e-8 relative.
 
 Eval forwards keep the logits loss. A training forward without labels returns the full logits, with one warning:
-only a labelled forward (SFT) runs the fused loss, and SMPO scores its pairs from those logits. A forward that cannot
+only a labeled forward (SFT) runs the fused loss, and SMPO scores its pairs from those logits. A forward that cannot
 take the fused path keeps the logits loss, with one warning:
 no `logits_to_keep` parameter (Bailing's remote code), a PEFT tuner or a non-`nn.Linear` module on the output
 embedding, a head path the transform probe cannot verify, or a logit scale over a biased head. The model's own head
@@ -160,12 +160,11 @@ Offline GRPO's CP collator right-pads each joined prompt+completion row
 
 ### Supported model architectures
 
-Source of truth: `ULYSSES_ATTENTION_MAP` in `halo/distributed/context_parallel/families.py`, built
-by walking the `UlyssesAttention` subclass tree and reading each wrapper's `HF_MODULE_NAMES` (a
-duplicate HF name raises). The validator and the patcher both read that map — there is no separate
-accept list to keep in sync.
+The validator and patcher share two class-claim maps: `ULYSSES_ATTENTION_MAP` for
+`UlyssesAttention` subclasses and `ULYSSES_GATED_DELTA_MAP` for `UlyssesSequenceLayerBase`
+subclasses. Both read `HF_MODULE_NAMES` from registered wrappers; duplicate HF names raise.
 
-| Attention class | Wrapper | Family specifics | Page |
+| Layer class | Wrapper | Family specifics | Page |
 |---|---|---|---|
 | `GptOssAttention` | `GptOssUlyssesAttention` | split-halves RoPE; sinks must be reset | [gpt-oss.md](../models/gpt-oss.md) |
 | `Qwen3MoeAttention` (Qwen3 MoE) | `Qwen3MoeUlyssesAttention` | Q/K RMSNorm | [qwen3.md](../models/qwen3.md#qwen3-moe) |
@@ -174,13 +173,23 @@ accept list to keep in sync.
 | `Glm4MoeLiteAttention` | `Glm4MoeLiteUlyssesAttention` | DeepSeek-V3 MLA: separate qk/v head dims | [glm4.md](../models/glm4.md) |
 | `Mistral4Attention` | `Mistral4UlyssesAttention` | MLA: separate qk/v head dims, llama-4 scaling | [mistral4.md](../models/mistral4.md) |
 | `Qwen3_5MoeAttention` / `Qwen3_5Attention` | `Qwen3_5MoeUlyssesAttention` | post-attention sigmoid gate + partial RoPE | [qwen3_5.md](../models/qwen3_5.md#cp-wrapper) |
+| `Qwen3_5GatedDeltaNet` (dense sequence layer) | `Qwen3_5UlyssesGatedDelta` | full-row head redistribution before convolution and recurrence; CP2 only | [qwen3_5.md](../models/qwen3_5.md#cp-wrapper) |
 | `BailingMoeV2Attention` / `…FlashAttention2` / `…SdpaAttention` (Ling 2.0) | `BailingMoeV2UlyssesAttention` | fused `query_key_value`, `dense` output projection, Q/K norm before partial RoPE | [bailing.md](../models/bailing.md#cp-wrapper) |
 | `Cohere2MoeAttention` | `Cohere2MoeUlyssesAttention` | interleaved fp32 rotary on sliding layers only; full-attention layers are NoPE | [cohere2-moe.md](../models/cohere2-moe.md) |
 
 Every other attention class raises `CPConfigError`, and a model carrying state along the sequence
-axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name even
-where its attention is wrapped — Qwen3.5/3.6 on every released checkpoint. Per family, with the reason
+axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name unless
+its sequence layer has a CP implementation. Per family, with the reason
 on its page: [Compatibility matrix](../models/README.md#compatibility-matrix).
+
+### Dense hybrid SFT
+
+Dense Qwen3.5/3.6 text towers run unpacked, full-fine-tuning SFT at CP2. For a released
+multimodal checkpoint, set `text_only_model: true` to load its text tower. Both linear-attention
+key and value head counts must be divisible by CP2, and value heads must be a multiple of key heads.
+Use right-padded rows; the path does not pass a padding mask into each linear-attention layer.
+MoE, adapters, quantized weights, packed rows, multimodal models, cache use and other trainers
+remain refused for this hybrid path.
 
 ## CP with EP
 
@@ -193,7 +202,8 @@ block — different points in the forward pass, no conflict.
 
 CP always requires gradient sync when `world_size > 1`, even at DP=1 — each rank holds partial
 gradients from its chunk. `DistributedTrainerMixin` applies FSDP2 across all ranks; for EP+CP the
-same wrapper runs with EP params in `ignored_params`.
+same wrapper runs with EP params in `ignored_params`, and across several NVLink domains it shards over
+the EP group with the cross-replica average deferred ([Topology rules](README.md#topology-rules)).
 
 EP+CP needs node-local EP filling the NVLink domain: on 8 GPUs ep8/cp2 → DP4, ep8/cp4 → DP2,
 ep8/cp8 → DP1 ([Topology rules](README.md#topology-rules)).
@@ -271,8 +281,8 @@ inspects a trainer's loss for CP-safety, so a new trainer must verify its own ob
 declaring the flag.
 
 **Models.** Only the wrappers in the [table above](#supported-model-architectures); anything else
-raises `CPConfigError`. Linear-attention, sequence-axis convolution and window-pooling blocks
-are rejected by class name even when the surrounding attention is wrapped.
+raises `CPConfigError`. Unregistered linear-attention, sequence-axis convolution and window-pooling
+blocks are rejected even when the surrounding attention is wrapped.
 
 **Generation.** `UlyssesModel.generate()` raises: each rank holds one sequence chunk and the
 Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP.
@@ -297,8 +307,8 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 | `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `reject_custom_parallelism_under_accelerate` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`; [rule](../optimization/flash-attention.md#usage)) | `DistributedTrainerMixin._apply_training_args_overrides` |
 | `use_liger_kernel` | supported; the model's own `cross_entropy` and `fused_linear_cross_entropy` patches are off (an explicit `cross_entropy` is warned), and a resolved `fused_linear_cross_entropy` runs in the CP wrapper ([fused head loss](#fused-head-loss)) | `halo/model_loading/liger/dispatch.py`, `context_parallel/ulysses_model.py` |
-| `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `reject_offline_cp_options` (offline GRPO) |
-| QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/load_rules.py`, `reject_offline_cp_options` |
+| `use_peft` / LoRA | supported for SFT and SMPO with attention-only CP — attention stays unsharded, so adapters stay replicated. Dense Qwen3.5/3.6 hybrid CP2 SFT and offline GRPO under CP reject adapters | `reject_hybrid_cp_training`, `reject_offline_cp_options` |
+| QLoRA (`load_in_4bit`) | supported for SFT and SMPO with attention-only CP on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. Dense Qwen3.5/3.6 hybrid CP2 SFT rejects quantized weights and adapters. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `reject_hybrid_cp_training`, `model_loading/parallel/load_rules.py`, `reject_offline_cp_options` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_reject_hsdp`, `_reject_fsdp_settings` |
 | `torch_compile` | not gated; the exchange traces without a graph break, throughput effect not measured | — |
 | `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `reject_unmergeable_ep_sharded_save` |

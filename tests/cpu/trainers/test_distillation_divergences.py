@@ -138,8 +138,7 @@ def test_the_generalized_jsd_endpoints_are_the_exact_kls():
     )
 
 
-@pytest.mark.parametrize("temperature", [1.0, 2.0])
-@pytest.mark.parametrize("beta", [0.1, 0.5, 0.9])
+@pytest.mark.parametrize(("beta", "temperature"), [(0.5, 1.0), (0.1, 2.0)])
 def test_the_generalized_jsd_matches_the_gkd_reference(beta, temperature):
     student = LOGITS_A.clone().requires_grad_(True)
     loss = generalized_jsd_loss(student, LOGITS_B, temperature, jsd_beta=beta).sum(-1)

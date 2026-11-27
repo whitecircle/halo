@@ -1,8 +1,9 @@
-"""SFT script arguments, the conversation-rendering fields both distillation scripts share, tree packing and MTP head
-training."""
+"""SFT script arguments, the conversation-rendering fields both distillation scripts share, tree packing, MTP head
+training and datatrove token sources."""
 
-from dataclasses import dataclass, field, fields
-from typing import ClassVar, get_args
+from collections.abc import Mapping
+from dataclasses import MISSING, dataclass, field, fields
+from typing import Any, ClassVar, get_args
 
 from halo.config_validation import (
     ValidatedConfig,
@@ -18,6 +19,8 @@ from halo.configs.script_arguments import (
     GenerationEvalArguments,
     VisionTrainingArguments,
 )
+from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
+from halo.data.sources.token_mix import TokenSource
 from halo.models.attention.tree_plan import FullAttentionForm
 from halo.models.mtp.spec import MtpHeadRequest, MtpLossType, MtpObjective, MtpScope
 
@@ -204,9 +207,116 @@ class MtpArguments(ValidatedConfig):
 # What a run with no head must find at its default: set there, these options do nothing.
 MTP_FIELDS = tuple(f.name for f in fields(MtpArguments))
 
+_TOKEN_SOURCE_KEYS = frozenset(f.name for f in fields(TokenSource))
+_TOKEN_SOURCE_REQUIRED = sorted(f.name for f in fields(TokenSource) if f.default is MISSING)
+
+
+def _token_sources(owner: str, knob: str, entries: list[dict[str, Any]] | None) -> list[TokenSource] | None:
+    """``entries`` as sources, refusing a list the mix cannot honor as written: anything but a non-empty list of
+    mappings of known keys, a blank name or path, a repeated name, a weight that is not a positive finite number, or a
+    weight on some sources only."""
+    if entries is None:
+        return None
+    if not isinstance(entries, list) or not entries:
+        raise ValueError(
+            f"{owner}: {knob} must be a non-empty list of mappings with 'name' and 'path', got {entries!r}"
+        )
+    sources = []
+    for index, entry in enumerate(entries):
+        where = f"{knob}[{index}]"
+        if not isinstance(entry, Mapping):
+            raise ValueError(f"{owner}: {where} must be a mapping with 'name' and 'path', got {entry!r}")
+        unknown = sorted(map(str, set(entry) - _TOKEN_SOURCE_KEYS))
+        if unknown:
+            raise ValueError(f"{owner}: {where} has unknown keys {unknown}; allowed: {sorted(_TOKEN_SOURCE_KEYS)}")
+        missing = [key for key in _TOKEN_SOURCE_REQUIRED if key not in entry]
+        if missing:
+            raise ValueError(f"{owner}: {where} lacks {missing}; every source needs {_TOKEN_SOURCE_REQUIRED}.")
+        source = TokenSource(**entry)
+        require_text(owner, **{f"{where}.name": source.name, f"{where}.path": source.path})
+        require_finite(owner, gt=0, **present(**{f"{where}.weight": source.weight}))
+        sources.append(source)
+    names = [source.name for source in sources]
+    repeated = sorted({name for name in names if names.count(name) > 1})
+    if repeated:
+        raise ValueError(
+            f"{owner}: {knob} repeats the names {repeated}; a name keys its source in the checkpoint's mix."
+        )
+    weighted = [source.name for source in sources if source.weight is not None]
+    if weighted and len(weighted) != len(sources):
+        raise ValueError(
+            f"{owner}: {knob} weighs {weighted} and leaves the others unweighted, so their shares are undefined. Weigh "
+            f"every source, or none for each source's share of the windows."
+        )
+    return sources
+
+
+@dataclass
+class TokenSourceArguments(ValidatedConfig):
+    """datatrove DocumentTokenizer folders trained as a weighted mix (``agent-docs/training-methods/pretraining.md``)."""
+
+    token_sources: list[dict[str, Any]] | None = field(
+        default=None,
+        metadata={
+            "help": "Train on datatrove DocumentTokenizer output folders instead of dataset: each a mapping with "
+            "'name', 'path' (local or s3://) and an optional relative 'weight' (on every source or none), mixed into "
+            "windows of max_length tokens. "
+            "See agent-docs/training-methods/pretraining.md#training-from-datatrove-token-folders."
+        },
+    )
+    eval_token_sources: list[dict[str, Any]] | None = field(
+        default=None,
+        metadata={
+            "help": "Held-out datatrove folders of a token_sources run, each a mapping with 'name' and 'path', read "
+            "whole at every evaluation and reported as eval_<name>_loss."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        # Parsing the lists refuses a malformed one.
+        mixed, held_out = self.token_source_specs, self.eval_token_source_specs
+        if held_out is None:
+            return
+        if mixed is None:
+            raise ValueError(
+                f"{owner}: eval_token_sources holds out folders of a token_sources run; set token_sources."
+            )
+        weighted = [source.name for source in held_out if source.weight is not None]
+        if weighted:
+            raise ValueError(
+                f"{owner}: eval_token_sources {weighted} carry a weight, but a held-out folder is read whole at every "
+                f"evaluation, unweighted. Remove the weights."
+            )
+
+    @property
+    def token_source_specs(self) -> list[TokenSource] | None:
+        return _token_sources(type(self).__name__, "token_sources", self.token_sources)
+
+    @property
+    def eval_token_source_specs(self) -> list[TokenSource] | None:
+        return _token_sources(type(self).__name__, "eval_token_sources", self.eval_token_sources)
+
+
+# What a token_sources run must find at its default: its rows are token windows, so no dataset loads and no
+# conversation renders. train_on_completions_only is refused on its own, since its default is on.
+_TOKEN_RUN_INERT_FIELDS = (
+    "dataset",
+    "dataset_ratio",
+    "test_size",
+    "train_on_last_assistant_only",
+    "generate_eval_examples",
+    *TEMPLATE_COLUMN_KNOBS,
+    *(f.name for f in fields(ConversationRenderArguments) if f.name != "train_on_completions_only"),
+    *(f.name for f in fields(VisionTrainingArguments)),
+    *TREE_PACKING_FIELDS,
+)
+
 
 @dataclass
 class SFTScriptArguments(
+    TokenSourceArguments,
     MtpArguments,
     _TreePackingArguments,
     CrossDocumentLinearAttentionArguments,
@@ -226,3 +336,18 @@ class SFTScriptArguments(
             "Requires train_on_completions_only=True."
         },
     )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        if self.token_sources is None:
+            return
+        if self.train_on_completions_only:
+            raise ValueError(
+                f"{type(self).__name__}: token_sources rows carry no completion marks, so every token trains. Set "
+                f"train_on_completions_only: false."
+            )
+        reject_non_default_args(
+            "Halo SFT on token_sources (its rows are token windows: no dataset loads and no conversation renders)",
+            self,
+            *_TOKEN_RUN_INERT_FIELDS,
+        )

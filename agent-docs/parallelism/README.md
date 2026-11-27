@@ -1,26 +1,27 @@
 # Parallelism
 
-On top of data parallelism, four strategies address different bottlenecks: model size (TP), sequence
-length (CP), expert distribution (EP), or depth across NVLink domains (PP). They combine within the
-supported set below. Each mode is a communication pattern with a price:
-[GPU Training Theory §9](../reference/gpu-training-theory.md#9-distributed-training-the-communication-wall).
+On top of data parallelism, five strategies address different bottlenecks: TP for model size, CP for
+sequence length, EP for expert distribution, ETP for expert FFN width and PP for depth across NVLink
+domains. They combine within the supported set below. Each mode frees one kind of memory and adds one kind of collective:
+[GPU Training Theory → Many GPUs](../reference/gpu-training-theory.md#many-gpus).
 
-Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GPU skip it);
+Multi-GPU DP modes run on FSDP2 for gradient sync, which pure TP at DP=1 and a single GPU skip;
 `DistributedTrainerMixin` selects the sharding strategy from the active mode. See the
 [Data Parallelism Guide](data-parallelism.md) for launchers and Accelerate configs.
 
 ## Parallelism modes
 
-- **Expert parallelism (EP)** — distributes MoE expert layers across GPUs via DeepEP all-to-all, or Mixture-of-Kittens' fused kernels under `moe_backend: mok` ([backend](expert-parallelism.md#mixture-of-kittens-backend)); the router stays replicated on every rank. Each GPU holds a subset of experts and routes tokens to the owning GPU. For MoE models; see [Expert Parallelism Guide](expert-parallelism.md).
-- **Tensor parallelism (TP)** — shards dense attention and MLP weights across GPUs via DTensor with all-reduce. For large dense models (Llama 70B+, Mistral Large) that exceed single-GPU memory: plain FSDP2 and DDP load the whole model onto every GPU first ([why](data-parallelism.md#fsdp2-strategy-by-mode)), and TP's HF `tp_plan` load, which shards as it reads, is the route past that inside one NVLink domain (PP's stage loader is the one across domains); see [Tensor Parallelism Guide](tensor-parallelism.md).
-- **Context parallelism (CP)** — splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training (32K+ tokens); see [Context Parallelism Guide](context-parallelism.md).
-- **Pipeline parallelism (PP)** — splits decoder layers into stages, one contiguous rank block each, and is the only axis meant to cross NVLink domains. Off by default ([why](#when-pipeline-parallelism-is-worth-it)). See [Pipeline Parallelism](pipeline-parallelism.md).
+- **Expert parallelism (EP)** distributes MoE expert layers across GPUs via DeepEP all-to-all, or Mixture-of-Kittens' fused kernels under `moe_backend: mok` ([backend](expert-parallelism.md#mixture-of-kittens-backend)), and the router stays replicated on every rank. Each GPU holds a subset of experts and routes tokens to the owning GPU. For MoE models; see [Expert Parallelism Guide](expert-parallelism.md).
+- **Expert tensor parallelism (ETP)**, experimental, shards each expert's FFN weights `expert_tp_size`-way. Pure ETP replicates the experts; EP+ETP also distributes them under EP. For MoE models; see [Expert Tensor Parallelism](expert-tensor-parallelism.md).
+- **Tensor parallelism (TP)** shards dense attention and MLP weights across GPUs via DTensor with all-reduce. It is for large dense models such as Llama 70B+ and Mistral Large that exceed single-GPU memory. Plain FSDP2 and DDP load the whole model onto every GPU first ([why](data-parallelism.md#fsdp2-strategy-by-mode)), while TP's HF `tp_plan` load shards as it reads, so TP is the route past that limit inside one NVLink domain and PP's stage loader the route across domains. See [Tensor Parallelism Guide](tensor-parallelism.md).
+- **Context parallelism (CP)** splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training at 32K+ tokens; see [Context Parallelism Guide](context-parallelism.md).
+- **Pipeline parallelism (PP)** splits decoder layers into stages, one contiguous rank block each, and is the only axis meant to cross NVLink domains. Off by default ([why](#when-pipeline-parallelism-is-worth-it)). See [Pipeline Parallelism](pipeline-parallelism.md).
 
 Which MoE families each axis wraps: [Supported Models → Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Supported combinations
 
-All modes use FSDP2 (`fully_shard`, per [unit of decoder layers](data-parallelism.md#shard-groups)). EP expert modules sit in `ignored_params`; their routers sync via EP backward hooks, and their experts (with one EP group) or everything (with more) via the deferred post-backward sweep, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
+Every mode that leaves a DP dimension to shard over uses FSDP2 (`fully_shard`, per [unit of decoder layers](data-parallelism.md#shard-groups)). EP expert modules sit in `ignored_params`. Their routers sync through EP backward hooks and their experts through the deferred post-backward sweep, which with more than one EP group takes the routers too. At `ep_group_size == 1`, `fsdp_shard_ep1_experts` (default on) has FSDP2 shard the experts instead. CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
 
 | Mode | Data Parallel Size | Notes |
 |------|-------------------|-------|
@@ -43,10 +44,10 @@ math, so a combination nobody considered is refused rather than run unvalidated.
 adding the equivalence gate that proves its gradients against an unsplit reference. Rejections quote
 the flags you typed and the mechanism from `AXIS_SET_MECHANISMS` that would break, for example:
 
-- **TP+CP** — TP shards attention over a DTensor `(dp, tp)` mesh while CP's Ulysses groups partition the same ranks a second, incompatible way.
-- **TP+ETP**, with or without EP — attention TP and expert TP would shard the same ranks along two different axes. Use EP+TP or pure ETP.
-- **ETP+CP** — expert-TP partners hold shards of one expert and must see the **same** tokens (`SumAcrossGroup` sums their outputs element-wise in token space), but CP hands each rank a different sequence chunk, so that sum would add unrelated tokens.
-- **PP with anything but EP or pure ETP** — the full PP refusal list: [Pipeline Parallelism → Rejected combinations](pipeline-parallelism.md#rejected-combinations).
+- **TP+CP.** TP shards attention over a DTensor `(dp, tp)` mesh while CP's Ulysses groups partition the same ranks a second, incompatible way.
+- **TP+ETP.** With or without EP, attention TP and expert TP would shard the same ranks along two different axes. Use EP+TP or pure ETP.
+- **ETP+CP.** Expert-TP partners hold shards of one expert and must see the same tokens (`SumAcrossGroup` sums their outputs element-wise in token space), but CP hands each rank a different sequence chunk, so that sum would add unrelated tokens.
+- **Other PP sets.** PP pairs only with EP or pure ETP; the full PP refusal list is in [Pipeline Parallelism → Rejected combinations](pipeline-parallelism.md#rejected-combinations).
 
 ### Topology rules
 
@@ -63,7 +64,7 @@ Inside an allowed set, `reject_invalid_composition` checks the layout against th
   [mechanism and evidence](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
 - **EP+TP.** `ep_size` is a multiple of `tp_size`. TP leaves `ep_group_size` at `ep_size`, so the
   single-domain rule applies unchanged: `ep2+tp2` and `ep8+tp2` on 8 pass, `ep4+tp2` is refused.
-  Across domains the EP group must be a **single global** one (`ep_size == world_size`,
+  Across domains the EP group must be a single global one (`ep_size == world_size`,
   `ep_scope: global`): multi-group EP there defers its replica average by sharding over the EP group,
   while EP+TP shards over the `(dp, tp)` mesh (`_reject_tp`).
 - **EP+CP.** Node-local EP with `ep_group_size == nvlink_domain_size`; global-scope EP is refused
@@ -87,8 +88,8 @@ Inside an allowed set, `reject_invalid_composition` checks the layout against th
 
 Two ways to group ranks, used where each fits:
 
-- **`DeviceMesh` (DTensor)** for the data-parallel and tensor axes, where sharding is *static* and the
-  collective follows from the tensor layout: `fully_shard` reduce-scatters FSDP params, and TP's
+- **`DeviceMesh` (DTensor)** for the data-parallel and tensor axes, where sharding is static and the
+  collective follows from the tensor layout: `fully_shard` reduce-scatters FSDP parameters, and TP's
   linears sum their activations over the `tp` group.
 
     The meshes are built in one place, `halo/distributed/mesh.py`: a 1D `(dp,)` mesh, a 2D HSDP
@@ -97,9 +98,9 @@ Two ways to group ranks, used where each fits:
     (`tp_group`, `tp_local_rank`, `dp_group`).
 
 - **Hand-built process groups** (`build_groups` in `halo/runtime/collectives.py`) for EP, CP and PP, whose
-  communication DTensor cannot express: EP routing is *data-dependent* (the router picks each token's experts
-  at runtime), EP and CP run *custom all-to-all kernels* (DeepEP dispatch/combine, Ulysses sequence↔head swap)
-  rather than a layout-inferred redistribution, and PP sends point-to-point along a pipeline chain
+  communication DTensor cannot express: EP routing is data-dependent (the router picks each token's experts
+  at runtime), EP and CP run custom all-to-all kernels (DeepEP dispatch/combine, the Ulysses swap of sequence and
+  heads) rather than a layout-inferred redistribution, and PP sends point-to-point along a pipeline chain
   (`halo/distributed/pipeline_parallel/groups.py`). On an NCCL default group bound to its device (the
   `init_distributed` launch) every group of one kind comes from one `split_group`, a single communicator split;
   a `dist.new_group` per group would split the world communicator once per group, each split blocking every
@@ -117,7 +118,7 @@ What crosses the wire:
 | Mode | Collective | Over |
 |---|---|---|
 | FSDP2 | all-gather params (forward), reduce-scatter grads (backward) | `(dp,)` mesh |
-| HSDP | all-gather/reduce-scatter within a domain, one all-reduce across replicas per backward | `(dp_replicate, dp_shard)` mesh |
+| HSDP | all-gather/reduce-scatter within a domain, then an all-reduce of each rank's gradient shard across replicas, once per shard group per backward | `(dp_replicate, dp_shard)` mesh |
 | TP | all-reduce / all-gather per layer | `(tp,)` axis |
 | CP | Ulysses all-to-all (sequence ↔ heads) around attention | CP group |
 | EP | DeepEP all-to-all dispatch → local expert GEMM → all-to-all combine | EP dispatch group |
@@ -125,30 +126,31 @@ What crosses the wire:
 | PP | boundary activation forward, its gradient back, point to point | pipeline chain (one rank per stage) |
 
 Backward mirrors the table: every activation all-to-all / all-reduce has an autograd transpose. By
-default FSDP2 reduce-scatters after every accumulation micro-step's backward
-([`fsdp_defer_grad_sync`](data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) holds
-it to the last); the EP gradient sync runs on the last micro-step: the router hooks during its backward (once per
-recompute under reentrant checkpointing, an average that repeats harmlessly), the deferred sweep after it.
+default FSDP2 reduce-scatters after every accumulation micro-step's backward, and
+[`fsdp_defer_grad_sync`](data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) holds
+it to the last. The EP gradient sync runs on the last micro-step: the router hooks during its backward,
+once per recompute under reentrant checkpointing (an average that repeats harmlessly), and the deferred
+sweep after it.
 
 EP gradients sync outside FSDP2: the replicated router all-reduces over the world group (the stage
-under PP), and expert grads all-reduce over the expert-replica group only when a run holds more than
+under PP), and expert gradients all-reduce over the expert-replica group only when a run holds more than
 one EP group.
 `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
 a disjoint slice, sharded by `data_parallel_rank` in `halo/trainers/loop/dataloaders.py`. Ranks
-inside a TP, CP or ETP group, and the stages of one pipeline chain, see the **same** batch; they
+inside a TP, CP or ETP group, and the stages of one pipeline chain, see the same batch; they
 shard weights, the sequence or the layers, not the data.
 
 EP is orthogonal: every rank still draws its own batch, and tokens are all-to-all'd to the ranks
-owning their routed experts, then returned in place after combine. CP splits the **sequence**: each
+owning their routed experts, then returned in place after combine. CP splits the sequence: each
 rank holds `seq_len / cp_size` tokens of its batch, and the Ulysses all-to-all reconstructs full
 sequences inside attention.
 
 ### Stacking the dimensions
 
-`data_parallel_size` counts distinct batches. PP carves the world first (`stage_world_size =
-world_size / pp_size`), then TP, CP or ETP divide each stage:
+`data_parallel_size` counts distinct batches. Each pipeline stage takes `world_size / pp_size` ranks,
+and TP, CP or ETP divide each stage:
 
 ```text
 data_parallel_size = world_size / pp_size / max(tp_size, cp_size, expert_tp_size)
@@ -156,9 +158,9 @@ data_parallel_size = world_size / pp_size / max(tp_size, cp_size, expert_tp_size
 
 EP does not reduce it, and the divisor is a max, not a product: no two of TP, CP and ETP may exceed
 1 at once. FSDP2's shard group is chosen per mode: the whole stage (the world at `pp_size` 1) for
-plain DP, CP, EP and ETP (CP and ETP ranks shard parameters even though they share a batch); the
-`dp` dimension of the `(dp, tp)` mesh under TP and EP+TP; and the EP group under multi-group EP
-across NVLink domains, where the cross-replica average is deferred to the post-backward sweep.
+plain DP, CP, EP and ETP; the `dp` dimension of the `(dp, tp)` mesh under TP and EP+TP; and the EP
+group under multi-group EP across NVLink domains, where the cross-replica average is deferred to the
+post-backward sweep. CP and ETP ranks shard parameters even though they share a batch.
 
 HSDP is not a separate layer on top of FSDP2; it is how the plain-DP or CP shard group is meshed.
 The default is 1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_shard)` mesh that
@@ -167,14 +169,14 @@ shards within one NVLink domain (`dp_shard_size = nvlink_domain_size`) and repli
 ([HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
 
 Node-local EP+CP reaches cross-domain depth without HSDP: EP dispatch/combine and CP Ulysses
-all-to-all stay node-local on NVLink, FSDP shards the non-expert params within the EP group, and the
-cross-replica DP average is deferred to one post-backward sweep over RDMA per step. EP+TP and EP+ETP
-reach the same depth by sharding attention (TP) or the expert FFN (ETP) across the NVLink domain
+all-to-all stay node-local on NVLink, FSDP shards the non-expert parameters within the EP group, and the
+cross-replica DP average is deferred to one post-backward sweep over RDMA per step. EP+TP reaches the
+same depth by sharding attention across the NVLink domain, and EP+ETP by sharding the expert FFN there,
 instead of replicating the DP dimension across domains.
 
 ## torch.compile
 
-`torch.compile` does not pay on EP MoE, and PP refuses it; keep `torch_compile` off and Liger on ([torch.compile](../optimization/torch-compile.md)).
+`torch.compile` gains at most 1% on EP MoE, and PP refuses it; keep `torch_compile` off and Liger on ([torch.compile](../optimization/torch-compile.md)).
 
 ## Per-axis limitation surface
 
@@ -206,18 +208,17 @@ mode): [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Additional guides
 
-- [Data Parallelism (FSDP)](data-parallelism.md) — FSDP strategies, Accelerate configs, mixin internals
-- [Expert Tensor Parallelism](expert-tensor-parallelism.md) — shard expert FFN weights for extra memory reduction
-- [Large-Scale Scenarios](large-scale-scenarios.md) — pick a layout by NVLink-domain size; start here for any multi-node job
-- [Multi-Node Parallelism](multi-node.md) — cross-node EP/CP/TP, EP scopes, RDMA setup
-- [Multi-Node Launch Recipes](launch-recipes.md) — runnable torchrun/SLURM launches, EP checkpoint save/load
-- [Distributed Data Loading](data-loading.md) — data loading across parallelism modes
-- [Checkpoints and Resume](../reference/checkpoints.md) — distributed checkpoint formats (gathered vs sharded) and resume
+- [Data Parallelism (FSDP)](data-parallelism.md): FSDP strategies, Accelerate configs, mixin internals
+- [Large-Scale Scenarios](large-scale-scenarios.md): pick a layout by NVLink-domain size; start here for any multi-node job
+- [Multi-Node Parallelism](multi-node.md): cross-node EP/CP/TP, EP scopes, RDMA setup
+- [Multi-Node Launch Recipes](launch-recipes.md): runnable torchrun/SLURM launches, EP checkpoint save/load
+- [Distributed Data Loading](data-loading.md): data loading across parallelism modes
+- [Checkpoints and Resume](../reference/checkpoints.md): distributed checkpoint formats (gathered vs sharded) and resume
 
 ## When pipeline parallelism is worth it
 
-On one 8-GPU machine, run as two 4-GPU agents, PP runs 8.5% below `dp8` on Qwen3-8B and 9.2% above `ep8` on gpt-oss-20b, where halving the dispatch group pays for the bubble. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
+On one 8-GPU machine, run as two 4-GPU agents, PP runs 8.5% below `dp8` on Qwen3-8B and 9.2% above `ep8` on gpt-oss-20b. On gpt-oss, halving the dispatch group cuts the DeepEP cost by more than the bubble adds. Across domains the layouts differ in which traffic crosses RDMA. Global-scope EP puts four latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward). PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack an EP group that divides the declared domain runs at node scope on NVLink, so none of its all-to-alls cross RDMA ([Large-Scale Scenarios](large-scale-scenarios.md#first-question-how-wide-is-the-nvlink-domain)).
 
-Measured on two 8-GPU B300 machines, DP, with any experts on one machine, beats PP on a fast link: PP runs 4.0% below `dp16` and 15.9% below `ep8` with DP. PP leads layouts that cross the link with attention or experts (1.63× over `dp8 × tp2`, 3.82× over `ep16`), a slow link (13.8× over `dp16` forced onto plain TCP sockets), and a model too large for one machine's expert group (GLM-5.3-Flash, 1.61× over `ep16`, where `ep8` with DP runs out of memory). The rows: [Measured throughput](pipeline-parallelism.md#measured-throughput).
+Measured on two 8-GPU B300 machines, DP, with any experts on one machine, beats PP on a fast link: PP runs 4.0% below `dp16` and 15.9% below `ep8` with DP. PP leads in four cases: over `dp8 × tp2` by 1.63×; over `ep16`, whose expert dispatch crosses the link, by 3.82×; on a slow link, by 13.8× over `dp16` forced onto plain TCP sockets; and on a model too large for one machine's expert group, GLM-5.3-Flash, by 1.61× over `ep16`, where `ep8` with DP runs out of memory. The rows: [Measured throughput](pipeline-parallelism.md#measured-throughput).
 
 PP is not a drop-in: [what it refuses](pipeline-parallelism.md#rejected-combinations). Layouts without it: [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).

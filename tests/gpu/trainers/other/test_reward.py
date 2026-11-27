@@ -25,7 +25,6 @@ from tests.common.distributed import (
     snapshot_full_weights,
     world_any,
     world_mean,
-    world_min,
 )
 from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
@@ -41,7 +40,8 @@ MAX_SEQ_LENGTH = 1024
 NUM_TRAIN_STEPS = 10
 # >1 pair per device so the batch is ragged; the `pooling_at_pad` control needs some row to carry padding.
 BATCH_SIZE = 4
-# Tiny: the O(1) margin comes from the random `score` head, and this rate keeps it inside RESPONSIVE_MARGIN instead of
+# Far below a bf16 weight's spacing, yet AdamWBF16's stochastic rounding (auto-enabled under bf16) applies it in
+# expectation, which grows the margin by ~0.07 a step: by PINNED_STEP it sits inside RESPONSIVE_MARGIN instead of
 # saturating -logsigmoid to 0, where the pin compares two zeros.
 LEARNING_RATE = 1e-7
 SEED = 42
@@ -51,15 +51,15 @@ PINNED_STEP = NUM_TRAIN_STEPS
 LOSS_REL_TOL = TOL.exact_objective_rel
 # A control shows the pin would fail, so its threshold is the pin's tolerance.
 CONTROL_MIN_GAP = LOSS_REL_TOL
-# bf16 pooled rewards of magnitude ~3 against an fp32 reference (measured 0.023). A swapped assignment flips the
-# margin's sign (~1.2), so this still catches it.
-REWARD_ABS_TOL = 0.05
+# Set by what the pin must catch: a swapped assignment negates the DP-mean margin, which
+# control_halves_swapped_breaks_the_margin_pin holds further than this from the logged one. The trainer's bf16 forward
+# and the reference's measured up to 0.036 apart on it and 0.026 on the mean reward, at 1, 2 and 4 ranks.
+REWARD_ABS_TOL = 0.15
+# An exact rate over the trainer's own pair comparisons, averaged in fp32: no dtype slack.
+ACCURACY_ABS_TOL = 1e-6
 # Below this band every control collapses onto log(2); above it -logsigmoid saturates and the sign-drop control can't
 # show.
 RESPONSIVE_MARGIN = (0.3, 5.0)
-# bf16 vs fp32 comparison: a pair inside bf16 noise (~0.03 at magnitude ~3) can flip and move `accuracy` by
-# 1/BATCH_SIZE.
-MIN_PAIR_GAP = 0.1
 
 
 def create_reward_dataset(num_samples: int, tokenizer, seed: int = SEED) -> Dataset:
@@ -227,14 +227,21 @@ def run(ctx):
 
     captured: dict = {}
     weights: dict = {}
+    trainer_rewards: list[torch.Tensor] = []
     real_compute_loss = trainer.compute_loss
 
-    def spying_compute_loss(model, inputs, *args, **kwargs):
+    def spying_compute_loss(model, inputs, return_outputs=False, num_items_in_batch=None):
         # global_step is still N-1 while step N's loss is being computed.
-        if trainer.state.global_step == PINNED_STEP - 1 and not captured:
-            captured.update({k: v.clone() for k, v in inputs.items() if torch.is_tensor(v)})
-            weights.update(snapshot_full_weights(model))
-        return real_compute_loss(model, inputs, *args, **kwargs)
+        if trainer.state.global_step != PINNED_STEP - 1 or captured:
+            return real_compute_loss(
+                model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
+            )
+        captured.update({k: v.clone() for k, v in inputs.items() if torch.is_tensor(v)})
+        weights.update(snapshot_full_weights(model))
+        loss, outputs = real_compute_loss(model, inputs, return_outputs=True, num_items_in_batch=num_items_in_batch)
+        # The bf16 rewards TRL's accuracy compares; a second bf16 forward can order a near-tied pair the other way.
+        trainer_rewards.append(outputs.logits.detach().float().squeeze(-1))
+        return (loss, outputs) if return_outputs else loss
 
     trainer.compute_loss = spying_compute_loss
     trainer.train()
@@ -250,7 +257,7 @@ def run(ctx):
         forward=lambda: probe_forward(trainer.model, ctx.device),
     )
     # Early return: without the capture every line below raises KeyError, and the harness reports `error` over FAIL.
-    checks["pinned_step_captured"] = bool(captured) and bool(weights)
+    checks["pinned_step_captured"] = bool(captured) and bool(weights) and bool(trainer_rewards)
     if not checks["pinned_step_captured"]:
         return {"checks": checks, "metrics": metrics}
 
@@ -292,17 +299,16 @@ def run(ctx):
     metrics["reward_margin"] = margin
     # Anti-vacuity: outside this band every control below collapses onto the real objective.
     checks["margin_in_responsive_region"] = RESPONSIVE_MARGIN[0] < abs(margin) < RESPONSIVE_MARGIN[1]
-    # No pair may sit inside bf16 noise, where the trainer's bf16 comparison and this fp32 one can disagree on its
-    # sign.
-    min_pair_gap = float((chosen - rejected).abs().min())
-    metrics["min_pair_gap"] = min_pair_gap
-    checks["pair_gaps_clear_of_bf16_noise"] = world_min(min_pair_gap, ctx.device) > MIN_PAIR_GAP
 
-    # Pinned independently of the loss, which separates the chosen/rejected assignment.
+    # Pinned independently of the loss, which separates the chosen/rejected assignment. Accuracy reads the trainer's
+    # own rewards, whose chunk order first_half_is_the_chosen_column anchors.
     entry = [e for e in trainer.state.log_history if "loss" in e][PINNED_STEP - 1]
+    trainer_chosen, trainer_rejected = torch.chunk(trainer_rewards[0], chunks=2)
     metric_pins = {
-        # An exact rate over pair comparisons: no accumulation, so no dtype slack.
-        "accuracy": (world_mean(float((chosen > rejected).float().mean()), ctx.device), 1e-6),
+        "accuracy": (
+            world_mean(float((trainer_chosen > trainer_rejected).float().mean()), ctx.device),
+            ACCURACY_ABS_TOL,
+        ),
         "margin": (world_mean(margin, ctx.device), REWARD_ABS_TOL),
         "mean_reward": (world_mean(float(rewards.mean()), ctx.device), REWARD_ABS_TOL),
     }
@@ -310,6 +316,18 @@ def run(ctx):
         got = entry.get(key)
         metrics[f"logged_{key}"], metrics[f"expected_{key}"] = (got if got is not None else float("nan")), want
         checks[f"metric_matches_reference[{key}]"] = got is not None and abs(got - want) < tol
+    # Anti-vacuity that can fail by data: a batch whose pairs split evenly logs the same accuracy either way round.
+    swapped_accuracy = world_mean(float((trainer_rejected > trainer_chosen).float().mean()), ctx.device)
+    metrics["control_halves_swapped_accuracy"] = swapped_accuracy
+    logged_accuracy = entry.get("accuracy")
+    checks["control_halves_swapped_breaks_the_accuracy_pin"] = (
+        logged_accuracy is not None and abs(logged_accuracy - swapped_accuracy) > ACCURACY_ABS_TOL
+    )
+    # Anti-vacuity that can fail by data: ranks whose margins cancel log nearly the same margin either way round.
+    logged_margin = entry.get("margin")
+    checks["control_halves_swapped_breaks_the_margin_pin"] = (
+        logged_margin is not None and abs(logged_margin + metric_pins["margin"][0]) > REWARD_ABS_TOL
+    )
 
     controls = {
         # Chunk-order inversion: trains the model to prefer the rejected answer.

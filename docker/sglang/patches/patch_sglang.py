@@ -15,6 +15,7 @@ _PREFILL_RESULT_FILE = "srt/managers/scheduler_components/batch_result_processor
 _FUNCTION_CALL_PARSER_FILE = "srt/function_call/function_call_parser.py"
 _SERVER_INFO_FILE = "srt/utils/common.py"
 _HYPERCONNECTION_FILE = "srt/layers/hyperconnection.py"
+_LORA_CONTROL_FILE = "srt/managers/tokenizer_control_mixin.py"
 
 # Reported on /server_info as ``halo_patches``; the trainer matches a family's required name against it.
 PATCH_NAMES = (
@@ -22,6 +23,7 @@ PATCH_NAMES = (
     "prefill_result_skip",
     "glm47_full_assistant_grammar",
     "hyperconnection_mix_up",
+    "lora_unload_forgets_name",
 )
 
 _GLM_WEIGHT_AFTER = """        self.weight = nn.Parameter(
@@ -98,6 +100,16 @@ _MIX_LOADER = """    def _load_mix_up_weight(self, param: torch.Tensor, loaded_w
 
 """
 
+_LORA_UNLOAD_BEFORE = """            async with self.lora_update_lock:
+                return await self._unload_lora_adapter_locked(obj)
+"""
+_LORA_UNLOAD_AFTER = """            async with self.lora_update_lock:
+                result = await self._unload_lora_adapter_locked(obj)
+                if result.success:
+                    self.lora_ref_cache.pop(obj.lora_name, None)
+                return result
+"""
+
 EDITS = (
     # /update_weights_from_distributed ends in model.load_weights, but the Gemma 4 router folds
     # ``scale`` into its norm weight once, behind a latch: a pushed ``scale`` would never reach routing.
@@ -133,6 +145,11 @@ EDITS = (
     # weight never reached it. The weight's loader rewrites the copy in place.
     Edit(_HYPERCONNECTION_FILE, _MIX_UP_PADDED_BEFORE, _MIX_UP_PADDED_AFTER, "hyper-connection mix-up loader hook"),
     Edit(_HYPERCONNECTION_FILE, _MIX_BEFORE, _MIX_BEFORE + _MIX_LOADER, "hyper-connection mix-up loader"),
+    # A request naming an adapter the registry lacks reloads it from the path ``lora_ref_cache`` keeps, which is how an
+    # adapter evicted past --max-loaded-loras comes back. Upstream keeps an explicitly unloaded name there too, so after
+    # /unload_lora_adapter answers success and /v1/models drops the card, the next request naming it loads it again from
+    # its path and is served. The explicit route forgets the name; an eviction keeps it.
+    Edit(_LORA_CONTROL_FILE, _LORA_UNLOAD_BEFORE, _LORA_UNLOAD_AFTER, "LoRA unload forgets the name"),
     # Names this image and its patches on /server_info: upstream 0.5.22 takes the same routes, and the trainer
     # refuses it, since it has none of the edits above.
     Edit(

@@ -102,7 +102,7 @@ def agree_microbatch_geometry(
     if bins_needed > slots:
         raise ValueError(
             f"A rank holds {tokens} row tokens this round, more than steps_per_generation ({slots}) packed "
-            f"micro-batches of at most {ceiling} tokens (the DeepEP dispatch ceiling) can carry. Raise "
+            f"micro-batches of at most {ceiling} tokens (the most one EP forward carries per rank) can carry. Raise "
             f"steps_per_generation, or lower the rollouts per step or the row length cap."
         )
     bins = partition_rows(lengths, max(bins_needed, 1), budget)

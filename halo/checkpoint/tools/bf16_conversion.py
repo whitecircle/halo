@@ -29,6 +29,7 @@ from halo.checkpoint.tools.offline_export import (
     load_task_model,
     preflight_model_load_resources,
     reject_in_place_conversion,
+    resolve_adapter_base_revision,
     save_full_checkpoint,
 )
 from halo.model_loading.finalization import finalize_loaded_model
@@ -63,10 +64,16 @@ def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
     """The adapter applied to its base, loaded through the class the adapter's keys address."""
     _reject_adapter_task(task)
     peft_config = PeftConfig.from_pretrained(adapter_dir)
+    revision = resolve_adapter_base_revision(peft_config.base_model_name_or_path, peft_config.revision)
 
     def load_base_model(base_model_path, *, excuse_task_head: bool, text_only: bool = False):
         return _load_verified(
-            base_model_path, task, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs
+            base_model_path,
+            task,
+            excuse_task_head=excuse_task_head,
+            text_only=text_only,
+            revision=revision,
+            **load_kwargs,
         )
 
     base = load_base_for_adapter(
@@ -81,7 +88,9 @@ def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
         adapter_dir,
         base.model,
         adapter_processor=load_processing_class(adapter_dir, trust_remote_code=trust_remote_code),
-        base_processor=load_processing_class(peft_config.base_model_name_or_path, trust_remote_code=trust_remote_code),
+        base_processor=load_processing_class(
+            peft_config.base_model_name_or_path, trust_remote_code=trust_remote_code, revision=revision
+        ),
         log=logger.info,
     )
 
@@ -140,14 +149,20 @@ def verify_adapter_conversion(adapter_path):
 
 def run_test_inference(model_path, task, is_peft=False, trust_remote_code=False) -> None:
     """Log what the converted model produces; diagnostic only, as ``--verify`` is the gate that raises."""
-    # An adapter directory need not carry a tokenizer; its base does.
-    sources = (
-        (model_path, PeftConfig.from_pretrained(model_path).base_model_name_or_path) if is_peft else (model_path,)
+    # An adapter directory need not carry a tokenizer; its base does, at the revision the adapter records.
+    sources: list[tuple[str, str | None]] = [(model_path, None)]
+    if is_peft:
+        peft_config = PeftConfig.from_pretrained(model_path)
+        sources.append((peft_config.base_model_name_or_path, peft_config.revision))
+    processing_classes = (
+        load_processing_class(source, trust_remote_code=trust_remote_code, revision=revision)
+        for source, revision in sources
     )
-    processing_classes = (load_processing_class(source, trust_remote_code=trust_remote_code) for source in sources)
     processing_class = next((loaded for loaded in processing_classes if loaded is not None), None)
     if processing_class is None:
-        logger.warning(f"No tokenizer at {' or '.join(sources)} — skipping the inference check")
+        logger.warning(
+            f"No tokenizer at {' or '.join(source for source, _ in sources)} — skipping the inference check"
+        )
         return
     tokenizer = resolve_tokenizer(processing_class)
 

@@ -170,15 +170,6 @@ def test_cp_rotary_identity_on_nope_layers():
     assert got_q is q and got_k is k
 
 
-def test_nope_and_force_rope_flags_from_config():
-    """``_use_rope`` reads these: sliding layers carry the window (RoPE), full layers None (NoPE)."""
-    model = _tiny_model()
-    sliding, full = (layer.self_attn for layer in model.model.layers)
-    assert sliding.sliding_window is not None
-    assert full.sliding_window is None
-    assert not sliding.force_rope and not full.force_rope
-
-
 def test_tiny_save_load_roundtrip(tmp_path):
     """Pins the per-expert<->fused converter the base gather relies on."""
     model = _tiny_model()

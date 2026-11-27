@@ -7,7 +7,6 @@ import functools
 
 import pytest
 import transformers
-from transformers.models.qwen4_exp import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
 from halo.models import segment_markers
@@ -101,11 +100,6 @@ def test_across_transformers_only_gated_delta_net_layers_decide():
     assert compared > 300, compared
     assert unconstructible == UNCONSTRUCTIBLE
     assert moved == MOVED
-
-
-@pytest.mark.parametrize("config", [Qwen4ExpConfig(), Qwen4ExpTextConfig()], ids=["wrapper", "text"])
-def test_qwen4_exp_packed_rows_get_the_markers(config):
-    assert segment_markers_for(config) == SegmentMarkers(seq_idx=True, cu_seq_lens=True)
 
 
 def test_an_unknown_model_type_with_gated_delta_net_layers_is_detected(monkeypatch):

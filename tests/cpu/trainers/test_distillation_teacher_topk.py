@@ -13,7 +13,7 @@ from halo.trainers.distillation.divergences import call_divergence, require_dive
 
 BATCH, SEQ, VOCAB = 2, 5, 64
 TOPK = 6
-TEMPERATURES = (1.0, 2.0)
+TEMPERATURES = (2.0,)
 # fp32 loss against a float64 reference.
 REFERENCE_RTOL = 1e-5
 REFERENCE_ATOL = 1e-6

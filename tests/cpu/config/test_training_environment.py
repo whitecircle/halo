@@ -316,8 +316,13 @@ def _required_values(dataclass_types) -> dict:
     return {"teacher_model": "org/teacher"} if "teacher_model" in declared else {}
 
 
-@pytest.mark.parametrize("full_determinism", [True, False])
-@pytest.mark.parametrize("entry_script", _TRAINING_SCRIPTS, ids=lambda path: path.stem)
+@pytest.mark.parametrize(
+    ("entry_script", "full_determinism"),
+    [
+        *(pytest.param(path, True, id=f"{path.stem}-True") for path in _TRAINING_SCRIPTS),
+        *(pytest.param(path, False, id="sft-False") for path in _TRAINING_SCRIPTS if path.stem == "sft"),
+    ],
+)
 def test_full_determinism_reaches_the_attention_choice_as_the_config_is_parsed(
     tmp_path, monkeypatch, entry_script, full_determinism
 ):

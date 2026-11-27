@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from huggingface_hub.errors import StrictDataclassFieldValidationError
+from huggingface_hub import constants as hub_constants
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -31,7 +31,7 @@ from halo.checkpoint import config_export
 from halo.checkpoint.config_export import export_source_config_schema, save_model_config
 from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
-from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
+from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, LOADED_WEIGHTS_REVISION_ATTR
 from halo.distributed.expert_parallel.families.nemotron_h import EPNemotronHMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.model_loading.model_preparation import auto_load_model
@@ -236,14 +236,14 @@ def _exported(tmp_path, cls, mutate=None) -> tuple[dict, str, object]:
 def test_a_source_without_a_named_module_is_refused_by_name(tmp_path, monkeypatch):
     monkeypatch.setattr(config_export, "cached_file", lambda *args, **kwargs: None)
     with pytest.raises(FileNotFoundError, match=r"modeling_x\.py, which it does not carry or which could not be"):
-        config_export._copy_auto_map_modules("source", {"AutoModel": "modeling_x.Model"}, str(tmp_path))
+        config_export._copy_auto_map_modules("source", {"AutoModel": "modeling_x.Model"}, str(tmp_path), None)
 
 
 def test_a_source_without_a_config_keeps_the_native_schema_and_says_why(monkeypatch):
     warned = []
     monkeypatch.setattr(config_export, "cached_file", lambda *args, **kwargs: None)
     monkeypatch.setattr(config_export.logger, "warning", warned.append)
-    assert config_export._source_config_payload("source", None) is None
+    assert config_export._source_config_payload("source", None, None) is None
     assert "'source' holds no config.json" in warned[0]
 
 
@@ -301,13 +301,6 @@ def test_a_dashed_auto_map_reference_is_carried_with_no_module_looked_for(cls, t
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
-def test_the_export_reloads_to_the_config_that_was_trained(cls, tmp_path):
-    """This transformers accepts the source's spellings, so the export reloads exactly."""
-    _payload, export, model = _exported(tmp_path, cls)
-    assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
-
-
-@pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_a_patched_vocab_size_reaches_the_carried_config(cls, tmp_path):
     """Carried verbatim, it would serve the source's vocabulary against a resized embedding, an off-by-N no reader
     can detect."""
@@ -340,6 +333,66 @@ def test_the_standalone_writer_carries_the_schema_too(cls, tmp_path):
     assert all(key in family.spelled(payload) for key in family.source_spellings)
     assert payload[family.text_section]["vocab_size"] == patched
     assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
+
+
+_MOVED_REPO = "halo-test/source-schema"
+_TRAINED_COMMIT, _MOVED_COMMIT = "1" * 40, "2" * 40
+
+
+@pytest.fixture
+def moved_source(tmp_path, monkeypatch) -> _SourceFamily:
+    """:data:`_MOVED_REPO` in an offline Hub cache: Step-3.7's source at the commit a run loaded, and a default branch
+    that has since dropped its remote code."""
+    family = FIXTURES[EPStep3p7MoELayer]
+    storage = tmp_path / "hub" / f"models--{_MOVED_REPO.replace('/', '--')}"
+    _write_source(storage / "snapshots" / _TRAINED_COMMIT, family.source_config, family.modules)
+    _write_source(
+        storage / "snapshots" / _MOVED_COMMIT,
+        {key: value for key, value in family.source_config.items() if key != "auto_map"},
+        {},
+    )
+    os.makedirs(storage / "refs")
+    (storage / "refs" / "main").write_text(_MOVED_COMMIT)
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    return family
+
+
+def _loaded_at_the_trained_commit(tmp_path):
+    """A Step-3.7 model stamped as ``load_distributed_model`` stamps a Hub load of :data:`_MOVED_REPO`."""
+    snapshot = tmp_path / "hub" / f"models--{_MOVED_REPO.replace('/', '--')}" / "snapshots" / _TRAINED_COMMIT
+    model = _model_from(EPStep3p7MoELayer, str(snapshot))
+    setattr(model, LOADED_WEIGHTS_FROM_ATTR, _MOVED_REPO)
+    setattr(model, LOADED_WEIGHTS_REVISION_ATTR, _TRAINED_COMMIT)
+    return model
+
+
+def _assert_the_trained_commits_schema(export: str, family: _SourceFamily) -> None:
+    with open(os.path.join(export, "config.json")) as handle:
+        payload = json.load(handle)
+    assert payload.get("auto_map") == family.source_config["auto_map"]
+    assert all(key in family.spelled(payload) for key in family.source_spellings)
+    assert all(os.path.isfile(os.path.join(export, name)) for name in family.modules)
+
+
+def test_a_hub_source_is_read_at_the_revision_the_writer_names(tmp_path, moved_source):
+    export = str(tmp_path / "export")
+
+    save_full_checkpoint(
+        _loaded_at_the_trained_commit(tmp_path), export, source_dir=_MOVED_REPO, source_revision=_TRAINED_COMMIT
+    )
+
+    _assert_the_trained_commits_schema(export, moved_source)
+
+
+def test_a_training_save_reads_its_hub_source_at_the_commit_the_weights_were_read_at(tmp_path, moved_source):
+    export = str(tmp_path / "export")
+    os.makedirs(export)
+
+    save_model_config(_loaded_at_the_trained_commit(tmp_path), export)
+
+    _assert_the_trained_commits_schema(export, moved_source)
 
 
 def test_a_change_the_source_schema_swallows_is_refused(tmp_path):
@@ -444,19 +497,6 @@ def test_the_release_fixture_is_the_roster_release():
     release = nemotron_h_release_config()
     assert release["llm_config"]["layers_block_type"] == NEMOTRON_H_RELEASE_TEXT_CONFIG["layers_block_type"]
     assert release["vision_config"]["hidden_size"] == NEMOTRON_H_RELEASE_VISION_CONFIG["hidden_size"]
-
-
-def test_the_release_tag_needs_decoding_before_the_class_reads_it():
-    """Raw, the carry would crash on the release's own ``time_step_limit``, so the decode is load-bearing here."""
-    release = nemotron_h_release_config()
-    assert release["llm_config"]["time_step_limit"] == [0.0, {"__float__": "Infinity"}]
-    config_class = NemotronH_Omni_Reasoning_V3.config_class
-    with pytest.raises(StrictDataclassFieldValidationError, match="time_step_limit"):
-        config_class.from_dict(copy.deepcopy(release))
-    assert config_class.from_dict(config_class._decode_special_floats(release)).text_config.time_step_limit == [
-        0.0,
-        float("inf"),
-    ]
 
 
 def test_a_trainers_cache_write_on_the_composite_root_does_not_fail_the_save(tmp_path, nemotron_source):

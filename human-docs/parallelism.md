@@ -72,7 +72,9 @@ sequence length to fit.
 ![Tokens/s/GPU with and without pipeline parallelism: on two 8-GPU machines over a fast link PP runs 4.0% below dp16 and 15.9% below ep8 with DP; forced onto plain TCP sockets it leads dp16 by 13.8×; on one machine it runs 8.5% below dp8 and 9.2% above ep8; on GLM-5.3-Flash it leads ep16 by 1.61×](../agent-docs/assets/benchmarks/pp_throughput.png)
 
 `pipeline_parallel_size` splits the decoder layers into stages, each a whole
-number of NVLink domains, so only boundary activations cross nodes. A run needs
+number of NVLink domains. With one domain per stage only the boundary
+activations leave a domain; with several, the collectives inside a stage cross
+domains too. A run needs
 at least two nodes, and `pp2` under one `torchrun` on an 8-GPU node is rejected;
 the figure's one-host rows run two 4-GPU `torchrun` agents, which count as two
 nodes. Inside a stage it runs

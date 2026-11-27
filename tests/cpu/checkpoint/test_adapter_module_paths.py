@@ -82,6 +82,20 @@ def test_every_peft_key_spelling_resolves_to_its_module(tmp_path):
     assert adapter_module_paths(adapter) == set(_KEY_TO_MODULE.values())
 
 
+def test_a_native_expert_adapter_addresses_its_ep_layer(tmp_path):
+    """Its ``experts.<attr>`` slot names the EP layer's expert weight, which the base's own class need not hold (Qwen3
+    MoE's fuses the ``gate_proj`` and ``up_proj`` its EP layer adapts), while the layer is a module of both; PEFT's
+    adapter on one expert's linear still addresses that linear."""
+    layer = "model.layers.0.mlp"
+    keys = [
+        f"{_PREFIX}{layer}.experts.gate_up_proj.lora_A",
+        f"{_PREFIX}{layer}.experts.down_proj.lora_B",
+        f"{_PREFIX}{layer}.experts.3.gate_proj.lora_A.weight",
+    ]
+
+    assert adapter_module_paths(_adapter(tmp_path, keys)) == {layer, f"{layer}.experts.3.gate_proj"}
+
+
 def test_an_adapter_the_wrapper_carries_loads_once(tmp_path):
     adapter = _adapter(tmp_path, [f"{_PREFIX}model.language_model.layers.0.self_attn.q_proj.lora_A.weight"])
     load, requests = _loader(_text_only())
@@ -100,15 +114,20 @@ def test_a_shared_lm_head_does_not_hide_the_text_only_class(tmp_path):
     base = load_base_for_adapter(adapter, "/base", load, excuse_task_head=True, log=logged.append)
 
     assert isinstance(base.model, TextOnly) and base.text_only and requests == [False, True]
-    assert logged and "text-only class of Multimodal" in logged[0]
+    assert logged == ["The adapter addresses the text-only class of Multimodal; reading the base as TextOnly."]
 
 
 def test_a_key_set_neither_class_carries_is_refused(tmp_path):
     adapter = _adapter(tmp_path, [f"{_PREFIX}model.blocks.0.attn.lora_A.weight", f"{_PREFIX}{_HEAD}.weight"])
     load, _requests = _loader(_text_only())
 
-    with pytest.raises(ValueError, match=r"Multimodal .* does not have .*model\.blocks\.0\.attn"):
+    with pytest.raises(ValueError, match=r"Multimodal .* does not have .*model\.blocks\.0\.attn") as refused:
         load_base_for_adapter(adapter, "/base", load, excuse_task_head=False, log=lambda _: None)
+
+    assert "merge" not in str(refused.value), "the refusal is worded for every caller, not the merge alone"
+    assert "Set base_model_name_or_path in adapter_config.json to the checkpoint the adapter was trained on" in str(
+        refused.value
+    )
 
 
 def test_a_base_with_no_text_only_class_is_refused_for_the_mismatch(tmp_path):

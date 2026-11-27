@@ -63,6 +63,7 @@ class ParallelismConfig:
 
     max_concurrent_loading: int | None = None  # per node; None = half the node width capped at 4, 0 = all
     ep_lazy_loading: bool = True  # every EP path; TP-only MoE ignores it, PP always loads stage-lazily
+    frozen_quantized_experts: bool = False  # the release's NVFP4/MXFP8 experts as a frozen base under LoRA
     ep_buffer_backend: EPBufferBackend = "auto"  # "auto" == "elastic" (DeepEP V2); "legacy" = V1 CUDA-IPC
     moe_backend: MoEBackend = "deepep"
 
@@ -159,6 +160,23 @@ class ParallelismConfig:
             )
         if self.moe_backend not in get_args(MoEBackend):
             raise ValueError(f"moe_backend must be one of {get_args(MoEBackend)}, got {self.moe_backend!r}")
+        if self.frozen_quantized_experts:
+            needs = {
+                "expert_parallel_size >= 2": self.ep_size >= 2,
+                # A bank is sliced on the expert axis only, so every expert-TP rank would hold the full FFN width.
+                "expert_tensor_parallel_size: 1": self.expert_tp_size == 1,
+                "ep_lazy_loading: true": self.ep_lazy_loading,
+                "merge_expert_lora_on_save: false": not self.merge_expert_lora_on_save,
+                # A frozen bank's GEMM reads the packed weights, so the expert fake-quant would never run.
+                "lowp_precision: bf16 or lowp_apply_moe_experts: false": not (
+                    self.lowp.enabled and self.lowp.apply_moe_experts
+                ),
+            }
+            if missing := [need for need, met in needs.items() if not met]:
+                raise ValueError(
+                    "frozen_quantized_experts keeps the release's packed experts as a frozen base that the lazy EP "
+                    f"loader installs and no gradient reaches; it needs {', '.join(missing)}."
+                )
         if self.max_concurrent_loading is not None and self.max_concurrent_loading < 0:
             raise ValueError(
                 f"max_concurrent_loading must be >= 0 (0 = all ranks in parallel, null = derive from "
@@ -366,6 +384,12 @@ class ParallelismConfig:
     def non_dp_replication_factor(self) -> int:
         """How many ranks see the same batch; a world-gathered token counter divides by it."""
         return self.world_size // self.data_parallel_size
+
+    @property
+    def router_token_replicas(self) -> int:
+        """How many ranks of a stage route each token: TP and expert-TP partners share a batch, while CP partners route
+        different chunks of theirs."""
+        return self.stage_world_size // (self.data_parallel_size * self.cp_size)
 
     @property
     def requires_rdma(self) -> bool:

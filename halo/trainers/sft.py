@@ -6,6 +6,7 @@ import logging
 from functools import cached_property
 from typing import ClassVar
 
+import datasets
 import torch
 from transformers import Trainer
 from trl import SFTTrainer
@@ -27,7 +28,31 @@ from halo.trainers.metrics.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
 
-_CTOR_POSITIONS = resolve_ctor_positions(SFTTrainer, "model", "args", "data_collator")
+_CTOR_POSITIONS = resolve_ctor_positions(SFTTrainer, "model", "args", "data_collator", "train_dataset")
+
+
+def _hand_trl_a_row_stand_in(ctor_args: tuple, kwargs: dict) -> tuple[tuple, dict, torch.utils.data.Dataset | None]:
+    """``(ctor_args, kwargs, rows)``: a map-style torch dataset of collated rows (the token mix) swapped for a one-row
+    ``datasets.Dataset`` of its first row, and the dataset to restore after the base init, else ``rows`` None. TRL
+    type-checks ``train_dataset`` against the ``datasets`` classes before it reads ``skip_prepare_dataset``, under
+    which it reads only the first row's keys."""
+    rows = get_ctor_arg(ctor_args, kwargs, "train_dataset", _CTOR_POSITIONS)
+    if not isinstance(rows, torch.utils.data.Dataset) or isinstance(
+        rows, datasets.Dataset | torch.utils.data.IterableDataset
+    ):
+        return ctor_args, kwargs, None
+    training_args = get_ctor_config(ctor_args, kwargs, _CTOR_POSITIONS)
+    if not (getattr(training_args, "dataset_kwargs", None) or {}).get("skip_prepare_dataset"):
+        raise ValueError(
+            f"train_dataset is a map-style {type(rows).__name__} of collated rows, which TRL's dataset preparation "
+            "cannot map over. Pass it with dataset_kwargs={'skip_prepare_dataset': True}, as disable_trl_dataset_prep "
+            "sets."
+        )
+    stand_in = datasets.Dataset.from_list([rows[0]])
+    if "train_dataset" in kwargs:
+        return ctor_args, {**kwargs, "train_dataset": stand_in}, rows
+    slot = _CTOR_POSITIONS["train_dataset"]
+    return (*ctor_args[:slot], stand_in, *ctor_args[slot + 1 :]), kwargs, rows
 
 
 def _replace_chunked_nll_loss_type(training_args) -> None:
@@ -91,9 +116,11 @@ def _record_loss_metrics(
 
 class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
     SUPPORTS_CP = True
+    SUPPORTS_HYBRID_CP = True
     # Canonical last-stage loss; the PP-incompatible knobs are rejected in _split_pipeline_stage.
     PP_REFUSAL = None
     SUPPORTS_LOWP_PRECISION = True
+    SUPPORTS_NATIVE_LOWP = True
     # Forwards with ``labels``, so ``*ForCausalLM.forward`` folds the router aux loss into outputs.loss.
     ROUTER_AUX_LOSS_ADDED_BY = "model_forward"
     # False lets loss-only eval take Liger's fused-CE ``skip_logits`` path; a subclass whose loss reads
@@ -108,7 +135,11 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
         collator = get_ctor_arg(args, kwargs, "data_collator", _CTOR_POSITIONS)
         reject_cp_packed_collator(collator, is_cp_mode=self.parallelism_config.is_cp_mode)
+        args, kwargs, rows = _hand_trl_a_row_stand_in(args, kwargs)
         super().__init__(*args, **kwargs)
+        if rows is not None:
+            # Every loader reads the dataset from here at train time; the base init kept the stand-in.
+            self.train_dataset = rows
         # On the model the base built, so a model id handed to the constructor is checked too.
         reject_multi_document_collator(collator, getattr(self.model, "config", None))
         if self.parallelism_config.is_cp_mode:

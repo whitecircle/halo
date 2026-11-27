@@ -128,9 +128,20 @@ class RLRRArguments(_RLRRTunables, ValidatedConfig):
 
 @dataclass
 class AdvantageShapingArguments(ValidatedConfig):
-    """Reward scaling, the degenerate-group drop and token-mass balance of the online and environmental GRPO
+    """Reward scaling, MaxRL, the degenerate-group drop and token-mass balance of the online and environmental GRPO
     advantages; the environmental config re-declares ``drop_degenerate_groups`` on by default."""
 
+    use_maxrl: bool = field(
+        default=False,
+        metadata={
+            "help": "MaxRL advantages (arXiv:2602.02710): divide each reward minus its group mean by that mean, in "
+            "place of a std, and give a group whose mean is 0 advantage 0. On a pass/fail reward this is an unbiased "
+            "gradient of a truncated maximum-likelihood objective, which weighs hard prompts up: one success in 16 "
+            "gets advantage 15. Needs non-negative rewards (checked every step on every rank) and scale_rewards: "
+            "none. Logged as sampling/maxrl_zero_mean_group_frac. "
+            "See agent-docs/training-methods/async-grpo/objective.md#advantages."
+        },
+    )
     scale_rewards_std_floor: float = field(
         default=0.0,
         metadata={
@@ -362,7 +373,8 @@ class PackedMicrobatchArguments(ValidatedConfig):
             "into bins (a row over the budget keeps a bin of its own), every rank runs the world's bin count in the "
             "last slots of the window and no-ops before them, and row-mean losses are rescaled so the objective is "
             "the per-row one. Null keeps one backbone call per row. Needs use_chunked_grpo_logprobs, "
-            "per_device_train_batch_size 1, a varlen flash backend and a family whose rows isolate; refused at "
+            "per_device_train_batch_size 1, a backend that reads documents off position_ids and a family whose rows "
+            "isolate; refused at "
             "construction otherwise. See "
             "agent-docs/training-methods/async-grpo/performance.md#packed-micro-batches."
         },

@@ -20,6 +20,7 @@ _EXPECTED_CLAIMS: dict[str, tuple[str, ...]] = {
     "EPGlm5NextMoELayer": ("glm5_next", "glm5_next_text"),
     "EPGptOssMoELayer": ("gpt_oss",),
     "EPInklingMoELayer": ("inkling_text", "inkling_mm_model"),
+    "EPInkling2MoELayer": ("inkling2", "inkling2_text"),
     "EPLagunaMoELayer": ("laguna",),
     "EPLfm2MoELayer": ("lfm2_moe", "lfm2_vl"),
     "EPMistral4MoELayer": ("mistral4", "mistral3"),

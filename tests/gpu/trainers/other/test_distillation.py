@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""DistributedTeacherDistillationTrainer end to end, with the logged loss pinned to its exact objective.
+"""DistributedTeacherDistillationTrainer end to end, with the logged loss pinned to its exact objective, which the
+full logits of both models score on either loss path (``--chunked``).
 
 ``alpha * KL(teacher_T || student_T) * T^2 + (1 - alpha) * CE``, each term one mean over the supervised positions. A
 dropped ``T^2``, reversed KL, ignored ``alpha``, per-row mean or unused teacher all keep the loss finite. Teacher and
@@ -12,12 +13,14 @@ import random
 import torch
 import torch.nn.functional as F
 from datasets import Dataset
+from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from halo.configs.distillation import TeacherDistillationConfig
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_all, world_mean
 from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
@@ -108,6 +111,21 @@ def build_model():
     )
 
 
+def build_student(parallelism_config: ParallelismConfig):
+    """Under TP the student loads sharded, its tied head one vocab-parallel weight."""
+    if not parallelism_config.is_tp_mode:
+        return build_model()
+    model, _ = load_distributed_model(
+        model_name_or_path=MODEL_NAME,
+        parallelism_config=parallelism_config,
+        dtype=torch.bfloat16,
+        trust_remote_code=True,
+        attn_implementation="flash_attention_2",
+        use_liger_kernel=True,
+    )
+    return model
+
+
 def shifted_logits(model, input_ids, attention_mask) -> torch.Tensor:
     with torch.no_grad():
         logits = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=False).logits
@@ -159,14 +177,21 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--zero3", action="store_true", help="fsdp_reshard_after_forward=True (FULL_SHARD)")
 parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
 parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+parser.add_argument("--chunked", action="store_true", help="use_chunked_distillation_loss: no [tokens, vocab] logits")
+parser.add_argument("--tp-size", type=int, default=1, help="tensor parallelism of the student")
 ARGS = parser.parse_args()
 
 
-@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="test_distill")
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else ARGS.tp_size, exact_world_size=ARGS.world, prefix="test_distill")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
-    layout = {**(hsdp_layout(ctx.world_size) if ARGS.hsdp else {}), "fsdp_reshard_after_forward": ARGS.zero3}
+    layout = {
+        **(hsdp_layout(ctx.world_size) if ARGS.hsdp else {}),
+        **({"tp_size": ARGS.tp_size} if ARGS.tp_size > 1 else {}),
+        "fsdp_reshard_after_forward": ARGS.zero3,
+    }
+    parallelism_config = ParallelismConfig(**layout)
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -183,7 +208,8 @@ def run(ctx):
         learning_rate=LEARNING_RATE,
         bf16=True,
         gradient_checkpointing=True,
-        use_liger_kernel=True,
+        # load_distributed_model applies it to a TP student.
+        use_liger_kernel=not parallelism_config.is_tp_mode,
         logging_steps=1,
         save_strategy="no",
         eval_strategy="no",
@@ -197,21 +223,29 @@ def run(ctx):
         distill_loss="kl_divergence",
         distill_temperature=TEMPERATURE,
         distill_alpha=ALPHA,
+        use_chunked_distillation_loss=ARGS.chunked,
     )
 
     trainer = DistributedTeacherDistillationTrainer(
-        student_model=build_model(),
+        student_model=build_student(parallelism_config),
         teacher_model=build_model(),
         teacher_tokenizer=tokenizer,
         args=config,
         train_dataset=dataset,
         data_collator=DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False),
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(**layout),
+        parallelism_config=parallelism_config,
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
     checks["teacher_frozen"] = not any(p.requires_grad for p in trainer.teacher_model.parameters())
+    if parallelism_config.is_tp_mode:
+        head = trainer.model.get_output_embeddings().weight
+        checks["tp_head_is_one_vocab_parallel_tied_weight"] = (
+            isinstance(head, DTensor)
+            and head is trainer.model.get_input_embeddings().weight
+            and head.to_local().size(0) < head.size(0)
+        )
 
     captured: dict = {}
     weights: dict = {}

@@ -39,6 +39,8 @@ SEQ_LEN = 128
 # with no bug: the bound test_ep_modes_vs_reference.py holds gpt-oss to. On 8x H200 the release and its BF16 mirror
 # both load to an EP8 loss of 4.158315 on this batch, 0.058 from stock transformers at 4.216044.
 LOSS_TOL = TOL.router_pick_flip_loss_abs
+# The release's ``original/`` holds a second copy of the weights, 13 GB that no loader reads.
+_RELEASE_FILES = {"allow_patterns": ["*.json", "*.safetensors"], "ignore_patterns": ["original/*"]}
 
 
 def _peak_host_rss_gb() -> float:
@@ -98,9 +100,9 @@ def run(ctx) -> dict:
     metrics: dict[str, float] = {}
     ensure_model_downloaded(GPT_OSS_20B_OPENAI, ctx.rank)
     if ctx.rank == 0:
-        snapshot_download(GPT_OSS_20B_OPENAI, allow_patterns=["*.json", "*.safetensors"])
+        snapshot_download(GPT_OSS_20B_OPENAI, **_RELEASE_FILES)
     ctx.barrier()
-    local_dir = snapshot_download(GPT_OSS_20B_OPENAI, allow_patterns=["*.json", "*.safetensors"])
+    local_dir = snapshot_download(GPT_OSS_20B_OPENAI, **_RELEASE_FILES)
     checks["lazy_gate_admits_the_release"] = is_lazy_loadable(local_dir)
 
     baseline_gb = _peak_host_rss_gb()

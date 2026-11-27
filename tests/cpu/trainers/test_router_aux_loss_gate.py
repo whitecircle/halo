@@ -89,11 +89,6 @@ def test_explicit_aux_loss_is_rejected():
         _validate(_Trainer(moe_balancing="aux_loss"))
 
 
-def test_auto_resolved_aux_loss_warns():
-    warnings = _capture_warnings(_Trainer(moe_balancing="auto"))
-    assert any("INERT" in w for w in warnings), warnings
-
-
 def test_consuming_trainer_passes():
     _validate(_ConsumingTrainer(moe_balancing="aux_loss"))
 

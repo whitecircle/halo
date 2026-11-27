@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Who holds what</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --held: var(--halo-blue);
+    --label-col: 188px;
+    --gutter: 36px;
+    --cell-h: 40px;
+  }
+
+  body { width: 1600px; }
+
+  .key {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 14px 40px;
+    font-size: 21px;
+    color: var(--body);
+  }
+
+  .key > span { display: inline-flex; align-items: center; gap: 12px; }
+
+  .key .cell { width: 72px; height: var(--cell-h); flex: none; }
+
+  .key .batch { color: var(--text); font-variant-numeric: tabular-nums; }
+
+  /* One band is one grid: the object names, then four panels of R cells with a gutter between panels. */
+  .band {
+    display: grid;
+    column-gap: 4px;
+    margin-top: var(--group-gap);
+  }
+
+  .band h2 {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: 28px;
+    line-height: 1.1;
+    letter-spacing: -0.01em;
+    font-variant-numeric: lining-nums;
+    color: var(--heading);
+    white-space: nowrap;
+  }
+
+  .band .note {
+    margin-top: 6px;
+    margin-bottom: var(--heading-gap);
+    font-size: 20px;
+    color: var(--secondary);
+  }
+
+  .band .rank, .band .batch {
+    text-align: center;
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .band .rank { color: var(--body); }
+
+  .band .batch { margin-bottom: 8px; color: var(--text); }
+
+  .band .object, .band .axis {
+    align-self: center;
+    font-size: 21px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  .band .axis { font-size: 20px; color: var(--secondary); }
+
+  .band .axis.batch-axis { align-self: start; text-align: left; }
+
+  .cell {
+    position: relative;
+    height: var(--cell-h);
+    margin-bottom: 4px;
+    border-radius: 6px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    overflow: hidden;
+  }
+
+  .cell i {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: var(--held);
+  }
+
+  /* A split cell: the part every rank holds whole on top, the part held as a piece under it. */
+  .cell.split i.whole { bottom: auto; height: 36%; left: 0; right: 0; }
+
+  .cell.split i.piece { top: 46%; }
+
+  .band .lines {
+    margin-top: 12px;
+    font-size: 20px;
+    line-height: 1.35;
+    color: var(--body);
+  }
+
+  .band .lines p + p { margin-top: 8px; }
+
+  .band .lines .adds { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1>Each mode splits some things and leaves the rest whole on every rank</h1>
+    <p class="subtitle">The most each of {ranks} ranks holds at any moment of a step and the tokens it processes, one mode at a time</p>
+  </header>
+
+  <div class="figure" id="figure">
+    <div class="key" id="key"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Schematic: a filled share is whole or one piece of {ranks}, never a measured size, and the two bands of a split cell are not sized by bytes.</span>
+      <span class="s">R is the ranks in a group, E the experts of an MoE layer, S the tokens of a row.</span>
+      <span class="s">Modes are combined in practice, and what one mode leaves whole another may split.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /** Every grid draws one group of this many ranks. */
+  const RANKS = 4;
+  /** Four things a rank holds, at their most during a step, and the tokens it processes in that step. */
+  const OBJECTS = ["Weights", "Gradients", "Optimizer state", "Activations", "Tokens processed"];
+
+  /** What a rank holds of an object: all of it, one piece of R, part whole and the rest as a piece, or nothing. */
+  const WHOLE = "whole";
+  const PIECE = "piece";
+  const SPLIT = "split";
+  const NONE = "none";
+
+  /** Which batch a rank works on: its own, one shared by the group, or none while at rest. */
+  const OWN = "own";
+  const SHARED = "shared";
+
+  /**
+   * One entry per grid, `cells` in the order of OBJECTS (the last is the tokens the rank processes). Source:
+   * agent-docs/reference/gpu-training-theory.md, part "Many GPUs", which cites the owner pages. "Data
+   * parallelism": the DDP sentence, the six-step FSDP cycle and the "who holds what" table (weights at rest
+   * 2P/R, gathered copy at the peak the whole model or one or two groups of layers, gradient after the reduction
+   * 2P/R, optimizer state 4P/R, activations not shrunk). "Tensor parallelism": split weights with their gradients
+   * and optimizer state, embeddings and the output matrix whole, one shared batch, a slice of Y and a partial Z
+   * of full width. "Expert parallelism": E/R whole experts with their gradients and optimizer state, a batch per
+   * rank. "Context parallelism": S/R consecutive tokens, activations freed by R, each rank a part of the
+   * gradient. "Pipeline parallelism": the layers of one stage, the same batch through every stage.
+   */
+  const MODES = [
+    {
+      name: "Plain data parallel",
+      note: "DDP, a full replica per rank",
+      batch: OWN,
+      cells: [WHOLE, WHOLE, WHOLE, WHOLE, WHOLE],
+      lines: [],
+      adds: "Adds one all-reduce of the gradients per backward.",
+    },
+    {
+      name: "FSDP at rest",
+      note: "after the backward",
+      batch: null,
+      cells: [PIECE, PIECE, PIECE, NONE, NONE],
+      lines: ["A piece is 1/R of every tensor."],
+      adds: "No collective runs at rest.",
+    },
+    {
+      name: "FSDP, ZeRO-2 analog",
+      note: "keeps the gathered weights",
+      batch: OWN,
+      cells: [WHOLE, SPLIT, PIECE, WHOLE, WHOLE],
+      lines: ["Whole part of the gradients: the layer group in its backward."],
+      adds: "Adds an all-gather of each layer group’s weights before its forward and a reduce-scatter of its gradients after its backward.",
+    },
+    {
+      name: "FSDP, ZeRO-3 analog",
+      note: "frees the gathered weights",
+      batch: OWN,
+      cells: [SPLIT, SPLIT, PIECE, WHOLE, WHOLE],
+      lines: ["Whole part of the weights: one or two layer groups, gathered while they run.", "Of the gradients: as under the ZeRO-2 analog."],
+      adds: "Adds a second all-gather before each group’s backward: three collectives where there were two.",
+    },
+    {
+      name: "Tensor parallel",
+      note: "one group, one shared batch",
+      batch: SHARED,
+      cells: [SPLIT, SPLIT, SPLIT, SPLIT, WHOLE],
+      lines: [
+        "A piece is this rank’s columns or rows of each attention and MLP weight.",
+        "Whole part: embeddings and the output matrix. Of the activations: the hidden state between layers.",
+      ],
+      adds: "Adds two all-reduces of activations per layer in the forward and two in the backward.",
+    },
+    {
+      name: "Expert parallel",
+      note: "one group, a batch per rank",
+      batch: OWN,
+      cells: [SPLIT, SPLIT, SPLIT, WHOLE, WHOLE],
+      lines: ["A piece is E/R whole experts of each MoE layer.", "Whole part: everything outside the experts."],
+      adds: "Adds four all-to-alls of routed tokens per MoE layer: dispatch and combine, forward and backward.",
+    },
+    {
+      name: "Context parallel",
+      note: "one group, one row",
+      batch: SHARED,
+      cells: [WHOLE, WHOLE, WHOLE, PIECE, PIECE],
+      lines: ["A piece is S/R consecutive tokens of the row."],
+      adds: "Adds two all-to-alls per attention layer in the forward and two in the backward. A rank’s gradients come from its own tokens, so the group reduces them.",
+    },
+    {
+      name: "Pipeline parallel",
+      note: `${RANKS} stages, one rank per stage`,
+      batch: SHARED,
+      cells: [PIECE, PIECE, PIECE, PIECE, WHOLE],
+      lines: ["A piece is the layers of one stage."],
+      adds: "Adds a send and a receive at each stage boundary per microbatch: the hidden state forward, its gradient back.",
+    },
+  ];
+  /** Grids per band: the data-parallel family on the first, the modes that split the model on the second. */
+  const PER_BAND = 4;
+
+  if (MODES.some((mode) => mode.cells.length !== OBJECTS.length) || MODES.length % PER_BAND !== 0) {
+    throw new Error("every grid needs one cell kind per object, and the grids must fill whole bands");
+  }
+
+  fillValues({ ranks: String(RANKS) });
+
+  /** One cell: what rank `r` of RANKS holds, drawn as a filled share. */
+  function cell(kind, r) {
+    const node = el("div", `cell ${kind}`);
+    const piece = () => {
+      const part = el("i", "piece");
+      part.style.left = `${(100 * r) / RANKS}%`;
+      part.style.width = `${100 / RANKS}%`;
+
+      return part;
+    };
+
+    if (kind === WHOLE) {
+      const all = el("i");
+      all.style.left = "0";
+      all.style.right = "0";
+      node.append(all);
+    } else if (kind === PIECE) {
+      node.append(piece());
+    } else if (kind === SPLIT) {
+      node.append(el("i", "whole"), piece());
+    }
+
+    return node;
+  }
+
+  const batchName = (mode, r) => (mode.batch === OWN ? `b${r}` : mode.batch === SHARED ? "b0" : "–");
+
+  // The key is drawn with the same cells as the grids.
+  const key = document.getElementById("key");
+  const keyed = (kind, text) => {
+    const item = el("span");
+    item.append(cell(kind, 1), text);
+
+    return item;
+  };
+  const batches = el("span");
+  batches.append(el("span", "batch", `b0 – b${RANKS - 1}`), "The batch a rank works on: one name on several ranks is one shared batch");
+  key.append(
+    keyed(WHOLE, "Whole"),
+    keyed(PIECE, `One piece of ${RANKS}`),
+    keyed(SPLIT, "Part whole (top), the rest as a piece"),
+    keyed(NONE, "Nothing"),
+    batches,
+  );
+
+  const figure = document.getElementById("figure");
+  const HEAD_ROWS = 4;
+
+  for (let first = 0; first < MODES.length; first += PER_BAND) {
+    const band = el("div", "band");
+    // repeat() does not nest, so the panels' tracks are written out: R cells, then a gutter between panels.
+    const panel = Array(RANKS).fill("minmax(0, 1fr)").join(" ");
+    band.style.gridTemplateColumns = `var(--label-col) ${Array(PER_BAND).fill(panel).join(" var(--gutter) ")}`;
+    const place = (node, row, column, span = 1) => {
+      node.style.gridRow = String(row);
+      node.style.gridColumn = `${column} / span ${span}`;
+      band.append(node);
+
+      return node;
+    };
+
+    place(el("div", "axis", "Rank"), 3, 1);
+    place(el("div", "axis batch-axis", "Its batch"), 4, 1);
+    OBJECTS.forEach((object, o) => place(el("div", "object", object), HEAD_ROWS + 1 + o, 1));
+
+    MODES.slice(first, first + PER_BAND).forEach((mode, i) => {
+      const start = 2 + i * (RANKS + 1);
+      place(el("h2", undefined, mode.name), 1, start, RANKS);
+      place(el("div", "note", mode.note), 2, start, RANKS);
+
+      for (let r = 0; r < RANKS; r += 1) {
+        place(el("div", "rank", `R${r}`), 3, start + r);
+        place(el("div", "batch", batchName(mode, r)), 4, start + r);
+        mode.cells.forEach((kind, o) => place(cell(kind, r), HEAD_ROWS + 1 + o, start + r));
+      }
+
+      const lines = el("div", "lines");
+
+      for (const line of mode.lines) {
+        lines.append(el("p", undefined, line));
+      }
+
+      lines.append(el("p", "adds", mode.adds));
+      place(lines, HEAD_ROWS + OBJECTS.length + 1, start, RANKS);
+    });
+
+    figure.append(band);
+  }
+</script>
+</body>
+</html>

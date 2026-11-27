@@ -33,7 +33,7 @@ def _div_rn(a, b):
 
 
 @triton.jit
-def _pow2(e):
+def pow2(e):
     """int32 e in [-127, 127] -> fp32 2^e, built from bits so 2^-127 (subnormal) is exact."""
     bits = tl.where(e == -127, 0x00400000, (e + 127) << 23)
     return bits.to(tl.float32, bitcast=True)
@@ -80,7 +80,7 @@ def e2m1_round(mag):
     ``[2^e, 2^(e+1))`` (``e >= 0``, and everything below 1 with ``e = 0``) sits on a grid of step ``2^(e-1)``, and
     ``rint`` of the magnitude over that step is round-to-nearest-even."""
     e = tl.maximum(((mag.to(tl.int32, bitcast=True) >> 23) & 0xFF) - 127, 0)
-    return mul_rn(libdevice.rint(mul_rn(mag, _pow2(1 - e))), _pow2(e - 1))
+    return mul_rn(libdevice.rint(mul_rn(mag, pow2(1 - e))), pow2(e - 1))
 
 
 @triton.jit
@@ -114,10 +114,10 @@ def mxfp8_fake_quant_kernel(
     has_nan = tl.sum((x != x).to(tl.int32), axis=1) > 0
     se_i = _e8m0_exponent(x, FMAX, TINY)
 
-    v = mul_rn(x, _pow2(-se_i)[:, None])
+    v = mul_rn(x, pow2(-se_i)[:, None])
     v = tl.minimum(tl.maximum(v, -FMAX), FMAX)
     q = v.to(tl.float8e4nv).to(tl.float32)
-    out = mul_rn(q, _pow2(se_i)[:, None])
+    out = mul_rn(q, pow2(se_i)[:, None])
     out = tl.where(has_nan[:, None], float("nan"), out)
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
@@ -132,8 +132,8 @@ def mxfp4_fake_quant_kernel(
     has_nan = tl.sum((x != x).to(tl.int32), axis=1) > 0
     se_i = _e8m0_exponent(x, FMAX, TINY)
 
-    q = _e2m1_level(mul_rn(x, _pow2(-se_i)[:, None]), FMAX)
-    out = mul_rn(q, _pow2(se_i)[:, None])
+    q = _e2m1_level(mul_rn(x, pow2(-se_i)[:, None]), FMAX)
+    out = mul_rn(q, pow2(se_i)[:, None])
     out = tl.where(has_nan[:, None], float("nan"), out)
     tl.store(out_ptr + offs, out.to(tl.bfloat16).to(out_ptr.dtype.element_ty), mask=mask)
 
