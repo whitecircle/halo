@@ -19,8 +19,10 @@ from halo.models.head_transform import resolve_head_transform
 from halo.models.introspection.modality import config_declares_multimodality
 from halo.models.introspection.module_tree import hidden_state_backbone
 from halo.models.introspection.unwrapping import base_transformers_model, find_peft_model
+from halo.models.moe.balancing import iter_balancing_routers
 from halo.models.moe.config_fields import has_routed_experts, resolve_active_router_aux_loss_coef
 from halo.models.moe.family_specs import QWEN3, find_moe_family_spec_for_config
+from halo.runtime.collectives import barrier
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.reference_logps import is_reference_entry, reference_regeneration_steps
 
@@ -101,6 +103,36 @@ class ChunkedDPOScoringMixin:
         if use_chunked_dpo_logprobs and self.aux_loss_enabled:
             raise ValueError("use_chunked_dpo_logprobs cannot train an active router aux_loss; disable that term.")
 
+    def _configure_distributed_modes(self) -> None:
+        """COLLECTIVE. Warm both scorer forms and backward after sharding, then drop warmup gradients."""
+        super()._configure_distributed_modes()
+        if not self.use_chunked_dpo_logprobs or not torch.cuda.is_available():
+            return
+        model = self.model
+        was_training = model.training
+        ids = torch.ones((2, 3), dtype=torch.long, device=self.accelerator.device)
+        batch = {
+            "input_ids": ids,
+            "attention_mask": torch.ones_like(ids),
+            "completion_mask": torch.tensor([[0, 0, 1], [0, 0, 1]], device=ids.device),
+        }
+        model.train()
+        try:
+            devices = [self.accelerator.device] if self.accelerator.device.type == "cuda" else []
+            with torch.random.fork_rng(devices=devices):
+                with torch.no_grad(), disable_gradient_checkpointing(model, self.args.gradient_checkpointing_kwargs):
+                    self._chunked_dpo_logps(model, batch, compute_entropy=False)
+                with self.compute_loss_context_manager():
+                    logps, _ = self._chunked_dpo_logps(model, batch, compute_entropy=True)
+                logps.sum().backward()
+                self._finish_fsdp2_backward(model)
+        finally:
+            model.zero_grad(set_to_none=True)
+            model.train(was_training)
+            for router in iter_balancing_routers(model):
+                router.expert_load_counter = None
+        barrier()
+
     def compute_ref_log_probs(self, model, inputs):
         if not getattr(self, "use_chunked_dpo_logprobs", False):
             return super().compute_ref_log_probs(model, inputs)
@@ -125,6 +157,14 @@ class ChunkedDPOScoringMixin:
         loss = -F.logsigmoid(self.beta * (chosen_ratio - rejected_ratio)).mean() * self.loss_weights[0]
         self._record_chunked_dpo_metrics(inputs, entropy, chosen, rejected, chosen_ratio, rejected_ratio)
         return loss
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        """Use the already-scored held split without TRL preparing and sweeping it again."""
+        if getattr(self, "use_chunked_dpo_logprobs", False) and eval_dataset is self.eval_dataset:
+            eval_dataset = None
+        return super().evaluate(
+            eval_dataset=eval_dataset, ignore_keys=ignore_keys, metric_key_prefix=metric_key_prefix
+        )
 
     def _precompute_ref_logps(self, dataset, name, batch_size):
         if not getattr(self, "use_chunked_dpo_logprobs", False):

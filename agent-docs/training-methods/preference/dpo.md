@@ -45,9 +45,11 @@ Every run takes the fp32 path. The trainer turns TRL's `use_liger_kernel` off at
 
 `use_chunked_dpo_logprobs: true` scores the policy and precomputed reference from completion hidden states with `chunked_head_logprobs`, without a full `[B, T, V]` logits plane. It applies the family's verified head transform inside the wrapped root forward, where FSDP2 holds the output head gathered. Sequence sums and reference columns stay fp32. Types and defaults: [DPOScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
 
+On CUDA, construction warms the reference and training scorer forms, including backward, after distributed wrapping. This avoids compiling the head kernels during the first optimizer step, including when a resume restores references without a sweep.
+
 This path supports padded text full fine-tuning, `sigmoid` with `reverse_kl`, on Halo-managed dense FSDP2 or Qwen3-MoE EP2 with no active router aux loss. It requires `precompute_ref_log_probs`. TP, ETP, CP, PP, Accelerate-managed wrapping, DeepSpeed, quantized weights, adapters, multimodal composites, other losses, weighting, length reshaping and nonzero label smoothing are refused.
 
-Loss-only evaluation keeps rewards, log-probs, entropy and token counts; raw-logit metrics and `compute_metrics` are unavailable. Externally supplied reference columns are refused because they carry no scorer identity: remove them and let this path sweep. Its sidecar records the scorer, and a resume cannot substitute a full-logits sidecar or vice versa. Use the regeneration procedure [below](#resuming-a-precompute-run) when changing paths.
+Loss-only evaluation keeps rewards, log-probs, entropy and token counts; raw-logit metrics and `compute_metrics` are unavailable. Passing the trainer's held eval split explicitly reuses its already-scored columns. Externally supplied reference columns are refused because they carry no scorer identity: remove them and let this path sweep. Its sidecar records the scorer, and a resume cannot substitute a full-logits sidecar or vice versa. Use the regeneration procedure [below](#resuming-a-precompute-run) when changing paths.
 
 ## Reference model
 

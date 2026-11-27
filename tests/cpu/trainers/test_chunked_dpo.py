@@ -34,6 +34,7 @@ import tests.common.preference_precompute_e2e as precompute_e2e
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.preference.chunked_dpo import CHUNKED_DPO_SCORER, DPO_SCORER_KEY, reject_chunked_dpo_options
 from halo.trainers.preference.dpo import DistributedDPOTrainer
@@ -267,6 +268,30 @@ def test_no_grad_reference_sweep_matches_full_logits_and_stores_fp32():
     assert bounded._reference_logps_by_split["train"]["settings"][DPO_SCORER_KEY] == CHUNKED_DPO_SCORER
     assert bounded._precompute_ref_logps(swept, "train", 1) is swept
     assert all(parameter.grad is None for parameter in model.parameters())
+
+
+def test_bounded_warmup_covers_reference_and_training_and_clears_grads(monkeypatch):
+    trainer = _loss_trainer(_model(), bounded=True)
+    trainer.model.eval()
+    trainer.compute_loss_context_manager = nullcontext
+    events = []
+
+    def score(model, batch, *, compute_entropy):
+        events.append((compute_entropy, torch.is_grad_enabled()))
+        assert batch["input_ids"].shape == (2, 3)
+        return model.lm_head.weight.sum().expand(2, 2), None
+
+    trainer._chunked_dpo_logps = score
+    trainer._finish_fsdp2_backward = lambda model: events.append("backward finished")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(
+        DistributedTrainerMixin, "_configure_distributed_modes", lambda self: events.append("configured")
+    )
+    monkeypatch.setattr(chunked_dpo, "barrier", lambda: events.append("barrier"))
+    trainer._configure_distributed_modes()
+    assert events == ["configured", (False, False), (True, True), "backward finished", "barrier"]
+    assert not trainer.model.training
+    assert all(parameter.grad is None for parameter in trainer.model.parameters())
 
 
 def test_bf16_storage_matches_fp32_head_on_rounded_operands(monkeypatch):
@@ -597,6 +622,17 @@ def test_real_trainer_constructs_precomputes_and_evaluates_loss_only(tmp_path):
     assert trainer.train_dataset.features["ref_chosen_logps"].dtype == "float32"
     metrics = trainer.evaluate()
     assert torch.isfinite(torch.tensor(metrics["eval_loss"]))
+    held_metrics = trainer.evaluate(eval_dataset=trainer.eval_dataset)
+    torch.testing.assert_close(
+        torch.tensor(held_metrics["eval_loss"]), torch.tensor(metrics["eval_loss"]), rtol=0, atol=0
+    )
+    with pytest.raises(ValueError, match="without scorer provenance"):
+        trainer.evaluate(eval_dataset=trainer.eval_dataset.select(range(2)))
+    trainer.state.global_step = 1
+    held_metrics = trainer.evaluate(eval_dataset=trainer.eval_dataset)
+    torch.testing.assert_close(
+        torch.tensor(held_metrics["eval_loss"]), torch.tensor(metrics["eval_loss"]), rtol=0, atol=0
+    )
     batch = trainer.data_collator([trainer.train_dataset[i] for i in range(2)])
     with pytest.raises(ValueError, match="does not return raw logits"):
         trainer.compute_loss(trainer.model, batch, return_outputs=True)

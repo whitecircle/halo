@@ -76,8 +76,10 @@ def run(ctx):
         trainer._finish_fsdp2_backward(trainer.model)
         grad_norm = trainer._get_grad_norm(trainer.model)
         local_norm = to_local(grad_norm) if isinstance(grad_norm, torch.Tensor) else grad_norm
-        finite = bool(loss.isfinite()) and local_norm is not None and bool(
-            torch.isfinite(torch.as_tensor(local_norm)).all()
+        finite = (
+            bool(loss.isfinite())
+            and local_norm is not None
+            and bool(torch.isfinite(torch.as_tensor(local_norm)).all())
         )
         if not world_all(finite, ctx.device):
             raise AssertionError("DPO benchmark loss or gradient norm is nonfinite on at least one rank")
