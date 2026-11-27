@@ -386,9 +386,7 @@ def build_sentence_transformer(
 
 def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: EmbeddingScriptArguments) -> None:
     """Inject LoRA into the transformer backbone in place and train the adapters alone; checkpoints fold and resume
-    only its adapters. ``inject_adapter_in_model``, not ``add_adapter``: that goes through transformers' adapter API,
-    which requires peft >= 0.20.0, above the image's pin (pyproject.toml). The trainer's gates reject EP, TP and the
-    grouped-GEMM EP layers."""
+    only its adapters. The trainer's gates reject EP, TP and the grouped-GEMM EP layers."""
     backbone = model[0].auto_model
     peft_config = build_peft_config(backbone, model_config)
     if peft_config is None:

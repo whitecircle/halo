@@ -75,10 +75,10 @@ def bump_forward_generation(*_hook_args) -> None:
 
 
 def register_forward_generation_hook(model: torch.nn.Module) -> None:
-    """Bump the capacity generation once per ``model`` forward. Register on the outermost module the loop calls, and
-    again whenever a wrapper lands above it: a task-typed ``PeftModel`` reaches the model it wraps through
-    ``.forward()``, which runs no pre-hook. Idempotence is read off these hooks, since PEFT forwards a marker attribute
-    to the wrapped model."""
+    """Bump the capacity generation once per ``model`` forward: register on the model EP patches or the stage PP
+    builds, which every wrapper above it (``PeftModel``, ``UlyssesModel``) calls as a module, so a second registration
+    on a wrapper would bump twice. Idempotence is read off these hooks, since PEFT forwards a marker attribute to the
+    wrapped model."""
     if not EP_CAPACITY_DEDUP or bump_forward_generation in model._forward_pre_hooks.values():
         return
     model.register_forward_pre_hook(bump_forward_generation)

@@ -10,15 +10,11 @@ import torch.nn as nn
 from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from halo.configs.script_arguments import DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
 from halo.distributed.expert_parallel.deepep.backends import free_retired_ep_buffers, free_unclaimed_ep_buffers
-from halo.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     install_ep_aware_disable_adapter,
     model_has_expert_lora,
 )
-from halo.distributed.fsdp import (
-    install_fsdp2_safe_disable_adapter,
-    reshard_fsdp2_modules,
-)
+from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_rules import (
     reject_cross_domain_determinism,
     reject_custom_parallelism_under_accelerate,
@@ -92,6 +88,7 @@ from halo.trainers.parallelism.adapter_rules import (
     reject_expert_lora_peft_conflicts,
     reject_lora_under_tp,
     reject_peft_lora_in_ep_layers,
+    reject_peft_model_below_fsdp2_root,
     reject_unmergeable_expert_lora_save,
     reject_unrealized_expert_lora,
     reject_unsaved_grown_vocabulary,
@@ -422,6 +419,8 @@ class DistributedTrainerMixin(
 
         self._wrap_for_parallel_mode()
 
+        if self._fsdp_wrapped:
+            reject_peft_model_below_fsdp2_root(self._top_level_model())
         if config.needs_ep_layers:
             reject_peft_lora_in_ep_layers(self._top_level_model())
             self._install_ep_layer_hooks()
@@ -515,10 +514,6 @@ class DistributedTrainerMixin(
             )
 
     def _install_ep_layer_hooks(self) -> None:
-        if self._ep_layers():
-            # EP patching registers the generation hook on the model it patched, which a PEFT wrapper reaches
-            # through .forward() without a pre-hook, freezing the generation at the first forward's capacity.
-            register_forward_generation_hook(self.model)
         # modules_to_save swaps in a router copy the ctor-time DP-sync hook never saw.
         if find_peft_model(self.model) is not None:
             attached = sum(module.reattach_dp_average_grad_hooks() for module in self._ep_layers())
@@ -533,12 +528,10 @@ class DistributedTrainerMixin(
         self._install_grad_accum_window()
         self._install_ep_gradient_checkpointing()
         # The reference passes run under peft's disable_adapter(): it must drop the native expert adapters too,
-        # so they see a frozen base, and restore trainability on the sharded params.
+        # so they see a frozen base.
         peft_model = find_peft_model(self.model)
-        if peft_model is not None:
-            if model_has_expert_lora(self.model):
-                install_ep_aware_disable_adapter(peft_model)
-            install_fsdp2_safe_disable_adapter(peft_model, self.model)
+        if peft_model is not None and model_has_expert_lora(self.model):
+            install_ep_aware_disable_adapter(peft_model)
         reject_unmergeable_expert_lora_save(
             self.model,
             merge_expert_lora_on_save=config.merge_expert_lora_on_save,

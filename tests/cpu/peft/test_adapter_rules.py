@@ -10,6 +10,7 @@ from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.parallelism.adapter_rules import (
     reject_expert_lora_peft_conflicts,
     reject_peft_lora_in_ep_layers,
+    reject_peft_model_below_fsdp2_root,
     reject_unrealized_expert_lora,
 )
 from tests.common.ep_stubs import StubEPLayerBase
@@ -84,6 +85,23 @@ def test_the_supported_adapter_layouts_pass():
 def test_each_adapter_refusal_names_its_mechanism(refusal, match):
     with pytest.raises(ValueError, match=match):
         refusal()
+
+
+class _Wrapper(nn.Module):
+    """A model holding the PeftModel at ``.model``, as a CP wrapper applied after the PEFT wrap does."""
+
+    def __init__(self, model: nn.Module):
+        super().__init__()
+        self.model = model
+
+
+def test_a_peft_model_below_the_fsdp2_root_is_refused():
+    peft_model = _peft(["q_proj"], r=RANK, lora_alpha=2 * RANK)
+    reject_peft_model_below_fsdp2_root(peft_model)
+    reject_peft_model_below_fsdp2_root(_MoEHost(native_adapters=True))
+
+    with pytest.raises(ValueError, match=r"PeftModel sits inside a _Wrapper(?s:.*)get_peft_model over the wrapper"):
+        reject_peft_model_below_fsdp2_root(_Wrapper(peft_model))
 
 
 if __name__ == "__main__":

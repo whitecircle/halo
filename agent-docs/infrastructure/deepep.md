@@ -116,8 +116,8 @@ the first MoE layer all-reduces the capacity and the rest reuse it, dropping Nâˆ
 `.item()` syncs per forward. A forward pre-hook on the outermost module the loop calls opens each
 forward's scope (`capacity_scope`, a `CapacityScope` in
 `halo/distributed/expert_parallel/deepep/capacity.py`), so the first-layer miss lands on every rank
-together. The trainer re-registers the hook after PEFT wrapping: a task-typed `PeftModel` reaches the
-model it wraps through `.forward()`, which runs no pre-hook. A caller entering the backbone directly
+together. The hook sits on the model EP patched, which every wrapper above it (`PeftModel`, `UlyssesModel`)
+calls as a module, so it runs once per forward. A caller entering the backbone directly
 (the chunked log-prob path peels the hidden-state backbone off the wrapper) opens its own scope with
 `bump_forward_generation()`.
 

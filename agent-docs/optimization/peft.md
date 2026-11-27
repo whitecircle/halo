@@ -108,9 +108,10 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
   performance is largely rank-independent; rank matters most when the LR is suboptimal.
 - **Alpha:** `alpha = rank` (conservative) or `2 * rank` (aggressive). For rank ≥ 64, prefer `use_rslora`.
 - **Target modules:** all-linear on a dense model or on stock experts (`use_grouped_gemm: false`). On EP layers it
-  runs on GPT-OSS, Qwen3 MoE, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. Every other EP
-  family refuses it, as it would put PEFT layers inside the EP layer. There, name attention and expert projections
-  explicitly (see [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
+  runs on GPT-OSS, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. A family whose targets PEFT
+  rewrites for transformers v5 refuses it on any layout, and every other EP family refuses it, as it would put PEFT
+  layers inside the EP layer. There, name attention and expert projections explicitly (see
+  [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
 - **Learning rate:** higher than the same run's full fine-tune on SFT and GRPO. The shipped SFT recipes start at `1e-4`, and the
   code-contests recipes run `3e-6` against `2e-7`.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
@@ -178,6 +179,13 @@ Do not reach for TRL's `lora_target_parameters` on an MoE model — it is **reje
 EP layers (`ep_size > 1`, or the default `use_grouped_gemm`), whatever it targets, so an attention-only run
 is rejected too. It is PEFT's own mechanism for fused `nn.Parameter` experts, and it wraps the module
 *owning* the parameter, which sits above the EP layer and so escapes both EP validators.
+
+PEFT also adds such parameters on its own. On a family whose checkpoints transformers v5 converts (Qwen3 MoE,
+Qwen3-Next, GLM-4 MoE Lite and Cohere2 MoE in the roster), its wrap turns a regex or `all-linear` target into
+`target_parameters` on the fused experts and the router, and resolves a regex to bare leaf names, which reach every
+layer. `build_peft_config` runs that rewrite on a copy and refuses a target it would change
+(`reject_peft_moe_target_rewrite`); a list of names or paths passes as written. Under EP,
+`reject_peft_lora_in_ep_layers` also refuses a tuner layer wrapped around an EP layer.
 
 Weights PEFT can't LoRA are **full-trained** (a trainable copy, not a low-rank adapter) via
 `lora_modules_to_save`: `embed_tokens` (an `nn.Embedding`), `lm_head` (excluded by `all-linear`), and the
@@ -312,13 +320,13 @@ from the frozen base instead of a second model copy. Under EP the mixin patches 
 (`install_ep_aware_disable_adapter`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
 
-The pinned PEFT 0.18.1 clears `requires_grad` on the adapters a module holds when `disable_adapter()`
-enters and restores it on the ones it holds at exit. A reference pass that is the first forward after an
-FSDP2 reshard (online GRPO at `beta > 0` with no old-logps recompute) enters on the sharded params and exits
-on the unsharded copies, which would freeze every sharded adapter silently. `install_fsdp2_safe_disable_adapter`
-wraps the context for every PEFT model: when the registered trainable params changed across it, it reshards
-before PEFT's exit, so the restore lands on the sharded params (upstream PEFT drops the freeze in
-huggingface/peft#3839, which 0.18.1 predates).
+PEFT clears `requires_grad` on the adapters when `disable_adapter()` enters and sets it again at exit. A
+reference pass that is the first forward after an FSDP2 reshard (online GRPO at `beta > 0` with no old-logps
+recompute) enters on the sharded params and exits on the unsharded copies the forward registered. PEFT compares
+the registered params across the context and, where they changed, reshards every FSDP2 module inside the
+`PeftModel` and enables the adapters again, so the flags land on the sharded params (huggingface/peft#3839,
+#3938). The trainer shards the `PeftModel` itself as the FSDP2 root, so that reaches every group, and refuses a
+wrapper applied above the `PeftModel` under FSDP2 (`reject_peft_model_below_fsdp2_root`).
 
 An explicit reference model (DPO, KTO, self-distillation's KL `reference_model`) is never parallelized:
 under EP or TP it is a whole dense replica on every rank, warned about rather than refused. LoRA with the
@@ -433,8 +441,8 @@ specific to LoRA:
 
 **Reloading elsewhere.** Attention adapters carry standard PEFT keys and load onto a stock
 `PeftModel.from_pretrained`. Native expert adapters do not: grouped `[E, K, r]` tensors have no PEFT
-representation, and PEFT drops unrecognized adapter keys without a warning (`load_adapter` filters
-`missing_keys` and never reads `unexpected_keys`).
+representation, and PEFT only warns about adapter keys it does not recognize unless the load passes
+`strict_adapter_check="error"`.
 
 Every directory carrying them is therefore labeled with a `peft_type` PEFT does not know, so an external load
 raises on the label rather than returning a half-adapted model: `EXPERT_LORA` for an expert-only save,
@@ -588,10 +596,12 @@ on the PEFT wrap before any mode wraps the model, so the check covers every mode
 holds no trainable parameter for an adapter meant to train: an active adapter whose config is not `inference_mode`,
 counting every tensor in the layer's `adapter_layer_names` (`lora_A`/`lora_B`, `lora_embedding_*`,
 `lora_magnitude_vector`, other tuners' own). It reads live `requires_grad` and holds no collective; every rank builds
-the same wrap and raises alike. PEFT 0.21 and later re-enable adapters by matching `named_parameters()` names against
-`named_modules()` prefixes, so `UlyssesModel` (its names omit the `original_attention` level) would leave every CP
-adapter frozen; the pin `peft<0.19` keeps that path unreachable, and a bump needs a release that fixes
-[peft#4181](https://github.com/huggingface/peft/issues/4181).
+the same wrap and raises alike. PEFT's wrap keeps trainable only the parameters whose `named_parameters()` name
+lies under a tuner layer's `named_modules()` name. `UlyssesModel`'s names omit the `original_attention` level, so
+under CP the wrap leaves every adapter frozen ([peft#4181](https://github.com/huggingface/peft/issues/4181)), and the
+native expert adapters sit in no tuner layer, so a mixed run's wrap freezes them. Before the check, construction marks
+the native expert adapters trainable again (`apply_expert_lora_trainability`) and, under `UlyssesModel`, every tensor
+an active adapter that trains holds, less the weights its variant keeps frozen (`apply_cp_adapter_trainability`).
 
 ## Tests and benchmarks
 

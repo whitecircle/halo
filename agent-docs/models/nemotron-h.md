@@ -153,7 +153,8 @@ The weight sync carries no head and refuses the family, so a server drafts with 
 `lora_target_modules` for the recipes: `q_proj`, `k_proj`, `v_proj`, `o_proj` on the attention layers, `in_proj`, `out_proj` on the Mamba layers, and `up_proj`, `down_proj`, which peel to the native expert adapters.
 
 - `lora_r` must be a multiple of 8 for the expert adapters, which are refused at `expert_tp_size > 1`.
-- An adapter on `conv1d` raises at the first forward, as the mixer reads its weight directly.
+- `conv1d` takes no adapter, as the mixer reads its weight directly: PEFT refuses one at the wrap, and on the composite, whose model type PEFT's check does not read, the mixer raises at the first forward.
+- PEFT refuses `out_proj` on every Mamba model type, since a fused scan reads its weight past the adapter. `apply_nemotron_h_patches` pins that scan off and lets `out_proj` through for `nemotron_h`, behind a signature guard; `merge_peft_adapters.py` applies the family patches before PEFT loads an adapter.
 - The latent projections and shared experts have no route.
 - A list target also matches Radio's `q_proj` on the composite. Train adapters with `text_only_model: true`, or pass a regex string, which leaves the experts out.
 - `merge_peft_adapters.py` merges attention and Mamba adapters and refuses expert ones, as the hub stores the expert layers under `backbone.*` ([Streaming merge](../optimization/peft.md#streaming-merge)); the recipe folds both with `merge_expert_lora_on_save: true`, a 251 GB write per save.

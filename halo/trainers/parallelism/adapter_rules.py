@@ -50,6 +50,20 @@ def reject_peft_lora_in_ep_layers(model) -> None:
         )
 
 
+def reject_peft_model_below_fsdp2_root(model) -> None:
+    """``model`` is the FSDP2 root. PEFT's ``disable_adapter()`` reshards only the FSDP2 modules inside the
+    ``PeftModel`` before it enables the adapters again, so a wrapper above it would keep the root group's adapters
+    frozen after a reference pass."""
+    peft_model = find_peft_model(model)
+    if peft_model is not None and peft_model is not model:
+        raise ValueError(
+            f"The PeftModel sits inside a {type(model).__name__}, which FSDP2 shards as its root: after a "
+            f"disable_adapter() reference pass PEFT reshards only the FSDP2 modules inside the PeftModel, so adapters "
+            f"in the root group (lm_head, embeddings) would stay frozen. Apply get_peft_model over the wrapper instead "
+            f"(over the UlyssesModel the loader returns under context parallelism)."
+        )
+
+
 def reject_expert_lora_peft_conflicts(model, expert_lora) -> None:
     """Checked against the live config, so a ``peft_config`` handed to the trainer directly lands on the same gate as
     the ``lora_target_modules`` peel."""

@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""The EP capacity generation must keep advancing after PEFT wraps the EP-patched model.
-``PeftModel`` calls ``.forward()``, which runs no pre-hook; frozen, a later longer batch fails in the dedup guard."""
+"""The EP capacity generation advances exactly once per forward after PEFT wraps the EP-patched model. PEFT's tuner
+calls the model it wraps as a module, so the hook EP patching registered runs; frozen, a later longer batch fails in
+the dedup guard, and a second hook on the wrapper would bump twice."""
 
 from __future__ import annotations
 
@@ -87,8 +88,8 @@ def test_an_attention_lora_run_still_advances_the_ep_capacity_generation(tmp_pat
     assert trainer.model_wrapped is trainer.model
 
     assert _generation_delta(trainer.model_wrapped, forwards=2) == 2, (
-        "the wrapper reaches the patched model through .forward(), which runs no pre-hook, so the "
-        "capacity generation stayed at the value the run's first forward cached"
+        "the capacity generation did not advance once per forward under the PEFT wrapper: it stayed at the first "
+        "forward's value, or a second hook bumped it twice"
     )
 
 
