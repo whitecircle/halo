@@ -108,6 +108,20 @@ def _count_calls(module, name: str) -> list[int]:
     return calls
 
 
+def _record_cached_casts() -> list[int]:
+    """Replace ``deepgemm._quant_weight`` for the process with a wrapper recording how many casts the weight cache
+    holds as each call returns."""
+    real, cached = deepgemm._quant_weight, []
+
+    def recorded(*args, **kwargs):
+        operand = real(*args, **kwargs)
+        cached.append(sum(map(len, deepgemm._weight_caches.values())))
+        return operand
+
+    deepgemm._quant_weight = recorded
+    return cached
+
+
 class _CallsBeforeTheLastStep(TrainerCallback):
     """``calls`` as the last step begins: the first forward's kernel warm-up runs the counted backward itself."""
 
@@ -233,6 +247,7 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
     simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
     flag_reads = _count_calls(lowp_compute, "verify_finite_mxfp4_weights")
+    cached_casts = _record_cached_casts()
     warmed, forwards = _CallsBeforeTheLastStep(wgrad_calls), _ModelForwards()
     losses, versions, adamw_bf16 = _train(
         ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed, forwards)
@@ -245,9 +260,10 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     checks["mxfp4_reads_its_non_finite_flag_once_a_forward"] = world_all(
         forwards.count >= 2 * TOTAL_STEPS and flag_reads[0] == (forwards.count if ARGS.precision == "mxfp4" else 0)
     )
-    # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM; the caches themselves must stay empty.
+    # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM, and the cache drops an entry with
+    # its weight; so the caches are read as each cast returns, and must be empty at every one.
     checks["fsdp2_managed_experts_cache_no_cast"] = world_all(
-        (sum(map(len, deepgemm._weight_caches.values())) == 0) == (ARGS.ep_size == 1)
+        bool(cached_casts) and (max(cached_casts) == 0) == (ARGS.ep_size == 1)
     )
     checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
     log(
