@@ -193,7 +193,7 @@ The specs carry the [standard container flags](docker.md#standard-training-launc
 
 That last row is the one real divergence from `docker run`, which caps nothing by default. `resources.memory` is a **hard cgroup limit**, and the `shm_size` allocation counts against it — a 128 GiB `/dev/shm` inside a 256 GiB cap leaves only 128 GiB for the trainer. Overshooting is an OOM-kill, not swapping, and with `restart { attempts = 0 }` that kill ends the job. The specs default to 512 GiB for the 8-GPU jobs and 128 GiB for the single-GPU one, tunable via `memory_mb`; raise it rather than trimming `shm_size` on a large host.
 
-The single-GPU job drops `ipc_mode` and `network_mode` — one process needs neither — but keeps a 16 GiB `shm_size`, because docker's 64 MB default is what breaks PyTorch dataloader workers, and keeps `memlock=-1` because those workers pin the memory they hand over.
+The single-GPU job drops `ipc_mode`, `network_mode` and the `ulimit` block, none of which one process needs: the loader pins its batches under the default locked-memory limit. It keeps a 16 GiB `shm_size`, because docker's 64 MB default is what breaks PyTorch dataloader workers.
 
 ## Job management
 

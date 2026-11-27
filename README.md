@@ -362,7 +362,7 @@ for the per-model matrix, and [Clusters & Multi-Node](human-docs/clusters.md) fo
 
 Built in. Most apply by default where supported; QAT, the Muon and FlashAdamW optimizers, LoRA and QLoRA, and the packing modes are set per run in the config:
 
-- **Attention and kernels.** Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 elsewhere, Liger fused
+- **Attention and kernels.** Flash Attention 4 on Blackwell, FA3 on Hopper, FA2 on Ampere and Ada, Liger fused
   CE/SwiGLU/RMSNorm (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS, Gemma 4, Nemotron-H and Inkling 2 take torch's fused RMSNorm instead),
   fused GLU kernels, and Grouped GEMM for MoE expert compute.
 
