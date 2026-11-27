@@ -2,7 +2,8 @@
 """``moe_backend: mok`` against the DeepEP path on one MoE block, at as many EP ranks as the launcher gives (1 or 4):
 the same weights and tokens give the same output and the same token, router and expert-weight gradients within bf16
 tolerance. ``--family qwen3`` stores separate GLU banks, ``qwen3_5`` a fused ``gate_up_proj`` beside a gated shared
-expert, which stays on the layer's own path. The token count is off MoK's 256 multiple, so the padded tail is checked.
+expert, which stays on the layer's own path. ``--mxfp8`` runs MoK's MXFP8 forward and backward, which must land in fp8's
+band of the bf16 reference instead. The token count is off MoK's 256 multiple, so the padded tail is checked.
 ``--skew`` routes every token of every rank to rank 0's experts: the most rows one rank can schedule, which a schedule
 sized to the group's rows alone overflows (MoK then traps in its kernel), and more than its ring of routed rows holds.
 """
@@ -20,10 +21,15 @@ from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSpars
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
 
+from halo.distributed.expert_parallel import mok as mok_module
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.mok import MoKExperts, require_mok
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.batched_transpose import transpose_last_two
+from halo.kernels.lowp.quantization import WeightVersionCache
+from halo.kernels.lowp.spec import LowpSpec
+from halo.optimizers.adamw_bf16 import AdamWBF16
 from tests.common.harness import gpu_test_main
 from tests.common.numerics import cos_sim, fro_rel_err
 from tests.common.rank_log import log
@@ -33,6 +39,10 @@ HIDDEN, INTERMEDIATE, EXPERTS, TOP_K = 512, 256, 32, 4
 TOKENS = 1000  # padded to 1024
 # Both paths accumulate in fp32 and round to bf16, in different orders and tilings.
 REL_MAX, COS_MIN = 2e-2, 0.9995
+# MXFP8 against bf16; the lower bound fails a run that silently stayed bf16. Weight gradients sum many fp8 products
+# and land well inside it; the shared expert's stay bf16 on both paths.
+MXFP8_BAND = (5e-3, 0.1)
+MXFP8 = LowpSpec(precision="fp8", backend="native", backward_precision="fp8", apply_dense_mlp=False)
 SIZES = {"hidden_size": HIDDEN, "moe_intermediate_size": INTERMEDIATE, "num_experts": EXPERTS}
 FAMILIES = {
     "qwen3": lambda: Qwen3MoeSparseMoeBlock(Qwen3MoeConfig(**SIZES, num_experts_per_tok=TOP_K, norm_topk_prob=True)),
@@ -45,21 +55,26 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--family", choices=tuple(FAMILIES), default="qwen3")
 parser.add_argument("--skew", action="store_true")
 parser.add_argument("--ep-size", type=int, help="The EP ranks this row launches at, checked against the launcher's")
+parser.add_argument("--mxfp8", action="store_true", help="Run MoK's MXFP8 forward and backward")
 parser.add_argument("--ranks", type=int, help="The ranks an --ep-size 1 row launches, each its own EP group")
 ARGS = parser.parse_args()
 
 
-def _ep_layer(block: nn.Module, backend: str, ep_size: int) -> nn.Module:
+def _ep_layer(block: nn.Module, backend: str, ep_size: int, lowp: LowpSpec | None = None) -> nn.Module:
     pc = ParallelismConfig(
         ep_size=ep_size,
         moe_backend=backend,
         ep_rows_per_device=1,
         ep_declared_max_length=TOKENS,
         fsdp_shard_ep1_experts=False,
+        lowp=lowp or LowpSpec(),
     )
     holder = nn.Module()
     holder.mlp = copy.deepcopy(block)
-    return apply_ep_layers(holder, pc.ep_config()).mlp
+    layer = apply_ep_layers(holder, pc.ep_config()).mlp
+    if lowp is not None:
+        layer.set_lowp_compute(lowp, weight_cacheable=True)
+    return layer
 
 
 def _route_to_rank_0(block: nn.Module, x: torch.Tensor, ep_size: int) -> torch.Tensor:
@@ -102,8 +117,8 @@ compiled_past_the_warm_up = []  # Triton kernels the MoK step compiled after it
 _warm = MoKExperts.warm
 
 
-def _recording_warm(self, banks, top_k):
-    _warm(self, banks, top_k)
+def _recording_warm(self, banks, top_k, mxfp8):
+    _warm(self, banks, top_k, mxfp8)
     warm_ups.append(top_k)
 
 
@@ -131,7 +146,58 @@ def _record_compile(*, fn, **_):
     return False  # a truthy return would skip the compile
 
 
-@gpu_test_main(prefix=f"mok_backend_{ARGS.family}{'_skew' if ARGS.skew else ''}", partial_state=False)
+def _record_bank_casts() -> list[bool]:
+    """Replace ``mok._mxfp8_layer_cast`` for the process with a wrapper recording, per cast, whether it returned
+    inference tensors."""
+    real, made_in_inference = mok_module._mxfp8_layer_cast, []
+
+    def recorded(w):
+        cast = real(w)
+        made_in_inference.append(all(t.is_inference() for t in cast))
+        return cast
+
+    mok_module._mxfp8_layer_cast = recorded
+    return made_in_inference
+
+
+def _bits_equal(left: tuple[torch.Tensor, ...], right: tuple[torch.Tensor, ...]) -> bool:
+    return all(
+        torch.equal(a.contiguous().view(torch.uint8), b.contiguous().view(torch.uint8))
+        for a, b in zip(left, right, strict=True)
+    )
+
+
+def _mxfp8_cast_checks(layer: nn.Module) -> dict[str, bool]:
+    """The cast the layer's layout takes is MoK's own of the transposed bank, bit for bit, and the per-step cache
+    serves a cast of the weights as they are after a fused AdamWBF16 step and after a ``load_state_dict``."""
+    weights = tuple(param for _, param in layer.expert_named_params())
+    quantize = mok_module._mxfp8_quantize()
+
+    def cache_is_current() -> bool:
+        served = mok_module._mxfp8_banks(weights).backward[0]
+        return _bits_equal(served, mok_module._mxfp8_layer_cast(mok_module._layer_banks(weights)[0]))
+
+    gate = mok_module._layer_banks(weights)[0]
+    checks = {
+        "the_layer_layout_cast_is_mok_s_cast_of_the_transposed_bank": _bits_equal(
+            mok_module._mxfp8_layer_cast(gate), quantize(transpose_last_two(gate.detach()).contiguous(), True, True)
+        ),
+        "the_cache_served_the_step_s_cast": cache_is_current(),
+    }
+    served = [tuple(t.clone() for t in mok_module._mxfp8_banks(weights).backward[0])]
+    AdamWBF16(layer.expert_named_params(), lr=1e-2).step()
+    served.append(tuple(t.clone() for t in mok_module._mxfp8_banks(weights).backward[0]))
+    checks["an_adamw_bf16_step_recasts_the_banks"] = cache_is_current() and not _bits_equal(*served)
+    layer.load_state_dict({name: value * 0.75 for name, value in layer.state_dict().items()})
+    recast = not _bits_equal(served[1], mok_module._mxfp8_banks(weights).backward[0])
+    checks["a_load_state_dict_recasts_the_banks"] = cache_is_current() and recast
+    return checks
+
+
+_VARIANT = f"{'_mxfp8' if ARGS.mxfp8 else ''}{'_skew' if ARGS.skew else ''}"
+
+
+@gpu_test_main(prefix=f"mok_backend_{ARGS.family}{_VARIANT}", partial_state=False)
 def run(ctx) -> dict:
     torch.manual_seed(SEED)
     block = FAMILIES[ARGS.family]().to(ctx.device, torch.bfloat16)
@@ -149,7 +215,21 @@ def run(ctx) -> dict:
     previous, triton.knobs.runtime.jit_cache_hook = triton.knobs.runtime.jit_cache_hook, _record_compile
     mok_ops._C = _RecordedEntryPoints(mok_ops._C)
     try:
-        mok = _step(_ep_layer(block, "mok", ep_size), x, grad)
+        mok_layer = _ep_layer(block, "mok", ep_size, MXFP8 if ARGS.mxfp8 else None)
+        # Two evaluations first. The warm-up in the first leaves inference mode and casts the banks there; with that
+        # cast dropped, the second casts them as inference tensors, and those serve the training step. The step runs
+        # under saved-tensor hooks, as in a non-reentrant checkpoint, which hand its backward other objects for the
+        # weights.
+        bank_casts = _record_bank_casts()
+        if ARGS.mxfp8:
+            with torch.inference_mode():
+                mok_layer(x)
+                mok_module._mxfp8_cache = WeightVersionCache()
+                mok_layer(x)
+        evaluation_casts = list(bank_casts)
+        with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
+            mok = _step(mok_layer, x, grad)
+        step_casts = len(bank_casts) - len(evaluation_casts)
     finally:
         triton.knobs.runtime.jit_cache_hook = previous
         mok_ops._C = mok_ops._C._compiled
@@ -169,8 +249,17 @@ def run(ctx) -> dict:
     }
     if ARGS.skew:
         local = EXPERTS // ctx.world_size
-        checks["every_token_routed_to_rank_0"] = len(routed) == 2 and all(bool((ids < local).all()) for ids in routed)
+        checks["every_token_routed_to_rank_0"] = len(routed) == 2 + 2 * ARGS.mxfp8 and all(
+            bool((ids < local).all()) for ids in routed
+        )
         checks["only_rank_0_takes_expert_gradients"] = (ctx.rank == 0) == ("grad_down_proj" in reference)
+    if ARGS.mxfp8:
+        # Three banks cast in the warm-up and three in the evaluation after it: a layer that stayed on bf16 would cast
+        # none, and pass a bare "no cast in the step".
+        checks["the_step_casts_no_bank_the_evaluation_cast_in_inference_mode"] = (
+            evaluation_casts == [False] * 3 + [True] * 3 and step_casts == 0
+        )
+        checks |= _mxfp8_cast_checks(mok_layer)
     metrics = {}
     for name, expected in reference.items():
         if name in unreached:
@@ -178,7 +267,10 @@ def run(ctx) -> dict:
         rel = fro_rel_err(mok[name].float(), expected.float())
         cos = cos_sim(mok[name].float(), expected.float(), label=name)
         metrics[f"{name}_rel"] = rel
-        checks[f"{name}_matches_deepep"] = rel < REL_MAX and cos > COS_MIN
+        if ARGS.mxfp8 and "shared_expert" not in name:
+            checks[f"{name}_in_mxfp8_band"] = MXFP8_BAND[0] < rel < MXFP8_BAND[1]
+        else:
+            checks[f"{name}_matches_deepep"] = rel < REL_MAX and cos > COS_MIN
         log(f"  {name:34s} rel {rel:.2e} cos {cos:.6f} norm {expected.float().norm():.3e}")
     return {"checks": checks, "metrics": metrics}
 

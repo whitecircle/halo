@@ -346,12 +346,14 @@ class EPMoELayerBase(
 
         if self._runs_mok:
             glu = (self.gate_up_proj,) if self._stores_fused_glu else (self.gate_proj, self.up_proj)
-            banks = (*glu, self.down_proj)
+            banks, mxfp8 = (*glu, self.down_proj), self._lowp is not None and self._lowp.native
             if not self._expert_kernels_warmed:  # before the span: a first-call compile inside it stalls every peer
                 self._expert_kernels_warmed = True
-                self.dispatcher.warm(banks, experts.shape[1])
+                self.dispatcher.warm(banks, experts.shape[1], mxfp8)
             with self._perf("ep.mok"):
-                return self.dispatcher(self._rank_uniform_dispatch_input(flat, weights), experts, weights, banks)
+                return self.dispatcher(
+                    self._rank_uniform_dispatch_input(flat, weights), experts, weights, banks, mxfp8
+                )
 
         # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
         # stalls every peer in DeepEP's barrier.

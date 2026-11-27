@@ -107,7 +107,7 @@ The MXFP4 cast flags a NaN or inf weight from its own pass, and one host read af
 
 On one MoE layer forward and backward through Halo's EP layer at EP 4 on B300 (DeepEP dispatch, expert weights cast every step), native fp8 with the fp8 backward runs at 0.70–1.13× DeepEP bf16: 1.13× on DeepSeek-V3's 2048-wide experts at 16,384 tokens per GPU, 0.79× on Qwen3-30B-A3B's 768-wide ones. Native mxfp4 with the fp8 backward is no faster: it matches fp8 once the weight casts are cached and runs at 0.64–1.01× when they are redone every step, as each bank is then cast twice. Its forward is a choice of numerics and of cache memory, not of speed.
 
-It is never auto-selected. With `lowp_backend: native`, every grouped expert GEMM of a converted block runs native (the `lowp_keep_first_blocks` / `lowp_keep_last_blocks` ones stay bf16), and a shape the kernel rejects raises. Dense MLP projections have no native kernel, so the config must set `lowp_apply_dense_mlp: false`.
+It is never auto-selected. With `lowp_backend: native` (under `moe_backend: mok` it runs [Mixture-of-Kittens' MXFP8 kernels](../parallelism/expert-parallelism.md#mixture-of-kittens-backend) instead), every grouped expert GEMM of a converted block runs native (the `lowp_keep_first_blocks` / `lowp_keep_last_blocks` ones stay bf16), and a shape the kernel rejects raises. Dense MLP projections have no native kernel, so the config must set `lowp_apply_dense_mlp: false`.
 
 `fp8` and `mxfp4` have a native path; `fp4` (nvfp4) has none and is refused at config time. What it gives:
 
@@ -146,6 +146,7 @@ That bit-identity holds for any block whose amax is within `2^-16` of the tensor
 | **nvfp4** (NVIDIA) | e2m1 | e4m3 + per-tensor fp32 | 1×16 | best fp4 | fused kernel |
 | DeepGEMM native fp8 | e4m3 | UE8M0 (pow-2) | act 1×128, weight 128×128 | — | (native kernel) |
 | DeepGEMM native mxfp4 | e2m1 (act fp8) | UE8M0 | act 1×128, weight 1×32 | — | (native kernel) |
+| MoK native mxfp8 (`moe_backend: mok`) | e4m3 | e8m0 (pow-2) | 1×32, both operands and gradients | — | (native kernel) |
 
 `lowp_precision` exposes three formats (`LOWP_RECIPES`): **`fp8`** = mxfp8; **`fp4`** = nvfp4 (the accurate fp4; validate an nvfp4 deployment); **`mxfp4`** = OCP fp4, whose power-of-two scale lets its cached weight quant compile bit-identically. Pick by deployment target.
 
@@ -233,6 +234,15 @@ lowp_keep_last_blocks: 0
 lowp_precision: fp8            # or mxfp4 (FP8 activations x MXFP4 weights)
 lowp_backend: native
 lowp_backward_precision: fp8   # bf16 (default) keeps the backward on F.grouped_mm
+lowp_apply_dense_mlp: false
+```
+
+```yaml
+# Mixture-of-Kittens' MXFP8 kernels on the MoE experts, forward and backward (its one low-precision recipe):
+moe_backend: mok
+lowp_precision: fp8
+lowp_backend: native
+lowp_backward_precision: fp8
 lowp_apply_dense_mlp: false
 ```
 

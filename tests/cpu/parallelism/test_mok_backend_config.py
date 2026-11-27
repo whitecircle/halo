@@ -1,7 +1,8 @@
 """``moe_backend: mok`` is refused at config time wherever its kernels cannot run the configuration, and at layer build
 for a block whose experts they would compute wrong; the padded token count covers the declared budget, no routing
-overflows the schedule MoK traps on, and the adapter hands MoK the layer's experts in MoK's layouts and back (against
-an eager stand-in for its kernels, as the package runs on Blackwell GPUs only)."""
+overflows the schedule MoK traps on, MXFP8 is the one low-precision recipe it takes, needing no ``deep_gemm``, and the
+adapter hands MoK the layer's experts in MoK's layouts and back (against an eager stand-in for its kernels, as the
+package runs on Blackwell GPUs only)."""
 
 import dataclasses
 import math
@@ -22,6 +23,7 @@ from halo.configs.parallelism_arguments import ParallelismArguments, parallelism
 from halo.distributed.expert_parallel import mok
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel import load_rules
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -44,9 +46,17 @@ def _mok(**kw):
     return create_config(moe_backend="mok", **{"world_size": 4, "gpus_per_node": 4, "ep_size": 4, **BUDGET, **kw})
 
 
+MXFP8 = LowpSpec(precision="fp8", backend="native", backward_precision="fp8", apply_dense_mlp=False)
+
+
 @pytest.mark.parametrize("overrides", [{}, {"ep_size": 1, "fsdp_shard_ep1_experts": False}])
-def test_pure_node_local_ep_with_a_budget_is_accepted(overrides):
-    assert _mok(**overrides).moe_backend == "mok"
+@pytest.mark.parametrize(
+    "lowp",
+    [LowpSpec(), MXFP8, LowpSpec(precision="fp8", apply_moe_experts=False)],
+    ids=["bf16", "mxfp8", "simulated_on_the_dense_mlps_alone"],
+)
+def test_pure_node_local_ep_with_a_budget_is_accepted(overrides, lowp):
+    assert _mok(**overrides, lowp=lowp).lowp == lowp
 
 
 @pytest.mark.parametrize(
@@ -61,7 +71,15 @@ def test_pure_node_local_ep_with_a_budget_is_accepted(overrides):
         ({"ep_size": 1}, "FSDP2-managed experts"),
         ({"expert_lora": ExpertLoraSpec(r=8, alpha=16)}, "expert LoRA"),
         ({"ep_fp32_experts": True}, "fp32_experts"),
-        ({"lowp": LowpSpec(precision="fp8")}, "lowp_precision='fp8'"),
+        ({"lowp": LowpSpec(precision="fp8")}, "lowp_backend='simulated'"),
+        (
+            {"lowp": LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False)},
+            "lowp_backward_precision='bf16'",
+        ),
+        (
+            {"lowp": LowpSpec(precision="mxfp4", backend="native", backward_precision="fp8", apply_dense_mlp=False)},
+            "lowp_precision='mxfp4'",
+        ),
         ({"ep_rows_per_device": 0}, "no declared token budget"),
         ({"use_grouped_gemm": False}, "use_grouped_gemm=False"),
         ({"ep_size": 1, "use_grouped_gemm": False}, "use_grouped_gemm=False"),
@@ -299,6 +317,71 @@ def test_destroying_the_layers_backend_releases_mok_workspaces(monkeypatch):
     monkeypatch.setattr(mok, "_mok", lambda: SimpleNamespace(clear_workspace_cache=lambda: released.append(True)))
     layer.dispatcher.destroy()
     assert released == [True]
+
+
+def test_mxfp8_under_mok_needs_no_deep_gemm(monkeypatch):
+    """MoK's own kernels run the native recipe; the DeepGEMM gate is for the DeepEP path."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
+    layer = _build(EPQwen3MoELayer, _qwen3_block(256), monkeypatch)
+    assert layer.set_lowp_compute(MXFP8, weight_cacheable=True) and layer._lowp is MXFP8
+
+
+def test_the_mxfp8_cast_is_redone_after_a_write_to_a_bank_and_only_then(monkeypatch):
+    """The backward and every grad-accumulation microbatch reuse one cast per step; a stale one trains old weights. An
+    optimizer step, a ``load_state_dict`` and a rebound bank each cast anew."""
+    casts = []
+
+    def quantize(w, normal, transposed):
+        casts.append(w)
+        return w, w, w, w
+
+    monkeypatch.setattr(mok, "_mxfp8_quantize", lambda: quantize)
+    holder = nn.ParameterList(nn.Parameter(torch.randn(2, 256, 256)) for _ in range(2))
+    banks = tuple(holder)
+    first = mok._mxfp8_banks(banks)
+    assert mok._mxfp8_banks(banks).forward[0][0] is first.forward[0][0] and len(casts) == 3
+
+    for bank in banks:
+        bank.grad = torch.ones_like(bank)
+    torch.optim.SGD(holder, lr=0.1).step()
+    mok._mxfp8_banks(banks), mok._mxfp8_banks(banks)
+    assert len(casts) == 6, "an optimizer step"
+
+    holder.load_state_dict({name: torch.zeros_like(bank) for name, bank in holder.state_dict().items()})
+    mok._mxfp8_banks(banks), mok._mxfp8_banks(banks)
+    assert len(casts) == 9 and not casts[-1].any(), "a load_state_dict"
+
+    rebound = (banks[0], nn.Parameter(banks[1].detach().clone()))
+    with torch.no_grad():
+        rebound[1].add_(0.0)
+        rebound[1].add_(0.0)
+    assert rebound[1]._version == banks[1]._version, "premise: another tensor at the same version"
+    mok._mxfp8_banks(rebound)
+    assert len(casts) == 12, "a rebound bank"
+
+
+def test_the_mxfp8_casts_reach_the_forward_and_the_backward_in_moks_operand_order(monkeypatch):
+    """``mxfp8_quantize`` returns ``(data, scales, data_t, scales_t)`` of a layer-layout bank, whose transposed cast is
+    MoK's normal one. The forward takes that pair of every bank; the backward takes all four of gate and up, that pair
+    first, and the layer-layout pair of down."""
+    casts = []
+
+    def quantize(w, normal, transposed):
+        casts.append(tuple(torch.empty(0) for _ in range(4)))
+        return casts[-1]
+
+    monkeypatch.setattr(mok, "_mxfp8_quantize", lambda: quantize)
+    banks = tuple(nn.Parameter(torch.randn(2, 256, 256)) for _ in range(2))
+    served = mok._mxfp8_banks(banks)
+
+    def ids(operands):
+        return [[id(tensor) for tensor in operand] for operand in operands]
+
+    assert ids(served.forward) == ids((data_t, scales_t) for _, _, data_t, scales_t in casts)
+    (gate, up, down) = casts
+    assert ids(served.backward) == ids(
+        ((gate[2], gate[3], gate[0], gate[1]), (up[2], up[3], up[0], up[1]), (down[0], down[1]))
+    )
 
 
 def test_an_absent_package_is_refused_at_build(monkeypatch):

@@ -41,11 +41,12 @@ class _Stack(nn.Module):
 
 class _EPStub(EPMoELayerBase):
     """A real subclass, since the check identifies EP layers by ``isinstance``; ``__init__`` needs a wrapped HF layer
-    and DeepEP, so it is bypassed for the two attributes ``set_lowp_compute`` reads and writes."""
+    and DeepEP, so it is bypassed for the attributes ``set_lowp_compute`` reads and writes."""
 
     def __init__(self, grouped: bool = True):
         nn.Module.__init__(self)
         self._lowp = None
+        self.dispatcher = None  # not MoK
         self._use_grouped_mm = grouped
 
     def forward(self, hidden_states):  # Abstract on the base; never called here.
