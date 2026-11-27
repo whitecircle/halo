@@ -379,11 +379,13 @@ work as for any adapter. The shared tensor matters where the trained policy is w
   and logs that it did so. The merged checkpoint reloads in transformers with the trained logits. An adapter that
   leaves the pair alone merges tied, and so does PEFT's `ensure_weight_tying`, which hands both halves one
   `modules_to_save` copy.
+- The weight sync of online and async GRPO refuses any adapter on either half at construction, a `modules_to_save`
+  copy included, since a server launched from the checkpoint holds the pair as one tensor
+  ([Rollout Servers → Construction gates](../infrastructure/rollout-servers.md#construction-gates)).
 - The out-of-place fold (`lora_fold_targets`) refuses a LoRA on either half, since it writes the shared tensor once
-  and both halves would carry the delta. The weight sync of online and async GRPO and `merge_expert_lora_on_save`
-  fold through it, so both refuse such a run at construction. A `modules_to_save` copy of the head needs no fold: the
-  merged save writes it under its own key and writes the config untied
-  ([Checkpoints](../reference/checkpoints.md#exported-configjson)).
+  and both halves would carry the delta, so `merge_expert_lora_on_save` refuses such a run at construction. A
+  `modules_to_save` copy of either half needs no fold: the merged save writes each half under its own key and writes
+  the config untied ([Checkpoints](../reference/checkpoints.md#exported-configjson)).
 - The [streaming merge](#streaming-merge) refuses an adapter on either half, since it keeps the base's key set and
   config. A dense adapter merges in memory instead. An adapter holding native expert LoRA has no in-memory merge, so
   over a tied pair it takes a full copy of the head (`lora_modules_to_save: [lm_head]`), which

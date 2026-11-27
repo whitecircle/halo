@@ -197,7 +197,7 @@ def test_the_gathered_save_refuses_a_lora_on_a_tied_pair(tied_base_dir, tmp_path
         save_ep_gathered_checkpoint(save_context(_trained(tied_base_dir, SPLITTING[adapter])), str(tmp_path))
 
 
-@pytest.mark.parametrize("adapter", ["full_head", "full_both"])
+@pytest.mark.parametrize("adapter", ["full_head", "full_embedding", "full_both"])
 def test_the_gathered_save_writes_full_copies_on_a_tied_pair_untied(tied_base_dir, tmp_path, adapter):
     trained = _trained(tied_base_dir, SPLITTING[adapter])
 

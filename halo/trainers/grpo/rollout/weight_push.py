@@ -37,7 +37,7 @@ from halo.models.moe.balancing import (
     resolve_balancing_slot,
 )
 from halo.models.moe.config_fields import has_routed_experts
-from halo.models.peft_adapters import LoraFolds, lora_fold_targets
+from halo.models.peft_adapters import LoraFolds, adapted_tied_embeddings, lora_fold_targets
 from halo.runtime.collectives import collective_side_stream
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import materialize_dtensor
@@ -90,7 +90,20 @@ def _reject_unpushed_folds(model: torch.nn.Module, folds: LoraFolds, pushed: set
         )
 
 
+def _reject_adapted_tied_embeddings(model: torch.nn.Module) -> None:
+    adapted = adapted_tied_embeddings(model)
+    if adapted:
+        leaves = sorted({path.rpartition(".")[2] for path in adapted})
+        raise ValueError(
+            f"PEFT adapts the {' and '.join(adapted.values())} ({', '.join(adapted)}) of a tied embedding "
+            f"pair (tie_word_embeddings): training computes the two halves with different weights, while a rollout "
+            f"server launched from this checkpoint holds them as one tensor, so no weight sync can serve the trained "
+            f"policy. Remove {', '.join(leaves)} from lora_target_modules and lora_modules_to_save."
+        )
+
+
 def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerBase]) -> None:
+    _reject_adapted_tied_embeddings(model)
     if has_packed_quantized_params(model):
         raise ValueError(
             "QLoRA (quantized base weights) is not supported with rollout-engine weight sync: the sync forwards "

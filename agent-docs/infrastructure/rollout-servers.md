@@ -573,6 +573,10 @@ model load and the server preflights:
   and no sync into one has run. Train it offline, or [add the family](../models/adding-a-model.md).
 - **A bnb-quantized (QLoRA) base**, and PEFT LoRA on a weight the dense push does not send (EP expert
   weights take native expert LoRA instead).
+- **An adapter on one half of a tied embedding pair**: a LoRA or a `modules_to_save` copy on `embed_tokens` or
+  `lm_head` of a model with `tie_word_embeddings: true`. Training computes the two halves with different weights,
+  while a server launched from the checkpoint holds them as one tensor: vLLM ties the head's parameter to the
+  embedding's and SGLang shares the module ([PEFT → Tied embedding pairs](../optimization/peft.md#tied-embedding-pairs)).
 - **GptOss without live sinks.** `reset_sinks: true` under `flash_attention_2` removes the sinks, and
   the sync forwards `named_parameters()` only, so the server keeps the pretrained sinks against a
   sink-free trainer, permanently off-policy. On-policy GptOss needs `reset_sinks: false` with FA4 or
