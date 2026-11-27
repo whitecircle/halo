@@ -1,8 +1,8 @@
 # Mixed-Precision Training: FP8 / FP4 (Low-Precision Compute)
 
-Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp4) matmul compute**. The parameter, checkpoint, and optimizer state are never stored in low precision; only the GEMM operands are cast to a block-scaled format for the forward, and the gradient flows back to the bf16/fp32 master (straight-through estimator). This is quantization-aware training (QAT): it answers *"does this model converge in fp8/fp4?"* and pairs with a block-scaled weight export.
+Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp4) matmul compute**. The parameter, checkpoint, and optimizer state are never stored in low precision; only the GEMM operands are cast to a block-scaled format, for the forward and, on the native path under `lowp_backward_precision: fp8`, for the backward, and the gradient flows back to the bf16/fp32 master (straight-through estimator). This is quantization-aware training (QAT): it answers *"does this model converge in fp8/fp4?"* and pairs with a block-scaled weight export.
 
-**Train in bf16; it stays the default.** Neither low-precision path Halo ships beats it. As whole training steps at ep8 on 8× B300 the simulated fake-quant path (the QAT oracle) ran at 0.10–0.45× bf16 with an eager activation round trip, and the opt-in DeepGEMM adapter, an FP8 forward over a bf16 backward, at 0.37–0.54× ([Why bf16 is the default](#why-bf16-is-the-default)). mxfp8 and mxfp4 round-trip activations in one fused kernel, and simulated mxfp4 runs at 0.93–0.99× bf16 on 8× H200 (ep8, [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed)). nvfp4 takes a fused round trip too, with no whole step measured on it yet. The one faster whole step measured, torchao MXFP8, ran in a test wrapper with its quality unmeasured, and Halo has not adopted it.
+**Train in bf16; it stays the default.** No low-precision path Halo ships has beaten it on a whole training step. At ep8 on 8× B300 the simulated fake-quant path (the QAT oracle) ran at 0.10–0.45× bf16 with an eager activation round trip ([Why bf16 is the default](#why-bf16-is-the-default)). mxfp8 and mxfp4 round-trip activations in one fused kernel, and simulated mxfp4 runs at 0.93–0.99× bf16 on 8× H200 (ep8, [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed)). nvfp4 takes a fused round trip too, with no whole step measured on it yet. The opt-in DeepGEMM adapter's MoE layer alone runs at 0.70–1.13× DeepEP bf16 at EP 4 ([DeepGEMM](#deepgemm-the-native-fp8fp4-path)); its whole step is unmeasured. The one faster whole step measured, torchao MXFP8, ran in a test wrapper with its quality unmeasured, and Halo has not adopted it.
 
 `scripts/after_training/quantize_to_lowp.py` writes MLP and expert weights in block-scaled fp8 (½ the bytes) or fp4 (¼). `halo.kernels.lowp.quantization.dequantize` reads them. Serving engines do not load Halo's manifest as-is, so `--export_format compressed-tensors` writes the layout vLLM loads ([Serving the export with vLLM](#serving-the-export-with-vllm)). The roofline argument: [GPU Training Theory → When low precision speeds training up](../reference/gpu-training-theory.md#when-low-precision-speeds-training-up).
 
@@ -12,7 +12,7 @@ Mixed precision here means **bf16/fp32 master weights with low-precision (fp8/fp
 |------|-----------|-------|-----------|
 | **bf16** | `F.grouped_mm` (MoE) / `F.linear` (dense) | Baseline | Default; all production training |
 | **Simulated** (fake-quant) | block-scale quantize→dequantize→bf16 matmul, straight-through gradient | Whole step 0.10–0.45× bf16 with the eager activation round trip (fp8, mxfp4, 8× B300); mxfp4 with the fused round trip 0.93–0.99× (8× H200) | QAT numerics oracle: `lowp_precision: fp8\|fp4\|mxfp4`. Any GPU. |
-| **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | Whole step 0.37–0.54× bf16 | Opt-in (`HALO_DEEPGEMM_NATIVE=1`); never auto-selected |
+| **DeepGEMM adapter** (fp8, mxfp4) | DeepSeek's on-device-`m_indices` grouped kernel, real fp8/fp4 tensor cores | One MoE layer 0.70–1.13× DeepEP bf16 (EP 4, B300); whole step unmeasured | `lowp_backend: native`; never auto-selected |
 
 The `lowp_*` keys build one `LowpSpec` (`halo/kernels/lowp/spec.py`), carried as `ParallelismConfig.lowp` and validated there (`LowpSpec.validate`). `LOWP_RECIPES` maps each `lowp_precision` mode to its block-scaled `QuantFormat` and the peak-FLOPS key the MFU callback scores its native path against; the EP layers, the dense linear and the export tool all read it.
 
@@ -24,7 +24,7 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 
 ## Why bf16 is the default
 
-**Whole steps.** tok/s/GPU on 8× B300 at 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build, with each arm as a ratio to bf16 on its shape. The simulated columns time the eager activation round trip, not the fused one. mxfp8 and mxfp4 take the fused round trip, whose mxfp4 whole step on H200 is under [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed):
+**Whole steps.** tok/s/GPU on 8× B300 at 4,096-token rows, gradient checkpointing on, uniform token ids, a 1.2.0 development build, with each arm as a ratio to bf16 on its shape. The simulated columns time the eager activation round trip, not the fused one. mxfp8 and mxfp4 take the fused round trip, whose mxfp4 whole step on H200 is under [The simulated path](#the-simulated-path--why-it-is-not-bf16-speed). The native columns time that build's adapter (DeepGEMM's Python casts, a bf16 backward), not the [current one](#deepgemm-the-native-fp8fp4-path):
 
 | Shape | bf16 | simulated fp8 | simulated mxfp4 | native fp8 | native mxfp4 |
 |---|---:|---:|---:|---:|---:|
@@ -32,15 +32,15 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 | Qwen3-30B-A3B ep8 b8 | 14,063 | 0.294× | 0.098× | 0.425× | 0.369× |
 | Qwen3.5-35B-A3B ep8 b8 | 16,536 | 0.442× | 0.171× | 0.533× | 0.373× |
 
-![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes on 8× B300: simulated fp8 and mxfp4 with the eager activation round trip at 0.10–0.45× (simulated mxfp4 with the fused round trip runs at 0.93–0.99× on 8× H200, not charted) and native fp8 and mxfp4 at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
+![Whole-step tokens/s per GPU as a ratio to bf16 on three EP8 shapes on 8× B300: simulated fp8 and mxfp4 with the eager activation round trip at 0.10–0.45× (simulated mxfp4 with the fused round trip runs at 0.93–0.99× on 8× H200, not charted) and native fp8 and mxfp4 on a 1.2.0 development build at 0.37–0.54×, all left of bf16 at 1.0. torchao MXFP8 reads 1.13× on gpt-oss-20b in a test wrapper, in its own row, quality unmeasured and not adopted](../assets/benchmarks/lowp_whole_step.png)
 
-**Kernels.** A sweep on one B300 timed each expert GEMM alone, forward and with both gradients, at the local expert counts, widths and rows per expert of gpt-oss-20b, Qwen3-30B and Qwen3.5-35B, on uniform and skewed routing: 94 cells, 3 repeats each. An arm counts as faster only when its range is disjoint from bf16's and the gap is at least max(2%, 2× bf16's spread). Halo's simulated and adapter paths are faster in 0 of the 94. Arms outside Halo's training path, in the same sweep:
+**Kernels.** A sweep on one B300 timed each expert GEMM alone, forward and with both gradients, at the local expert counts, widths and rows per expert of gpt-oss-20b, Qwen3-30B and Qwen3.5-35B, on uniform and skewed routing: 94 cells, 3 repeats each. An arm counts as faster only when its range is disjoint from bf16's and the gap is at least max(2%, 2× bf16's spread). Halo's simulated path and the 1.2.0 development build's adapter are faster in 0 of the 94. Arms outside Halo's training path, in the same sweep:
 
-- DeepGEMM's fp8 kernel alone beats the bf16 forward in 59 of 94, but that ratio leaves out the casts: at gpt-oss-20b ep8 b4's shape the activation cast takes 2.66 ms against 0.86–0.89 ms for the whole bf16 forward.
+- DeepGEMM's fp8 kernel alone beats the bf16 forward in 59 of 94, but that ratio leaves out the casts: at gpt-oss-20b ep8 b4's shape DeepGEMM's Python activation cast takes 2.66 ms against 0.86–0.89 ms for the whole bf16 forward, and Halo's Triton cast 0.10 ms.
 - DeepGEMM's bf16 kernels show no net win: their forward and weight-gradient pair reads 0.69–1.01× torch's on uniform routing (median per model and row count).
 - torchao MXFP8 as a whole path is faster only at 16,384 rows per expert: 1.08–1.30× on gpt-oss-20b, 0.90–1.07× across Qwen3-30B's GEMM pair, and never on Qwen3.5-35B. `F.scaled_grouped_mm` refuses more than 32 groups, which rules out Qwen3-30B and Qwen3.5-35B at ep2, and its mxfp4 kernel failed to initialize on two wide cells.
 
-**Where native's time goes.** gpt-oss-20b ep8 b4 s4096, in a run that syncs the GPU around its timers: bf16 takes 1,311 ms a step and native fp8 2,424 ms, +1,113 ms. Activation cast +392, weight cast +63, padding and un-padding +59, kernel −37 and combine wait +309. Of the remaining +327, about +300 sits outside the EP spans, unattributed. The backward's GEMMs stay bf16 at 114 ms either way. So cheaper casts alone do not win: with every cast and copy free, native reaches about 1.08× (calculated).
+**Where native's time goes.** On the 1.2.0 development build's adapter, gpt-oss-20b ep8 b4 s4096, in a run that syncs the GPU around its timers: bf16 takes 1,311 ms a step and native fp8 2,424 ms, +1,113 ms. Activation cast +392, weight cast +63, padding and un-padding +59, kernel −37 and combine wait +309. Of the remaining +327, about +300 sits outside the EP spans, unattributed. The backward's GEMMs stay bf16 at 114 ms either way. So cheaper casts alone do not win: with every cast and copy free, native reaches about 1.08× (calculated).
 
 ![Waterfall from the 1,311 ms bf16 step to the 2,424 ms native fp8 step on gpt-oss-20b ep8 b4: activation cast +392, weight cast +63, padding and un-padding +59, expert kernel −37, combine wait +309, the rest +327](../assets/benchmarks/lowp_native_step.png)
 
@@ -52,17 +52,17 @@ Under TP a projection also carries an instance-level `forward`: the [local-shard
 
 Rows per expert are `ep_size × tokens_per_rank × top_k / num_experts`. At s4096: gpt-oss-20b (K=N=2880) 512–2048 at ep1 b1–b4, 4096–16384 at ep8 b1–b4; Qwen3.6-35B (gate_up K2048 N1024, down K512 N2048) 256–1024 at ep2 b1–b4, 1024–8192 at ep8 b1–b8. The bf16 ridge, about 210 FLOP/byte on one B300, puts the crossover at 244 rows per expert for gpt-oss-20b and at 301 and 427 rows for Qwen3.6-35B's gate_up and down (computed, [GPU Training Theory → When low precision speeds training up](../reference/gpu-training-theory.md#when-low-precision-speeds-training-up)), so most configurations sit above their crossover in the GEMM.
 
-Forward time, bf16 ÷ adapter fp8, at 8 local experts on uniform routing, from the same sweep (**>1.0 means the adapter is faster**):
+Forward time, bf16 ÷ adapter fp8, at 8 local experts on uniform routing, each expert GEMM timed alone on one B300 on the current adapter, 3 repeats (**>1.0 means the adapter is faster**):
 
 | K · N | 256 rows | 512 | 1024 | 2048 | 4096 | 8192 | 16384 |
 |-------|----|----|----|----|----|----|----|
-| 4096 · 8192  | 0.25× | 0.33× | 0.42× | 0.53× | 0.60× | 0.67× | 0.76× |
-| 4096 · 16384 | — | — | — | — | 0.85× | 0.93× | 1.02× |
-| 2880 · 2880 (gpt-oss) | 0.15× | 0.14× | 0.17× | 0.18× | 0.20× | — | — |
+| 4096 · 8192  | 0.90× | 0.83× | 0.93× | 1.18× | 1.35× | 1.48× | 1.67× |
+| 4096 · 16384 | — | — | — | — | 1.35× | 1.50× | 1.65× |
+| 2880 · 2880 (gpt-oss) | 0.81× | 0.72× | 0.69× | 0.67× | 0.68× | — | — |
 
-These ratios measure Halo's adapter: it casts with DeepGEMM's Python utilities, passes float32 scales (a transform kernel per call) and copies rows in Python loops.
+These ratios include the adapter's Triton activation cast; the weight cast is cached per optimizer step.
 
-The adapter clears the bar only at K4096 N16384, wider than the three models above: forward 1.05× at 16384 rows per expert on skewed routing, forward with both gradients 1.03–1.08× at 8192. At gpt-oss-20b ep8 b4's own shape its forward reads 0.24×.
+The adapter's forward passes bf16 from 2,048 rows per expert at K4096 N8192 (1.18×) and reaches 1.67× at 16,384; with both gradients in fp8 its forward and backward together read 1.32× at 2,048 rows per expert and 1.57–1.64× at 16,384. At gpt-oss-20b's own width the forward reads 0.67–0.72× from 512 rows per expert up, and forward and backward together 0.86× at 2,048 and 0.96× at 4,096.
 
 Pushing sequence length is the throughput lever for bf16 too: it fills the expert GEMMs.
 
@@ -99,19 +99,23 @@ The simulated path is a convergence-validation tool — run a few hundred steps 
 
 ## DeepGEMM: the native fp8/fp4 path
 
-Native fp8/mxfp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's GEMM library, here its Blackwell grouped block-scaled kernels, via `halo/kernels/lowp/deepgemm.py`. A fixed-layout grouped kernel rebuilds its per-expert layout on the host every call. DeepGEMM instead resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). The cost sits around the kernel: at 256 rows per expert and K=N=2880 the adapter's forward takes 520 µs, the kernel 73 µs and the activation cast 180 µs.
+Native fp8/mxfp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's GEMM library, here its Blackwell grouped block-scaled kernels, via `halo/kernels/lowp/deepgemm.py`. A fixed-layout grouped kernel rebuilds its per-expert layout on the host every call. DeepGEMM instead resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk).
 
-It is never auto-selected. With `HALO_DEEPGEMM_NATIVE=1`, every grouped expert GEMM runs native, and a shape the kernel rejects raises.
+The activation, gradient and FP8 weight casts are Triton kernels (`halo/kernels/lowp/deepgemm_cast_triton.py`), bitwise DeepGEMM's reference casts on activations and weights. The token casts read through the 128-row expert layout, so no padded bf16 copy is built, and the FP8 weight cast keeps the `[E, K, N]` bank's own layout. The projections of one expert FFN share one row layout, and gate and up one activation cast. The per-step cache holds each bank's FP8 cast, one more byte a parameter.
 
-`fp8` and `mxfp4` have a native path; `fp4` (nvfp4) stays simulated, with a one-time warning under the flag. What it gives, opted in:
+On one MoE layer forward and backward through Halo's EP layer at EP 4 on B300 (DeepEP dispatch, expert weights cast every step), native fp8 with the fp8 backward runs at 0.70–1.13× DeepEP bf16: 1.13× on DeepSeek-V3's 2048-wide experts at 16,384 tokens per GPU, 0.79× on Qwen3-30B-A3B's 768-wide ones.
+
+It is never auto-selected. With `lowp_backend: native`, every grouped expert GEMM of a converted block runs native (the `lowp_keep_first_blocks` / `lowp_keep_last_blocks` ones stay bf16), and a shape the kernel rejects raises. Dense MLP projections have no native kernel, so the config must set `lowp_apply_dense_mlp: false`.
+
+`fp8` and `mxfp4` have a native path; `fp4` (nvfp4) has none and is refused at config time. What it gives:
 
 - **fp8** — DeepGEMM's fp8 grouped kernel, DeepSeek's UE8M0 recipe: 1×128 groups for the activation, 128×128 blocks for the weight (forward rel ≈ 0.038 vs bf16).
-- **mxfp4** — FP8 activation (1×128) × MXFP4 weight (1×32, UE8M0) (forward rel ≈ 0.12 vs bf16). Simulated `mxfp4` is 4-bit on both operands, so the two backends are different numerics. The adapter zero-pads K to ÷256 (K=2880 → 3072; matmul unchanged).
-- **backward is always bf16** (Wgrad-in-HP via `F.grouped_mm`, measured bf16-exact); the master dtype (bf16 or fp32) is preserved.
+- **mxfp4** — FP8 activation (1×128) × MXFP4 weight (1×32, UE8M0) (forward rel ≈ 0.12 vs bf16). The weight cast rounds e2m1 ties to even, so the native weight equals simulated `mxfp4`'s away from blocks whose largest element is under 1e-4, where DeepGEMM floors the scale. Simulated `mxfp4` is 4-bit on both operands, so the two backends are different numerics. The adapter zero-pads K to ÷256 (K=2880 → 3072; matmul unchanged).
+- **backward** — bf16 by default (`F.grouped_mm`, bf16-exact). `lowp_backward_precision: fp8` (with `fp8`) runs both gradients on DeepGEMM: dgrad on the forward's 128×128 FP8 weight (`m_grouped_fp8_gemm_nt_contiguous`, the forward's `m_grouped_fp8_gemm_nn_contiguous` operand read N-major; a cached weight needs no second cast, an uncached one, FSDP2's at `ep_size: 1` or an fp32 master's bf16 copy, is cast again) over 1×128 gradient tiles, wgrad on 128×1 token tiles of the gradient and the activation (`k_grouped_fp8_gemm_tn_contiguous`, fp32 accumulation, at most 128 experts per call), written without an accumulator into an unfilled output, an expert with no rows getting zeros. The gradient casts scale each group by its own largest element: the reference casts floor it at 1e-4, under which a mean-reduced loss's gradients would round into fp8's subnormals or to zero. DeepGEMM compiles a second weight-gradient kernel once a call's experts average 2,048 rows (4,096 for an fp32 gradient), which the layer warm-up compiles too (`warm_fp8_wgrad`). Each gradient lands within rel ≈ 0.038 of bf16. The master dtype (bf16 or fp32) is preserved.
 
-    DeepGEMM ships fp8 weight-gradient kernels (`k_grouped_fp8_gemm_*`) but the adapter keeps the backward in bf16: the 4-bit-training literature finds gradients are the precision-sensitive path (NVFP4 applies stochastic rounding to gradients only, [arXiv 2509.25149](https://arxiv.org/abs/2509.25149)).
+    Gradients are the precision-sensitive path in the low-bit training literature (NVFP4 applies stochastic rounding to gradients only, [arXiv 2509.25149](https://arxiv.org/abs/2509.25149)), so the fp8 backward is opt-in. Both kernels take e4m3 only; DeepGEMM has no e5m2 operand.
 
-The native path requires the `deep_gemm` wheel, built into the **Blackwell** image only (its kernels are the SM100 block-scaled grouped ones). On Hopper `HALO_DEEPGEMM_NATIVE=1` cannot be honored; `use_deepgemm` says so once and the simulated path runs. DeepGEMM officially targets SM90 (Hopper) and SM100 (B200/GB200); on **B300 (sm_103a)** it runs through JIT sm_100f forward-compat (no sm_103-specific path).
+The native path requires the `deep_gemm` wheel, built into the **Blackwell** image only (its kernels are the SM100 block-scaled grouped ones). The load refuses `lowp_backend: native` wherever `deep_gemm` is not installed, the Hopper image included; the check is on the package, not the GPU. It also refuses a `deep_gemm` older than 2.8.2, which a repository mounted into an earlier Blackwell image finds: that build leaves part of the fp8 weight gradient unwritten and rounds the MXFP4 cast differently, so pull or rebuild the image. Expert TP is refused with it at config time, and FSDP2-managed experts (`ep_size: 1`) are cast every call, as on the simulated path. DeepGEMM officially targets SM90 (Hopper) and SM100 (B200/GB200); on **B300 (sm_103a)** it runs through JIT sm_100f forward-compat (no sm_103-specific path).
 
 ## Frozen expert banks
 
@@ -222,9 +226,17 @@ lowp_keep_first_blocks: 0      # keep the first/last N blocks bf16 (NVFP4 recipe
 lowp_keep_last_blocks: 0
 ```
 
-Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1`. `HALO_LOWP_WEIGHT_CACHE=0` disables the simulated path's per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
+```yaml
+# Native DeepGEMM on the MoE experts (Blackwell image), fp8 forward and backward:
+lowp_precision: fp8            # mxfp4 (FP8 activations x MXFP4 weights) runs with the bf16 backward
+lowp_backend: native
+lowp_backward_precision: fp8   # bf16 (default) keeps the backward on F.grouped_mm
+lowp_apply_dense_mlp: false
+```
 
-Rejected at config/load time, loudly: any trainer but SFT and teacher distillation, which quantizes only the student ([QAD](../training-methods/distillation/teacher-distillation.md#quantization-aware-distillation)); a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing; and pipeline parallelism, whose stages re-base block indices so the `lowp_keep_*` windows would land on each stage's own ends ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
+Low precision is the fake-quant oracle by default. `HALO_LOWP_WEIGHT_CACHE=0` disables the simulated path's per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
+
+Rejected at config/load time, loudly: any trainer but SFT and teacher distillation, which quantizes only the student ([QAD](../training-methods/distillation/teacher-distillation.md#quantization-aware-distillation)); `lowp_backend: native` on any trainer but SFT, as no test trains another on DeepGEMM's kernels; a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing; and pipeline parallelism, whose stages re-base block indices so the `lowp_keep_*` windows would land on each stage's own ends ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
 
 At trainer setup, `verify_lowp_conversion` checks the built model against the config in both directions: with `lowp_precision` on it must hold a module that computes in low precision, and with it off none. It counts as the loader does, so a loop-path EP layer (below), which stores the format and never applies it, counts as bf16. The loader keeps that, so the check catches a model built outside it, such as a module handed to a trainer or a model id a trainer loads itself (`resolve_trainer_model` applies no lowp), which would otherwise train unquantized.
 

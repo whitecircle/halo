@@ -19,11 +19,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from halo.env import env_flag
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.grouped_mm import grouped_mm, grouped_mm_grads
 from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.quantization import BlockScaledTensor, quantize_mxfp4, quantize_mxfp8, quantize_nvfp4
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from tests.common.numerics import fro_rel_err
 from tests.gpu.profiling.benchmark_grouped_mm import _median_per_iter
 
@@ -125,14 +125,19 @@ def _forward_and_step(name: str, forward_of: Callable[[Operands], Callable]) -> 
     }
 
 
+_PRECISION = {recipe.quant_format: precision for precision, recipe in LOWP_RECIPES.items()}
+
+
 def _simulated(quant_format: str, *, cacheable: bool = True) -> Callable:
-    return lambda ops: lambda x, w: expert_gemm(
-        x, w, offs=ops.offs, quant_format=quant_format, weight_cacheable=cacheable
+    lowp = LowpSpec(precision=_PRECISION[quant_format])
+    return lambda ops: lambda x, w: expert_gemm(x, w, offs=ops.offs, lowp=lowp, weight_cacheable=cacheable)
+
+
+def _adapter(quant_format: str, *, fp8_backward: bool = False) -> Callable:
+    lowp = LowpSpec(
+        precision=_PRECISION[quant_format], backend="native", backward_precision="fp8" if fp8_backward else "bf16"
     )
-
-
-def _adapter(quant_format: str) -> Callable:
-    return lambda ops: lambda x, w: deepgemm.deepgemm_grouped_gemm(x, w, offs=ops.offs, quant_format=quant_format)
+    return lambda ops: lambda x, w: deepgemm.deepgemm_grouped_gemm(x, w, offs=ops.offs, lowp=lowp)
 
 
 def _torchao():
@@ -166,12 +171,12 @@ def _dg_operands(ops: Operands, quant_format: str) -> tuple:
     """The padded activation cast and the weight cast, for a kernel timed alone."""
     _, utils = deepgemm._deep_gemm()
     k = ops.w.shape[1]
-    k_pad = utils.align(k, deepgemm._FP4_K_ALIGN) if quant_format == "mxfp4" else k
+    k_pad = deepgemm._contraction_width(k, quant_format)
     x = F.pad(ops.x, (0, k_pad - k)) if k_pad != k else ops.x
     with torch.no_grad():
         return (
             utils.per_token_cast_to_fp8(x, use_ue8m0=True, gran_k=deepgemm._ALIGN),
-            deepgemm._quant_weight(ops.w, quant_format, k_pad, cacheable=False),
+            deepgemm._quant_weight(ops.w, quant_format, cacheable=False),
             x,
             k_pad,
         )
@@ -194,8 +199,8 @@ def _dg_kernel(quant_format: str) -> Callable:
                 kernels.m_grouped_fp8_fp4_gemm_nt_contiguous(
                     a_op, b_op, d, m_indices, recipe=None, recipe_a=(1, 128), recipe_b=(1, 32)
                 )
-            else:
-                kernels.m_grouped_fp8_gemm_nt_contiguous(a_op, b_op, d, m_indices, recipe=None)
+            else:  # the FP8 weight is cast [E, K, N]
+                kernels.m_grouped_fp8_gemm_nn_contiguous(a_op, b_op, d, m_indices, recipe=None)
             return d
 
         return step
@@ -214,7 +219,7 @@ def _dg_weight_cast(quant_format: str) -> Callable:
 
         @torch.no_grad()
         def step() -> None:
-            deepgemm._quant_weight(ops.w, quant_format, k_pad, cacheable=False)
+            deepgemm._quant_weight(ops.w, quant_format, cacheable=False)
 
         return step
 
@@ -361,6 +366,7 @@ GROUPED_ARMS: dict[str, Callable[[Operands], Callable]] = {
     "simulated_mxfp8_uncached_forward": lambda ops: _no_grad_forward(_simulated("mxfp8", cacheable=False)(ops), ops),
     **_forward_and_step("adapter_mxfp8", _adapter("mxfp8")),
     **_forward_and_step("adapter_mxfp4", _adapter("mxfp4")),
+    "adapter_mxfp8_fp8_backward_step": lambda ops: _with_backward(_adapter("mxfp8", fp8_backward=True)(ops), ops),
     **_forward_and_step("ao_mxfp8", _ao_mxfp8(wgrad_with_hp=False)),
     "ao_mxfp8_wgrad_with_hp_step": lambda ops: _with_backward(_ao_mxfp8(wgrad_with_hp=True)(ops), ops),
     "torch_scaled_mxfp4_forward": _torch_scaled(
@@ -414,8 +420,6 @@ def main() -> None:
     parser.add_argument("--warmup", type=int, default=10, help="Untimed iterations per arm, past any JIT compile")
     parser.add_argument("--output", required=True, help="JSON-lines file, appended to as each arm finishes")
     args = parser.parse_args()
-    if env_flag("HALO_DEEPGEMM_NATIVE"):
-        parser.error("HALO_DEEPGEMM_NATIVE=1 would run the simulated arms native; the adapter arms need no flag")
 
     device = torch.device("cuda", 0)
     torch.cuda.set_device(device)

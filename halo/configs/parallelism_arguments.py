@@ -7,7 +7,8 @@ from halo.config_validation import ValidatedConfig, present, require_int
 from halo.distributed.expert_parallel.config import EPBufferBackend
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
-from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
+from halo.env import env_str
+from halo.kernels.lowp.spec import LowpBackend, LowpBackwardPrecision, LowpPrecision, LowpSpec
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
 
 
@@ -98,10 +99,26 @@ class ParallelismArguments(ValidatedConfig):
     lowp_precision: LowpPrecision = field(
         default=LowpSpec.precision,
         metadata={
-            "help": "Low-precision GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
+            "help": "Low-precision forward GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
             "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT and "
-            "teacher distillation (on the student) only; Halo's paths measured slower than bf16. "
+            "teacher distillation (on the student) only. "
             "See agent-docs/optimization/low-precision-moe-kernels.md#usage."
+        },
+    )
+    lowp_backend: LowpBackend = field(
+        default=LowpSpec.backend,
+        metadata={
+            "help": "'simulated' (the block-scaled fake-quant QAT oracle, any GPU) or 'native' (the MoE experts on "
+            "DeepGEMM's fp8 kernels: FP8 x FP8 for 'fp8', FP8 activations x MXFP4 weights for 'mxfp4'; Blackwell "
+            "image, lowp_apply_dense_mlp false). "
+            "See agent-docs/optimization/low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path."
+        },
+    )
+    lowp_backward_precision: LowpBackwardPrecision = field(
+        default=LowpSpec.backward_precision,
+        metadata={
+            "help": "Precision of the expert backward GEMMs (dgrad and wgrad): 'bf16' or 'fp8' (e4m3, the gradient "
+            "cast per 1x128 for the dgrad and per 128x1 for the wgrad; lowp_backend 'native' only)."
         },
     )
     lowp_apply_dense_mlp: bool = field(
@@ -113,11 +130,7 @@ class ParallelismArguments(ValidatedConfig):
     )
     lowp_apply_moe_experts: bool = field(
         default=LowpSpec.apply_moe_experts,
-        metadata={
-            "help": "Apply lowp_precision to MoE expert grouped GEMMs; false keeps the experts in bf16. DeepGEMM's "
-            "native kernel is opt-in through HALO_DEEPGEMM_NATIVE=1 and never auto-routed. "
-            "See agent-docs/optimization/low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path."
-        },
+        metadata={"help": "Apply lowp_precision to MoE expert grouped GEMMs; false keeps the experts in bf16."},
     )
     lowp_keep_first_blocks: int = field(
         default=LowpSpec.keep_first_blocks,
@@ -383,15 +396,25 @@ def parallelism_config_from_args(
     row_sources: tuple = (),
 ) -> ParallelismConfig:
     """The ``ParallelismConfig`` the parsed arguments describe. Refuses here, before any model loads, a CP/PP size
-    ``trainer_cls`` rejects, ``lowp_*`` without ``SUPPORTS_LOWP_PRECISION``, ``init_from_scratch`` without
-    ``supports_init_from_scratch``, and ``full_determinism`` on an EP group spanning NVLink domains.
-    ``training_config`` also declares the token budget the DeepEP dispatch-ceiling gate judges, with ``row_sources``
-    the script's other objects that carry a row-length bound (the script arguments, the rollout config). ``expert_lora`` is
-    passed here, not assigned onto the result: only construction runs its PP and expert-TP refusals, and
-    ``ep_config()`` caches the ``EPConfig``."""
+    ``trainer_cls`` rejects, a set ``HALO_DEEPGEMM_NATIVE``, ``lowp_*`` without ``SUPPORTS_LOWP_PRECISION``, the native
+    backend without ``SUPPORTS_NATIVE_LOWP``, ``init_from_scratch`` without ``supports_init_from_scratch``, and
+    ``full_determinism`` on an EP group spanning NVLink domains. ``training_config`` also declares the token budget
+    the DeepEP dispatch-ceiling gate judges, with ``row_sources`` the script's other objects that carry a row-length
+    bound (the script arguments, the rollout config). ``expert_lora`` is passed here, not assigned onto the result:
+    only construction runs its PP and expert-TP refusals, and ``ep_config()`` caches the ``EPConfig``."""
+    if (env_str("HALO_DEEPGEMM_NATIVE") or "").strip():
+        raise ValueError(
+            "HALO_DEEPGEMM_NATIVE is set and nothing reads it: a run that relied on it would train on the simulated "
+            "numerics. Set lowp_backend: native in the config and unset the variable."
+        )
     lowp = LowpSpec(**{f.name: getattr(dist_args, f"lowp_{f.name}") for f in fields(LowpSpec)})
     if not trainer_cls.SUPPORTS_LOWP_PRECISION:
         _reject_unsupported_lowp(lowp, trainer_cls)
+    elif lowp.native and not trainer_cls.SUPPORTS_NATIVE_LOWP:
+        raise ValueError(
+            f"lowp_backend='native' is not supported by {trainer_cls.__name__}: no test trains it on DeepGEMM's "
+            "kernels. Set lowp_backend='simulated', or train with the SFT script."
+        )
 
     # Only SFT threads init_from_scratch into the loader; elsewhere the run would fine-tune pretrained weights.
     if not supports_init_from_scratch and dist_args.init_from_scratch:

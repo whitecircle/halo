@@ -4,7 +4,7 @@
 ``cached_fake_quant`` keys on ``weight._version``. The fused kernel writes through raw pointers ATen never sees, so
 only ``increment_version`` advances the key; without it the cache serves the step-0 quantization for the whole run.
 ``--native`` runs the same step through the DeepGEMM kernel, whose cast keeps the same per-version cache; the Hopper
-image has no ``deep_gemm``, so there the flag must stay inert.
+image has no ``deep_gemm``, so there the load must refuse ``lowp_backend: native``.
 """
 
 import argparse
@@ -16,6 +16,7 @@ from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.hardware import is_blackwell_gpu
 from halo.kernels import expert_gemm
 from halo.kernels.lowp import deepgemm, quantization
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
@@ -43,7 +44,11 @@ LOSS_RTOL = 1e-3
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--precision", choices=tuple(LOWP_RECIPES), required=True)
-parser.add_argument("--native", action="store_true", help="Train with HALO_DEEPGEMM_NATIVE=1")
+parser.add_argument("--native", action="store_true", help="Train with lowp_backend: native")
+parser.add_argument(
+    "--backward", choices=("bf16", "fp8"), default="bf16", help="lowp_backward_precision under --native"
+)
+parser.add_argument("--ep-size", type=int, choices=(1, 2), default=2, help="1 trains FSDP2-managed experts")
 ARGS = parser.parse_args()
 QUANT_FORMAT = LOWP_RECIPES[ARGS.precision].quant_format
 # Expert weights are stored ``[E, K, N]``.
@@ -61,8 +66,7 @@ def _native_entry_is_current(weight: torch.Tensor) -> bool | None:
     entry = deepgemm._weight_cache.get(weight, (weight._version, QUANT_FORMAT))
     if entry is None:
         return None
-    k_pad = entry[0].shape[-1] * 2 if QUANT_FORMAT == "mxfp4" else weight.shape[CONTRACTION_AXIS]
-    fresh = deepgemm._quant_weight(weight, QUANT_FORMAT, k_pad, cacheable=False)
+    fresh = deepgemm._quant_weight(weight, QUANT_FORMAT, cacheable=False)
     # As floats, the one read of fp8 elements the production path itself runs on CUDA.
     return all(torch.equal(served.float(), recast.float()) for served, recast in zip(entry, fresh, strict=True))
 
@@ -103,11 +107,35 @@ def _count_calls(module, name: str) -> list[int]:
     return calls
 
 
+def _record_cached_casts() -> list[int]:
+    """Replace ``deepgemm._quant_weight`` for the process with a wrapper recording how many casts the weight cache
+    holds as each call returns."""
+    real, cached = deepgemm._quant_weight, []
+
+    def recorded(*args, **kwargs):
+        operand = real(*args, **kwargs)
+        cached.append(len(deepgemm._weight_cache))
+        return operand
+
+    deepgemm._quant_weight = recorded
+    return cached
+
+
+class _CallsBeforeTheLastStep(TrainerCallback):
+    """``calls`` as the last step begins: the first forward's kernel warm-up runs the counted backward itself."""
+
+    def __init__(self, calls: list[int]):
+        self.calls, self.count = calls, 0
+
+    def on_step_begin(self, args, state, control, **kwargs):
+        self.count = self.calls[0]
+
+
 def _train(
-    ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current
+    ctx, checkpoint: str, tokenizer, output_dir: str, entry_is_current, lowp: LowpSpec | None = None, callbacks=()
 ) -> tuple[list[float], _ExpertVersions, bool]:
     """The run's losses, the expert version counters and weight-cache checks it saw, and whether AdamWBF16 stepped it."""
-    pc = ParallelismConfig(ep_size=2, lowp=LowpSpec(precision=ARGS.precision))
+    pc = ParallelismConfig(ep_size=ARGS.ep_size, lowp=lowp or LowpSpec(precision=ARGS.precision))
     model, _ = load_distributed_model(
         checkpoint, pc, torch.bfloat16, trust_remote_code=False, attn_implementation="eager", use_liger_kernel=False
     )
@@ -137,7 +165,8 @@ def _train(
         parallelism_config=pc,
     )
     versions = _ExpertVersions(trainer.model, entry_is_current)
-    trainer.add_callback(versions)
+    for callback in (versions, *callbacks):
+        trainer.add_callback(callback)
     trainer.train()
     optimizer = getattr(trainer.optimizer, "optimizer", trainer.optimizer)
     losses = step_losses(trainer)
@@ -161,7 +190,10 @@ def _shared_checks(versions: _ExpertVersions, adamw_bf16: bool) -> dict[str, boo
     return {
         "fused_adamw_bf16_stepped_the_run": adamw_bf16,
         "expert_weight_versions_advance_every_step_on_every_rank": world_all(_versions_advanced(versions)),
-        "cached_entries_were_compared_on_every_rank": world_all(versions.compared > 0),
+        # FSDP2 manages the experts at ep_size 1 and pins their version counter, so nothing of theirs is cached.
+        "cached_entries_were_compared_wherever_weights_are_cached": world_all(
+            (versions.compared > 0) == (ARGS.ep_size > 1)
+        ),
         "cached_entries_quantize_the_current_weight": world_all(versions.stale == 0),
     }
 
@@ -185,28 +217,50 @@ def _run_simulated(ctx, checkpoint: str, tokenizer) -> dict:
 
 
 def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
-    available = deepgemm.deepgemm_available()
-    native_calls = _count_calls(deepgemm, "_deepgemm_forward")
-    simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
-    os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
-    entry_is_current = _native_entry_is_current if available else _simulated_entry_is_current
-    losses, versions, adamw_bf16 = _train(
-        ctx, checkpoint, tokenizer, os.path.join(ctx.output_dir, "native"), entry_is_current
+    lowp = LowpSpec(
+        precision=ARGS.precision, backend="native", backward_precision=ARGS.backward, apply_dense_mlp=False
     )
-    del os.environ["HALO_DEEPGEMM_NATIVE"]
+    output_dir = os.path.join(ctx.output_dir, f"native_{ARGS.backward}")
+    if not deepgemm.deepgemm_available():
+        try:
+            _train(ctx, checkpoint, tokenizer, output_dir, None, lowp)
+        except RuntimeError as exc:
+            refused = "needs the deep_gemm package" in str(exc)
+        else:
+            refused = False
+        log(f"  {ARGS.precision} native without deep_gemm: refused at load={refused}")
+        # The Blackwell image ships the wheel, so a refusal there is a broken image, not a pass.
+        return {"checks": {"refused_without_deep_gemm": world_all(refused and not is_blackwell_gpu())}, "metrics": {}}
+
+    native_calls = _count_calls(deepgemm, "_deepgemm_forward")
+    wgrad_calls = _count_calls(deepgemm, "_fp8_wgrad")
+    simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
+    cached_casts = _record_cached_casts()
+    warmed = _CallsBeforeTheLastStep(wgrad_calls)
+    losses, versions, adamw_bf16 = _train(
+        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed,)
+    )
 
     checks = _shared_checks(versions, adamw_bf16)
     checks["ran_every_step"] = len(losses) == TOTAL_STEPS and all(math.isfinite(loss) for loss in losses)
-    took_the_kernel = native_calls[0] > 0 and simulated_calls[0] == 0
-    stayed_simulated = native_calls[0] == 0 and simulated_calls[0] > 0
-    checks["one_route_for_the_whole_run"] = world_all(took_the_kernel if available else stayed_simulated)
-    log(
-        f"  {ARGS.precision} native (available={available}): {losses}; {native_calls[0]} kernel, {simulated_calls[0]} simulated"
+    checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
+    # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM, and the cache drops an entry with
+    # its weight; so the cache is read as each cast returns, and must be empty at every one.
+    checks["fsdp2_managed_experts_cache_no_cast"] = world_all(
+        bool(cached_casts) and (max(cached_casts) == 0) == (ARGS.ep_size == 1)
     )
-    return {"checks": checks, "metrics": {"native_calls": native_calls[0], "simulated_calls": simulated_calls[0]}}
+    checks["backward_ran_its_precision"] = world_all((wgrad_calls[0] > warmed.count) == (ARGS.backward == "fp8"))
+    log(
+        f"  {ARGS.precision} native backward={ARGS.backward}: {losses}; {native_calls[0]} kernel, "
+        f"{wgrad_calls[0]} fp8 wgrad, {simulated_calls[0]} simulated"
+    )
+    return {"checks": checks, "metrics": {"native_calls": native_calls[0], "fp8_wgrad_calls": wgrad_calls[0]}}
 
 
-@gpu_test_main(exact_world_size=2, prefix=f"lowp_ep_trainer_{ARGS.precision}{'_native' if ARGS.native else ''}")
+@gpu_test_main(
+    exact_world_size=2,
+    prefix=f"lowp_ep_trainer_{ARGS.precision}{f'_native_{ARGS.backward}' if ARGS.native else ''}_ep{ARGS.ep_size}",
+)
 def run(ctx):
     torch.cuda.set_device(ctx.device)
     pin_deterministic_ep_dispatch()

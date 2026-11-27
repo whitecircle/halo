@@ -201,6 +201,8 @@ class DistributedTrainerMixin(
         "loss cannot be expressed as a last-stage function of logits and labels"
     )
     SUPPORTS_LOWP_PRECISION: ClassVar[bool] = False
+    # ``lowp_backend: native``, the experts on DeepGEMM's kernels, beside ``SUPPORTS_LOWP_PRECISION``.
+    SUPPORTS_NATIVE_LOWP: ClassVar[bool] = False
     # Sequence rows one model call carries per dataset example; the EP dispatch gate multiplies by it.
     FORWARD_ROWS_PER_EXAMPLE: ClassVar[int] = 1
     # Rows come from generation, so the config has no ``max_length``: the bound is :meth:`declared_row_length`, and an

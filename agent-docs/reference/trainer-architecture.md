@@ -138,6 +138,7 @@ pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
 | `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
 | `GENERATION_SHAPED_ROWS` | `False` | rows come from generation, so the config has no `max_length`: the EP dispatch-ceiling gate takes the row length from `declared_row_length` (online and async GRPO, SDPG) |
 | `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT, and teacher distillation on the student) |
+| `SUPPORTS_NATIVE_LOWP` | `False` | `lowp_backend: native` applies (SFT) |
 | `POLICY_GRADIENT_LOSS` | `False` | the loss runs outside the forward with no labels (the GRPO family): it never adds the router aux loss, and an applied Liger FLCE draws a warning |
 | `SYNCS_TO_EXTERNAL_GENERATOR` | `False` | on-policy RL that syncs weights to a rollout engine (online and async GRPO, SDPG) |
 | `ROUTER_AUX_LOSS_ADDED_BY` | `None` | what adds the router aux loss: `"model_forward"` (SFT's `labels` forward), `"trl_loss"` (DPO, KTO; TRL is handed the balancing mode's coefficient, every other trainer `0.0`), or nothing, where `moe_balancing: aux_loss` is refused and `auto` turns the router logits back off |

@@ -4,6 +4,8 @@ block. Otherwise the first MoE forward raises inside the quantizer."""
 from __future__ import annotations
 
 import copy
+import re
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -18,6 +20,7 @@ from halo.distributed.expert_parallel import config as ep_config_module
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.moe_layer import layer as layer_module
+from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -146,10 +149,55 @@ def test_a_misaligned_whole_axis_is_refused_without_the_expert_tp_remedy(family,
 
 
 @pytest.mark.parametrize("family", list(FAMILIES))
+def test_native_without_deep_gemm_is_refused_at_load(family, monkeypatch):
+    """The Hopper image ships no ``deep_gemm``; a simulated run in its place would train other numerics silently."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
+    model = _Model(_layer(family, ALIGNED_M, grouped=True))
+    with pytest.raises(RuntimeError, match="needs the deep_gemm package"):
+        apply_lowp_compute(
+            model, LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False), expert_weight_cacheable=False
+        )
+    assert model.layers[0].mlp._lowp is None
+
+
+@pytest.mark.parametrize("version", ["2.6.1", "2.8.1+5081f85"])
+def test_native_on_an_older_deep_gemm_is_refused_at_load(version, monkeypatch):
+    """A repo mounted into an image built before the pin finds every entry point, an fp8 wgrad that leaves part of
+    its output unwritten and another MXFP4 rounding."""
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (SimpleNamespace(__version__=version), object()))
+    model = _Model(_layer("qwen3_moe", ALIGNED_M, grouped=True))
+    with pytest.raises(RuntimeError, match=rf"needs deep_gemm 2\.8\.2 or newer.*has {re.escape(version)}.*rebuild"):
+        apply_lowp_compute(
+            model, LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False), expert_weight_cacheable=False
+        )
+    assert model.layers[0].mlp._lowp is None
+
+
+@pytest.mark.parametrize("version", ["2.8.2", "2.8.2+5081f85", "2.10.0"])
+def test_native_on_the_pinned_deep_gemm_or_newer_loads(version, monkeypatch):
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (SimpleNamespace(__version__=version), object()))
+    model = _Model(_layer("qwen3_moe", ALIGNED_M, grouped=True))
+    apply_lowp_compute(
+        model, LowpSpec(precision="fp8", backend="native", apply_dense_mlp=False), expert_weight_cacheable=False
+    )
+    assert model.layers[0].mlp._lowp.native
+
+
+@pytest.mark.parametrize("family", list(FAMILIES))
+@pytest.mark.parametrize("backward", ["bf16", "fp8"])
+def test_native_reaches_the_layer_with_its_backward(family, backward, monkeypatch):
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (SimpleNamespace(__version__="2.8.2"), object()))
+    model = _Model(_layer(family, ALIGNED_M, grouped=True))
+    lowp = LowpSpec(precision="fp8", backend="native", backward_precision=backward, apply_dense_mlp=False)
+    assert apply_lowp_compute(model, lowp, expert_weight_cacheable=False)["moe_layers"] == 1
+    assert model.layers[0].mlp._lowp is lowp
+
+
+@pytest.mark.parametrize("family", list(FAMILIES))
 def test_the_refusal_guards_a_forward_that_fails(family):
     """The premise: past the load, the first grouped forward fails inside the quantizer."""
     layer = _layer(family, MISALIGNED_M, grouped=True)
-    assert layer.set_lowp_compute("mxfp8", weight_cacheable=False)
+    assert layer.set_lowp_compute(LowpSpec(precision="fp8"), weight_cacheable=False)
     with pytest.raises(ValueError, match="not divisible by block_size 32"):
         _run_experts(layer)
 

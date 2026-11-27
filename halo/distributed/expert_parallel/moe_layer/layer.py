@@ -161,7 +161,7 @@ class EPMoELayerBase(
 
         # Not cacheable once experts are FSDP2-managed: the unsharded param's version counter is pinned,
         # so the per-step quant cache would serve step-0 weights forever.
-        self._lowp_quant_format = None
+        self._lowp = None
         self._lowp_weight_cacheable = True
 
         # Empty = no expert LoRA, so the hot path is one set-membership check.

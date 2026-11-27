@@ -120,6 +120,7 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
     # Canonical last-stage loss; the PP-incompatible knobs are rejected in _split_pipeline_stage.
     PP_REFUSAL = None
     SUPPORTS_LOWP_PRECISION = True
+    SUPPORTS_NATIVE_LOWP = True
     # Forwards with ``labels``, so ``*ForCausalLM.forward`` folds the router aux loss into outputs.loss.
     ROUTER_AUX_LOSS_ADDED_BY = "model_forward"
     # False lets loss-only eval take Liger's fused-CE ``skip_logits`` path; a subclass whose loss reads

@@ -38,7 +38,7 @@ class _EPStub(EPMoELayerBase):
 
     def __init__(self):
         nn.Module.__init__(self)
-        self._lowp_quant_format = None
+        self._lowp = None
         self._use_grouped_mm = True
 
     def forward(self, hidden_states):  # Abstract on the base; never called here.
@@ -74,7 +74,7 @@ def test_an_expert_layer_carrying_a_format_is_refused():
     teacher = nn.ModuleDict({"moe": _EPStub()})
     reject_lowp_teacher(teacher)  # The layer is EP but carries no format: a bf16 teacher.
 
-    teacher["moe"].set_lowp_compute("nvfp4", weight_cacheable=True)
+    teacher["moe"].set_lowp_compute(LowpSpec(precision="fp4"), weight_cacheable=True)
     assert lowp_converted_modules(teacher) == ["moe"]
     with pytest.raises(ValueError, match=r"1 low-precision module\(s\) \(moe\)"):
         reject_lowp_teacher(teacher)
@@ -85,7 +85,7 @@ def test_a_loop_path_expert_layer_is_refused_too():
     the format a later switch to the grouped path would apply."""
     layer = _EPStub()
     layer._use_grouped_mm = False
-    assert layer.set_lowp_compute("mxfp4", weight_cacheable=True) is False
+    assert layer.set_lowp_compute(LowpSpec(precision="mxfp4"), weight_cacheable=True) is False
     with pytest.raises(ValueError, match=r"\(moe\)"):
         reject_lowp_teacher(nn.ModuleDict({"moe": layer}))
 

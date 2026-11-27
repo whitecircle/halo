@@ -45,7 +45,7 @@ class _EPStub(EPMoELayerBase):
 
     def __init__(self, grouped: bool = True):
         nn.Module.__init__(self)
-        self._lowp_quant_format = None
+        self._lowp = None
         self._use_grouped_mm = grouped
 
     def forward(self, hidden_states):  # Abstract on the base; never called here.
@@ -84,7 +84,7 @@ def test_an_expert_layer_carrying_a_format_counts_in_both_directions():
     with pytest.raises(ValueError, match=UNCONVERTED.format("fp4")):
         verify_lowp_conversion(model, LowpSpec(precision="fp4"))
 
-    model["moe"].set_lowp_compute("nvfp4", weight_cacheable=True)
+    model["moe"].set_lowp_compute(LowpSpec(precision="fp4"), weight_cacheable=True)
     verify_lowp_conversion(model, LowpSpec(precision="fp4"))
     with pytest.raises(ValueError, match=CONVERTED_UNDER_BF16.format(1, "moe")):
         verify_lowp_conversion(model, LowpSpec(precision="bf16"))
@@ -94,7 +94,7 @@ def test_an_expert_layer_on_the_loop_path_computes_in_bf16():
     """``set_lowp_compute`` stores the format on a loop-path layer too, but only the grouped path applies it, so the
     check counts the layer as the loader does: no conversion under lowp, nothing to refuse under bf16."""
     model = nn.ModuleDict({"moe": _EPStub(grouped=False)})
-    assert not model["moe"].set_lowp_compute("nvfp4", weight_cacheable=True)
+    assert not model["moe"].set_lowp_compute(LowpSpec(precision="fp4"), weight_cacheable=True)
     with pytest.raises(ValueError, match=LOOP_PATH_ONLY.format("fp4", 1, "moe")):
         verify_lowp_conversion(model, LowpSpec(precision="fp4"))
     verify_lowp_conversion(model, LowpSpec(precision="bf16"))

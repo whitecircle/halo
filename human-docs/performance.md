@@ -97,9 +97,9 @@ attention and gated residual on Triton kernels. Each lever's page carries its me
 
 ## Levers that do not help here
 
-Halo's fp8/fp4 QAT path and the opt-in DeepGEMM adapter ran whole training steps at
-about half bf16's speed or less on B300. Simulated mxfp4 with its fused round trip ran at
-0.93–0.99× bf16 on H200. `torch.compile` on an EP MoE run gained at most 1%
+Halo's simulated fp8/fp4 QAT path ran whole training steps at about half bf16's speed or
+less on B300. Simulated mxfp4 with its fused round trip ran at 0.93–0.99× bf16 on H200. The
+opt-in DeepGEMM adapter has no measured whole-step win. `torch.compile` on an EP MoE run gained at most 1%
 ([Levers that do not help](../agent-docs/optimization/README.md#levers-that-do-not-help-at-these-shapes) ↗).
 
 ![Roofline of one B300: a memory line at 6.65 TB/s meets the 1,388 TFLOP/s sustained GEMM peak at about 210 FLOP/byte; a bf16 GEMM at K = N = 2880 (GPT-OSS's expert width), timed on the device, reaches 45% of the memory line at M = 128 and 88% of the roof at M = 8,192](../agent-docs/assets/diagrams/roofline.png)

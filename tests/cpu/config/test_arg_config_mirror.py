@@ -17,7 +17,9 @@ from halo.configs.parser import _literal_choices
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES
 from halo.kernels.lowp.spec import LowpSpec
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 
@@ -39,6 +41,7 @@ class _LowpTrainer(DistributedTrainerMixin):
     """The mixin's gates with the ``lowp_*`` knobs admitted, as on the SFT path."""
 
     SUPPORTS_LOWP_PRECISION = True
+    SUPPORTS_NATIVE_LOWP = True
 
 
 def _defaults(cls) -> dict:
@@ -85,6 +88,14 @@ def _config_kwargs_built_by_builder() -> set[str]:
     return keys | {axis.size_field for axis in AXES} | _SAME_NAME_FIELDS
 
 
+# The settings a knob is valid only beside: the native backend leaves dense projections to nothing, and an fp8 backward
+# runs on it alone.
+_LOWP_COMPANIONS = {
+    "lowp_backend": {"lowp_apply_dense_mlp": False},
+    "lowp_backward_precision": {"lowp_backend": "native", "lowp_apply_dense_mlp": False},
+}
+
+
 def test_every_lowp_knob_lands_on_the_built_spec(subtests):
     """A ``lowp_*`` knob set away from its default reaches ``ParallelismConfig.lowp`` on the SFT path."""
     assert _LOWP_ARG_FIELDS, "LowpSpec declares no field, so no lowp knob is swept"
@@ -92,11 +103,47 @@ def test_every_lowp_knob_lands_on_the_built_spec(subtests):
         with subtests.test(f"{arg_field}-{spec_field}"):
             requested = _non_default_value(arg_field)
             # Under an enabled mode, so a shape knob is not the bf16 no-op.
-            dist_args = ParallelismArguments(**{"lowp_precision": "fp8", arg_field: requested})
+            companions = _LOWP_COMPANIONS.get(arg_field, {})
+            dist_args = ParallelismArguments(**{"lowp_precision": "fp8", **companions, arg_field: requested})
 
             config = parallelism_config_from_args(dist_args, trainer_cls=_LowpTrainer)
 
             assert getattr(config.lowp, spec_field) == requested
+
+
+def test_the_native_backend_is_refused_on_a_trainer_no_test_runs_it_on():
+    """Teacher distillation admits the ``lowp_*`` knobs for its fake-quantized student, and no test trains it on
+    DeepGEMM's kernels."""
+
+    class SimulatedOnly(DistributedTrainerMixin):
+        SUPPORTS_LOWP_PRECISION = True
+
+    native = {"lowp_precision": "fp8", "lowp_backend": "native", "lowp_apply_dense_mlp": False}
+    with pytest.raises(ValueError, match="lowp_backend='native' is not supported by SimulatedOnly"):
+        parallelism_config_from_args(ParallelismArguments(**native), trainer_cls=SimulatedOnly)
+    simulated = parallelism_config_from_args(ParallelismArguments(lowp_precision="fp8"), trainer_cls=SimulatedOnly)
+    assert not simulated.lowp.native
+
+
+def test_the_sft_trainer_admits_the_native_backend_and_teacher_distillation_refuses_it():
+    native = ParallelismArguments(lowp_precision="fp8", lowp_backend="native", lowp_apply_dense_mlp=False)
+    assert parallelism_config_from_args(native, trainer_cls=DistributedSFTTrainer).lowp.native
+    with pytest.raises(ValueError, match="not supported by DistributedTeacherDistillationTrainer"):
+        parallelism_config_from_args(native, trainer_cls=DistributedTeacherDistillationTrainer)
+
+
+@pytest.mark.parametrize("value", ["1", "0"])
+def test_a_set_halo_deepgemm_native_is_refused(value, monkeypatch):
+    """The variable chose the native kernels before ``lowp_backend`` did; left in a ``.env`` it would now train on the
+    simulated numerics with no message."""
+    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", value)
+    with pytest.raises(ValueError, match="HALO_DEEPGEMM_NATIVE is set.*lowp_backend: native"):
+        parallelism_config_from_args(ParallelismArguments(), trainer_cls=DistributedTrainerMixin)
+
+
+def test_a_blank_halo_deepgemm_native_reads_as_unset(monkeypatch):
+    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", " ")
+    parallelism_config_from_args(ParallelismArguments(), trainer_cls=DistributedTrainerMixin)
 
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():

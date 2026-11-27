@@ -201,8 +201,7 @@ def run(ctx):
     expect_cacheable = not pc.experts_fsdp_managed
     checks["setup_matches_the_row"] = (ARGS.ep == 1) == pc.experts_fsdp_managed
     checks["student_experts_carry_the_format"] = bool(layers) and all(
-        layer._lowp_quant_format == QUANT_FORMAT and layer._lowp_weight_cacheable is expect_cacheable
-        for layer in layers
+        layer._lowp == pc.lowp and layer._lowp_weight_cacheable is expect_cacheable for layer in layers
     )
     checks["teacher_holds_no_converted_module"] = lowp_converted_modules(teacher) == []
 
