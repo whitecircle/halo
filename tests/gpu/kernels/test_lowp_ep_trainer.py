@@ -132,14 +132,18 @@ class _CallsBeforeTheLastStep(TrainerCallback):
         self.count = self.calls[0]
 
 
-class _ModelForwards(TrainerCallback):
-    """How many forwards the trained model ran."""
+class _CallsPerForward(TrainerCallback):
+    """How many of ``calls`` each forward of the trained model made."""
 
-    def __init__(self):
-        self.count = 0
+    def __init__(self, calls: list[int]):
+        self.calls, self.per_forward, self._seen = calls, [], 0
 
     def on_train_begin(self, args, state, control, model=None, **kwargs):
-        model.register_forward_hook(lambda *_: setattr(self, "count", self.count + 1))
+        model.register_forward_hook(self._record)
+
+    def _record(self, *_):
+        self.per_forward.append(self.calls[0] - self._seen)
+        self._seen = self.calls[0]
 
 
 def _train(
@@ -248,9 +252,15 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     simulated_calls = _count_calls(expert_gemm, "cached_fake_quant")
     flag_reads = _count_calls(lowp_compute, "verify_finite_mxfp4_weights")
     cached_casts = _record_cached_casts()
-    warmed, forwards = _CallsBeforeTheLastStep(wgrad_calls), _ModelForwards()
+    warmed, forwards = _CallsBeforeTheLastStep(wgrad_calls), _CallsPerForward(flag_reads)
     losses, versions, adamw_bf16 = _train(
-        ctx, checkpoint, tokenizer, output_dir, _native_entry_is_current, lowp, callbacks=(warmed, forwards)
+        ctx,
+        checkpoint,
+        tokenizer,
+        output_dir,
+        _native_entry_is_current,
+        lowp,
+        callbacks=(warmed, forwards),
     )
 
     checks = _shared_checks(versions, adamw_bf16)
@@ -258,7 +268,9 @@ def _run_native(ctx, checkpoint: str, tokenizer) -> dict:
     checks["one_route_for_the_whole_run"] = world_all(native_calls[0] > 0 and simulated_calls[0] == 0)
     # The MXFP4 weight cast only flags a NaN weight on the device: one read a forward, and none under fp8.
     checks["mxfp4_reads_its_non_finite_flag_once_a_forward"] = world_all(
-        forwards.count >= 2 * TOTAL_STEPS and flag_reads[0] == (forwards.count if ARGS.precision == "mxfp4" else 0)
+        len(forwards.per_forward) >= 2 * TOTAL_STEPS
+        and set(forwards.per_forward) == {int(ARGS.precision == "mxfp4")}
+        and flag_reads[0] == sum(forwards.per_forward)
     )
     # ``versions`` holds the sharded parameters, which FSDP2 never hands the GEMM, and the cache drops an entry with
     # its weight; so the caches are read as each cast returns, and must be empty at every one.
