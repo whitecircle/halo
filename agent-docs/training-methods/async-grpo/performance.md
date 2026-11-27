@@ -2,8 +2,6 @@
 
 An async GRPO step is usually limited by generation, and its training forward's memory by the logits plane.
 
-<a id="the-logits-wall"></a>
-
 ## The logits plane
 
 TRL's GRPO computes per-token log-probs from a full `[B, T, vocab]` logits tensor. At gpt-oss's ~201k vocab, a 24k-token trajectory is ~9 GiB of bf16 logits, roughly doubled by the log-softmax saved for the backward.

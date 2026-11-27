@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from halo.rewards.graders.verifiable import RLVR_GRADERS, RLVR_REWARD_SOURCES
+from halo.rewards.graders.verifiable import RLVR_GRADERS, RLVR_REWARD_SOURCES, AccuracyTerm
 from halo.rewards.terms import parse_reward_terms, read_context_files
 from halo.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
 
@@ -23,11 +23,17 @@ _ANSWER = "answer"
 
 
 def build_reward_functions(config_path: str | Path, *, with_reference: bool) -> tuple[list[Callable], list[float]]:
-    """The ``rewards`` list of a training YAML (an online-GRPO recipe's included) as TRL reward functions."""
+    """The ``rewards`` list of a training YAML (an online-GRPO recipe's included) as TRL reward functions. An
+    ``accuracy`` term without the reference raises before any scorer is built."""
     config = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
     if "rewards" not in config:
         raise ValueError(f"{config_path} has no 'rewards' list of reward terms")
     terms = parse_reward_terms(read_context_files(config["rewards"]), RLVR_REWARD_SOURCES)
+    if not with_reference and any(isinstance(term, AccuracyTerm) for term in terms):
+        raise ValueError(
+            f"{config_path} has an accuracy reward term, which compares each completion with its row's answer, and "
+            "no --answer_field names the row field holding it; pass --answer_field <field>"
+        )
     return build_trl_reward_functions(terms, RLVR_GRADERS, reference_column=_ANSWER if with_reference else None)
 
 

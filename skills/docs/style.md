@@ -56,6 +56,10 @@ the page that owns it, and the lecture links there.
   table what to take from it.
 - Use a table for a real matrix: model by mode, GPU state by interpretation, config by result. A
   two-row relationship is a sentence. Never table what a short list says shorter.
+- Write plain markdown in `agent-docs/` and `human-docs/`, with no raw HTML tag. A viewer that does not
+  render HTML prints the tag as text, and the link check refuses it. For an anchor, link the heading's
+  slug. For text you want folded, give it its own section and link that. Put a placeholder such as
+  `<split>` in a code span, because GitHub drops a tag it does not know.
 - State limits plainly. Unsupported combinations, known bugs and measured results that came out slower
   are load-bearing. Keep each in one line, with the reason.
 - Describe the present state. A doc says what the code does now. Leave out dated verification

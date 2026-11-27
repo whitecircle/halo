@@ -108,11 +108,11 @@ def datasets_cache_dir() -> str:
     return os.environ.get("HF_DATASETS_CACHE") or str(datasets.config.HF_DATASETS_CACHE)
 
 
-def ensure_cache_dir(writer_rank: Callable[[], bool] = is_local_main_process) -> str:
+def ensure_cache_dir() -> str:
     """COLLECTIVE: :func:`datasets_cache_dir` (inside :func:`scratch_dataset_maps`, its staging dir), so a read-only or
     full volume raises on every rank."""
     cache_dir = _scratch_cache_dir or datasets_cache_dir()
-    fs_aware_makedirs(cache_dir, writer_rank=writer_rank)
+    fs_aware_makedirs(cache_dir, writer_rank=is_local_main_process)
     return cache_dir
 
 

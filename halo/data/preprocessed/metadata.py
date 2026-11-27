@@ -12,6 +12,7 @@ from typing import Any, Literal, get_args
 from huggingface_hub import hf_hub_download, is_offline_mode
 from huggingface_hub.errors import EntryNotFoundError, LocalEntryNotFoundError, RepositoryNotFoundError
 
+from halo.data.chat_render import resolve_final_turn_closers
 from halo.data.conversation import TEMPLATE_COLUMN_KNOBS
 from halo.data.preprocessed.shard_index import (
     PREPROCESSING_VERSION,
@@ -27,7 +28,7 @@ from halo.data.sources.paths import (
 )
 from halo.data.sources.s3_dataset_store import read_control_json_with_cache
 from halo.model_loading.tokenizer_backend import TokenizerBackend
-from halo.model_loading.tokenizer_setup import load_chat_template
+from halo.model_loading.tokenizer_setup import load_chat_template, resolve_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +74,9 @@ _UNCOMPARED_FIELDS = frozenset(
 
 # Render knobs a stamp may not record: a stamp lacking one was baked at its default.
 _DEFAULTED_WHEN_UNRECORDED = ("reasoning_effort_field",)
+
+# What a text bake writes into its ids beside the text: --append_eos the EOS, the tokenizer its own BOS.
+_TEXT_BAKED_KNOBS = ("eos_token", "bos_token")
 
 _PreprocessingMode = Literal["chat", "text"]
 _PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
@@ -248,6 +252,9 @@ class PreprocessedDatasetMetadata:
     rendered_chat_template: str | dict[str, str] | None = None
     # The turn terminators a chat bake closed its rows and ended their completion spans against; None for a text one.
     eos_token_ids: list[int] | None = None
+    # What a chat bake closed a row's open last assistant turn with, per kind of turn (resolve_final_turn_closers);
+    # None for a text one.
+    final_turn_closer_ids: dict[str, int] | None = None
 
     max_length: int = 0
     packed: bool = False
@@ -391,14 +398,17 @@ def _render_knob_differences(
 
 def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any) -> None:
     """Raise when a knob the run STATES differs from the baked value; knobs the metadata predates, ``render_args``
-    lacks or the run leaves at default are reported instead, since the prepared value is what trained either way."""
+    lacks or the run leaves at default are reported instead, since the prepared value is what trained either way. A
+    text bake renders no chat template, so only the special tokens it bakes are compared."""
     recorded = metadata.config or {}
     if recorded.get("mode") == "text":
-        # Raw-text artifacts render no chat template, so no knob was baked.
-        return
-    recorded = {**{name: getattr(PreprocessingConfig, name) for name in _DEFAULTED_WHEN_UNRECORDED}, **recorded}
+        checked = _TEXT_BAKED_KNOBS
+        recorded = {name: recorded[name] for name in checked if name in recorded}
+    else:
+        checked = _RENDER_CHECKED_FIELDS
+        recorded = {**{name: getattr(PreprocessingConfig, name) for name in _DEFAULTED_WHEN_UNRECORDED}, **recorded}
 
-    unrecorded = [name for name in _RENDER_CHECKED_FIELDS if name not in recorded and hasattr(render_args, name)]
+    unrecorded = [name for name in checked if name not in recorded and hasattr(render_args, name)]
     if unrecorded:
         logger.warning(
             f"Preprocessed dataset metadata predates recording of {unrecorded}; cannot verify these "
@@ -493,6 +503,39 @@ def _verify_turn_terminators(metadata: PreprocessedDatasetMetadata, run_eos_toke
         )
 
 
+def _closer_tokens(tokenizer: Any, closers: dict[str, int]) -> dict[str, str]:
+    return {kind: tokenizer.convert_ids_to_tokens(closer) for kind, closer in closers.items()}
+
+
+def _verify_final_turn_closers(
+    metadata: PreprocessedDatasetMetadata, run_processing_class: Any, run_eos_token_ids: frozenset[int]
+) -> None:
+    """Raise when the run would close a row's open last assistant turn with another token than the bake did, read off
+    ``run_processing_class``'s template against ``run_eos_token_ids``: ``IncompatiblePreprocessedDataset`` for a chat
+    bake that records no closers, which closed every such turn with the eos, and ``ValueError`` for recorded ones."""
+    if not is_chat_bake((metadata.config or {}).get("mode", PreprocessingConfig.mode), metadata.is_vlm):
+        return
+    tokenizer = resolve_tokenizer(run_processing_class)
+    run = resolve_final_turn_closers(tokenizer, run_eos_token_ids, template_owner=run_processing_class)
+    baked = metadata.final_turn_closer_ids
+    if baked == run or (baked is None and set(run.values()) == {tokenizer.eos_token_id}):
+        return
+    if baked is None:
+        raise IncompatiblePreprocessedDataset(
+            f"Preprocessed dataset metadata records no final_turn_closer_ids, so its rows close a last assistant turn "
+            f"the template leaves open with the eos {tokenizer.eos_token!r}, while this run closes one with the token "
+            f"the template writes after it ({_closer_tokens(tokenizer, run)}): the baked rows train another stop than "
+            f"the served model stops at. Re-run scripts/before_training/prepare_dataset.py with this version of the "
+            f"toolkit."
+        )
+    raise ValueError(
+        f"The preprocessed rows close a last assistant turn the template leaves open with "
+        f"{_closer_tokens(tokenizer, baked)}, but this run closes one with {_closer_tokens(tokenizer, run)}: baked "
+        f"rows train another stop than this run's own. Re-preprocess with this run's model and toolkit "
+        f"(scripts/before_training/prepare_dataset.py)."
+    )
+
+
 def verify_preprocessed_dataset(
     metadata: PreprocessedDatasetMetadata,
     required_max_length: int,
@@ -503,9 +546,11 @@ def verify_preprocessed_dataset(
     run_processing_class: Any | None = None,
     required_eos_token_ids: frozenset[int] | None = None,
 ) -> None:
-    """Raise on a max_length, baked-label or render-knob mismatch, on an exported chat template other than the rows
-    were rendered with and on turn terminators other than ``required_eos_token_ids``, the set the run resolves; warn on
-    a model mismatch and on ``required_packing`` against an unpacked artifact."""
+    """Raise on a max_length, baked-label or render-knob mismatch, on a ``run_processing_class`` vocabulary of another
+    size than the bake's or an exported chat template other than the rows were rendered with, on turn terminators other
+    than ``required_eos_token_ids``, the set the run resolves, and, given both, on a token other than the run's closing
+    a row's open last assistant turn; warn on a model mismatch and on ``required_packing`` against an unpacked
+    artifact."""
     if metadata.max_length < required_max_length:
         raise ValueError(
             f"Preprocessed dataset max_length ({metadata.max_length}) is less than "
@@ -546,9 +591,21 @@ def verify_preprocessed_dataset(
     if render_args is not None:
         _verify_render_knobs(metadata, render_args)
     if run_processing_class is not None:
+        run_vocab_size = len(resolve_tokenizer(run_processing_class))
+        if run_vocab_size != metadata.tokenizer_vocab_size:
+            raise ValueError(
+                f"The preprocessed rows were tokenized with a {metadata.tokenizer_vocab_size}-token vocabulary "
+                f"({metadata.model_name}), but this run's tokenizer has {run_vocab_size} tokens: the baked ids would "
+                f"mean other text to this model. Train with the tokenizer the rows were baked with, or re-preprocess "
+                f"with this run's (scripts/before_training/prepare_dataset.py). A run adding tokens "
+                f"(added_special_tokens) needs a bake that holds them: grow the vocabulary first "
+                f"(scripts/before_training/patch_vocab.py), then bake and train from that checkpoint."
+            )
         _verify_exported_chat_template(metadata, run_processing_class.chat_template, required_model)
     if required_eos_token_ids is not None:
         _verify_turn_terminators(metadata, required_eos_token_ids)
+        if run_processing_class is not None:
+            _verify_final_turn_closers(metadata, run_processing_class, required_eos_token_ids)
 
     if required_packing and not metadata.packed:
         logger.warning(

@@ -47,8 +47,9 @@ code. Keep docs current: a significant `halo/` change updates its owning doc pag
 6. Run the link check. `./scripts/docs/check_links.sh` resolves every relative markdown link and heading
    anchor in `agent-docs/`, `human-docs/`, `skills/` and the root markdown, and every repo path and
    dotted first-party name their code cites. It fails on a broken target, a missing anchor, a `{#id}`
-   heading, or a cited path or name that does not exist. CI runs the same script in `docs.yml`. It runs
-   on the bare host with stdlib Python 3.12 and needs no image. It must be green before the work is done.
+   heading, a raw HTML tag in an `agent-docs/` or `human-docs/` page, or a cited path or name that does
+   not exist. CI runs the same script in `docs.yml`. It runs on the bare host with stdlib Python 3.12 and
+   needs no image. It must be green before the work is done.
 
 ## Citing repo paths
 

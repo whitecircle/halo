@@ -589,6 +589,53 @@ def test_recursive_delete_reports_false_when_the_prefix_matched_nothing():
     client.boto_client.delete_objects.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("argv", "method"),
+    [(["push", "local_dir", "key"], "push_folder"), (["download", "key", "local_dir"], "download_folder")],
+    ids=["push", "download"],
+)
+def test_cli_replacing_a_destination_is_opt_in(argv, method):
+    for flags, overwrite in (([], False), (["--overwrite"], True)):
+        with (
+            patch("halo.data.sources.s3_client.S3Client.__post_init__"),
+            patch(f"halo.data.sources.s3_client.S3Client.{method}", return_value="s3://b/key") as transfer,
+            patch.object(sys, "argv", ["s3", *argv, *flags, "--bucket", "test-bucket"]),
+        ):
+            s3_cli_main()
+        assert transfer.call_args.kwargs["overwrite"] is overwrite, flags
+
+
+def test_cli_download_onto_an_existing_directory_is_refused_and_leaves_it(tmp_path):
+    """Replacing by default would remove the directory, files unrelated to the key and ``.`` included, before the
+    first byte arrives."""
+    target = tmp_path / "data"
+    target.mkdir()
+    (target / "mine.txt").write_text("keep")
+    with (
+        patch("halo.data.sources.s3_client.S3Client.__post_init__"),
+        patch("halo.data.sources.s3_client.S3Client.exists", return_value=True),
+        patch.object(sys, "argv", ["s3", "download", "key", str(target), "--bucket", "test-bucket"]),
+        pytest.raises(SystemExit, match=r"already exists\. Pass --overwrite"),
+    ):
+        s3_cli_main()
+    assert (target / "mine.txt").read_text() == "keep"
+
+
+def test_cli_push_onto_an_existing_prefix_is_refused_before_any_write(tmp_path):
+    """Replacing by default would delete every object the folder lacks, with none of the prompt ``delete`` asks."""
+    boto = MagicMock()
+    with (
+        patch(
+            "halo.data.sources.s3_client.S3Client.__post_init__", lambda client: setattr(client, "boto_client", boto)
+        ),
+        patch("halo.data.sources.s3_client.S3Client.exists", return_value=True),
+        patch.object(sys, "argv", ["s3", "push", str(tmp_path), "key", "--bucket", "test-bucket"]),
+        pytest.raises(SystemExit, match=r"s3://test-bucket/key already exists\. Pass --overwrite"),
+    ):
+        s3_cli_main()
+    assert boto.mock_calls == []
+
+
 def test_cli_delete_declines_confirmation():
     mock_delete = _run_cli(["delete", "my_folder", "--recursive"], answer="n")
 

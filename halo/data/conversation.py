@@ -174,16 +174,22 @@ def resolve_row_reasoning_effort(row: dict[str, Any], reasoning_effort_field: st
     return level
 
 
+def resolve_row_tools(row: dict[str, Any], tools_field: str | None) -> Any:
+    """The tool declarations ``row`` holds under ``tools_field``, ``None`` where it holds none."""
+    if not tools_field or tools_field not in row:
+        return None
+    return resolve_json_value(row[tools_field])
+
+
 def chat_template_kwargs(
     row: dict[str, Any], interleaved_thinking: bool, tools_field: str | None, reasoning_effort_field: str | None
 ) -> dict:
     """The template variables for ``row``: ``clear_thinking`` under interleaved thinking, then the row's tools and
     reasoning-effort level, each only when it has one."""
     template_kwargs = {"clear_thinking": False} if interleaved_thinking else {}
-    if tools_field and tools_field in row:
-        tools = resolve_json_value(row[tools_field])
-        if tools is not None:
-            template_kwargs["tools"] = tools
+    tools = resolve_row_tools(row, tools_field)
+    if tools is not None:
+        template_kwargs["tools"] = tools
     level = resolve_row_reasoning_effort(row, reasoning_effort_field)
     if level is not None:
         template_kwargs["reasoning_effort"] = level

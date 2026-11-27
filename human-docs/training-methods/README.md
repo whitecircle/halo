@@ -22,6 +22,10 @@ HuggingFace checkpoint and a dataset, and writes a HuggingFace checkpoint. If yo
 | Online SDPG | prompts with an answer, generated live | `grpo/online --use_sdpg=true` | [Distillation](distillation.md#online-sdpg) |
 | Embedding | text pairs, triplets or scored pairs | `embedding` | [Embedding](embedding.md) |
 
+Online and Async GRPO score completions with the same reward terms, and `halo run score-offline-grpo` uses them to
+write an offline GRPO dataset's rewards. [GRPO Rewards](rewards.md) explains how to choose a rule, an LLM judge, a
+reward model or White Circle policies, and how to set each up.
+
 ## What every method shares
 
 - **Config.** A config is a flat YAML file of trainer fields, most of which can be

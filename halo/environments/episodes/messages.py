@@ -78,6 +78,8 @@ class Message:
     calls_rejected: bool = False
     # The calls the environment refused unrun or that named no tool: a scorer's view marks them as never run.
     refused_call_ids: tuple[str, ...] = ()
+    # What the environment alone knows of a call, by call id: a scorer's view shows it beside the call.
+    call_notes: dict[str, str] | None = None
     empty: bool = False
 
     def to_dict(self, include_thinking: bool = False) -> dict[str, Any]:

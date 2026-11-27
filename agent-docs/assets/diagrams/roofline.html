@@ -31,7 +31,7 @@
 
   svg .ridge { font-size: 23px; fill: var(--text); }
 
-  /* The key names the two regions and the marks in a column left of the plot. */
+  /* The key names the two sides of the ridge and the three sweeps in a column left of the plot. */
   .figure {
     display: grid;
     grid-template-columns: 330px minmax(0, 1fr);
@@ -58,11 +58,11 @@
     color: var(--heading);
   }
 
-  .key h3 i {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-    background: var(--hue);
+  .key svg {
+    flex: none;
+    width: 36px;
+    height: 24px;
+    overflow: visible;
   }
 
   .key p {
@@ -73,20 +73,15 @@
 
   .key p + p { margin-top: 12px; }
 
-  /* A mark's line in the key: its swatch, then what it is. */
+  /* A sweep's line in the key: its swatch, then what it is. */
   .key p.mark {
     display: grid;
-    grid-template-columns: 22px 1fr;
-    column-gap: 12px;
+    grid-template-columns: 36px 1fr;
+    column-gap: 14px;
     color: var(--body);
   }
 
-  .key p.mark svg {
-    width: 22px;
-    height: 22px;
-    margin-top: 4px;
-    overflow: visible;
-  }
+  .key p.mark svg { margin-top: 3px; }
 </style>
 </head>
 <body>
@@ -156,7 +151,7 @@
   const ADDCMUL_TB_PER_S = 7.236;
   /** torch.addcmul(t, a, b) is t + a × b on every value: a multiply and an add, over three reads and one write of 2 bytes. */
   const ADDCMUL = { flops: 2, bytes: 4 * 2 };
-  /** The values of M named on the plot, each with a line to the ceiling above it. */
+  /** The values of M named on the plot, each with its share of the ceiling above it. */
   const NAMED_M = [16, 128, 512, 8192];
   const SQUARE = 8192;
 
@@ -184,30 +179,30 @@
 
   document.getElementById("title").textContent = `Below about ${ridgeText} the bytes set the speed, and small GEMMs run lower still`;
   document.getElementById("above").textContent =
-    `A kernel that reads more than it writes runs above it: addcmul, three reads and one write for a multiply and an add, is at ${percent(addcmul.rate / ceiling(addcmul.ai))}.`;
+    `A kernel that reads more than it writes runs above it: addcmul on 4 GiB tensors, three reads and one write for a multiply and an add, is at ${percent(addcmul.rate / ceiling(addcmul.ai))}.`;
 
-  /** Region fills: a faint wash of each ceiling's colour over the canvas. */
-  const TINTS = {
-    memory: "color-mix(in oklab, var(--bg), var(--halo-violet) 9%)",
-    compute: "color-mix(in oklab, var(--bg), var(--halo-blue) 6%)",
-  };
-  /** Mark shapes, drawn alike on the plot and in the key: a 22px swatch centred on (11, 11). */
-  const MARKS = {
-    device: (x, y) => svgEl("circle", { cx: x, cy: y, r: 4, fill: "var(--text)" }),
-    eager: (x, y) => svgEl("circle", { cx: x, cy: y, r: 3.5, fill: "var(--bg)", stroke: "var(--secondary)", "stroke-width": 1.5 }),
-    wide: (x, y) => svgEl("polygon", { points: `${x},${y - 5.5} ${x + 5.5},${y} ${x},${y + 5.5} ${x - 5.5},${y}`, fill: "var(--text)" }),
-    burst: (x, y) => svgEl("polygon", { points: `${x},${y - 5} ${x + 5},${y} ${x},${y + 5} ${x - 5},${y}`, fill: "var(--bg)", stroke: "var(--text)", "stroke-width": 1.5 }),
-    elementwise: (x, y) => svgEl("rect", { x: x - 4.5, y: y - 4.5, width: 9, height: 9, fill: "var(--text)" }),
+  /** The two ceilings are the grey frame the sweeps sit in. */
+  const FRAME = "var(--secondary)";
+  /** One hue per sweep. Sand is the third because indigo fails the palette check beside blue and beside violet. */
+  const HUES = { device: "var(--halo-blue)", eager: "var(--halo-violet)", wide: "var(--halo-sand)" };
+  /** Key swatches, each a 36 × 24 drawing: the slope of a ceiling, or a sweep's line. */
+  const stroke = (x1, y1, x2, y2, hue) => svgEl("line", { x1, y1, x2, y2, stroke: hue, "stroke-width": 2.5, "stroke-linecap": "round" });
+  const SWATCHES = {
+    memory: () => stroke(6, 22, 30, 2, FRAME),
+    roof: () => stroke(2, 12, 34, 12, FRAME),
+    device: () => stroke(2, 12, 34, 12, HUES.device),
+    eager: () => stroke(2, 12, 34, 12, HUES.eager),
+    wide: () => stroke(2, 12, 34, 12, HUES.wide),
   };
   const KEY = [
     {
       name: "Memory-bound",
-      hue: "var(--halo-violet)",
+      swatch: "memory",
       lines: ["More tensor cores don’t help: move fewer bytes", "Elementwise kernels, small-M GEMMs with large weights"],
     },
     {
       name: "Compute-bound",
-      hue: "var(--halo-blue)",
+      swatch: "roof",
       lines: ["Faster memory doesn’t help: lower precision does", "Large-M GEMMs"],
     },
     {
@@ -216,22 +211,24 @@
         ["device", "bf16 GEMM, K = N = 2880, time on the device"],
         ["eager", "The same calls timed from PyTorch: the gap is the CPU"],
         ["wide", `K = N = 8192 on the device, ${percent(wideFirst.device / ceiling(wideFirst.ai))} of the line at M = ${wideFirst.m}`],
-        ["burst", `The ${SQUARE}³ GEMM in its first 40 ms`],
-        ["elementwise", "addcmul on 4 GiB tensors"],
       ],
     },
   ];
 
+  const swatch = (kind) => {
+    const svg = svgEl("svg", { viewBox: "0 0 36 24", "aria-hidden": "true" });
+    svg.append(SWATCHES[kind]());
+
+    return svg;
+  };
   const key = document.getElementById("key");
 
   for (const group of KEY) {
     const column = el("div");
     const heading = el("h3");
 
-    if (group.hue !== undefined) {
-      const dot = el("i");
-      dot.style.setProperty("--hue", group.hue);
-      heading.append(dot);
+    if (group.swatch !== undefined) {
+      heading.append(swatch(group.swatch));
     }
 
     heading.append(group.name);
@@ -241,18 +238,16 @@
       column.append(el("p", undefined, line));
     }
 
-    for (const [mark, text] of group.marks ?? []) {
+    for (const [kind, text] of group.marks ?? []) {
       const p = el("p", "mark");
-      const swatch = svgEl("svg", { viewBox: "0 0 22 22" });
-      swatch.append(MARKS[mark](11, 11));
-      p.append(swatch, el("span", undefined, text));
+      p.append(swatch(kind), el("span", undefined, text));
       column.append(p);
     }
 
     key.append(column);
   }
 
-  const HEIGHT = 760;
+  const HEIGHT = 840;
   /** Length of a tick mark outside an axis. */
   const TICK = 8;
   /** Plot-area insets inside the SVG: the y title and ticks, the line-end labels, and the x ticks and title. */
@@ -286,10 +281,6 @@
     return Array.from({ length: Math.round(Math.log10(hi)) - first + 1 }, (_, i) => 10 ** (first + i));
   };
 
-  // Regions, behind everything: memory-bound left of the ridge, compute-bound right of it.
-  add("rect", { x: plot.l, y: plot.t, width: sx(RIDGE) - plot.l, height: plot.b - plot.t, fill: TINTS.memory });
-  add("rect", { x: sx(RIDGE), y: plot.t, width: plot.r - sx(RIDGE), height: plot.b - plot.t, fill: TINTS.compute });
-
   // Labels sit on the plot, so it draws no gridlines: a tick mark outside each axis marks every decade.
   for (const v of decades(xRange)) {
     add("line", { x1: sx(v), x2: sx(v), y1: plot.b, y2: plot.b + TICK, stroke: "var(--secondary)", "stroke-width": 1 });
@@ -306,45 +297,40 @@
   add("text", { class: "axis", x: (plot.l + plot.r) / 2, y: HEIGHT - 6, "text-anchor": "middle" }, "Arithmetic intensity, FLOP per byte");
   add("text", { class: "axis", transform: `translate(14 ${(plot.t + plot.b) / 2}) rotate(-90)`, "text-anchor": "middle", "dominant-baseline": "hanging" }, "Rate, TFLOP/s");
 
-  // Everything a label must stay clear of: boxes around marks and labels, and the drawn lines.
+  // Everything a label must stay clear of: boxes around dots and labels, and the drawn lines.
   const boxes = [];
   const lines = [];
-  const line = (x1, y1, x2, y2, attrs) => {
-    lines.push([x1, y1, x2, y2]);
-
-    return add("line", { x1, y1, x2, y2, ...attrs });
-  };
-  const mark = (kind, x, y) => {
-    chart.append(MARKS[kind](x, y));
-    boxes.push({ l: x - 6, r: x + 6, t: y - 6, b: y + 6 });
+  /** A line through the points [x, y], in plot coordinates. */
+  const path = (points, attrs) => {
+    points.slice(1).forEach(([x, y], i) => lines.push([...points[i], x, y]));
+    add("polyline", { points: points.map((p) => p.join(",")).join(" "), fill: "none", "stroke-linejoin": "round", "stroke-linecap": "round", ...attrs });
   };
 
   // The ceilings meet at the ridge. The memory line enters at the left edge or the floor. The burst peak is a
   // thin second roof from where the memory line reaches it.
   const enter = Math.max(xRange[0], yRange[0] / COPY_TB_PER_S);
-  line(sx(RIDGE), sy(SUSTAINED_PEAK), sx(RIDGE), plot.b, { stroke: "var(--tertiary)", "stroke-width": 1.5 });
-  line(sx(enter), sy(COPY_TB_PER_S * enter), sx(RIDGE), sy(SUSTAINED_PEAK), { stroke: "var(--halo-violet)", "stroke-width": 3, "stroke-linecap": "round" });
-  line(sx(RIDGE), sy(SUSTAINED_PEAK), plot.r, sy(SUSTAINED_PEAK), { stroke: "var(--halo-blue)", "stroke-width": 3, "stroke-linecap": "round" });
-  line(sx(BURST_PEAK / COPY_TB_PER_S), sy(BURST_PEAK), plot.r, sy(BURST_PEAK), { stroke: "var(--halo-blue)", "stroke-width": 1.25 });
+  path([[sx(enter), sy(COPY_TB_PER_S * enter)], [sx(RIDGE), sy(SUSTAINED_PEAK)], [plot.r, sy(SUSTAINED_PEAK)]], { stroke: FRAME, "stroke-width": 2.5 });
+  path([[sx(BURST_PEAK / COPY_TB_PER_S), sy(BURST_PEAK)], [plot.r, sy(BURST_PEAK)]], { stroke: FRAME, "stroke-width": 1.25 });
 
-  // From each named point a thin line up to the ceiling above it, through the eager and the device mark.
-  const leaders = named.map((p) => ({ p, x: sx(p.ai), top: sy(ceiling(p.ai)), bottom: sy(Math.min(p.eager, p.device)) }));
+  // Each sweep is one line through its points. The device line lies over the PyTorch one where they meet.
+  const sweep = (points, rate, hue) => path(points.map((p) => [sx(p.ai), sy(rate(p))]), { stroke: hue, "stroke-width": 2.5 });
+  sweep(narrow, (p) => p.eager, HUES.eager);
+  sweep(narrow, (p) => p.device, HUES.device);
+  sweep(wide, (p) => p.device, HUES.wide);
 
-  for (const p of narrow) {
-    mark("eager", sx(p.ai), sy(p.eager));
+  /** A dot where a label points, ringed in the canvas colour so it stays whole over a line. */
+  const dot = (x, y, hue) => {
+    add("circle", { cx: x, cy: y, r: 5, fill: hue, stroke: "var(--bg)", "stroke-width": 2 });
+    boxes.push({ l: x - 7, r: x + 7, t: y - 7, b: y + 7 });
+  };
+
+  for (const p of named) {
+    dot(sx(p.ai), sy(p.device), HUES.device);
   }
 
-  for (const p of narrow) {
-    mark("device", sx(p.ai), sy(p.device));
-  }
-
-  for (const p of wide) {
-    mark("wide", sx(p.ai), sy(p.device));
-  }
-
-  mark("wide", sx(square.ai), sy(SUSTAINED_PEAK));
-  mark("burst", sx(square.ai), sy(BURST_PEAK));
-  mark("elementwise", sx(addcmul.ai), sy(addcmul.rate));
+  dot(sx(square.ai), sy(SUSTAINED_PEAK), HUES.wide);
+  dot(sx(square.ai), sy(BURST_PEAK), HUES.wide);
+  dot(sx(addcmul.ai), sy(addcmul.rate), "var(--text)");
 
   const overlaps = (a, b) => a.l < b.r && b.l < a.r && a.t < b.b && b.t < a.b;
   /** Whether the segment (x1, y1)–(x2, y2) passes through the box. */
@@ -365,59 +351,64 @@
 
     return t0 < t1;
   };
+  // A label stays inside the plot on three sides. On the right it may run into the room of the line-end labels.
   const free = (box) =>
-    box.l >= plot.l + CLEAR && box.r <= plot.r - CLEAR && box.t >= plot.t + CLEAR && box.b <= plot.b - CLEAR &&
+    box.l >= plot.l + CLEAR && box.r <= width && box.t >= plot.t + CLEAR && box.b <= plot.b - CLEAR &&
     !boxes.some((other) => overlaps(box, other)) && !lines.some((segment) => crosses(segment, box));
-  /** A label of one or two lines, drawn at its first free place among `places(width, height)`, each a top-left corner. */
-  const label = (rows, places) => {
-    const text = add("text", { class: "point" });
-    rows.forEach(([cls, value], i) => text.append(svgEl("tspan", { class: cls, x: 0, dy: i === 0 ? 0 : 27 }, value)));
+  /** Keeps later labels off a text already drawn, by the clear space on every side. */
+  const keep = (text) => {
     const size = text.getBBox();
-    const spot = places(size.width, size.height).find(([l, t]) => free({ l: l - CLEAR, t: t - CLEAR, r: l + size.width + CLEAR, b: t + size.height + CLEAR }));
-
-    if (spot === undefined) {
-      throw new Error(`No free place on the plot for the label ${rows.map(([, value]) => value).join(" / ")}.`);
-    }
-
-    const [l, t] = spot;
-    text.setAttribute("transform", `translate(${l - size.x} ${t - size.y})`);
-    boxes.push({ l, t, r: l + size.width, b: t + size.height });
-
-    return { l, t, r: l + size.width, b: t + size.height };
+    boxes.push({ l: size.x - CLEAR, t: size.y - CLEAR, r: size.x + size.width + CLEAR, b: size.y + size.height + CLEAR });
   };
 
-  // A named point's label hangs under its line: as near under the marks as it finds room, centred on the line
-  // or to one side of it.
-  for (const leader of leaders) {
-    const { p, x } = leader;
-    const placed = label([["point", `M = ${p.m.toLocaleString("en-US")}`], ["why", percent(p.device / ceiling(p.ai))]], (w) =>
-      Array.from({ length: 120 }, (_, i) => leader.bottom + 14 + 4 * i).flatMap((t) => [[x - w / 2, t], [x - w + 10, t], [x - 10, t]]));
-    line(x, leader.top, x, placed.t - 6, { stroke: "var(--secondary)", "stroke-width": 1 });
+  // Each roof's value at its right end, the two nudged apart where the lines run closer than a line of text.
+  const apart = Math.max(0, (26 - (sy(SUSTAINED_PEAK) - sy(BURST_PEAK))) / 2);
+  keep(add("text", { class: "why", x: plot.r + 12, y: sy(BURST_PEAK) - apart, "dominant-baseline": "central" }, `${fmt(BURST_PEAK)}, first 40 ms`));
+  keep(add("text", { class: "point", x: plot.r + 12, y: sy(SUSTAINED_PEAK) + apart, "dominant-baseline": "central" }, `${fmt(SUSTAINED_PEAK)}, sustained`));
+
+  /** A one-line label of parts [class, text], drawn at its first free place among `places(width, height)`, each a top-left corner. */
+  const label = (parts, places) => {
+    const text = add("text", { class: "point" });
+    parts.forEach(([cls, value], i) => text.append(svgEl("tspan", { class: cls, dx: i === 0 ? 0 : 10 }, value)));
+    const size = text.getBBox();
+    // The label's box with its clear space. It is kept that wide too, so two labels stand twice the space apart.
+    const boxAt = ([l, t]) => ({ l: l - CLEAR, t: t - CLEAR, r: l + size.width + CLEAR, b: t + size.height + CLEAR });
+    const spot = places(size.width, size.height).find((place) => free(boxAt(place)));
+
+    if (spot === undefined) {
+      throw new Error(`No free place on the plot for the label ${parts.map(([, value]) => value).join(" ")}.`);
+    }
+
+    text.setAttribute("transform", `translate(${spot[0] - size.x} ${spot[1] - size.y})`);
+    boxes.push(boxAt(spot));
+  };
+
+  // A dot's name sits beside it, on the first side that is free.
+  const beside = (x, y) => (w, h) =>
+    [8, 16, 28].flatMap((d) => [[x - w / 2, y - h - d - 4], [x + d, y + d], [x + d, y - h / 2], [x - w / 2, y + d + 4], [x - w - d, y + d], [x - w - d, y - h / 2]]);
+  label([["point", "addcmul"]], beside(sx(addcmul.ai), sy(addcmul.rate)));
+  label([["point", `${SQUARE}³`]], beside(sx(square.ai), sy(BURST_PEAK)));
+
+  // A named point's label hangs under its dot and right of it, as near as it finds room. The sweep's upper end
+  // is labelled first, where the room is least.
+  for (const p of named.toReversed()) {
+    const [x, y] = [sx(p.ai), sy(p.device)];
+    label([["point", `M = ${p.m.toLocaleString("en-US")}`], ["why", percent(p.device / ceiling(p.ai))]], () =>
+      Array.from({ length: 40 }, (_, i) => [x + 12, y + 12 + 4 * i]));
   }
 
-  // The other marks' names sit beside them, on the first side that is free.
-  const beside = (x, y) => (w, h) =>
-    [8, 16, 28].flatMap((d) => [[x + d, y + d], [x + d, y - h / 2], [x - w / 2, y + d + 4], [x - w - d, y + d], [x - w - d, y - h / 2], [x - w / 2, y - h - d - 4]]);
-  label([["point", "addcmul"]], beside(sx(addcmul.ai), sy(addcmul.rate)));
-  label([["point", `${SQUARE}³`]], beside(sx(square.ai), sy(SUSTAINED_PEAK)));
-
-  // The memory line's name runs along and above it, past the elementwise mark.
+  // The memory line's name runs along and above it, past the elementwise dot.
   const a0 = addcmul.ai * 10 ** 0.35;
   const angle = (Math.atan2(sy(SUSTAINED_PEAK) - sy(COPY_TB_PER_S * enter), sx(RIDGE) - sx(enter)) * 180) / Math.PI;
   add("text", { class: "mark", transform: `translate(${sx(a0)} ${sy(COPY_TB_PER_S * a0)}) rotate(${angle}) translate(0 -16)` }, `Memory line, AI × ${COPY_TB_PER_S.toFixed(2)} TB/s`);
 
-  const ridgeLabel = svgEl("text", { class: "ridge", x: sx(RIDGE) - 22, y: sy(BURST_PEAK) - 58, "text-anchor": "end" });
+  // The ridge's name sits above the corner the two ceilings make.
+  const ridgeLabel = svgEl("text", { class: "ridge", x: sx(RIDGE) - 18, y: sy(SUSTAINED_PEAK) - 52, "text-anchor": "end" });
   ridgeLabel.append(
     svgEl("tspan", {}, "Ridge"),
-    svgEl("tspan", { class: "why", x: sx(RIDGE) - 22, dy: 28 }, `about ${ridgeText}`),
+    svgEl("tspan", { class: "why", x: sx(RIDGE) - 18, dy: 28 }, `about ${ridgeText}`),
   );
   chart.append(ridgeLabel);
-  add("circle", { cx: sx(RIDGE), cy: sy(SUSTAINED_PEAK), r: 7, fill: "var(--text)" });
-
-  // Each roof's value at its right end, the two nudged apart where the lines run closer than a line of text.
-  const apart = Math.max(0, (26 - (sy(SUSTAINED_PEAK) - sy(BURST_PEAK))) / 2);
-  add("text", { class: "why", x: plot.r + 12, y: sy(BURST_PEAK) - apart, "dominant-baseline": "central" }, `${fmt(BURST_PEAK)}, first 40 ms`);
-  add("text", { class: "point", x: plot.r + 12, y: sy(SUSTAINED_PEAK) + apart, "dominant-baseline": "central" }, `${fmt(SUSTAINED_PEAK)}, sustained`);
 </script>
 </body>
 </html>

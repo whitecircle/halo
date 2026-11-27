@@ -7,6 +7,11 @@
   Frontier-Lab Training for Everyone
 </p>
 
+<!-- Temporary, with the "Halo Competition" section: remove both when the competition ends on Dec 10. -->
+<p align="center">
+  <a href="https://whitecircle.com/halo/competition"><strong>Halo Competition, Dec 1–10 · $200k in cash prizes · apply by Nov 30</strong></a>
+</p>
+
 <p align="center">
   <a href="https://whitecircle.com/research/halo"><strong>Blog post</strong></a> ·
   <a href="https://whitecircle.com/halo/docs"><strong>Docs</strong></a> ·
@@ -28,6 +33,14 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 `Pre- & Post-Training` · `EP / CP / TP / ETP / PP` ·
 `Multi-Node` · `Verifiable & Multi-Turn RL` · `FA4 + Liger + Grouped GEMM` · `Full BF16`
+
+</br>
+
+## Halo Competition
+
+The Halo Competition runs Dec 1–10. There are tracks for making Halo faster on a model family and for post-training one on a task you pick, and best-use tracks from the partners and White Circle. The prizes are $200k in cash and $1.5M in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others.
+
+Apply by Nov 30: [details](https://whitecircle.com/halo/competition) · [apply](https://luma.com/ykoj0t48).
 
 </br>
 
@@ -53,99 +66,37 @@ On 8× B300, Halo 1.2.0 trains Qwen3.6-35B-A3B on packed 64k and 128k rows at 1.
 
 ## Latest updates
 
-<!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
+<!-- Newest first, a few lines per entry. The details of a release belong in its release notes. -->
 
-- **2026-11-25 — Halo 1.3.0rc2.** Adds Inkling 2. Inkling-2-Small trains with LoRA on its attention, alone or
-  beside its routed experts, while the released NVFP4/MXFP8 expert weights stay frozen, and environmental GRPO
-  serves each adapter version to vLLM ([Inkling 2](agent-docs/models/inkling2.md#rollouts)).
-  - **Adapter sync on vLLM:** each adapter version loads from a shared directory, and a model Halo pushes no full
-    weights to, such as Inkling 2, is served from its release with no NCCL group.
-  - **Inkling 2 vLLM image:** a second tag, `:vllm-0.1.dev25249` on vLLM's Inkling 2 build, with expert LoRA on the
-    quantized experts in Triton kernels. Every other family stays on `:vllm-0.32.0`.
-  - **Inkling 2 attention:** a compiled FlexAttention kernel supports the family's relative-position bias and
-    attention sinks. It runs a full-attention layer's forward and backward in 41 ms at a 2.6 GiB peak, against
-    166 ms at 61 GiB in eager attention, at 8,192 tokens on one B300. Packed rows train with it in SFT and GRPO
-    ([Inkling 2](agent-docs/models/inkling2.md#measured)).
-  - **Commands:** `make build-vllm-inkling2`, `make up-vllm-inkling2` and `make train-inkling2` build the image, serve
-    and train.
-  - **Saved adapters on an engine:** `halo run export-engine-adapter` writes a saved LoRA adapter, such as an SFT
-    checkpoint, as the directory a vLLM or SGLang server loads by path
-    ([Scripts](agent-docs/reference/scripts-reference.md#post-training-scripts)).
-  - **Rollouts without reasoning:** `rollout_thinking: false` samples environmental GRPO with no reasoning block
-    ([Thinking off](agent-docs/training-methods/async-grpo/reasoning.md#thinking-off)), and code contests give
-    such a policy a `notes` tool that holds its working between turns
-    ([Notes](agent-docs/training-methods/async-grpo/environments/tasks/code-contests/tools.md#notes)).
-  - **Per-row reasoning effort:** `reasoning_effort_field` trains each row at its own reasoning effort in SFT,
-    distillation, DPO, SMPO, classification and offline and online GRPO
-    ([Dataset Formats](agent-docs/data/dataset-formats.md#required-columns-by-method)).
+Only the highlights are here. Each release's full notes, with its breaking changes and upgrade steps, are on
+[GitHub Releases](https://github.com/whitecircle/halo/releases).
+
+- **2026-11-25 — Halo 1.3.0rc2.** Adds Inkling 2: Inkling-2-Small trains with LoRA on its attention, alone or
+  beside its routed experts, while the released NVFP4/MXFP8 expert weights stay frozen
+  ([Inkling 2](agent-docs/models/inkling2.md),
+  [release notes](https://github.com/whitecircle/halo/releases/tag/v1.3.0rc2)).
+  - **Adapter sync on vLLM:** in environmental GRPO the server keeps Inkling 2's released weights and loads each
+    adapter version from a shared directory, so no full weights are pushed.
   - **Qwen3.8-Flash-Next:** block-sparse attention and gated-residual kernels are on by default (1.57× and 1.22×
-    faster LoRA steps at EP8 on 8× B300), and its weights now sync to vLLM and SGLang for RL
-    ([kernel defaults](agent-docs/models/qwen4_exp.md#kernel-defaults),
-    [RL weight sync](agent-docs/models/qwen4_exp.md#rl-weight-sync)).
-  - **Low precision:** fused Triton fake-quantization kernels for MXFP4 and NVFP4, bit-exact with the eager
-    quantizer, including ep1 expert weights. `quantize-to-lowp --export_format compressed-tensors` writes a layout
-    vLLM serves, and native MXFP4 releases load directly. The trainer checks the converted modules against
-    `lowp_precision`. Fixed: an all-zero MXFP8 block no longer becomes NaN, and eager MXFP4/MXFP8 scale each block
-    by an exact power of two.
-  - **Distillation:** `use_chunked_distillation_loss` trains teacher and self-distillation without the full
-    `[tokens, vocab]` logits, and online SDPG computes its OPD term the same way under `use_chunked_grpo_logprobs`.
-    Teacher distillation takes `lowp_precision`, fitting a fake-quantized student to a BF16 teacher. `bias_update`
-    balancing warns when the teacher is the student's own checkpoint.
-  - **GRPO:** `use_maxrl` for MaxRL's mean-normalized advantages in online and environmental GRPO, White Circle
-    policies as a reward term, and episode code in Modal or Baseten Sandboxes with `--halo-rollout-backend modal`
-    or `baseten`.
-  - **Context parallelism:** CP2 SFT on dense Qwen3.5/3.6 with their native hybrid layers (text-only full
-    fine-tune).
-  - **MoE metrics:** each checkpoint of a MoE run that logs expert load carries `moe_expert_token_counts.json`, the
-    routed token slots of each expert over the run, so each layer sums to tokens × `top_k`.
-  - **Adapters:** an adapter save records the Hub commit of its base model, and the merge tool,
-    `export-engine-adapter` and `convert_to_bf16.py --check_inference` read the base at that commit (`--base_revision`
-    on the merge and export tools names it for an adapter that records none). An
-    expert-only adapter records whether its run neutralized the attention sinks, and the streaming merge repeats it.
-    A PEFT wrap that leaves no trainable adapter parameter is refused when the trainer is built.
-  - **Docs:** [GPU Training Theory](agent-docs/reference/gpu-training-theory.md) is now a lecture for newcomers to
-    GPU training. Each number says where it comes from, and scripts under `tests/gpu/profiling/` reproduce most of
-    its B300 measurements.
-  - **Also:** Transformers 5.23 and flash-linear-attention 0.6, DPO/KTO reference log-probs swept after the FSDP2
-    wrap, SGLang turns requeued at a weight push, and a fix: fused AdamWBF16 takes `1 - beta` from the float64 betas.
-  - **Upgrade note:** the trainer refuses vLLM images built for 1.2.0 and 1.3.0rc1, which report no engine build.
-    Pull or build the 1.3.0rc2 tags. An offline chat or VLM dataset preprocessed by 1.3.0rc1 or earlier records no
-    turn terminators, so SFT refuses it until `prepare_dataset.py` runs on it again. `rollout_chat_template_kwargs`
-    no longer takes `enable_thinking`, which `rollout_thinking` sets. Fused AdamWBF16 no longer repeats 1.3.0rc1's
-    runs bit for bit, and a Qwen3.8-Flash-Next run on its default attention kernel does not replay itself unless it
-    sets `full_determinism` or `HALO_QSA_KERNEL=off`.
-- **2026-11-24 — Halo Competition.** Dec 1–10, with tracks for making Halo faster on a model family, post-training
-  one for a task you pick, and best-use tracks from the partners and White Circle. $200k in cash prizes and $1.5M
-  in compute and API credits from OpenAI, Mistral, Nebius, Modal, Lovable and others. Apply by Nov 30
-  ([details](https://whitecircle.com/halo/competition), [apply](https://luma.com/ykoj0t48)).
-- **2026-11-07 — Halo 1.3.0rc1.** A release candidate for faster RL at scale. On synchronous GRPO with
-  Qwen3.5-35B-A3B on two 8× B300 nodes, a step takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
-  ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles)).
-  - **Faster GRPO:** rows pack into token-budget micro-batches, importance weights can come from the loss forward,
-    and weight sync can run one group across servers.
-  - **New in RL:** score centering on SGLang, FP8-weight rollouts for Qwen3.5/3.6 MoE, adapter-only sync to
-    SGLang, and GLM-5.3-Flash under GRPO.
-  - **Scale:** gathered EP saves striped over several writers, adapter merges with no model load, and startup
-    checks for setups that used to fail hours into a run.
-- **2026-11-04 — Halo 1.2.0.** Training steps are faster than in 1.1.0 on all twelve shapes benchmarked
-  against it, from 1.11× to 2.07×, and GLM-5.3-Flash more than doubles its LoRA throughput with two new kernels.
-  Halo also gains pipeline parallelism and three more model families ([benchmarks](human-docs/performance.md)).
-  - **GLM-5.3-Flash:** new attention and hyper-connection kernels. LoRA at EP8 runs 2.2–2.7× faster than
-    before them with the same peak memory, and a full fine-tune on two 8-GPU machines up to 2.3× faster.
-  - **Pipeline parallelism** for SFT, preference, offline GRPO, reward, and classification training, with EP
-    or ETP inside each stage ([docs](agent-docs/parallelism/pipeline-parallelism.md)).
-  - **New models:** NVIDIA Nemotron 3.5 (Super VL and Lightning), Qwen3-Next, and experimental
-    Qwen3.8-Flash-Next, for eighteen MoE families in all.
-  - **SFT features:** tree packing, which stores a shared prefix once, and training of MTP heads.
-  - **Upgrade notes:** the import package is now `halo`, and 1.2.0 shipped on transformers 5.20, TRL 1.14,
-    vLLM 0.32, and SGLang 0.5.22. PaliGemma SFT and distillation now use a causal mask, which 1.1.0 left off.
-- **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume, and more reliable async RL. Fused MoE
-  kernels and FlexAttention on sliding-window layers made Gemma 4 26B-A4B 1.67× faster than 1.0.0 on two
-  GPUs, and an atomic-free expert permute made gpt-oss-20b at EP8 24% faster. Checkpoint and resume problems now stop the run instead of
-  passing silently, and offline GRPO gained context parallelism.
-- **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models
-  (LLM and VLM), 15 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
-  FlashAttention-4, DeepEP V2, DeepGEMM, and the AdamWBF16 optimizer.
+    faster LoRA steps at EP8 on 8× B300), and its weights sync to vLLM and SGLang for RL.
+  - **Also:** rollouts without reasoning, MaxRL advantages, chunked distillation losses, fused MXFP4 and NVFP4
+    fake-quantization kernels, native MXFP4 gpt-oss loading, pre-training on datatrove token folders and
+    Transformers 5.23.
+- **2026-11-24 — Halo Competition.** Dec 1–10, with $200k in cash prizes and $1.5M in compute and API credits.
+  Apply by Nov 30 ([Halo Competition](#halo-competition)).
+- **2026-11-07 — Halo 1.3.0rc1.** Faster RL at scale: a synchronous GRPO step on Qwen3.5-35B-A3B over two 8× B300
+  nodes takes 0.137 s per 1k response tokens against Miles v0.1.3's 0.176
+  ([GRPO against Miles](agent-docs/optimization/throughput-benchmarks.md#grpo-against-miles),
+  [release notes](https://github.com/whitecircle/halo/releases/tag/v1.3.0rc1)).
+- **2026-11-04 — Halo 1.2.0.** Training steps are 1.11× to 2.07× faster than in 1.1.0 on all twelve shapes
+  benchmarked against it. It also adds pipeline parallelism, tree packing, MTP head training and three model
+  families ([benchmarks](human-docs/performance.md),
+  [release notes](https://github.com/whitecircle/halo/releases/tag/v1.2.0)).
+- **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL
+  ([release notes](https://github.com/whitecircle/halo/releases/tag/v1.1.0)).
+- **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models, 15 MoE
+  families and pre-training through multi-turn RL with vLLM or SGLang rollouts
+  ([release notes](https://github.com/whitecircle/halo/releases/tag/v1.0.0)).
 
 </br>
 
@@ -166,7 +117,8 @@ docker pull public.ecr.aws/whitecircle/halo:hopper
 Versioned tags (`:blackwell-1.3.0rc2`, `:hopper-1.3.0rc2`) pin the release. There is no `latest` tag, since
 the images are architecture-specific. The RL inference images are published alongside them
 (`:vllm-0.32.0`, `:sglang-0.5.22`), pinned as `:vllm-0.32.0-1.3.0rc2` and `:sglang-0.5.22-1.3.0rc2`.
-Inkling 2 is served from its own vLLM tag, `:vllm-0.1.dev25249`, pinned as `:vllm-0.1.dev25249-1.3.0rc2`.
+Inkling 2 is served from its own vLLM image. [Registry](agent-docs/infrastructure/docker.md#registry) lists its
+tag and pin, and [Inkling 2](agent-docs/models/inkling2.md#rollouts) has the commands that serve and train with it.
 
 To build locally instead:
 ```bash

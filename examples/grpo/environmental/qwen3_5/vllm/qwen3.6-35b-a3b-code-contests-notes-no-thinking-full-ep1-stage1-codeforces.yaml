@@ -42,6 +42,8 @@ environment_kwargs:
   compiled_time_limit_scale: 2.0   # a compiled solution's time limit as a multiple of the stated one
   timeout_per_test: 5
   max_grading_seconds: 150   # wall-clock budget per submission grade, no test-count limit; a stop before any failure leaves the group baseline, one after is a failure
+  stop_on_first_failure: true   # a failing test ends the grade: every test runs in a fresh jail, and a wrong program would
+                               # spend the grading budget on tests already decided (the policy reads the pass count so far)
   reasoning_effort: random   # drawn once per generation group (shared conditioning), not per episode
   max_length_cutoff_recoveries: 2  # two recoveries, cut and empty turns together: the third such turn ends the episode truncated
   # Each level's interaction budgets; with no reasoning there is no reasoning budget or price to set.

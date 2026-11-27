@@ -7,6 +7,7 @@ import os
 import pickle
 import tempfile
 import threading
+import time
 from contextvars import ContextVar
 from types import SimpleNamespace
 
@@ -31,6 +32,7 @@ from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, 
 from halo.environments.tools.toolsets import build_math_tools
 from halo.inference.response import FINISH_REASON_LENGTH
 from halo.rewards.samples import CUT_TOOL_CALLS_KEY
+from halo.rewards.scorers import whitecircle
 from tests.common.repo import REPO_ROOT
 
 
@@ -185,6 +187,64 @@ async def test_rollout_manager_start_shutdown():
         ray.shutdown()
 
 
+async def test_a_node_without_a_scorers_key_fails_the_pool_start(monkeypatch):
+    """Built in the first settlement instead, the scorer would raise in every one, each losing its episode as an error
+    row while the other nodes' episodes train."""
+    monkeypatch.delenv(whitecircle.API_KEY_VARIABLE, raising=False)
+    if ray.is_initialized():
+        ray.shutdown()
+    # Started after the delenv, the local raylet's workers lack the key, as on a node where it was never exported.
+    ray.init(**ray_init_kwargs(num_cpus=2))
+    try:
+        manager = RolloutManager(
+            num_workers=2,
+            env_type="react_math",
+            env_config={"max_turns": 3, "reward_terms": [{"source": "whitecircle", "environment_id": "env_test"}]},
+            server_urls=["http://localhost:8000"],
+            rollout_config=RolloutConfig(),
+            max_concurrent_rollouts=2,
+        )
+        with pytest.raises(RuntimeError, match=f"no API key — set {whitecircle.API_KEY_VARIABLE}"):
+            await manager.start()
+        await manager.shutdown()
+    finally:
+        ray.shutdown()
+
+
+async def test_a_pool_whose_actors_never_build_fails_its_start_and_kills_them():
+    """Unbounded, the start would hold rank 0 while its peers wait in the next collective; left alive, the blocked
+    actors would hold the trainer's teardown, whose shutdown call they never run."""
+
+    class _NeverBuilt:
+        def __init__(self, **_):
+            time.sleep(3600)
+
+    if ray.is_initialized():
+        ray.shutdown()
+    ray.init(**ray_init_kwargs(num_cpus=2))
+    try:
+        manager = RolloutManager(
+            num_workers=2,
+            env_type=(_NeverBuilt, {}),
+            env_config={},
+            server_urls=["http://localhost:8000"],
+            rollout_config=RolloutConfig(episode_timeout=2),
+            max_concurrent_rollouts=2,
+        )
+        start = asyncio.create_task(manager.start())
+        await asyncio.sleep(0)  # the start has spawned its actors and waits on their builds
+        actors = list(manager._actors)
+        with pytest.raises(RuntimeError, match="did not build their environments within episode_timeout=2s"):
+            # Bounded here as well: a start with no deadline would hang this test, not fail it.
+            await asyncio.wait_for(start, 60)
+        for actor in actors:
+            with pytest.raises(ray.exceptions.RayActorError):
+                await asyncio.wait_for(actor.shutdown.remote(), 30)
+        await asyncio.wait_for(manager.shutdown(), 30)
+    finally:
+        ray.shutdown()
+
+
 class _Spawner:
     """Stands in for a ``@ray.remote`` class: records each spawn with the scheduling strategy it was placed under."""
 
@@ -196,7 +256,7 @@ class _Spawner:
 
     def remote(self, *args):
         self.spawned.append((self.name, self.strategy))
-        return SimpleNamespace()
+        return SimpleNamespace(build_scorers=SimpleNamespace(remote=lambda: asyncio.sleep(0)))
 
 
 async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(monkeypatch):

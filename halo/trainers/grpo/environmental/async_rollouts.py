@@ -117,11 +117,7 @@ class AsyncRolloutMixin:
             )
 
         self._prefetch_thread = None
-        # At most prefetch_depth rounds are submitted and unconsumed, so no put on either queue waits while the
-        # worker lives.
-        depth = self.async_config.prefetch_depth
-        self._prefetch_queue = queue.Queue(maxsize=depth)
-        self._prefetch_input_queue = queue.Queue(maxsize=depth)
+        self._reset_prefetch_queues()
         self._prefetch_stop_event: threading.Event | None = None
 
         self._prefetch_hits = 0
@@ -136,6 +132,13 @@ class AsyncRolloutMixin:
         self._last_pushed_step = -1
         self._rollout_start_callback = None
         self._rollout_generation_started = False
+
+    def _reset_prefetch_queues(self) -> None:
+        """Queues for the next worker. At most ``prefetch_depth`` rounds are submitted and unconsumed, so no put on
+        either waits while the worker lives."""
+        depth = self.async_config.prefetch_depth
+        self._prefetch_queue = queue.Queue(maxsize=depth)
+        self._prefetch_input_queue = queue.Queue(maxsize=depth)
 
     def _install_adapter_sync(self) -> None:
         """Refuses on every rank a config or model whose adapters the engine cannot serve, else arms the adapter sync."""
@@ -377,31 +380,32 @@ class AsyncRolloutMixin:
         return super().evaluate(*args, **kwargs)
 
     def _start_prefetch_thread(self):
-        """A stop event of its own: a previous worker still in its round past the stop's bounded join keeps its set
-        one, so this start cannot revive it."""
+        """The worker runs on a stop event of its own and the queues current at its start. A previous worker still in
+        its round past the stop's bounded join keeps its set event and the queues the stop replaced, so this start
+        neither revives it nor shares a round with it."""
         if self._prefetch_thread is not None:
             return
 
         self._prefetch_stop_event = threading.Event()
         self._prefetch_thread = threading.Thread(
             target=self._prefetch_worker,
-            args=(self._prefetch_stop_event,),
+            args=(self._prefetch_stop_event, self._prefetch_input_queue, self._prefetch_queue),
             name="PrefetchWorker",
             daemon=True,
         )
         self._prefetch_thread.start()
         logger.info("Prefetch thread started for async overlap")
 
-    def _prefetch_worker(self, stop: threading.Event):
+    def _prefetch_worker(self, stop: threading.Event, inputs: queue.Queue, outputs: queue.Queue):
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(self._prefetch_rounds(stop))
+            loop.run_until_complete(self._prefetch_rounds(stop, inputs, outputs))
             loop.run_until_complete(loop.shutdown_default_executor())
         finally:
             loop.close()
 
-    async def _prefetch_rounds(self, stop: threading.Event):
+    async def _prefetch_rounds(self, stop: threading.Event, inputs: queue.Queue, outputs: queue.Queue):
         """Start each round's collection as it arrives, so a later round's episodes keep the engines busy while an
         earlier round's longest ones finish. Rounds still collecting at ``stop`` are cancelled."""
         loop = asyncio.get_running_loop()
@@ -411,11 +415,11 @@ class AsyncRolloutMixin:
             while not stop.is_set():
                 try:
                     prompts, contexts = await loop.run_in_executor(
-                        None, partial(self._prefetch_input_queue.get, timeout=_PREFETCH_POLL_TIMEOUT_S)
+                        None, partial(inputs.get, timeout=_PREFETCH_POLL_TIMEOUT_S)
                     )
                 except queue.Empty:
                     continue
-                previous = loop.create_task(self._collect_prefetch_round(prompts, contexts, previous, stop))
+                previous = loop.create_task(self._collect_prefetch_round(prompts, contexts, previous, stop, outputs))
                 collecting.add(previous)
                 previous.add_done_callback(collecting.discard)
         finally:
@@ -429,6 +433,7 @@ class AsyncRolloutMixin:
         contexts: list[dict | None],
         previous: asyncio.Task | None,
         stop: threading.Event,
+        outputs: queue.Queue,
     ) -> None:
         """Deliver once ``previous`` has delivered, since the trainer pairs each output with its oldest pending round.
         Every round yields exactly one output, its rollouts or a ``(prompt_count, None)`` failure marker."""
@@ -445,18 +450,20 @@ class AsyncRolloutMixin:
             logger.error(f"Prefetch worker error ({len(prompts)} prompts): {e}")
         if previous is not None:
             await asyncio.wait([previous])
-        self._put_prefetch_output((len(prompts), results), stop)
+        self._put_prefetch_output((len(prompts), results), stop, outputs)
         if results is not None:
             logger.debug(f"Prefetched {len(results)} rollouts in {time.time() - start_time:.2f}s")
 
-    def _put_prefetch_output(self, item: tuple[int, list[RolloutResult] | None], stop: threading.Event):
+    def _put_prefetch_output(
+        self, item: tuple[int, list[RolloutResult] | None], stop: threading.Event, outputs: queue.Queue
+    ):
         """Only shutdown abandons an item. At most ``prefetch_depth`` are unconsumed, so a full queue raises instead of
         waiting, since a wait on the worker's event loop would freeze every other round's collection."""
         if stop.is_set():
             logger.warning(f"Prefetch stopping; abandoning delivery of a {item[0]}-prompt rollout batch (shutdown)")
             return
         try:
-            self._prefetch_queue.put_nowait(item)
+            outputs.put_nowait(item)
         except queue.Full:
             logger.error(
                 f"Prefetch output queue full delivering a {item[0]}-prompt round: more rounds in flight than "
@@ -680,8 +687,9 @@ class AsyncRolloutMixin:
         self._last_pushed_step = -1
 
     def _stop_prefetch_thread(self):
-        """It sees its stop event within a poll slice and cancels the rounds still collecting, so a later start begins
-        on an empty input queue."""
+        """It sees its stop event within a poll slice and cancels the rounds still collecting. A later start gets fresh
+        queues, since a worker still running past the bounded join can take a submission with the poll it had in
+        flight, or deliver a round between its stop check and its put."""
         if self._prefetch_thread is None:
             return
 
@@ -699,9 +707,7 @@ class AsyncRolloutMixin:
         # Drained submissions can no longer produce output items, and delivered ones belong to rounds no
         # later step consumes (a second train() would pop them against its own pending rounds).
         self._prefetch_pending.clear()
-        with contextlib.suppress(queue.Empty):
-            while True:
-                self._prefetch_queue.get_nowait()
+        self._reset_prefetch_queues()
 
         total = self._prefetch_hits + self._prefetch_misses
         if total > 0:

@@ -26,7 +26,7 @@ The units are the same throughout:
 - Number formats are written in lowercase. An fp32 number takes 4 bytes, a bf16 or fp16 number 2 bytes, an fp8 number 1 byte and an fp4 number half a byte. bf16 is the format the training runs in this lecture store their numbers in, and [Precision](#precision) explains why.
 - A shape is written the way PyTorch prints it, `[M, K]`. `@` is a matrix multiply and `×` an ordinary multiplication. "About" marks a rounded value.
 
-The lecture has four parts: [One GPU](#one-gpu), [Many GPUs](#many-gpus), [Around the training step](#around-the-training-step) and [Finding the bottleneck](#finding-the-bottleneck). A [glossary](#glossary-and-notation) at the end lists the terms in the order the lecture introduces them, and then the symbols.
+The lecture has four parts: [One GPU](#one-gpu), [Many GPUs](#many-gpus), [Around the training step](#around-the-training-step) and [Finding the bottleneck](#finding-the-bottleneck). A [glossary](#glossary-and-notation) at the end lists the terms in the order the lecture introduces them, and then the symbols. The "Check yourself" questions that close some sections have their answers in the last section, [Answers](#answers).
 
 ## One GPU
 
@@ -92,13 +92,7 @@ Check yourself:
 1. A linear layer has a 4096 × 4096 weight. How many FLOPs does the forward pass take for 8,192 tokens? How many does the whole step take for this layer?
 2. The same layer is frozen. How many FLOPs does the step take now?
 
-<details>
-<summary>Answers</summary>
-
-1. Forward: 2 × 8,192 × 4,096 × 4,096 = 2.75 × 10¹¹ FLOPs. The step runs three such GEMMs: 8.25 × 10¹¹.
-2. The forward GEMM and dgrad only: 5.5 × 10¹¹.
-
-</details>
+[Answers](#answers-on-one-training-step) are at the end of the page.
 
 ### The chip
 
@@ -304,8 +298,6 @@ A recording holds the shapes and the memory addresses it was made with, and it c
 
 > In Halo: `torch_compile_mode: reduce-overhead`, which captures CUDA graphs, ran 7% slower alone and 10% slower on top of the fused kernels of the Liger library on a mixture-of-experts model, where kernel shapes change every step. That is Qwen3-30B-A3B on 2 B300s with its experts split over both, 16,384-token rows, batch 1 ([torch.compile](../optimization/torch-compile.md)).
 
-<a id="2-the-roofline--arithmetic-intensity-and-the-ridge-point"></a>
-
 ### The roofline
 
 You now have two rates for this GPU, 1,388 TFLOP/s of arithmetic and 6.65 TB/s of memory traffic, and their ratio of about 210 FLOPs per byte. The roofline is a plot that tells you which of the two rates limits a given kernel.
@@ -375,8 +367,6 @@ AI    = 2,123,366,400 / 18,063,360           = 117.6 FLOP/byte
 
 The weight alone is 16.6 MB, 92% of the bytes.
 
-<a id="worked-example--why-small-per-expert-m-is-slow"></a>
-
 #### Why a small M is slow
 
 The first measurement of this lecture comes from a sweep of `M` on the bf16 GEMM `[M, 2880] @ [2880, 2880]` (measured on one B300). The weight is read from HBM on every call. Each row was timed two ways. **Eager** means plain PyTorch calls, one after another. Device time is for the same calls replayed from a CUDA graph, so the CPU's launch cost is not in it. The roof column is min(AI × 6.65 TB/s, 1,388), computed.
@@ -431,7 +421,7 @@ At large `M` what is left is a cost of this particular `K = N = 2880`. From a co
 
 The last column of the table explains a different gap, the one to the burst GEMM peak. The SM clock falls as the kernel does more arithmetic and the board nears its power limit.
 
-![Log-log plot of rate against arithmetic intensity on one B300. A memory line, AI × 6.65 TB/s, meets a roof at 1,388 TFLOP/s at about 210 FLOP/byte, with a thin second roof at 1,793 for the first 40 ms. Points: a bf16 GEMM at K = N = 2880 on the device and, lower at small M, timed from PyTorch; K = N = 8192 near the memory line; the 8192³ GEMM on the roof; the elementwise kernel addcmul far left. Four values of M carry their share of the roof: 31% at 16, 45% at 128, 58% at 512, 88% at 8,192.](../assets/diagrams/roofline.png)
+![Log-log plot of rate against arithmetic intensity on one B300. A memory line, AI × 6.65 TB/s, meets a roof at 1,388 TFLOP/s at about 210 FLOP/byte, with a thin second roof at 1,793 for the first 40 ms. Three lines run under them. Two are a bf16 GEMM at K = N = 2880, timed on the device and timed from PyTorch, and the PyTorch line is lower at small M. The third, K = N = 8192, runs closest to the memory line, at 96% of it at M = 16. Dots mark the 8192³ GEMM on both roofs and the elementwise kernel addcmul far left. Four dots on the device line carry their share of the ceiling above them: 31% at M = 16, 45% at 128, 58% at 512, 88% at 8,192.](../assets/diagrams/roofline.png)
 
 The rate between the rows of the table is not smooth. [The measured curve has teeth](#the-measured-curve-has-teeth) shows the whole curve.
 
@@ -471,15 +461,7 @@ Check yourself:
 3. For a square weight, `AI = M×K / (K + 2×M)`. At what `M` does `K = 2048` reach a ridge of 209, and what is the highest AI this shape can reach?
 4. Use the formula of this section, 3.9 µs plus the weight's bytes at 7.7 TB/s, to estimate the device time for a 6144 × 6144 bf16 weight and a few dozen rows. How far do you trust the estimate?
 
-<details>
-<summary>Answers</summary>
-
-1. The launch and the allocation of the output. The kernel takes 0.6 to 0.8 ms.
-2. 64 × 4,096 / (4,096 + 2 × 64) = 262,144 / 4,224 = 62 FLOP/byte.
-3. `M*` = 209 × 2,048 / (2,048 − 418) = 263 rows. The AI can never exceed `K/2` = 1,024.
-4. The weight is 2 × 6,144 × 6,144 bytes = 75.5 MB, which is 9.8 µs at 7.7 TB/s. With the 3.9 µs that is 13.7 µs. This shape was not measured. It is square and lies between two of the four fitted shapes, which missed by up to 0.5 µs, so trust it to about that. For a narrow shape the formula can be off by 1.5 µs or more.
-
-</details>
+[Answers](#answers-on-the-roofline) are at the end of the page.
 
 ### Tiles and kernel selection
 
@@ -555,8 +537,6 @@ The width matters by about a tenth. Some cuBLAS kernels on this GPU run their bl
 
 The 8192³ GEMM measured the same way runs at 1,793 TFLOP/s, so a width of 2,880, which the gpt-oss models use, is 13% below a large square. A partly filled tile does not explain the table. A width of 2,944 is a whole 23 tiles and still runs the slower kind of kernel. In these four points the cluster kernel ran where the number of column tiles is even.
 
-<a id="4-how-a-matmul-runs-tiles-kernels-launches"></a>
-
 #### Multiples of 8
 
 A bf16 GEMM `[M, K] @ [K, N]` slows down several times over when `K` or `N` is not a multiple of 8. These slowdowns were measured on one B300 at `M = 4096`, stepping one dimension at a time through two windows, one around 2,880 and one around 4,096:
@@ -625,15 +605,7 @@ Check yourself:
 3. Two bf16 GEMMs differ by 8 rows and nothing else, and one runs 14% slower. What is the likely cause, and how do you confirm it?
 4. A step has 8,192 tokens on one GPU. How many rows does each expert's GEMM have on gpt-oss-120b, with 128 experts and 4 per token? Where does that put it against the crossover M of 244 for its width of 2,880?
 
-<details>
-<summary>Answers</summary>
-
-1. 2,050 is even and not a multiple of 8, so every GEMM with that width as `K` or `N` runs 4 to 5 times slower. Full-precision fp32 runs on the CUDA cores, which showed no such slowdown.
-2. Yes, 2,880 = 360 × 8. No, 2,880 = 22.5 × 128.
-3. cuBLAS picked a different kernel for the two shapes. A profiler trace gives the name of the kernel that ran, and the name carries the tile.
-4. 8,192 × 4 / 128 = 256 rows, just past the crossover M. In the sweep of `M` that shape runs at about 620 TFLOP/s on the device, under half of the sustained GEMM peak.
-
-</details>
+[Answers](#answers-on-tiles-and-kernel-selection) are at the end of the page.
 
 ### Inside a tensor-core GEMM kernel
 
@@ -724,8 +696,6 @@ You can recognize an overhead-bound step from outside, and power is the clearer 
 A step like that has two remedies. One is fewer launches: put the work into one kernel, or replay a CUDA graph where the shapes are fixed. The other is less CPU work between launches.
 
 > In Halo: grouped GEMM is the default for MoE expert compute ([Grouped GEMM](../optimization/grouped-gemm.md)).
-
-<a id="5-memory-bound-kernels-and-why-fusion-pays"></a>
 
 ### Memory-bound kernels and fusion
 
@@ -842,8 +812,6 @@ The logits never exist as a tensor, so nothing that reads them can use this loss
 
 > In Halo: which training methods, parallel modes and model families use the fused loss, and which turn it off, is listed on [Liger Kernels](../optimization/liger-kernels.md).
 
-<a id="what-fusion-does-not-buy"></a>
-
 #### What fusion does not help with
 
 Small tensors gain nothing from the two kinds of fused kernel timed here. A Triton kernel is launched from Python, and a compiled function checks its guards, the conditions under which its compiled code is valid, before it runs. Either costs the CPU 25 to 31 µs a call, whatever the size. The same `silu(a) * b` was timed at four sizes (measured on one B300, back-to-back calls):
@@ -872,17 +840,7 @@ Check yourself:
 3. How large are the logits for 8,192 positions and a vocabulary of 200,000 entries, in bf16 and in fp32?
 4. An update with momentum and no second moment reads the weight, the gradient and the momentum and writes the weight and the momentum, all in bf16. How long does it take for 8 × 10⁹ parameters at 6.65 TB/s?
 
-<details>
-<summary>Answers</summary>
-
-1. 8.75 µs, which is about the CPU's cost of launching one `torch.mm`. The kernel itself takes about 4 µs.
-2. Eager, 6: the multiply reads `a` and `b` and writes an intermediate, and the add reads the intermediate and `c` and writes `x`. Fused, 4.
-3. 8,192 × 200,000 = 1.64 × 10⁹ scores, which is 3.3 GB in bf16 and 6.6 GB in fp32.
-4. 3 reads and 2 writes of 2 bytes are 10 bytes per parameter, 80 GB in all. At 6.65 TB/s that is 12 ms.
-
-</details>
-
-<a id="6-attention--the-canonical-memory-bound-fix"></a>
+[Answers](#answers-on-memory-bound-kernels-and-fusion) are at the end of the page.
 
 ### Attention
 
@@ -962,15 +920,7 @@ Check yourself:
 3. Naive attention with 32 heads held 128.5 GiB at 16,384 tokens in the measured run. How many copies of its fp32 scores is that?
 4. By the count this section uses, how many FLOPs is one forward-and-backward call at 8,192 tokens with 16 heads of width 128? What rate does a time of 0.864 ms give?
 
-<details>
-<summary>Answers</summary>
-
-1. 16,384² = 2.68 × 10⁸ entries, 0.54 GB in bf16. For 32 heads in fp32: 32 × 2.68 × 10⁸ × 4 bytes = 34.4 GB, which is 32 GiB.
-2. The FLOPs do not fall, and the backward pass does somewhat more. Memory falls from quadratic to linear in the row length, and traffic falls by a constant factor.
-3. 128.5 / 32 is 4 copies.
-4. 7 × 8,192² × 2,048 = 9.62 × 10¹¹ FLOPs. Over 0.864 ms that is 1,113 TFLOP/s, the FA4 cell of the table.
-
-</details>
+[Answers](#answers-on-attention) are at the end of the page.
 
 ### Who writes the kernels
 
@@ -1048,8 +998,6 @@ With several GPUs a compile on one of them delays all of them. The section on ho
 
 You have now met three limits on the speed of one GPU: the arithmetic rate, the rate of memory traffic, and the cost that each kernel carries whatever its size. For a loop of one kind of work you can tell them apart from outside the program, before you open a profiler.
 
-<a id="watch-power-not-utilization"></a>
-
 #### Power and utilization
 
 `nvidia-smi` defines `utilization.gpu` as the "percent of time over the past sample period during which one or more kernels was executing on the GPU". A kernel that is waiting for memory counts as executing. So does a kernel that is waiting for another GPU. The figure says that something was running and nothing about what it did.
@@ -1112,15 +1060,7 @@ Check yourself:
 3. A third reads 100% utilization, 1,095 W and 1,200 MHz, and it is still slower than you need. What is left to change?
 4. One GPU of an 8-GPU job reads 100% utilization, 238 W and 2,032 MHz. What is that GPU doing?
 
-<details>
-<summary>Answers</summary>
-
-1. Memory-bound: the clock is at its maximum and power is 82% of the power limit. Move fewer bytes per FLOP, with a larger `M`, fused elementwise kernels or a Flash Attention kernel.
-2. Overhead-bound: power is 27% of the power limit. Look for thousands of kernels that each take a few microseconds, and for CPU work between them.
-3. It is compute-bound at the clock the power cap allows. What is left is a lower precision where that helps, a kernel that does the same FLOPs for fewer watts, or more GPUs.
-4. It waits for another GPU inside a communication call. Look at the other GPUs of the job, not at this one.
-
-</details>
+[Answers](#answers-on-which-limit-a-kernel-is-hitting) are at the end of the page.
 
 ### Precision
 
@@ -1145,8 +1085,6 @@ bf16 keeps the exponent of fp32 and gives up mantissa. Its relative precision is
 The words "mixed precision" name two setups. In the first, called autocast, the parameters stay in fp32 and the inputs of each operation are cast down as it runs. In the second, the parameters themselves are stored in bf16. The second halves the memory per parameter, as the next subsection works out.
 
 > In Halo: parameters are stored in bf16, and the fp32 matmul precision is pinned to `highest` when a model is loaded ([Configuration Reference → Environment variables](configuration-reference.md#environment-variables)).
-
-<a id="bf16-numerics-what-stays-fp32"></a>
 
 #### What stays fp32 in a bf16 run
 
@@ -1183,8 +1121,6 @@ One step does not show the difference. The measurement is a single optimizer ste
 So a "bf16 run" means bf16 storage, fp32 accumulation in the tensor cores, fp32 sums in the norms, the softmax and the loss, and an optimizer that rounds stochastically.
 
 > In Halo: the default optimizer, AdamWBF16, computes each update in fp32 in registers and rounds only when it stores. It uses stochastic rounding on the weight and the second moment and round-to-nearest on the first moment ([BF16 Optimizer → Stochastic rounding](../optimization/bf16-optimizer.md#stochastic-rounding)). An option reduces gradients across GPUs in fp32. On 8 GPUs that is about 2.2 times tighter, 0.17% against 0.37% of the signal, for about twice the bytes of that transfer ([Master weight and grad-reduce options](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)).
-
-<a id="when-low-precision-compute-helps"></a>
 
 #### When low precision speeds training up
 
@@ -1226,14 +1162,7 @@ Check yourself:
 2. Up to which integer is fp16 exact, and why is that the same answer as for TF32?
 3. A model has 8B parameters. How much do weights and two moments take in bf16, and how much do fp32 master weights and moments take?
 
-<details>
-<summary>Answers</summary>
-
-1. Between 0.5 and 1 neighboring bf16 values are 2⁻⁸ = 3.9 × 10⁻³ apart, so round-to-nearest drops the update. Stochastic rounding moves the weight one step with probability 10⁻⁴ / 3.9 × 10⁻³, about 2.6% of the time.
-2. Up to 2,048. Both formats keep 10 stored mantissa bits, which is 11 significant bits, and 2¹¹ = 2,048.
-3. 6 bytes per parameter is 48 GB. 12 bytes is 96 GB, and the bf16 working copy adds 16 GB.
-
-</details>
+[Answers](#answers-on-precision) are at the end of the page.
 
 ### Determinism
 
@@ -1277,8 +1206,6 @@ So 6 bytes per parameter persist from step to step, for the weights and two mome
 Check the count against a measurement. gpt-oss-20b has 20.9B parameters, and in one benchmark about 14B of them were trainable. The weights are 20.9 × 2 = 41.8 GB. Gradients and moments for the trainable part are 14 × (2 + 4) = 84 GB. The sum is 125.8 GB (computed). The recorded peak on one B300 is 134.2 GB ([BF16 Optimizer](../optimization/bf16-optimizer.md#benchmarks)), which leaves about 8 GB for activations and everything else.
 
 Splitting a model over several GPUs divides some of these four and leaves others whole. The part on many GPUs says which, mode by mode.
-
-<a id="activations-the-memory-sharding-doesnt-touch"></a>
 
 #### Activations
 
@@ -1409,16 +1336,7 @@ Check yourself:
 2. Qwen3-4B has a hidden size of 2,560 and 36 layers, and a layer keeps about 33 hidden states' worth for the backward pass. How much do the decoder layers hold at 8,192 tokens without gradient checkpointing?
 3. Gradient checkpointing makes a step of equal batch about 29% longer. Give two reasons why the largest batch that fits with it can still give more tokens/s than the largest batch that fits without it.
 
-<details>
-<summary>Answers</summary>
-
-1. 8 bytes per parameter is 64 GB. With fp32 moments it is 12 bytes, 96 GB.
-2. One hidden state is 8,192 × 2,560 × 2 bytes = 41.9 MB. Times 33 and times 36 layers that is 49.8 GB. The measured 5.87 MiB per token gives 50.4 GB.
-3. A larger batch raises the `M` of every GEMM, which can lift small GEMMs above their crossover M. It also spreads the costs that are paid once per step, such as the optimizer update, over more tokens.
-
-</details>
-
-<a id="9-distributed-training-the-communication-wall"></a>
+[Answers](#answers-on-memory) are at the end of the page.
 
 ## Many GPUs
 
@@ -1541,16 +1459,7 @@ Check yourself:
 2. A collective of 64 KiB takes 20 µs on 2 GPUs. What would you expect for 256 KiB?
 3. A group shrinks from 8 ranks to 4. By how much do the bytes per rank of an all-gather fall?
 
-<details>
-<summary>Answers</summary>
-
-1. 2 × 7/8 × 1 GiB = 1.75 GiB, and it receives as many.
-2. About the same 20 µs. Below about 1 MiB the time is the fixed cost of a call.
-3. From 7/8 to 3/4 of `D`, 14% less.
-
-</details>
-
-<a id="interconnect-tiers"></a>
+[Answers](#answers-on-collectives) are at the end of the page.
 
 ### The wires
 
@@ -1692,14 +1601,7 @@ Check yourself:
 2. The same job switches to the ZeRO-3 analog. How many bytes does each rank move now, and what does the job get in return?
 3. A job goes from 8 to 16 ranks under the ZeRO-2 analog. Which of these shrink on each rank: optimizer state, the gathered copy of the weights, activations?
 
-<details>
-<summary>Answers</summary>
-
-1. 2 × 7/8 × 16 GB = 28 GB.
-2. Three collectives in place of two: 3 × 7/8 × 16 GB = 42 GB. In return a rank no longer holds the whole model at the peak of the step, only its shards and one or two gathered layer groups.
-3. Only the optimizer state, with the reduced gradients. The gathered copy and the activations stay as they were.
-
-</details>
+[Answers](#answers-on-data-parallelism) are at the end of the page.
 
 ### Tensor parallelism
 
@@ -1817,16 +1719,7 @@ Check yourself:
 2. A model has 128 experts and routes each token to 8. The experts are spread over 4 ranks with 8,192 tokens per rank. How many rows does each expert's GEMM have?
 3. A row of 65,536 tokens is split 4 ways with context parallelism. How many tokens does a rank hold, and what happens to its activations and to its weights?
 
-<details>
-<summary>Answers</summary>
-
-1. One activation is 16,384 × 4,096 × 2 bytes = 134 MB, and the all-reduce factor is 2 × 3/4 = 1.5. That gives 4 × 36 × 1.5 × 134 MB = 29 GB.
-2. 4 × 8,192 × 8 / 128 = 2,048 rows.
-3. 16,384 tokens. Its activations fall to a quarter. Its weights, gradients and optimizer state stay whole.
-
-</details>
-
-<a id="pipeline-parallelism-the-bubble-and-the-boundary"></a>
+[Answers](#answers-on-context-parallelism) are at the end of the page.
 
 ### Pipeline parallelism
 
@@ -1923,14 +1816,7 @@ Check yourself:
 2. You raise `m` from 8 to 32 on those 4 stages at a fixed batch. What happens to the bubble, and what happens to the `M` of every GEMM?
 3. How much crosses one stage boundary per step at 16,384 tokens and a hidden size of 2,560?
 
-<details>
-<summary>Answers</summary>
-
-1. 3/11 = 27%. A 10% bubble needs `m = 9 × (p − 1)` = 27.
-2. The bubble falls from 27% to 8.6%. Each microbatch holds a quarter of the rows it held, so every `M` falls 4 times.
-3. 4 × 16,384 × 2,560 bytes = 168 MB.
-
-</details>
+[Answers](#answers-on-pipeline-parallelism) are at the end of the page.
 
 ### Combining the modes
 
@@ -1988,13 +1874,7 @@ Check yourself:
 1. A job has 16 ranks, 2 pipeline stages and a 2-way context split inside each stage. How many replicas does it have?
 2. Which modes divide the activations a rank holds, and which divide its weights?
 
-<details>
-<summary>Answers</summary>
-
-1. 16 / 2 / 2 = 4 replicas.
-2. Context parallelism and a pipeline lower the activations a rank holds. FSDP at rest, tensor parallelism, expert parallelism and a pipeline divide weights. Plain data parallelism divides neither.
-
-</details>
+[Answers](#answers-on-combining-the-modes) are at the end of the page.
 
 ### Overlapping communication with compute
 
@@ -2017,8 +1897,6 @@ On one GPU, the measurements in [Streams](#streams) showed that two large kernel
 Megatron hides its tensor-parallel collectives under layer compute by another route. With its sequence parallelism the all-reduce becomes a reduce-scatter and an all-gather, and the overlap depends on that and on NVIDIA's Transformer Engine.
 
 > In Halo: the images set `CUDA_DEVICE_MAX_CONNECTIONS=1`, which serializes how one process submits work to its GPU. The expert-parallel suites are validated with it, at no measurable cost in throughput ([Configuration Reference → Environment variables](configuration-reference.md#environment-variables)).
-
-<a id="why-n-gpus-is-not-n-throughput"></a>
 
 ### Why N GPUs are not N times faster
 
@@ -2086,14 +1964,7 @@ Check yourself:
 2. Rank 3 of a job raises an out-of-memory error. Ten minutes later the other ranks die with a watchdog message that names a collective. Whose log do you read first, and which class is this for the other ranks?
 3. Every GPU of a hung job reads 100% utilization at 238 W. What does that tell you, and what do you do next?
 
-<details>
-<summary>Answers</summary>
-
-1. Amdahl: 1 / (0.1 + 0.9 / 16) = 6.4. Gustafson: 0.1 + 0.9 × 16 = 14.5.
-2. Rank 3's log. It is class 6 for rank 3 and class 5 for the others, whose message blames the collective they were blocked in.
-3. Every rank is waiting inside a collective, so they are waiting in different ones. Dump the stacks and read the flight recorder for the sequence number where the ranks disagree.
-
-</details>
+[Answers](#answers-on-how-distributed-runs-fail) are at the end of the page.
 
 ## Around the training step
 
@@ -2166,7 +2037,7 @@ The GEMM takes 8.5 to 9.2 µs at every row count measured from 1 to 128 except 1
 
 With few sequences the CPU sets the pace. In a second run, without the profiler, the GEMM with 1 to 8 rows took 11.5 µs per call from plain PyTorch against 8.7 to 8.8 µs on the device. At those row counts cuBLAS runs two kernels per call, one that splits each tile along `K` and one that adds the parts. Inference engines replay the decode step from a CUDA graph to take the CPU out of that path.
 
-![Two panels against the rows M of one bf16 layer, [M, 4096] @ [4096, 4096], from 1 to 2,048 on a log axis. Time per call on the device is flat near 9 µs from 1 row to 128, except 12 µs at 16, and reaches 54 µs at 2,048. Calls from PyTorch take 11.5 µs up to 8 rows. The rate rises from 3.9 to 1,280 TFLOP/s under the memory line and the 1,388 roof, with the crossover M at 232.](../assets/diagrams/decode_roofline.png)
+![Two panels of lines against the rows M of one bf16 layer, [M, 4096] @ [4096, 4096], from 1 to 2,048 on a log axis. Above, the time per call on the device is flat near 9 µs from 1 row to 128, except 12 µs at 16, and reaches 54 µs at 2,048. A second line, calls from PyTorch, sits at 11.5 µs up to 8 rows and then runs just above the first. Below, the rate on the device rises from 3.9 to 1,280 TFLOP/s under the memory line and the 1,388 roof, with the crossover M at 232.](../assets/diagrams/decode_roofline.png)
 
 With many sequences decode leaves the flat stretch. The time starts to grow between 128 and 256 rows, where the AI passes the ridge. At 2,048 rows the layer is compute-bound and runs under the power cap.
 
@@ -2224,14 +2095,7 @@ Check yourself:
 2. A model has 24 full-attention layers with 8 key-value heads of width 64. How large is its KV cache per token in bf16, and for 100 sequences of 8,000 tokens?
 3. How long do the 234 GB of gpt-oss-120b take on the wire at 53 GB/s, and why is the whole transfer longer?
 
-<details>
-<summary>Answers</summary>
-
-1. About the same 8.5 to 9 µs, since 64 rows are still on the flat stretch. The rate is 64 times higher.
-2. 2 × 24 × 8 × 64 × 2 bytes = 49 KB per token. 800,000 tokens hold 39 GB.
-3. 234 / 53 = 4.4 s. The engine also has to load what arrives, which was more than half of one timed push.
-
-</details>
+[Answers](#answers-on-training-and-inference) are at the end of the page.
 
 ## Finding the bottleneck
 
@@ -2274,7 +2138,7 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=15))
 
 On one B300 it printed 15 rows. These are six of them, with the CPU columns cut:
 
-```
+```text
 Name                                                  Self CUDA   CUDA total   # of Calls
 aten::addmm                                             1.483ms      1.632ms           10
 aten::mm                                                1.616ms      1.616ms           10
@@ -2300,8 +2164,6 @@ No kernel profile of this step was taken. The run with fused kernels in [Where f
 Halo's own profiles show the last two checks done in full. On a gpt-oss-20b step with its experts split across GPUs, one `index_add_` kernel takes about 20% of all GPU time. A gather and a reduction in its place run about 5 times faster, and board power rises from about 34% to about 56% of the power limit ([Grouped GEMM](../optimization/grouped-gemm.md#the-duplicate-index-gather-trap)). In another profile an attention backward pass takes 22% of kernel time, and it is absent from the profile with a block-sparse kernel in its place ([Flash Attention](../optimization/flash-attention.md#block-sparse-attention-qwen38-flash-next)).
 
 > In Halo: the profiler setting writes a trace and a list of the 25 operations with the most GPU time, and it names the phases of the token exchange. The trace does not complete on a multi-GPU run with experts split and FA4 active ([Debugging](debugging.md#1-flame-graphs)). The efficiency callback computes rate, step time, memory and MFU, and MFU reaches the log only when the MFU diagnostics are on as well (`report_mfu_diagnostics`).
-
-<a id="mfu-and-why-moe-complicates-it"></a>
 
 ### MFU
 
@@ -2351,14 +2213,7 @@ Check yourself:
 2. You turn gradient checkpointing on and MFU falls from 37.5% to 28.7%. Did the hardware get less busy?
 3. One run reads 30% MFU on a B300 and another 60% on an H100, whose reference peak is 989.5 TFLOP/s. Which does more model FLOPs per second?
 
-<details>
-<summary>Answers</summary>
-
-1. 6 × 8.19 × 10⁹ × 12,000 = 590 TFLOP/s, and 590 / 2,250 is 26%.
-2. No. The second forward pass of checkpointing is work that MFU does not count. HFU would count it.
-3. The B300: 30% of 2,250 is 675 TFLOP/s, and 60% of 989.5 is 594.
-
-</details>
+[Answers](#answers-on-mfu) are at the end of the page.
 
 ### Reproduce the numbers
 
@@ -2636,3 +2491,138 @@ Halo's own pages go deeper into the mechanisms: [Optimization](../optimization/R
 - Hugging Face and nanotron, [The Ultra-Scale Playbook](https://huggingface.co/spaces/nanotron/ultrascale-playbook). Data, tensor, pipeline and context parallelism with activation recomputation.
 - Stas Bekman, [Machine Learning Engineering Open Book](https://github.com/stas00/ml-engineering). Networking between nodes, benchmarking a cluster's links and debugging hung distributed jobs.
 - [GPU MODE](https://www.youtube.com/@GPUMODE) lectures, with code in the [lectures repository](https://github.com/gpu-mode/lectures): lecture 7 on advanced quantization, lecture 12 on Flash Attention, lecture 17 on collective communication with NCCL, lecture 23 on tensor cores and lecture 36 on CUTLASS and FlashAttention-3.
+
+## Answers
+
+Each block answers the "Check yourself" questions that close the section it names.
+
+### Answers on one training step
+
+The questions are at the end of [One training step](#one-training-step).
+
+1. Forward: 2 × 8,192 × 4,096 × 4,096 = 2.75 × 10¹¹ FLOPs. The step runs three such GEMMs: 8.25 × 10¹¹.
+2. The forward GEMM and dgrad only: 5.5 × 10¹¹.
+
+### Answers on the roofline
+
+The questions follow [Padding and packing](#padding-and-packing), at the end of [The roofline](#the-roofline).
+
+1. The launch and the allocation of the output. The kernel takes 0.6 to 0.8 ms.
+2. 64 × 4,096 / (4,096 + 2 × 64) = 262,144 / 4,224 = 62 FLOP/byte.
+3. `M*` = 209 × 2,048 / (2,048 − 418) = 263 rows. The AI can never exceed `K/2` = 1,024.
+4. The weight is 2 × 6,144 × 6,144 bytes = 75.5 MB, which is 9.8 µs at 7.7 TB/s. With the 3.9 µs that is 13.7 µs. This shape was not measured. It is square and lies between two of the four fitted shapes, which missed by up to 0.5 µs, so trust it to about that. For a narrow shape the formula can be off by 1.5 µs or more.
+
+### Answers on tiles and kernel selection
+
+The questions follow [Rows per expert in an MoE layer](#rows-per-expert-in-an-moe-layer), at the end of [Tiles and kernel selection](#tiles-and-kernel-selection).
+
+1. 2,050 is even and not a multiple of 8, so every GEMM with that width as `K` or `N` runs 4 to 5 times slower. Full-precision fp32 runs on the CUDA cores, which showed no such slowdown.
+2. Yes, 2,880 = 360 × 8. No, 2,880 = 22.5 × 128.
+3. cuBLAS picked a different kernel for the two shapes. A profiler trace gives the name of the kernel that ran, and the name carries the tile.
+4. 8,192 × 4 / 128 = 256 rows, just past the crossover M. In the sweep of `M` that shape runs at about 620 TFLOP/s on the device, under half of the sustained GEMM peak.
+
+### Answers on memory-bound kernels and fusion
+
+The questions follow [What fusion does not help with](#what-fusion-does-not-help-with), at the end of [Memory-bound kernels and fusion](#memory-bound-kernels-and-fusion).
+
+1. 8.75 µs, which is about the CPU's cost of launching one `torch.mm`. The kernel itself takes about 4 µs.
+2. Eager, 6: the multiply reads `a` and `b` and writes an intermediate, and the add reads the intermediate and `c` and writes `x`. Fused, 4.
+3. 8,192 × 200,000 = 1.64 × 10⁹ scores, which is 3.3 GB in bf16 and 6.6 GB in fp32.
+4. 3 reads and 2 writes of 2 bytes are 10 bytes per parameter, 80 GB in all. At 6.65 TB/s that is 12 ms.
+
+### Answers on attention
+
+The questions follow [Three kernels for three generations](#three-kernels-for-three-generations), at the end of [Attention](#attention).
+
+1. 16,384² = 2.68 × 10⁸ entries, 0.54 GB in bf16. For 32 heads in fp32: 32 × 2.68 × 10⁸ × 4 bytes = 34.4 GB, which is 32 GiB.
+2. The FLOPs do not fall, and the backward pass does somewhat more. Memory falls from quadratic to linear in the row length, and traffic falls by a constant factor.
+3. 128.5 / 32 is 4 copies.
+4. 7 × 8,192² × 2,048 = 9.62 × 10¹¹ FLOPs. Over 0.864 ms that is 1,113 TFLOP/s, the FA4 cell of the table.
+
+### Answers on which limit a kernel is hitting
+
+The questions follow [The limits side by side](#the-limits-side-by-side), at the end of [Which limit a kernel is hitting](#which-limit-a-kernel-is-hitting).
+
+1. Memory-bound: the clock is at its maximum and power is 82% of the power limit. Move fewer bytes per FLOP, with a larger `M`, fused elementwise kernels or a Flash Attention kernel.
+2. Overhead-bound: power is 27% of the power limit. Look for thousands of kernels that each take a few microseconds, and for CPU work between them.
+3. It is compute-bound at the clock the power cap allows. What is left is a lower precision where that helps, a kernel that does the same FLOPs for fewer watts, or more GPUs.
+4. It waits for another GPU inside a communication call. Look at the other GPUs of the job, not at this one.
+
+### Answers on precision
+
+The questions follow [When low precision speeds training up](#when-low-precision-speeds-training-up), at the end of [Precision](#precision).
+
+1. Between 0.5 and 1 neighboring bf16 values are 2⁻⁸ = 3.9 × 10⁻³ apart, so round-to-nearest drops the update. Stochastic rounding moves the weight one step with probability 10⁻⁴ / 3.9 × 10⁻³, about 2.6% of the time.
+2. Up to 2,048. Both formats keep 10 stored mantissa bits, which is 11 significant bits, and 2¹¹ = 2,048.
+3. 6 bytes per parameter is 48 GB. 12 bytes is 96 GB, and the bf16 working copy adds 16 GB.
+
+### Answers on memory
+
+The questions follow [Frozen weights and LoRA](#frozen-weights-and-lora), at the end of [Memory](#memory).
+
+1. 8 bytes per parameter is 64 GB. With fp32 moments it is 12 bytes, 96 GB.
+2. One hidden state is 8,192 × 2,560 × 2 bytes = 41.9 MB. Times 33 and times 36 layers that is 49.8 GB. The measured 5.87 MiB per token gives 50.4 GB.
+3. A larger batch raises the `M` of every GEMM, which can lift small GEMMs above their crossover M. It also spreads the costs that are paid once per step, such as the optimizer update, over more tokens.
+
+### Answers on collectives
+
+The questions follow [What to do about communication](#what-to-do-about-communication), at the end of [Collectives](#collectives).
+
+1. 2 × 7/8 × 1 GiB = 1.75 GiB, and it receives as many.
+2. About the same 20 µs. Below about 1 MiB the time is the fixed cost of a call.
+3. From 7/8 to 3/4 of `D`, 14% less.
+
+### Answers on data parallelism
+
+The questions follow [Gradient accumulation](#gradient-accumulation), at the end of [Data parallelism](#data-parallelism).
+
+1. 2 × 7/8 × 16 GB = 28 GB.
+2. Three collectives in place of two: 3 × 7/8 × 16 GB = 42 GB. In return a rank no longer holds the whole model at the peak of the step, only its shards and one or two gathered layer groups.
+3. Only the optimizer state, with the reduced gradients. The gathered copy and the activations stay as they were.
+
+### Answers on context parallelism
+
+The questions are at the end of [Context parallelism](#context-parallelism).
+
+1. One activation is 16,384 × 4,096 × 2 bytes = 134 MB, and the all-reduce factor is 2 × 3/4 = 1.5. That gives 4 × 36 × 1.5 × 134 MB = 29 GB.
+2. 4 × 8,192 × 8 / 128 = 2,048 rows.
+3. 16,384 tokens. Its activations fall to a quarter. Its weights, gradients and optimizer state stay whole.
+
+### Answers on pipeline parallelism
+
+The questions follow [When a pipeline is worth it](#when-a-pipeline-is-worth-it), at the end of [Pipeline parallelism](#pipeline-parallelism).
+
+1. 3/11 = 27%. A 10% bubble needs `m = 9 × (p − 1)` = 27.
+2. The bubble falls from 27% to 8.6%. Each microbatch holds a quarter of the rows it held, so every `M` falls 4 times.
+3. 4 × 16,384 × 2,560 bytes = 168 MB.
+
+### Answers on combining the modes
+
+The questions are at the end of [Combining the modes](#combining-the-modes).
+
+1. 16 / 2 / 2 = 4 replicas.
+2. Context parallelism and a pipeline lower the activations a rank holds. FSDP at rest, tensor parallelism, expert parallelism and a pipeline divide weights. Plain data parallelism divides neither.
+
+### Answers on how distributed runs fail
+
+The questions are at the end of [How distributed runs fail](#how-distributed-runs-fail).
+
+1. Amdahl: 1 / (0.1 + 0.9 / 16) = 6.4. Gustafson: 0.1 + 0.9 × 16 = 14.5.
+2. Rank 3's log. It is class 6 for rank 3 and class 5 for the others, whose message blames the collective they were blocked in.
+3. Every rank is waiting inside a collective, so they are waiting in different ones. Dump the stacks and read the flight recorder for the sequence number where the ranks disagree.
+
+### Answers on training and inference
+
+The questions follow [An RL step does both](#an-rl-step-does-both), at the end of [Training and inference](#training-and-inference).
+
+1. About the same 8.5 to 9 µs, since 64 rows are still on the flat stretch. The rate is 64 times higher.
+2. 2 × 24 × 8 × 64 × 2 bytes = 49 KB per token. 800,000 tokens hold 39 GB.
+3. 234 / 53 = 4.4 s. The engine also has to load what arrives, which was more than half of one timed push.
+
+### Answers on MFU
+
+The questions are at the end of [MFU](#mfu).
+
+1. 6 × 8.19 × 10⁹ × 12,000 = 590 TFLOP/s, and 590 / 2,250 is 26%.
+2. No. The second forward pass of checkpointing is work that MFU does not count. HFU would count it.
+3. The B300: 30% of 2,250 is 675 TFLOP/s, and 60% of 989.5 is 594.

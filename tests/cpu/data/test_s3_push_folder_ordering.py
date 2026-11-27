@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""``S3Client.push_folder`` overwrite protocol: delete the marker first, upload the bulk, upload the marker last,
-sweep stale objects after. Deleting the prefix first loses the old dataset on a mid-upload failure."""
+"""``S3Client.push_folder`` overwrite protocol: delete the marker first, upload the bulk, sweep stale objects, upload
+the marker last. Deleting the prefix first loses the old dataset on a mid-upload failure."""
 
 import pytest
 
@@ -38,6 +38,10 @@ class _FakeBoto:
     def delete_object(self, Bucket, Key):
         self.ops.append(("delete", Key))
 
+    def delete_objects(self, Bucket, Delete):
+        self.ops.append(("delete_batch", tuple(entry["Key"] for entry in Delete["Objects"])))
+        return {"Deleted": Delete["Objects"]}
+
     def get_paginator(self, operation_name):
         assert operation_name == "list_objects_v2", operation_name
         return _FakePaginator(self._keys)
@@ -68,11 +72,24 @@ def test_overwrite_deletes_marker_first_and_uploads_it_last(tmp_path):
 
     ops = client.boto_client.ops
     assert ops[0] == ("delete", "ds/metadata.json"), "the marker must be invalidated before any byte uploads"
-    uploads = [key for op, key in ops if op == "upload"]
-    assert uploads[-1] == "ds/metadata.json", "the marker must be re-written only after the bulk completed"
-    # The stale sweep runs only AFTER the full upload, and touches nothing the new tree carries.
-    tail = ops[ops.index(("upload", "ds/metadata.json")) + 1 :]
-    assert tail == [("delete", "ds/train/stale_9.arrow")]
+    assert ops[-1] == ("upload", "ds/metadata.json"), "the marker must be re-written last"
+    # The stale sweep runs after the bulk upload, in one request, touching nothing the new tree carries.
+    assert ops[-2] == ("delete_batch", ("ds/train/stale_9.arrow",)), ops
+    assert ("upload", "ds/train/shard_0.arrow") in ops[1:-2]
+
+
+def test_a_push_killed_during_the_sweep_leaves_no_marker_over_the_old_rows(tmp_path):
+    """Uploaded before the sweep, the marker would stand beside the old shard index if a kill hits the first stale
+    delete, and a download of the prefix would load the old rows."""
+    client = _client_with({"ds/metadata.json", "ds/train/shard_0.arrow", "ds/train/shard_index.json"})
+
+    def killed(Bucket, Delete):
+        raise KeyboardInterrupt
+
+    client.boto_client.delete_objects = killed
+    with pytest.raises(KeyboardInterrupt):
+        client.push_folder(_local_dataset(tmp_path), "ds")
+    assert ("upload", "ds/metadata.json") not in client.boto_client.ops
 
 
 def test_fresh_destination_uploads_without_deletes(tmp_path):
