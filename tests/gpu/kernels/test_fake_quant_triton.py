@@ -40,6 +40,7 @@ from halo.kernels.lowp.quantization import (
     cached_fake_quant,
     fake_quant,
 )
+from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from tests.common.harness import gpu_test_main, record_check
 
 DEV = "cuda"
@@ -359,9 +360,10 @@ def test_uncached_expert_gemm_takes_the_kernel():
     x = torch.randn(96, 256, device=DEV, dtype=torch.bfloat16)
     w = torch.randn(4, 256, 128, device=DEV, dtype=torch.bfloat16) * 0.02
     offs = torch.tensor([16, 48, 48, 96], device=DEV, dtype=torch.int32)
+    precision = {recipe.quant_format: name for name, recipe in LOWP_RECIPES.items()}
     for fmt in FUSED:
         with _Spy() as s:
-            out = expert_gemm(x, w, offs=offs, quant_format=fmt, weight_cacheable=False)
+            out = expert_gemm(x, w, offs=offs, lowp=LowpSpec(precision=precision[fmt]), weight_cacheable=False)
         ref = grouped_mm(
             _block_round_trip(x, fmt, -1).to(x.dtype), _block_round_trip(w, fmt, 1).to(w.dtype), offs=offs
         )
