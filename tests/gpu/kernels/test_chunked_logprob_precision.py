@@ -15,6 +15,7 @@ from halo.kernels import head_logprobs
 from halo.kernels.head_logprobs import (
     SEQ_TILE,
     VOCAB_TILE,
+    LowRankDelta,
     _logprobs_backward,
     _logprobs_forward,
     chunked_head_logprobs,
@@ -46,6 +47,11 @@ BIAS_STD = 1.0
 SOFTCAP_HEAD = {"temperature": 0.8, "softcap": 30.0, "compute_entropy": True}
 EVERY_TERM_SCALARS = {"temperature": 0.8, "logit_scale": 0.5, "softcap": 30.0, "compute_entropy": True}
 NEW_SCALARS = {"temperature": 1.1, "logit_scale": 0.7, "softcap": 20.0, "compute_entropy": True}
+LORA_RANK, LORA_SCALING = 16, 2.0
+# With a LoRA delta on the head (fp32 adapter, bf16 model): measured 5.1e-5 nats and 2.2e-3 to 3.0e-3 relative on a
+# 5070 Ti. The delta's fp32 product keeps the log-probs at the base sweep's bound; the gradients take the same bf16
+# tiles as the base weight's.
+LORA_GRAD_REL_FRO = 4e-3
 # Far below a sequence tile, as a short batch's sweep is.
 SMALL_ROWS = (2, 37, 300)
 
@@ -75,13 +81,35 @@ def _fp32_sweep(
     hidden, weight, targets, grad, bias=None, temperature=1.0, logit_scale=None, softcap=None, compute_entropy=False
 ):
     logps, log_z, entropy = _logprobs_forward(
-        hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy
+        hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy, ()
     )
-    needs_grad = (True, True, bias is not None)
-    dh, dw, db = _logprobs_backward(
-        hidden, weight, targets, bias, log_z, grad, temperature, logit_scale, softcap, needs_grad
+    needs_grad = (True, True, bias is not None, [])
+    dh, dw, db, _ = _logprobs_backward(
+        hidden, weight, targets, bias, log_z, grad, temperature, logit_scale, softcap, needs_grad, ()
     )
     return logps, entropy, dh, dw, db
+
+
+def _lora_case(hidden, weight, targets, grad) -> dict[str, float]:
+    """Max log-prob error and each operand's gradient error against fp64, with a bf16 LoRA delta on the head, the
+    adapter in fp32 (PEFT's default upcast) beside the bf16 model."""
+    generator = torch.Generator(device=hidden.device).manual_seed(1)
+    down = torch.randn(LORA_RANK, HIDDEN, generator=generator, device=hidden.device) / HIDDEN**0.5
+    up = torch.randn(weight.size(0), LORA_RANK, generator=generator, device=hidden.device) / LORA_RANK**0.5
+    leaves = [t.detach().requires_grad_(True) for t in (hidden, weight, down, up)]
+    # PEFT hands an fp32 adapter its input cast to fp32.
+    lora_input = leaves[0].float()
+    delta = LowRankDelta(lora_input, leaves[2], leaves[3], LORA_SCALING)
+    logps, _ = chunked_head_logprobs(leaves[0], leaves[1], targets, None, 1.0, low_rank=[delta])
+    (logps * grad).sum().backward()
+    exact = [t.detach().double().requires_grad_(True) for t in (hidden, weight, down, up)]
+    logits = exact[0] @ exact[1].t() + LORA_SCALING * (exact[0] @ exact[2].t() @ exact[3].t())
+    want = torch.log_softmax(logits, dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
+    (want * grad.double()).sum().backward()
+    errors = {"logprob_max_error": (logps.double() - want.detach()).abs().max().item()}
+    for name, got, exact_leaf in zip(("hidden", "weight", "down", "up"), leaves, exact, strict=True):
+        errors[f"{name}_grad_rel_fro"] = fro_rel_err(got.grad, exact_leaf.grad)
+    return errors
 
 
 def _eager_fp32_sweep(*args, **head):
@@ -160,6 +188,13 @@ def run(ctx) -> dict:
     metrics["fp32_bias_grad_rel_fro"] = fro_rel_err(biased[4], ref_db)
     checks["bias_logprob_max_error_vs_fp64"] = metrics["bias_logprob_max_error"] < LOGP_MAX_ERR
     checks["fp32_bias_grad_rel_fro_vs_fp64"] = metrics["fp32_bias_grad_rel_fro"] < BIAS_GRAD_FP32_REL_FRO
+
+    lora_vocab = 3 * VOCAB_TILE + 500
+    lora = _lora_case(hidden, weight[:lora_vocab], targets % lora_vocab, grad)
+    metrics.update({f"lora_{name}": value for name, value in lora.items()})
+    checks["lora_logprob_max_error_vs_fp64"] = lora["logprob_max_error"] < LOGP_MAX_ERR
+    for name in ("hidden", "weight", "down", "up"):
+        checks[f"lora_{name}_grad_rel_fro_vs_fp64"] = lora[f"{name}_grad_rel_fro"] < LORA_GRAD_REL_FRO
 
     # New sizes, small row counts, tiles one row or column wide (which run eagerly), and new scalars on the every-term
     # path.

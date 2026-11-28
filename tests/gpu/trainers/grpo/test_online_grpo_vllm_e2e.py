@@ -19,6 +19,7 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     full_ep2_dp2        four ranks, two EP groups in one NVLink domain (the deferred replica sweep)
     full_ep2x2dom       four ranks, one EP group per simulated two-GPU NVLink domain
     full_ep2_etp2       four ranks, EP x expert TP: each rank a slice of half the experts
+    lora_head_ep2       attention and ``lm_head`` PEFT under EP, the ``lora_head_fsdp_zero3`` checks below
 
     dense (Qwen3-0.6B, ``HALO_TEST_VLLM_DENSE_SERVER_URL``, two ranks):
     full_tp2            full fine-tune at ``tp_size=2`` — the sync gathers DTensor shards
@@ -30,6 +31,12 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     full_tp2_dp2        four ranks, TP x DP
     full_hsdp           four ranks, HSDP over two simulated NVLink domains of two
 
+    untied dense (Qwen3-8B, ``HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL``, two ranks): a tied checkpoint's sync pushes
+    an adapted ``lm_head`` as its input embedding too, so a head adapter trains on an untied one
+    lora_head_fsdp_zero3  attention and ``lm_head`` PEFT under FULL_SHARD: with ``--chunked`` the sweep adds the
+                        head adapter's delta, gathered inside the redirected forward, its ``lora_B`` must move,
+                        and the policy's ``lm_head`` must not share ``embed_tokens``' weight
+
     one process, no FSDP wrap (Qwen3-0.6B, the first ``--servers`` URLs of ``HALO_TEST_VLLM_SERVER_URLS``):
     full_world1, lora_world1   ``--trainer environmental`` runs the ReAct math environment through
                         :mod:`tests.common.env_grpo_e2e`, pushing through a WeightSyncPool; each row
@@ -40,9 +47,9 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     ``--maxrl`` (``--trainer online`` or ``environmental``, a ``*_world1`` mode) trains with ``use_maxrl`` and
     ``scale_rewards: none`` on a non-negative reward, and checks ``sampling/maxrl_zero_mean_group_frac`` is logged
     beside finite losses
-    ``--chunked`` (``--trainer sdpg``, no resume) runs ``use_chunked_grpo_logprobs``, the OPD term included, and checks
-    the ``opd_loss`` of the first step whose OPD term is non-zero on the same batch against the same forward with the
-    term projected unchunked, and against the full-logits path
+    ``--chunked`` (``--trainer online`` or ``sdpg``, no resume) runs ``use_chunked_grpo_logprobs``; under SDPG the OPD
+    term included, checking the ``opd_loss`` of the first step whose OPD term is non-zero on the same batch against
+    the same forward with the term projected unchunked, and against the full-logits path
 
 Each row also reads its layout's data-parallel half off the trained policy (``record_dp_layout``): FULL_SHARD
 resharding after a forward, where ep1 experts live, the HSDP mesh, the EP groups' expert replicas in step.
@@ -65,7 +72,7 @@ import requests
 from halo.env import env_str
 from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.models import QWEN3_0_6B, QWEN3_30B_A3B
+from tests.common.models import QWEN3_0_6B, QWEN3_8B, QWEN3_30B_A3B
 from tests.common.on_policy_e2e import PolicyLayout
 from tests.common.online_grpo_e2e import MODES, modes_for, run_online_grpo_e2e
 from tests.common.ports import free_port
@@ -74,7 +81,11 @@ from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 
 MOE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_MOE_MODEL", QWEN3_30B_A3B)
 DENSE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_DENSE_MODEL", QWEN3_0_6B)
+UNTIED_DENSE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_UNTIED_DENSE_MODEL", QWEN3_8B)
 MOE_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
+UNTIED_DENSE_SERVER_URL = (
+    env_str("HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL") or env_str("VLLM_SERVER_URL") or "http://localhost:8020"
+)
 # Comma-separated, each serving DENSE_MODEL on a GPU of its own; every one-process row drives the first.
 SERVER_URLS = [
     url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_DENSE_SERVER_URL).split(",") if url.strip()
@@ -91,7 +102,7 @@ parser.add_argument("--maxrl", action="store_true", help="online / environmental
 parser.add_argument(
     "--chunked",
     action="store_true",
-    help="sdpg: use_chunked_grpo_logprobs, the first non-zero OPD step against full logits",
+    help="online / sdpg: use_chunked_grpo_logprobs; sdpg also checks the first non-zero OPD step",
 )
 ARGS = parser.parse_args()
 POLICY = MODES[ARGS.mode].family
@@ -103,8 +114,8 @@ if ARGS.prefetch_depth is not None and ARGS.trainer != "environmental":
     parser.error("--prefetch-depth drives the environmental trainer's prefetch")
 if ARGS.maxrl and (ARGS.trainer == "sdpg" or POLICY != "world1"):
     parser.error("--maxrl runs the online or environmental trainer in one process: a *_world1 mode")
-if ARGS.chunked and (ARGS.trainer != "sdpg" or ARGS.resume):
-    parser.error("--chunked drives the SDPG trainer's chunked OPD term, which has no resume row")
+if ARGS.chunked and (ARGS.trainer == "environmental" or ARGS.resume):
+    parser.error("--chunked drives the online or SDPG trainer's chunked scorer, which has no resume row")
 
 
 def _row_index() -> int:
@@ -173,7 +184,11 @@ def _run_one_process(ctx) -> dict:
 def run(ctx) -> dict:
     if POLICY == "world1":
         return _run_one_process(ctx)
-    server_url, model_name = (MOE_SERVER_URL, MOE_MODEL) if POLICY == "moe" else (VLLM_DENSE_SERVER_URL, DENSE_MODEL)
+    server_url, model_name = {
+        "moe": (MOE_SERVER_URL, MOE_MODEL),
+        "dense": (VLLM_DENSE_SERVER_URL, DENSE_MODEL),
+        "untied_dense": (UNTIED_DENSE_SERVER_URL, UNTIED_DENSE_MODEL),
+    }[POLICY]
     return run_online_grpo_e2e(
         ctx,
         trainer_kind=ARGS.trainer,
