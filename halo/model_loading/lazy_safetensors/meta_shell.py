@@ -100,13 +100,30 @@ def _instantiate_from_config_on_meta(model_class, config, dtype, trust_remote_co
     return model
 
 
+def build_config_meta_shell(
+    model_class,
+    config,
+    dtype: torch.dtype,
+    *,
+    trust_remote_code: bool,
+    revision: str | None = None,
+    attn_implementation: str | None = None,
+) -> nn.Module:
+    """``model_class`` built from ``config`` alone on meta at ``dtype``, remote code resolved, buffers real and the fp32
+    pins applied. Raises :class:`MetaShellBuildError` for a class the meta device cannot build."""
+    model_class = _resolve_remote_code_class(model_class, config, trust_remote_code, revision)
+    kwargs = {} if attn_implementation is None else {"attn_implementation": attn_implementation}
+    return _instantiate_from_config_on_meta(
+        model_class, config, resolve_load_dtype(dtype, config), trust_remote_code, **kwargs
+    )
+
+
 def config_only_parameter_bytes(
     model_class, config, dtype: torch.dtype, *, trust_remote_code: bool, revision: str | None = None
 ) -> int:
     """Bytes of the parameters ``model_class`` builds from ``config`` alone at ``dtype``, fp32 pins included: no weight
     is read. Raises :class:`MetaShellBuildError` for a class the meta device cannot build."""
-    model_class = _resolve_remote_code_class(model_class, config, trust_remote_code, revision)
-    shell = _instantiate_from_config_on_meta(model_class, config, resolve_load_dtype(dtype, config), trust_remote_code)
+    shell = build_config_meta_shell(model_class, config, dtype, trust_remote_code=trust_remote_code, revision=revision)
     return sum(p.numel() * p.element_size() for p in shell.parameters())
 
 

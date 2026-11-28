@@ -360,7 +360,7 @@ def test_the_loader_stamps_no_commit_on_a_local_directory(snapshots, monkeypatch
 
 
 def test_the_loader_stamps_no_commit_on_a_random_init(snapshots, monkeypatch):
-    assert _stamp_after_load(monkeypatch, REPO, revision=TRAINED, init_from_scratch=True) is None
+    assert _stamp_after_load(monkeypatch, REPO, revision=TRAINED, init_from_scratch=True, init_seed=0) is None
 
 
 def test_a_pipeline_stage_carries_the_commit_its_model_was_read_at():

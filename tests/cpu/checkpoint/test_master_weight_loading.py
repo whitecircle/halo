@@ -102,7 +102,6 @@ def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, mon
         "trust_remote_code": False,
     }
     rung = cp_loading.load_cp_model if mode == "cp" else loading._load_undistributed_model
-    extra = {} if mode == "cp" else {"init_from_scratch": False}
     model = rung(
         ModelSource(source, None, source),
         _dense_pc(keep=keep),
@@ -110,7 +109,6 @@ def test_real_dense_and_cp_construction_retains_checkpoint_masters(tmp_path, mon
         kwargs,
         preserve_checkpoint_precision=strict,
         wraps_experts=False,
-        **extra,
     )
     actual = model.state_dict(keep_vars=True)
     for key, value in expected.items():
@@ -236,7 +234,6 @@ def _read_failure_rank(rank, source, outcomes):
                 },
                 preserve_checkpoint_precision=True,
                 wraps_experts=False,
-                init_from_scratch=False,
             )
         except RuntimeError as error:
             outcome = str(error)

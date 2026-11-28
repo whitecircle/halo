@@ -474,7 +474,7 @@ _QUANTIZED = SimpleNamespace(load_in_4bit=True)
 _LOAD_REFUSALS = {
     "qlora_under_ep": ({"ep_size": 2}, {"quantization_config": _QUANTIZED}, ValueError, "Quantized loading"),
     "qlora_under_tp": ({"tp_size": 2}, {"quantization_config": _QUANTIZED}, ValueError, "Quantized loading"),
-    "scratch_under_cp": ({"cp_size": 2}, {"init_from_scratch": True}, NotImplementedError, "dense data-parallel"),
+    "scratch_under_dense_tp": ({"tp_size": 2}, {"init_from_scratch": True}, NotImplementedError, "dense TP"),
     "scratch_with_qlora": (
         {},
         {"init_from_scratch": True, "quantization_config": _QUANTIZED},
@@ -519,11 +519,21 @@ def test_every_load_refusal_fires_before_attention_the_tokenizer_and_the_weight_
 
 def test_qlora_passes_plain_data_parallelism_and_is_refused_under_the_expert_wrappers():
     load_rules.reject_unsupported_load(
-        _pc(), torch.bfloat16, quantization_config=_QUANTIZED, init_from_scratch=False, wraps_experts=False
+        _pc(),
+        torch.bfloat16,
+        quantization_config=_QUANTIZED,
+        init_from_scratch=False,
+        wraps_experts=False,
+        dense_tp=False,
     )
     with pytest.raises(ValueError, match="grouped-GEMM MoE loaders"):
         load_rules.reject_unsupported_load(
-            _pc(), torch.bfloat16, quantization_config=_QUANTIZED, init_from_scratch=False, wraps_experts=True
+            _pc(),
+            torch.bfloat16,
+            quantization_config=_QUANTIZED,
+            init_from_scratch=False,
+            wraps_experts=True,
+            dense_tp=False,
         )
 
 
@@ -622,13 +632,54 @@ def test_a_pp_load_refuses_an_ep_group_no_ep_layer_wraps_before_the_process_grou
     _load_refused_before_the_process_groups(config, pc, match)
 
 
-def test_scratch_and_lowp_pass_where_each_is_supported():
-    """Anti-vacuity: both are production shapes."""
+@pytest.mark.parametrize(
+    ("pc", "axis"),
+    [
+        (make_parallelism_config(world_size=4, gpus_per_node=2, pp_size=2), "PP"),
+        (make_parallelism_config(world_size=4, gpus_per_node=4, ep_size=2, expert_tp_size=2), "ETP"),
+    ],
+    ids=["pp2", "ep2_etp2"],
+)
+def test_a_from_scratch_build_under_a_sharded_loader_is_refused(pc, axis):
+    """PP stages and ETP slices read only their own part of a checkpoint, and have no random-init route yet."""
+    with pytest.raises(NotImplementedError, match=f"not supported under {axis}"):
+        load_rules.reject_unsupported_load(
+            pc, torch.bfloat16, quantization_config=None, init_from_scratch=True, wraps_experts=True, dense_tp=False
+        )
+
+
+def test_a_from_scratch_build_over_frozen_quantized_experts_is_refused():
+    """The random-init route builds bf16 experts and never reaches the lazy loader that installs the packed banks, so
+    an Inkling 2 run, whose family passes the frozen-experts check, would train adapters over random experts."""
+    pc = _pc(ep_size=2, frozen_quantized_experts=True)
+    with pytest.raises(ValueError, match="incompatible with frozen_quantized_experts"):
+        load_rules.reject_unsupported_load(
+            pc, torch.bfloat16, quantization_config=None, init_from_scratch=True, wraps_experts=True, dense_tp=False
+        )
     load_rules.reject_unsupported_load(
-        _pc(), torch.bfloat16, quantization_config=None, init_from_scratch=True, wraps_experts=False
+        pc, torch.bfloat16, quantization_config=None, init_from_scratch=False, wraps_experts=True, dense_tp=False
     )
+
+
+def test_scratch_and_lowp_pass_where_each_is_supported():
+    """Anti-vacuity: both are production shapes. A from-scratch build passes on every route that holds the whole
+    model on a rank: data parallelism, EP, CP and attention-only TP."""
+    for pc_fields in ({}, {"ep_size": 2}, {"cp_size": 2}, {"tp_size": 2}):
+        load_rules.reject_unsupported_load(
+            _pc(**pc_fields),
+            torch.bfloat16,
+            quantization_config=None,
+            init_from_scratch=True,
+            wraps_experts=True,
+            dense_tp=False,
+        )
     load_rules.reject_unsupported_load(
-        _pc(lowp=_FP8), torch.bfloat16, quantization_config=None, init_from_scratch=False, wraps_experts=False
+        _pc(lowp=_FP8),
+        torch.bfloat16,
+        quantization_config=None,
+        init_from_scratch=False,
+        wraps_experts=False,
+        dense_tp=False,
     )
 
 

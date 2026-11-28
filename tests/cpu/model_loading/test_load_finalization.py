@@ -49,7 +49,6 @@ DISPATCHED_LOADERS = frozenset(
 # Each must call the seam directly: the reachability sweep is branch-insensitive, so a terminal could still reach it
 # through a sibling branch.
 TERMINAL_LOADERS = (
-    (DISPATCHER, "_build_random_init"),
     ("halo/model_loading/parallel/tp.py", "load_tp_model"),
     ("halo/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
     ("halo/model_loading/parallel/whole_model.py", "resolve_trainer_model"),

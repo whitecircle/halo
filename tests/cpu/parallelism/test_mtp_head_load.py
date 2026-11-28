@@ -2,6 +2,7 @@
 """The tail streams through the lazy planner onto a head-only shell: a release's bytes land at the release's keys under
 every expert layout, a tail that is not this head is refused, and the EP patch leaves one capacity generation."""
 
+import dataclasses
 import json
 import re
 import weakref
@@ -276,7 +277,7 @@ def _from_scratch(name, path, *, ep_config=None):
         model,
         MtpHeadRequest(MtpObjective(weight=1.0)),
         pc=_pc(ep_config),
-        source=_source(path),
+        source=dataclasses.replace(_source(path), random_init_seed=0),
         dtype=torch.float32,
         wraps_experts=ep_config is not None,
         init_from_scratch=True,

@@ -287,8 +287,9 @@ class ParallelismArguments(ValidatedConfig):
         default=False,
         metadata={
             "help": "Build the model from model_name_or_path's config with freshly initialized random weights, "
-            "reusing its tokenizer, instead of loading the pretrained weights. Dense data-parallel/FSDP2 only; pair "
-            "it with max_steps and a warmup-plus-decay schedule. "
+            "reusing its tokenizer, instead of loading the pretrained weights. SFT only. Data parallelism, EP, CP "
+            "and attention-only TP on a MoE draw the same keyed weights for one seed; PP, ETP and dense TP are "
+            "refused. Pair it with max_steps and a warmup-plus-decay schedule. "
             "See agent-docs/training-methods/pretraining.md#random-initialization."
         },
     )

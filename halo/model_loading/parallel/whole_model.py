@@ -17,10 +17,11 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import current_device
 from halo.kernels.lowp.frozen_bank import warm_fused_dequant_kernels
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
-from halo.model_loading.dtype import cast_parameters_to_run_dtype, normalize_model_init_dtype
+from halo.model_loading.dtype import cast_parameters_to_run_dtype, normalize_model_init_dtype, resolve_load_dtype
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches, auto_load_model, resolve_build_config
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
+from halo.model_loading.parallel.keyed_init import build_keyed_model
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
 from halo.models.attention.backend_setup import warm_fa4_kernels
 from halo.models.attention.inkling2_relative_flex import warm_inkling2_relative_flex_kernels
@@ -69,33 +70,56 @@ def load_whole_model(
 ) -> torch.nn.Module:
     """COLLECTIVE: ``from_pretrained`` a node's ranks at a time, cast to the run dtype with fp32 masters restored, on
     CPU unless ``device_map`` is named. A failed restore raises on every rank only after all leave the node-serialized
-    region, where a world collective would wait on queued ranks."""
+    region, where a world collective would wait on queued ranks. A ``source`` with a ``random_init_seed`` is built
+    from the config and drawn on CPU instead (:func:`build_keyed_model`), with nothing to read or restore."""
+    random_init = source.random_init_seed is not None
     from_pretrained_kwargs.setdefault("device_map", "cpu")
     precision_guard = DeferredRankFailure(f"FP32-master checkpoint load from {source.name}")
-    with joined_node_load(f"{load_phase} from {source.name}", pc.max_concurrent_loading):
-        model = from_pretrained_verified(model_class, source.name, **from_pretrained_kwargs)
+    what = f"Model build from {model_class.__name__} config" if random_init else f"{load_phase} from {source.name}"
+    with joined_node_load(what, pc.max_concurrent_loading):
+        if random_init:
+            model = _build_random_init(model_class, source.random_init_seed, from_pretrained_kwargs)
+        else:
+            model = from_pretrained_verified(model_class, source.name, **from_pretrained_kwargs)
         cast_loaded_parameters(
             model,
             from_pretrained_kwargs.get("dtype"),
             keep_fp32=pc.fp32_non_ep_params,
             ep_wrapped=ep_config is not None,
         )
-        precision_guard.run(
-            lambda: restore_fp32_master_parameters(
-                model,
-                source.local_dir,
-                ep_config,
-                keep_non_ep=pc.fp32_non_ep_params,
-                strict=preserve_checkpoint_precision,
+        if not random_init:
+            precision_guard.run(
+                lambda: restore_fp32_master_parameters(
+                    model,
+                    source.local_dir,
+                    ep_config,
+                    keep_non_ep=pc.fp32_non_ep_params,
+                    strict=preserve_checkpoint_precision,
+                )
             )
-        )
         if place_on_device and precision_guard.reason is None:
             if before_move is not None:
                 model = before_move(model)
             model = move_model_to_local_device(model)
-    precision_guard.reject()
-    finalize_loaded_model(model, weights_dir=source.local_dir)
+    if not random_init:  # agreed across ranks with the source, and a build restores nothing
+        precision_guard.reject()
+    finalize_loaded_model(model, weights_dir=None if random_init else source.local_dir)
     return model
+
+
+def _build_random_init(model_class, seed: int, from_pretrained_kwargs: dict) -> torch.nn.Module:
+    """The keyed random init :func:`load_whole_model` builds in place of a checkpoint read, on CPU. Only the
+    arguments a config build takes are used: the rest name a checkpoint, and there is none."""
+    config = from_pretrained_kwargs["config"]
+    return build_keyed_model(
+        model_class,
+        config,
+        resolve_load_dtype(from_pretrained_kwargs.get("dtype"), config),
+        seed=seed,
+        trust_remote_code=from_pretrained_kwargs.get("trust_remote_code", True),
+        attn_implementation=from_pretrained_kwargs.get("attn_implementation"),
+        revision=from_pretrained_kwargs.get("revision"),
+    )
 
 
 def _apply_config_field_kwargs(config: PretrainedConfig, model_init_kwargs: dict) -> dict:
