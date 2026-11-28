@@ -22,6 +22,7 @@ from halo.checkpoint.model_card import HUB_TAGS
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified, reject_adapter_directory
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import (
+    ensure_cudnn_sdpa_off_on_affected_hopper,
     install_fa4_varlen_softcap_refusal,
     patch_sdpa_for_wide_heads,
     patch_transformers_flash_unpad_memo,
@@ -174,6 +175,8 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     """Apply the family/backend-keyed patches every loaded model needs, trainable or frozen, and return the
     implementation to build with. ``None`` applies only the patches no backend keys. Flex-sliding still hands SDPA some
     calls, so a wide-head model keeps the SDPA pin under it."""
+    # Else a padded batch on Hopper loses optimizer steps to NaN query gradients, under any label that reaches SDPA.
+    ensure_cudnn_sdpa_off_on_affected_hopper()
     if attn_implementation == "sdpa" and has_head_dim_beyond_flash(model_config):
         patch_sdpa_for_wide_heads()
     # Else each forward's mask construction reads whether position_ids hold packed documents, for a mask flash ignores.
@@ -199,7 +202,7 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     if model_type_matches(model_config, "qwen4_exp"):
         apply_qwen4_exp_patches(model_config)
     # Else the DSA layers run stock SDPA over their [T, T] mask: mem-efficient on Blackwell, whose backward grows to most
-    # of a long step, and cuDNN on Hopper.
+    # of a long step, and cuDNN on Hopper (mem-efficient under the guard above).
     if attn_implementation == "sdpa" and model_type_matches(model_config, "glm5_next") and dsa_matmul_enabled():
         install_glm5_next_masked_matmul()
     # Else a padded row's DSA indexer scores every query against every pool in one call, 96 fp32 bytes a squared token.
