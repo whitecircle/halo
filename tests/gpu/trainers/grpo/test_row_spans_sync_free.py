@@ -18,6 +18,16 @@ HIDDEN = 8
 VOCAB = 40
 
 
+class _SummingHead:
+    """A head whose log-probs are a plain reduction of its input."""
+
+    def head_inputs(self, hidden: torch.Tensor) -> tuple[torch.Tensor]:
+        return (hidden,)
+
+    def logprobs(self, inputs, targets, temperature, compute_entropy=False):
+        return inputs[0].sum(-1), None
+
+
 class _Scorer(ChunkedGRPOLogprobsMixin):
     """A position-free embedding backbone at batch size 1, so every row forwards densely, and a head sweep that is a
     plain reduction: only the span reads can synchronize."""
@@ -33,8 +43,8 @@ class _Scorer(ChunkedGRPOLogprobsMixin):
     def _head_transform(self, unwrapped_model):
         return IDENTITY_HEAD_TRANSFORM
 
-    def _head_sweep(self, unwrapped_model):
-        return lambda hidden, targets, compute_entropy=False: (hidden.sum(-1), None)
+    def _head_projector(self, unwrapped_model):
+        return _SummingHead()
 
     def _get_last_hidden_state(self, model, input_ids, attention_mask, logits_to_keep):
         return self.embed(input_ids)[:, :-1, :][:, -logits_to_keep:, :]

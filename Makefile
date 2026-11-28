@@ -148,6 +148,7 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 #   dense: Qwen/Qwen3-0.6B on either engine (VLLM_MODEL / SGLANG_MODEL)
 #   MoE:   SERVER_TIER='moe and not gptoss' with VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507, and
 #          SERVER_TIER='moe and gptoss' with VLLM_MODEL / SGLANG_MODEL=unsloth/gpt-oss-20b-BF16
+#   untied dense: SERVER_TIER=untied_dense with VLLM_MODEL=Qwen/Qwen3-8B (vLLM only)
 #   The Step-3.7 sync suite serves its own checkpoint (see its script header) and skips without HALO_TEST_STEP3P7_MODEL.
 # The vLLM compose default parses tool calls with hermes, which reads JSON <tool_call> calls only: the
 # gpt-oss pass serves with VLLM_GPTOSS_PARSERS below, and a per-family pass (HALO_TEST_ENV_GRPO_MODEL) with
@@ -155,7 +156,7 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 # stays text and the env-GRPO rows raise by their second round.
 # SGLang's default parser (auto) reads it off the chat template where it can and otherwise disables it with a log line:
 # gpt-oss, Qwen3.6 and Gemma 4 resolve, the Qwen3 2507 releases serve with SGLANG_TOOL_PARSER=qwen25.
-SERVER_TIER ?= not moe
+SERVER_TIER ?= not moe and not untied_dense
 VLLM_GPTOSS_PARSERS = VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text \
   VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
 # The trainer↔server weight-transfer group is NCCL between two containers. Without EFA=1 both ends

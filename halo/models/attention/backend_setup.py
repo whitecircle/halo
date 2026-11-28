@@ -1,5 +1,5 @@
 """Process-wide attention backend fixes (flash varlen seqlens and unpad memo, FA4's varlen softcap refusal,
-wide-head SDPA, flex compile) and the FA4 warm-up."""
+wide-head SDPA, Hopper's cuDNN SDPA backward, flex compile) and the FA4 warm-up."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.integrations import sdpa_attention as _sdpa_mod
 from transformers.integrations.flex_attention import WrappedFlexAttention, flex_attention
 
+from halo.hardware import is_hopper_gpu
 from halo.models.attention.fa4_entry_points import install_fa4_entry_point_wrapper
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from halo.models.attention.layout import attention_calls, non_causal_attention_calls
@@ -34,6 +35,9 @@ _WARMUP_WINDOW_MARGIN = 8
 _FA4_VARLEN_SOFTCAP_ATTR = "_halo_fa4_varlen_softcap_refusal"
 # On the padding mask, as ``(version, set)``.
 _UNPAD_MEMO_ATTR = "_halo_unpad_data"
+CUDNN_SDPA_HOPPER_ISSUE = "pytorch/pytorch#196678"
+# The cuDNN whose SM90 SDPA backward is fixed, as ``torch.backends.cudnn.version()`` spells 9.26.0.
+CUDNN_SDPA_HOPPER_FIXED_VERSION = 92600
 
 
 def patch_transformers_flash_varlen_int_seqlen() -> None:
@@ -142,6 +146,33 @@ def patch_sdpa_for_wide_heads() -> None:
             f"Forced mem-efficient SDPA + manual KV repeat for heads wider than {FLASH_MAX_HEAD_DIM} "
             "(unlocks seq>20k by avoiding the math kernel's score matrix)"
         )
+
+
+def _cudnn_version_label(version: int) -> str:
+    return f"{version // 10000}.{version % 10000 // 100}.{version % 100}"
+
+
+def ensure_cudnn_sdpa_off_on_affected_hopper() -> bool:
+    """Turn off cuDNN SDPA alone (flash and mem-efficient stay on) on Hopper under a cuDNN before 9.26, whose SM90
+    backward returns NaN in dQ for a call with an explicit mask at a key length 64 mod 128 once a query row's logsumexp
+    is below -ln(FLT_MAX) (:data:`CUDNN_SDPA_HOPPER_ISSUE`). PyTorch's guard (pytorch/pytorch#196861) refuses cuDNN per
+    such call; this one flag takes it off every SDPA call, on the same device and cuDNN bound. Every model load calls
+    it, whatever the attention label: DSA layers, QSA tiles and flex-sliding's fallbacks reach SDPA under others.
+    Blackwell keeps cuDNN. Idempotent; returns whether this call turned it off, which global rank 0 logs."""
+    if not is_hopper_gpu():
+        return False
+    version = torch.backends.cudnn.version()
+    if version is None or version >= CUDNN_SDPA_HOPPER_FIXED_VERSION or not torch.backends.cuda.cudnn_sdp_enabled():
+        return False
+    torch.backends.cuda.enable_cudnn_sdp(False)
+    if is_global_main_process():
+        logger.warning(
+            f"cuDNN SDPA is off on this SM 9.0 GPU: cuDNN {_cudnn_version_label(version)} returns NaN in the query "
+            f"gradient of a masked call at a key length 64 mod 128 ({CUDNN_SDPA_HOPPER_ISSUE}), which a padded batch "
+            f"hits as a skipped optimizer step. Masked SDPA calls run the mem-efficient kernel instead. cuDNN "
+            f"{_cudnn_version_label(CUDNN_SDPA_HOPPER_FIXED_VERSION)} lifts this."
+        )
+    return True
 
 
 def patch_transformers_packed_sequence_probe() -> None:

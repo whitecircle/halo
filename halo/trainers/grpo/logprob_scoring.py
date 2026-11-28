@@ -3,6 +3,7 @@ policy and the protected-token entropy mask."""
 
 import inspect
 import logging
+import weakref
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -20,22 +21,21 @@ from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
 from halo.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from halo.distributed.tensor_parallel.hf_plan import plan_shards_param
 from halo.distributed.tensor_parallel.local_linears import runs_local_forward
-from halo.kernels.head_logprobs import chunked_head_logprobs
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.selection import effective_attn_implementation
 from halo.models.forward_capture import capturing_forward_outputs
-from halo.models.head_transform import HeadTransform
 from halo.models.introspection.modality import config_declares_multimodality
 from halo.models.introspection.module_tree import embedding_module, find_module_path, hidden_state_backbone
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.models.moe.balancing import iter_balancing_routers
 from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.segment_markers import segment_markers_for
 from halo.runtime.collectives import barrier
 from halo.runtime.consensus import rank_consensus
-from halo.runtime.dtensor import materialize_dtensor
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.full_logits_memory import LogitsWidth, verify_full_logits_fit
 from halo.trainers.grpo.packed_forward import build_packed_rows
+from halo.trainers.head_projection import HeadProjector, OutputEmbedding, resolve_output_embedding
 from halo.trainers.hidden_state_forward import HiddenStateForwardMixin
 
 logger = logging.getLogger(__name__)
@@ -58,52 +58,16 @@ STASHED_COLUMNS = slice(RowSpan.MALFORMED)
 
 
 @dataclass(frozen=True, eq=False)
-class HeadSweep:
-    """The output embedding as the chunked scorer reads it inside the redirected forward, where FSDP2 has gathered
-    it: the weight and bias cut to the verified head transform's vocabulary. Called as ``sweep(hidden, targets,
-    compute_entropy=False) -> (logps, entropy)``, where ``targets`` is one id per position or ``(..., m)`` ids (a
-    sampled token and its candidates, negatives masked), scored under the position's one ``log Z``
-    (``chunked_head_logprobs``)."""
-
-    weight: torch.Tensor
-    bias: torch.Tensor | None
-    transform: HeadTransform
-    temperature: float
-
-    def __call__(
-        self, hidden: torch.Tensor, targets: torch.Tensor, compute_entropy: bool = False
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        return chunked_head_logprobs(
-            self.transform.scale_hidden(hidden),
-            self.weight,
-            targets,
-            self.bias,
-            self.temperature,
-            logit_scale=self.transform.logit_scale,
-            softcap=self.transform.softcap,
-            compute_entropy=compute_entropy,
-        )
-
-    @property
-    def width(self) -> int:
-        return self.weight.size(0)
-
-    def project(self, hidden: torch.Tensor) -> torch.Tensor:
-        """``[rows, width]`` pre-temperature logits of ``hidden`` rows, with a gradient to the head."""
-        logits = F.linear(self.transform.scale_hidden(hidden), self.weight, self.bias)
-        return self.transform.scale_logits(logits)
-
-
-@dataclass(frozen=True, eq=False)
 class CompletionTerm:
     """A per-token term a host's loss reads off the policy's completion rows in its own loss forward, so the policy
     runs forward and backward once. The full-logits scorer appends each forward's ``[rows, C, V]`` completion logits,
-    pre-temperature and carrying the graph, to ``logits``. The chunked scorer calls ``score(head, hidden, positions)``
-    on the policy's hidden-state rows at the positions ``mask`` (``[B, C]``) keeps, ``positions`` indexing the flattened
-    ``[B, C]`` window, and appends the ``[B, C]`` result, zero off the mask, to ``per_token``."""
+    pre-temperature and carrying the graph, to ``logits``. The chunked scorer calls ``score(head, rows, positions)``
+    with the policy's head inputs (``HeadProjector.head_inputs``, the ones its log-probs read) at the positions ``mask``
+    (``[B, C]``) keeps, ``positions`` indexing the flattened ``[B, C]`` window, and appends the ``[B, C]`` result, zero
+    off the mask, to ``per_token``."""
 
     mask: torch.Tensor
-    score: Callable[[HeadSweep, torch.Tensor, torch.Tensor], torch.Tensor]
+    score: Callable[[HeadProjector, list[torch.Tensor], torch.Tensor], torch.Tensor]
     logits: list[torch.Tensor] = field(default_factory=list)
     per_token: list[torch.Tensor] = field(default_factory=list)
 
@@ -179,10 +143,15 @@ def rows_forward_densely(model, batch_size: int) -> bool:
 
 
 def _completion_term_rows(
-    term: CompletionTerm, head: HeadSweep, hidden: torch.Tensor, rows: slice, widths: list[int] | None
+    term: CompletionTerm,
+    head: HeadProjector,
+    inputs: Sequence[torch.Tensor],
+    rows: slice,
+    widths: list[int] | None,
 ) -> torch.Tensor:
-    """``[rows, C]``: ``term.score`` at the positions its mask keeps in ``rows``, zero elsewhere. ``hidden`` is
-    ``[rows, C, H]``, or with ``widths`` each row's first ``widths[i]`` completion positions concatenated."""
+    """``[rows, C]``: ``term.score`` at the positions its mask keeps in ``rows``, zero elsewhere. Each of the head's
+    ``inputs`` is ``[rows, C, H]``, or with ``widths`` each row's first ``widths[i]`` completion positions
+    concatenated."""
     mask = term.mask[rows]
     width = mask.size(1)
     kept = mask.flatten().nonzero().squeeze(1)
@@ -190,7 +159,7 @@ def _completion_term_rows(
     if not kept.numel():
         return out.view(mask.shape)
     if widths is None:
-        student = hidden.flatten(0, 1).index_select(0, kept)
+        student = [x.flatten(0, 1).index_select(0, kept) for x in inputs]
     else:
         row, column = kept // width, kept % width
         lengths = torch.tensor(widths, device=kept.device)
@@ -200,7 +169,8 @@ def _completion_term_rows(
                 "the attention mask the rows were trimmed by disagree. Build the term's mask from the same "
                 "completion_mask the loss forward reads."
             )
-        student = hidden.index_select(0, (lengths.cumsum(0) - lengths)[row] + column)
+        index = (lengths.cumsum(0) - lengths)[row] + column
+        student = [x.index_select(0, index) for x in inputs]
     values = term.score(head, student, kept + rows.start * width)
     return out.to(values.dtype).index_put((kept,), values).view(mask.shape)
 
@@ -244,10 +214,10 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
         )
 
     def _reject_unreproducible_chunked_head(self) -> None:
-        """Refuse a family the chunked sweep cannot reproduce before the first rollout. Pure local computation, so
-        every rank reaches the same verdict."""
+        """Refuse a family, or a PEFT layer on the output embedding, the chunked sweep cannot reproduce before the first
+        rollout. Pure local computation, so every rank reaches the same verdict."""
         if self._use_chunked_grpo_logprobs:
-            self._head_transform(self.accelerator.unwrap_model(self.model))
+            self._resolve_output_embedding(self.accelerator.unwrap_model(self.model))
 
     def _verify_full_logits_fit(self, width: LogitsWidth | None) -> None:
         """COLLECTIVE when it runs. Refuse a full-logits loss forward that cannot fit, on every rank when one cannot;
@@ -372,10 +342,10 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
         """``(logps, entropies, term_values)``, the last the armed completion term's ``[rows, C]`` values, else
         ``None``."""
         batch_size = batch_size or input_ids.size(0)
-        sweep = self._head_sweep(unwrapped_model)
+        head = self._head_projector(unwrapped_model)
         if self._packs_microbatches and self.model.training:
             logps, entropies = self._packed_logps(
-                unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, sweep
+                unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, head
             )
             return logps, entropies, None
         dense = rows_forward_densely(unwrapped_model, batch_size)
@@ -390,11 +360,12 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
             targets = self._scored_targets(completion_ids, rows)
             if not dense:
                 hidden = self._backbone_hidden_state(unwrapped_model, ids, mask, logits_to_keep)  # (b, ltk, H)
-                logps, entropies = sweep(hidden, targets, compute_entropy)
+                inputs = head.head_inputs(hidden)
+                logps, entropies = head.logprobs(inputs, targets, self.temperature, compute_entropy)
                 all_logps.append(logps)
                 all_entropies.append(entropies)
                 if term is not None:
-                    term_values.append(_completion_term_rows(term, sweep, hidden, rows, None))
+                    term_values.append(_completion_term_rows(term, head, inputs, rows, None))
                 continue
             # Dense rows: one sweep over every row's real completion tokens, the window's zero tail masked
             # downstream, so the head pays the rows' lengths, not the padded width, and runs once.
@@ -402,19 +373,20 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
                 unwrapped_model, ids, mask, logits_to_keep, spans=(spans[rows], completions[rows])
             )
             row_targets = torch.cat([row_ids[:width] for row_ids, width in zip(targets, widths, strict=True)])
-            logps, entropies = sweep(hidden, row_targets, compute_entropy)
+            inputs = head.head_inputs(hidden)
+            logps, entropies = head.logprobs(inputs, row_targets, self.temperature, compute_entropy)
             all_logps.append(_completion_window(logps.split(widths), logits_to_keep))
             all_entropies.append(
                 _completion_window(entropies.split(widths), logits_to_keep) if compute_entropy else None
             )
             if term is not None:
-                term_values.append(_completion_term_rows(term, sweep, hidden, rows, widths))
+                term_values.append(_completion_term_rows(term, head, inputs, rows, widths))
 
         logps = torch.cat(all_logps, dim=0)
         entropies = torch.cat(all_entropies, dim=0) if compute_entropy else None
         return logps, entropies, torch.cat(term_values) if term is not None else None
 
-    def _packed_logps(self, unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, sweep):
+    def _packed_logps(self, unwrapped_model, input_ids, attention_mask, logits_to_keep, compute_entropy, head):
         """All rows handed in as one flattened varlen backbone call (their ``batch_size`` chunking ignored: the caller
         picked the micro-batch). Each row's positions restart at 0, so it scores as it does alone."""
         if self._armed_completion_term is not None:
@@ -425,7 +397,7 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
         hidden = self._packed_hidden_state(unwrapped_model, rows)
         completion_ids = self._scored_targets(input_ids[:, -logits_to_keep:], slice(None))
         targets = torch.cat([row_ids[:width] for row_ids, width in zip(completion_ids, widths, strict=True)])
-        logps, entropies = sweep(hidden, targets, compute_entropy)
+        logps, entropies = head.logprobs(head.head_inputs(hidden), targets, self.temperature, compute_entropy)
         return (
             _completion_window(logps.split(widths), logits_to_keep),
             _completion_window(entropies.split(widths), logits_to_keep) if compute_entropy else None,
@@ -496,40 +468,29 @@ class LogprobScoringMixin(HiddenStateForwardMixin):
         if labels.shape != input_ids.shape:
             raise ValueError("CP GRPO scoring needs labels aligned with the full input row")
 
-        sweep = self._head_sweep(unwrapped_model)
+        head = self._head_projector(unwrapped_model)
         hidden = unwrapped_model.forward_hidden_states(input_ids=input_ids, attention_mask=attention_mask)
         shifted_hidden, shifted_labels = cp_shift_against_full_labels(
             hidden, labels, unwrapped_model.cp_config.cp_rank, unwrapped_model.cp_config.cp_size
         )
-        logps, _ = sweep(shifted_hidden, shifted_labels)
+        logps, _ = head.logprobs(head.head_inputs(shifted_hidden), shifted_labels, self.temperature)
         return logps, shifted_labels
 
-    def _head_sweep(self, unwrapped_model) -> HeadSweep:
+    def _head_projector(self, unwrapped_model) -> HeadProjector:
         """COLLECTIVE where the head's tensors are DTensors (one gather each). Called inside the redirected forward."""
-        lm_head = unwrapped_model.get_output_embeddings()
-        self._assert_output_embeddings_unadapted(unwrapped_model, lm_head)
-        transform = self._head_transform(unwrapped_model)
-        weight, bias = transform.kept_rows(
-            materialize_dtensor(lm_head.weight), materialize_dtensor(getattr(lm_head, "bias", None))
-        )
-        return HeadSweep(weight, bias, transform, self.temperature)
+        return self._resolve_output_embedding(unwrapped_model).projector()
 
-    def _assert_output_embeddings_unadapted(self, unwrapped_model, lm_head) -> None:
-        """``get_output_embeddings()`` resolves to the tuner wrapper or the base linear, and both hand the chunked
-        matmul a delta-free weight. Checked once per run."""
-        if getattr(self, "_lm_head_adapter_checked", False):
-            return
-        adapted = getattr(lm_head, "base_layer", None) is not None or any(
-            module is not lm_head and getattr(module, "base_layer", None) is lm_head
-            for module in unwrapped_model.modules()
-        )
-        if adapted:
-            raise ValueError(
-                "use_chunked_grpo_logprobs computes log-probs from the base lm_head weight, but a "
-                "PEFT adapter wraps the output embedding — its delta would be silently ignored. "
-                "Remove lm_head from the adapter's target_modules or disable use_chunked_grpo_logprobs."
-            )
-        self._lm_head_adapter_checked = True
+    def _resolve_output_embedding(self, unwrapped_model) -> OutputEmbedding:
+        """Resolved once per model, as the resolution walks its module tree. Raises on a PEFT layer on the head that
+        ``HeadProjector`` does not reproduce (a LoRA variant such as DoRA). Held weakly, so a reference model the run
+        drops takes its head with it."""
+        base = base_transformers_model(unwrapped_model)
+        embeddings = getattr(self, "_output_embeddings", None)
+        if embeddings is None:
+            embeddings = self._output_embeddings = weakref.WeakKeyDictionary()
+        if base not in embeddings:
+            embeddings[base] = resolve_output_embedding(base, self._head_transform(base))
+        return embeddings[base]
 
 
 def _tp_gathered_output_head(model) -> torch.nn.Module | None:

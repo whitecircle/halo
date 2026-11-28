@@ -8,10 +8,12 @@ import pytest
 import halo.hardware as hardware
 from halo.hardware import GPU_PEAK_FLOPS, GpuPeak, _classify_gpu_name, detect_gpu_model, get_gpu_peak_flops
 
-# Dense bf16/fp16 tensor-core FLOPs per SM per clock. GA102 (workstation) ships a lower per-SM rate than GA100.
+# Dense bf16/fp16 tensor-core FLOPs per SM per clock. GA102 (A6000, A10) ships a lower per-SM rate than GA100, and
+# the Ada dies keep GA102's.
 _ARCH_BF16_FLOPS_PER_SM_CLOCK = {
     "ampere_ga100": 2048,
     "ampere_ga102": 1024,
+    "ada": 1024,
     "hopper": 4096,
     "blackwell": 8192,
 }
@@ -27,6 +29,9 @@ _DIE_SPECS = {
     "B300": (148, 2.032, "blackwell"),
     "A100": (108, 1.410, "ampere_ga100"),
     "A6000": (84, 1.860, "ampere_ga102"),
+    "A10": (72, 1.695, "ampere_ga102"),
+    "L4": (58, 2.040, "ada"),
+    "L40S": (142, 2.520, "ada"),
 }
 
 # Published peaks embed a nominal clock. This allows clock rounding but not marketing inflation (tens of percent).

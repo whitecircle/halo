@@ -149,7 +149,7 @@ The trainer's tokenizer renders each prompt and TRL sends vLLM the **token ids**
 
 ## Chunked log-probs
 
-`use_chunked_grpo_logprobs: true` (default off) replaces the full `[B, T, vocab]` logits with a vocab-chunked softmax, for large vocabularies with long completions ([Offline GRPO](offline.md#memory-chunked-log-probs), [limits](../async-grpo/performance.md#chunked-log-probs)). Here a multimodal batch falls back to the full path, and a PEFT adapter on `lm_head` raises.
+`use_chunked_grpo_logprobs: true` (default off) replaces the full `[B, T, vocab]` logits with a vocab-chunked softmax, for large vocabularies with long completions ([Offline GRPO](offline.md#memory-chunked-log-probs), [limits](../async-grpo/performance.md#chunked-log-probs)). Here a multimodal batch falls back to the full path.
 
 ## Packed micro-batches
 

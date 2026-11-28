@@ -210,7 +210,10 @@ _GLM5_NEXT_ATTENTION_FUNCTIONS["sdpa"] = masked_matmul_attention
 
 
 def dsa_matmul_enabled() -> bool:
-    """On by default where stock SDPA takes this head to its mem-efficient kernel; on Hopper it selects cuDNN."""
+    """On by default on Blackwell, where stock SDPA takes this head to its mem-efficient kernel. Off by default on
+    Hopper, where stock SDPA took it to cuDNN; under a cuDNN before 9.26 the cuDNN SDPA guard
+    (``ensure_cudnn_sdpa_off_on_affected_hopper``) leaves it on mem-efficient there too, and ``HALO_DSA_MATMUL=1``
+    runs this kernel instead."""
     return env_flag("HALO_DSA_MATMUL", is_blackwell_gpu())
 
 
