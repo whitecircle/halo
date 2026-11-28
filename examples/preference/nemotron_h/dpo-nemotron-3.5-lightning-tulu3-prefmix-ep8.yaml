@@ -1,0 +1,61 @@
+# DPO — NVIDIA Nemotron 3.5 Lightning on the Tulu-3 preference mixture, EP=8, one 8-GPU node, a full fine-tune.
+# precompute_ref_log_probs scores the reference once, from the untrained policy, so no second model loads: a frozen
+# reference would be the whole model, unsharded, on every rank.
+# Measured on 8x H200 (the 1.3.0rc2 Hopper image, 20 steps): 64.4 GiB reserved on rank 0 and 59-88 GiB in use
+# across the GPUs.
+# See agent-docs/models/nemotron-h.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/preference/dpo.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+moe_balancing: bias_update            # the router's own e_score_correction_bias; auto resolves here too
+
+# --- Parallelism ---
+expert_parallel_size: 8               # 128 routed experts -> 16/rank; one dispatch group on 8 GPUs
+
+# --- Dataset ---
+dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
+test_size: 0.005
+
+# --- DPO Hyperparameters ---
+beta: 0.1
+loss_type: sigmoid
+precompute_ref_log_probs: true        # one pass over the training rows before step 1; a resume restores them
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 2
+gradient_accumulation_steps: 8
+learning_rate: 5.0e-07
+lr_scheduler_type: cosine
+warmup_steps: 20
+
+# --- Sequence Lengths ---
+# DPO has no training-side prompt cap: TRL truncates prompt + completion to max_length keep_start,
+# so an over-long prompt eats its own completion. generation_max_prompt_length bounds eval generation only.
+max_length: 4096
+generation_max_prompt_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/dpo-nemotron-3.5-lightning-tulu3-prefmix-ep8
+save_steps: 1000                      # each save ~59 GiB
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 1
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>
