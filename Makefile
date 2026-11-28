@@ -143,8 +143,8 @@ test-gpu-full: ## pytest full GPU tier (heavy, many-GPU)
 # GPUs the trainer may use — must exclude the server's (VLLM_CUDA_DEVICES / SGLANG_CUDA_DEVICES in the
 # compose files): weight sync is an NCCL broadcast, and a rank cannot broadcast to itself.
 TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
-# Both ends of a weight-sync test must serve the same checkpoint, so the dense and MoE halves are
-# separate passes with the server restarted in between; SERVER_TIER selects the pass.
+# Both ends of a weight-sync test must serve the same checkpoint, so the dense, untied-dense and MoE
+# rows are separate passes with the server restarted in between; SERVER_TIER selects the pass.
 #   dense: Qwen/Qwen3-0.6B on either engine (VLLM_MODEL / SGLANG_MODEL)
 #   MoE:   SERVER_TIER='moe and not gptoss' with VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507, and
 #          SERVER_TIER='moe and gptoss' with VLLM_MODEL / SGLANG_MODEL=unsloth/gpt-oss-20b-BF16
@@ -167,12 +167,13 @@ VLLM_GPTOSS_PARSERS = VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py V
 test-gpu-vllm: SERVER_TIER_DOCKER_ENV = $(NO_FABRIC_ENV) \
   -e CUDA_VISIBLE_DEVICES=$(TRAINER_CUDA_DEVICES) \
   -e VLLM_SERVER_URL=$(VLLM_SERVER_URL) -e HALO_TEST_REQUIRE_SERVER=vllm
-test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense or a MoE pass, see above; EFA=1 on an EFA host)
+test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAINER_CUDA_DEVICES; SERVER_TIER picks the dense, the untied-dense or a MoE pass, see above; EFA=1 on an EFA host)
 	@curl -sf $(VLLM_SERVER_URL)/health >/dev/null || { echo "No vLLM server at $(VLLM_SERVER_URL). Start it on a \
 	  GPU the trainer does not use: make build-vllm (or set VLLM_IMAGE), then \
 	  HALO_SCRATCH=$(HALO_SCRATCH) VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 docker compose -f docker-compose.vllm.yml up -d vllm-server \
 	  (the benchmarks need the reasoning parser: their per-effort CoT budget draws a 400 without one; \
 	  the gpt-oss pass serves VLLM_MODEL=unsloth/gpt-oss-20b-BF16 $(VLLM_GPTOSS_PARSERS) in its place, \
+	  the untied-dense pass VLLM_MODEL=Qwen/Qwen3-8B, \
 	  another family its parsers from agent-docs/infrastructure/rollout-servers.md; \
 	  EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"

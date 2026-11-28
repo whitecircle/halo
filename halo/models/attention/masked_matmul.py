@@ -1,6 +1,7 @@
 """SDPA's mem-efficient kernel over a boolean mask, one tile of queries over the keys it selected, with a closed-form
 backward, and the local ``sdpa`` override that runs GLM-5 Next's DSA layers on it: their ``[T, T]`` masks at their head
-width keep SDPA on that kernel on Blackwell, whose own backward takes most of a long step, and on cuDNN on Hopper."""
+width keep SDPA on that kernel on Blackwell, whose own backward takes most of a long step, and on Hopper on cuDNN, or
+on that kernel too under the cuDNN SDPA guard."""
 
 from typing import NamedTuple
 
@@ -211,7 +212,7 @@ _GLM5_NEXT_ATTENTION_FUNCTIONS["sdpa"] = masked_matmul_attention
 
 def dsa_matmul_enabled() -> bool:
     """On by default on Blackwell, where stock SDPA takes this head to its mem-efficient kernel. Off by default on
-    Hopper, where stock SDPA took it to cuDNN; under a cuDNN before 9.26 the cuDNN SDPA guard
+    Hopper, where stock SDPA takes it to cuDNN; under a cuDNN before 9.26 the cuDNN SDPA guard
     (``ensure_cudnn_sdpa_off_on_affected_hopper``) leaves it on mem-efficient there too, and ``HALO_DSA_MATMUL=1``
     runs this kernel instead."""
     return env_flag("HALO_DSA_MATMUL", is_blackwell_gpu())

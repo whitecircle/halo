@@ -156,9 +156,8 @@ def ensure_cudnn_sdpa_off_on_affected_hopper() -> bool:
     """Turn off cuDNN SDPA alone (flash and mem-efficient stay on) on Hopper under a cuDNN before 9.26, whose SM90
     backward returns NaN in dQ for a call with an explicit mask at a key length 64 mod 128 once a query row's logsumexp
     is below -ln(FLT_MAX) (:data:`CUDNN_SDPA_HOPPER_ISSUE`). PyTorch's guard (pytorch/pytorch#196861) refuses cuDNN per
-    such call; this one flag takes it off every SDPA call, on the same device and cuDNN bound. Every model load calls
-    it, whatever the attention label: DSA layers, QSA tiles and flex-sliding's fallbacks reach SDPA under others.
-    Blackwell keeps cuDNN. Idempotent; returns whether this call turned it off, which global rank 0 logs."""
+    such call; this one flag takes it off every SDPA call, under any attention label, on the same device and cuDNN
+    bound. Blackwell keeps cuDNN. Idempotent; returns whether this call turned it off, which global rank 0 logs."""
     if not is_hopper_gpu():
         return False
     version = torch.backends.cudnn.version()

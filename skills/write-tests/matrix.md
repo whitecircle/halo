@@ -69,6 +69,7 @@ real checkpoints (gpt-oss, Qwen3-MoE) run EP, EP+TP and ETP against the undistri
       doubt, mark `full`.
 - [ ] A `Ngpu` tag matching `nproc` (`1gpu`/`2gpu`/`4gpu`/`8gpu`).
 - [ ] Capability tags as applicable: `ep cp tp etp pp hsdp vlm lora moe vllm_server sglang_server`.
+- [ ] For a server row, the pass it runs in: `moe`, `gptoss` and `untied_dense` select the `SERVER_TIER` pass.
 - [ ] A model-family tag — the family half of `ALL_MARKERS` in `tests/gpu/manifest.py`.
 - [ ] World-size strictness goes in the **script**, not the manifest:
       `gpu_test_main(exact_world_size=N)` when the body only makes sense at exactly `N` ranks.
