@@ -47,14 +47,14 @@ On the real weights:
 - **Recipe, memory and tok/s:** 20 steps at `ep8` and `max_length` 8,192 run 9,986 tok/s per rank with the optimizer and reduce, at 6.53 s a step, 47.4–47.9 GiB peak allocated and 55–60 GB reserved.
 - **Serving:** vLLM and SGLang each start an untrained export with the cookbook's flags and answered one text prompt. SGLang refuses transformers' native `config.json` at start. Online weight sync stays refused, as for the family.
 
-On 8× H200 (`hopper-1.3.0rc2`), the LoRA, SMPO, DPO and offline GRPO recipes each ran 20 steps at `ep8`. SFT resolves to FA3, and the preference and offline GRPO scripts to SDPA. The LoRA run read the first 24,000 UltraChat rows, SMPO the first 4,096 Tulu-3 rows and DPO the first 2,048. Offline GRPO read 1,400 GSM8K prompts with four completions each, sampled from the release on vLLM and scored with the `accuracy` term. Peak allocated and reserved are rank 0's (`enable_efficiency_metrics`), and the last column is what `nvidia-smi` showed in use across the eight GPUs:
+On 8× H200 (`hopper-1.3.0rc2`), the LoRA, SMPO, DPO and offline GRPO recipes each ran 20 steps at `ep8`. SFT resolves to FA3, and the preference and offline GRPO scripts to SDPA, which the load runs without its cuDNN backend: the image's cuDNN 9.19 predates the fix for Hopper's NaN query gradient, and the start log says `cuDNN SDPA is off` ([cuDNN SDPA guard](../optimization/flash-attention.md#known-issues)). The LoRA run read the first 24,000 UltraChat rows, SMPO the first 4,096 Tulu-3 rows and DPO the first 2,048. Offline GRPO read 1,400 GSM8K prompts with four completions each, sampled from the release on vLLM and scored with the `accuracy` term. Peak allocated and reserved are rank 0's (`enable_efficiency_metrics`), and the last column is what `nvidia-smi` showed in use across the eight GPUs:
 
 | Recipe | Attention | Loss, first → last | tok/s per rank | Peak allocated | Reserved | In use |
 |---|---|---|---|---|---|---|
 | LoRA SFT, 16,384 tokens packed | FA3 | 1.323 → 0.956 | 6,870 | 35.3 GiB | 55.6 GiB | 56–66 GiB |
-| SMPO | SDPA | 3.816 → 1.729 | 1,430 | 47.4 GiB | 58.5 GiB | 53–63 GiB |
-| DPO, precomputed reference | SDPA | 0.693 → 0.604 | 1,879 | 49.8 GiB | 64.4 GiB | 59–89 GiB |
-| Offline GRPO | SDPA | 0.035 → −0.028 | 772 | 42.0 GiB | 44.5 GiB | 45–48 GiB |
+| SMPO | SDPA | 3.784 → 1.722 | 1,667 | 47.4 GiB | 58.6 GiB | 53–63 GiB |
+| DPO, precomputed reference | SDPA | 0.693 → 0.590 | 2,104 | 49.8 GiB | 64.4 GiB | 59–88 GiB |
+| Offline GRPO | SDPA | 0.035 → −0.029 | 1,004 | 42.0 GiB | 44.5 GiB | 44–48 GiB |
 
 Every grad norm was finite. The LoRA run's folded save (6,243 tensors, 63.16 GB) loads in stock transformers as `NemotronHForCausalLM` and generates, at an NLL of 1.205 on 32 UltraChat test rows where the release reads 1.521. The release answers most GSM8K prompts the same way four times, so 1,201 of the 1,400 groups tie and carry no advantage.
 
