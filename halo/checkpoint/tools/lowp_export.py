@@ -158,11 +158,12 @@ def _reject_unexportable_experts(
 
 def _fused_expert_axis(input_dir: str) -> int | None:
     """The contraction axis of this family's fused 3-D experts, or ``None``; the caller then raises if a fused expert
-    shows up, since a guessed axis corrupts every dequantized expert."""
-    for model_type in detect_model_types(input_dir):
-        if spec := find_moe_family_spec(model_type):
-            return spec.fused_contraction_axis
-    return None
+    shows up, since a guessed axis corrupts every dequantized expert. Read off the text tower's type alone, which
+    :func:`detect_model_types` lists first: a composite spelling also wraps dense towers (``mistral3`` over
+    ``ministral3``)."""
+    model_types = detect_model_types(input_dir)
+    spec = find_moe_family_spec(model_types[0]) if model_types else None
+    return spec.fused_contraction_axis if spec is not None else None
 
 
 def _backbone_block_count(input_dir: str, include: re.Pattern, exclude: re.Pattern) -> int:

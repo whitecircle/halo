@@ -566,8 +566,10 @@ model load and the server preflights:
   one (`use_grouped_gemm: false` at `ep_size: 1`): the experts ship in the layout the EP layer's gather
   emits, and the stock tree's fused tensors under module names are dropped by the engine's loader with no
   error; `use_grouped_gemm: true` (the torchrun default) installs the EP layers. A dense checkpoint under a
-  spelling a MoE family claims (`lfm2_vl` over `lfm2`, `mistral3` over `mistral`, `gemma4` with
-  `enable_moe_block: false`): no `use_grouped_gemm` remedy applies, so train it offline. Any MoE with no
+  spelling a MoE family claims (`lfm2_vl` over `lfm2`, `mistral3` over `ministral3` for Ministral 3 and Devstral
+  Small 2 or over `mistral` for Mistral Small 3.x, `gemma4` with `enable_moe_block: false`):
+  `reject_unsyncable_config` refuses it off the config, before the load, as no weight sync into its composite
+  class has been validated and no `use_grouped_gemm` remedy applies, so train it offline. Any MoE with no
   family spec, read off the config's routed-expert count: SGLang's loaders drop its fused experts with a
   `200`, vLLM's take them only where the checkpoint spells `gate_proj`/`up_proj` and drop `w1`/`w3` names,
   and no sync into one has run. Train it offline, or [add the family](../models/adding-a-model.md).

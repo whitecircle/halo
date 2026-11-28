@@ -348,6 +348,9 @@ def _write_config(tmp_path, cfg: dict) -> str:
         ({"model_type": "gpt_oss_vlm", "text_config": {"model_type": "gpt_oss"}}, 1),
         ({"model_type": "qwen3_5_moe"}, -1),
         ({"model_type": "glm4_moe_lite"}, -1),
+        ({"model_type": "mistral3", "text_config": {"model_type": "mistral4"}}, -1),
+        ({"model_type": "mistral3", "text_config": {"model_type": "ministral3"}}, None),
+        ({"model_type": "mistral3", "text_config": {"model_type": "mistral"}}, None),
         ({"model_type": "not_a_registered_family"}, None),
     ],
 )
@@ -395,6 +398,25 @@ def test_an_expert_bank_under_an_undeclared_fused_name_is_refused_before_any_wri
         "with experts out of scope every bank is copied through unchanged"
     )
     assert "model.language_model.layers.0.mlp.gate_proj.weight_packed" in saved
+
+
+def test_a_dense_tower_under_a_moe_spelling_exports_with_experts_in_scope(tmp_path):
+    """Ministral 3's ``mistral3`` composite wraps a dense ``ministral3`` tower, which holds no expert to scope."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    src.mkdir()
+    name = "model.language_model.layers.0.mlp.gate_proj.weight"
+    save_file(
+        {name: torch.randn(64, 64, dtype=torch.bfloat16)},
+        os.path.join(src, "model.safetensors"),
+        metadata={"format": "pt"},
+    )
+    with open(src / "config.json", "w") as f:
+        json.dump({"model_type": "mistral3", "text_config": {"model_type": "ministral3"}}, f)
+
+    lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8")
+    assert "model.language_model.layers.0.mlp.gate_proj.weight_packed" in load_file(
+        os.path.join(out, "model.safetensors")
+    )
 
 
 def test_a_moe_checkpoint_whose_experts_match_nothing_is_refused(tmp_path):

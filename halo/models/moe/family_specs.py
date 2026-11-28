@@ -146,6 +146,7 @@ class MoEFamilySpec:
     # one causal sequence.
     dense_packing_leaks: bool = False
     # Its attention reads a token's row index, not only relative distance, so a left-padded row scores as another row.
+    # A llama-4 query scale is read off the tower's rope parameters instead (:func:`attention_reads_row_positions`).
     attention_reads_row_positions: bool = False
     # The sequence mixer its forward reaches with no segment marker, so it carries every document of a
     # multi-document row into the next on every backend, named for the refusal.
@@ -286,10 +287,11 @@ LFM2 = MoEFamilySpec(
     shared_expert_attrs=("shared_experts",),
 )
 MISTRAL4 = MoEFamilySpec(
-    # The published Mistral-Small-4 checkpoints are composite: ``mistral3`` wrapping a ``mistral4`` text tower.
+    # The published Mistral-Small-4 checkpoints are composite: ``mistral3`` wrapping a ``mistral4`` text tower. The
+    # root spelling stays for the lookups that read it alone (the sharded EP save, merge_ep_shards, the expert-adapter
+    # streaming merge); a dense ``ministral3`` or ``mistral`` tower under it is no Mistral 4.
     model_types=("mistral4", "mistral3"),
     shared_expert_attrs=("shared_experts",),
-    attention_reads_row_positions=True,
 )
 # Gateless experts on a latent, stored per expert; no ``per_expert_keys``, as there is no gate half to name. Both engines
 # parse the release's own config schema (``llm_config``, ``vit_hidden_size``), which transformers absorbs at load.
@@ -412,10 +414,27 @@ def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
     return None
 
 
+def find_moe_family_spec_for_tower(config) -> MoEFamilySpec | None:
+    """The family of ``config``'s text tower alone. A composite spelling (``mistral3``, ``lfm2_vl``,
+    ``cohere2_vision``) also wraps dense towers, which no MoE family's facts describe."""
+    return find_moe_family_spec(getattr(text_config(config), "model_type", None)) if config is not None else None
+
+
+def llama_4_scaling_beta(config) -> float:
+    """The beta of the llama-4 query scale the text tower applies past its ``original_max_position_embeddings``
+    (Mistral 4, Ministral 3), 0 for a tower with none. Read from ``rope_parameters``, per layer type where it is
+    keyed so."""
+    tower = text_config(config) if config is not None else None
+    rope = getattr(tower, "rope_parameters", None) or {}
+    levels = [rope, *(value for value in rope.values() if isinstance(value, dict))]
+    return max((float(level.get("llama_4_scaling_beta") or 0.0) for level in levels), default=0.0)
+
+
 def attention_reads_row_positions(config) -> bool:
-    """Read off the text tower's own type, since the composite ``mistral3`` also wraps a dense ``mistral`` tower."""
-    spec = find_moe_family_spec(getattr(text_config(config), "model_type", None)) if config is not None else None
-    return spec is not None and spec.attention_reads_row_positions
+    """Whether the text tower's attention reads a token's row index: its family says so, or it scales queries by
+    position (a nonzero llama-4 beta). Read off the tower, since a composite also wraps dense towers."""
+    spec = find_moe_family_spec_for_tower(config)
+    return (spec is not None and spec.attention_reads_row_positions) or llama_4_scaling_beta(config) > 0
 
 
 def wraps_experts(config, *, ep_layers_requested: bool) -> bool:
