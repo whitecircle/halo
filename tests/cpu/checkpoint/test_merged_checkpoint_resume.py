@@ -462,9 +462,9 @@ def test_the_merged_save_writes_the_peft_merge_and_no_weight_of_the_run(tmp_path
     assert not any("lora_" in key or "base_layer" in key for key in written), "adapter keys reached the checkpoint"
 
 
-def test_the_merged_save_folds_a_tied_base_weight():
-    """``named_parameters()`` lists the tied tensor under the embedding's name; the fold is keyed by the tensor, so
-    the written weight carries the head's delta."""
+def test_the_merged_save_refuses_a_lora_on_a_tied_head():
+    """``named_parameters()`` lists the tied tensor once, under the embedding's name, so a fold keyed by the tensor
+    would write the head's delta into the input embedding too, which training never computed with."""
     model = _trained_bf16_peft_model(tie_word_embeddings=True, target_modules=("lm_head", "q_proj"))
     tied = model.base_model.model.lm_head.base_layer.weight
     assert tied is model.base_model.model.model.embed_tokens.weight, "premise: the head is tied"
@@ -474,11 +474,9 @@ def test_the_merged_save_folds_a_tied_base_weight():
     original = tied.detach().clone()
 
     with tempfile.TemporaryDirectory() as out_dir:
-        written, expected = _merged_save(model, out_dir)
-
-    key = "model.embed_tokens.weight"
-    assert not torch.equal(expected[key], original), "premise: the head's delta moves the tied weight"
-    assert torch.equal(written[key], expected[key]), "the tied weight was written without the head's delta"
+        with pytest.raises(ValueError, match="tied embedding pair"):
+            saving_mod.save_ep_gathered_checkpoint(_save_context(model), out_dir)
+        assert not os.listdir(out_dir), "a refused save must write nothing"
     assert torch.equal(tied, original), "the save moved the tied base weight"
 
 

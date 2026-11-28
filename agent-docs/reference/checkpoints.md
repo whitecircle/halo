@@ -243,7 +243,8 @@ sentence-transformers loads. A new writer that serializes a training run's confi
 `finalize_exported_config` does not apply it.
 
 Gathered saves also reconcile `tie_word_embeddings`. Tied embeddings can diverge in distributed training
-(independent FSDP2 shards, FLCE training `lm_head` directly), so when the saved `lm_head` and
+(independent FSDP2 shards, FLCE training `lm_head` directly, a `modules_to_save` copy of one half in a merged save,
+whose dropped original leaves the other half its own key), so when the saved `lm_head` and
 `embed_tokens` differ (matched by key suffix), the config is written `tie_word_embeddings: false` on every
 level that declares it (`untie_word_embeddings`) and the trained `lm_head` is honored on reload.
 

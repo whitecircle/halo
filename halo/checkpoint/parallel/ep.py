@@ -74,6 +74,19 @@ def _resolve_and_cast(
     return {key: cast(key, t) for item in items for key, t in gather_full_tensors([item], retain=retain).items()}
 
 
+def _saved_named_params(
+    model: torch.nn.Module, ep_prefixes: tuple[str, ...], remap: Callable[[str], str | None]
+) -> Iterator[tuple[str, torch.nn.Parameter]]:
+    """The non-expert parameters a gathered save writes, each tensor once under its first name ``remap`` keeps. A
+    ``modules_to_save`` original is dropped, so the half of a tied embedding pair it shares a tensor with keeps its key."""
+    seen: set[int] = set()
+    for name, param in model.named_parameters(remove_duplicate=False):
+        if name.startswith(ep_prefixes) or remap(name) is None or id(param) in seen:
+            continue
+        seen.add(id(param))
+        yield name, param
+
+
 def _ep_gathered_chunks(
     model: torch.nn.Module,
     ep_layers: list[tuple[str, torch.nn.Module]],
@@ -92,9 +105,7 @@ def _ep_gathered_chunks(
     ep_prefixes = tuple(f"{path}." for path, _ in ep_layers)
     # One tensor at a time; a folded DTensor's delta is a collective every rank enters.
     params = (
-        (name, lora_folded_data(param, lora_folds))
-        for name, param in model.named_parameters()
-        if not name.startswith(ep_prefixes) and remap(name) is not None
+        (name, lora_folded_data(param, lora_folds)) for name, param in _saved_named_params(model, ep_prefixes, remap)
     )
     state = _resolve_and_cast(params, cast, retain=retain)
     # A modules_to_save copy duplicates its module's buffers, and the frozen `original_module` side must not be saved.

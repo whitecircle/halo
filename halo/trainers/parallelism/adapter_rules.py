@@ -8,7 +8,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.tokenizer_setup import vocabulary_grown
 from halo.models.introspection.unwrapping import find_peft_model
-from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
+from halo.models.peft_adapters import lora_adapted_tied_embeddings, lora_fold_targets, tuner_adapter_param_ids
 
 
 def reject_peft_lora_in_ep_layers(model) -> None:
@@ -133,6 +133,26 @@ def reject_lora_under_tp(model) -> None:
         "  - LoRA with Context Parallelism (CP) and/or pure Expert-TP (ETP) — attention "
         "weights stay unsharded there, so the adapter is replicated and correct\n"
         "  - Full fine-tuning under TP (no adapters)"
+    )
+
+
+def reject_unexportable_tied_embedding_lora(model) -> None:
+    """Refuse a LoRA on either half of a tied embedding pair beside native expert LoRA, whatever
+    ``merge_expert_lora_on_save`` says: no tool exports such an adapter. Structural, so every rank raises alike."""
+    if not model_has_expert_lora(model):
+        return
+    peft_model = find_peft_model(model)
+    lora = lora_adapted_tied_embeddings(peft_model) if peft_model is not None else {}
+    if not lora:
+        return
+    leaves = ", ".join(sorted({path.rpartition(".")[2] for path in lora}))
+    raise ValueError(
+        f"LoRA adapts the {' and '.join(lora.values())} ({', '.join(lora)}) of a tied embedding pair "
+        f"(tie_word_embeddings) beside native expert LoRA: training computes the two halves with different weights, "
+        f"and no tool can export this adapter. The in-memory merge (merge_peft_adapters.py) refuses native expert "
+        f"LoRA, and the streaming merge and the merged save (merge_expert_lora_on_save) refuse a LoRA on a tied half. "
+        f"Remove {leaves} from lora_target_modules, or list {leaves} in lora_modules_to_save with "
+        f"merge_expert_lora_on_save: true, whose merged save writes the pair untied."
     )
 
 

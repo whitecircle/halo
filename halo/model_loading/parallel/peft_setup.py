@@ -25,6 +25,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_polic
 from halo.models.introspection.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
+from halo.models.peft_adapters import adapted_tied_embeddings
 from halo.runtime.consensus import reject_across_ranks, reject_divergent_settings
 
 if TYPE_CHECKING:
@@ -374,12 +375,26 @@ def _peft_module_casting_to_bf16(model):
                 module.to(torch.bfloat16)
 
 
+def _reject_merging_adapted_tied_embeddings(model: PeftModel) -> None:
+    adapted = adapted_tied_embeddings(model)
+    if adapted:
+        raise ValueError(
+            f"The PeftModel passed with a new peft_config holds an adapter on the {' and '.join(adapted.values())} "
+            f"({', '.join(adapted)}) of a tied embedding pair (tie_word_embeddings), which training computed with "
+            f"different weights, and merge_and_unload would fold it into the one tensor both halves share. Merge the "
+            f"held adapter with merge_peft_adapters.py (in memory), which writes the pair untied, and train from that "
+            f"checkpoint, or pass no peft_config to keep training the held adapter."
+        )
+
+
 def build_peft_model(model, peft_config, args, *, merge_existing: bool = True):
     """Wrap ``model`` with ``peft_config``; returns ``(model, casted_to_bf16)``. ``merge_existing=False`` returns a
-    ``PeftModel`` unchanged. The k-bit prep freezes every parameter, so it must precede ``get_peft_model``."""
+    ``PeftModel`` unchanged; otherwise its adapter is merged first, and one splitting a tied embedding pair raises. The
+    k-bit prep freezes every parameter, so it must precede ``get_peft_model``."""
     if isinstance(model, PeftModel):
         if not merge_existing:
             return model, False
+        _reject_merging_adapted_tied_embeddings(model)
         model = model.merge_and_unload()
 
     if is_kbit_quantized(model):

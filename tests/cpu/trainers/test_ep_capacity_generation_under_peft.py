@@ -1,6 +1,7 @@
 #!/usr/bin/env python
-"""The EP capacity generation must keep advancing after PEFT wraps the EP-patched model.
-``PeftModel`` calls ``.forward()``, which runs no pre-hook; frozen, a later longer batch fails in the dedup guard."""
+"""A ``DistributedSFTTrainer`` built over an EP-patched tiny Gemma 4 MoE under PEFT. The EP capacity generation must
+keep advancing after PEFT wraps the model: ``PeftModel`` calls ``.forward()``, which runs no pre-hook, and frozen, a
+later longer batch fails in the dedup guard. Construction refuses native expert LoRA beside a LoRA on a tied half."""
 
 from __future__ import annotations
 
@@ -17,13 +18,18 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4ForCausalLM
 from trl import SFTConfig
 
 from halo.distributed.expert_parallel.deepep.capacity import capacity_scope
+from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 
 _INPUT_IDS = [3, 4, 5, 6]
+# The attention adapters' rank and alpha, which the native expert adapters must share.
+_EXPERT_LORA_SCALE = {"r": EXPERT_LORA_RANK_MULTIPLE, "lora_alpha": 2 * EXPERT_LORA_RANK_MULTIPLE}
+_EXPERT_LORA = ExpertLoraSpec(r=_EXPERT_LORA_SCALE["r"], alpha=_EXPERT_LORA_SCALE["lora_alpha"])
 
 
 def _tokenizer() -> PreTrainedTokenizerFast:
@@ -34,16 +40,18 @@ def _tokenizer() -> PreTrainedTokenizerFast:
     return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="t0", pad_token="t1", eos_token="t2")
 
 
-def _ep_patched_model() -> Gemma4ForCausalLM:
+def _ep_patched_model(expert_lora: ExpertLoraSpec | None = None) -> Gemma4ForCausalLM:
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(Gemma4TextConfig(**TINY_GEMMA4_MOE_CONFIG))
-    apply_ep_layers(model, single_process_ep_config(TINY_GEMMA4_MOE_CONFIG["num_experts"]))
+    apply_ep_layers(model, single_process_ep_config(TINY_GEMMA4_MOE_CONFIG["num_experts"], expert_lora=expert_lora))
     # A zero-patch is only a warning at ep_group_size 1, and nothing below would notice.
     assert [name for name, module in model.named_modules() if isinstance(module, EPMoELayerBase)]
     return model
 
 
-def _trainer(tmp_path, peft_config: LoraConfig | None) -> DistributedSFTTrainer:
+def _trainer(
+    tmp_path, peft_config: LoraConfig | None, expert_lora: ExpertLoraSpec | None = None, **parallelism
+) -> DistributedSFTTrainer:
     args = SFTConfig(
         output_dir=str(tmp_path),
         use_cpu=True,
@@ -60,11 +68,13 @@ def _trainer(tmp_path, peft_config: LoraConfig | None) -> DistributedSFTTrainer:
         report_to="none",
     )
     return DistributedSFTTrainer(
-        model=_ep_patched_model(),
+        model=_ep_patched_model(expert_lora),
         args=args,
         train_dataset=Dataset.from_dict({"input_ids": [_INPUT_IDS] * 2, "labels": [_INPUT_IDS] * 2}),
         processing_class=_tokenizer(),
-        parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1),
+        parallelism_config=make_parallelism_config(
+            world_size=1, gpus_per_node=1, expert_lora=expert_lora, **parallelism
+        ),
         peft_config=peft_config,
         moe_balancing="none",
     )
@@ -99,6 +109,27 @@ def test_the_same_run_without_an_adapter_advances_it_exactly_once_per_forward(tm
 
     assert not isinstance(trainer.model, PeftModel)
     assert _generation_delta(trainer.model_wrapped, forwards=2) == 2
+
+
+@pytest.mark.parametrize("merge_expert_lora_on_save", [False, True], ids=["adapter-save", "merged-save"])
+def test_construction_refuses_a_head_lora_on_a_tied_pair_beside_expert_lora(tmp_path, merge_expert_lora_on_save):
+    """With merge_expert_lora_on_save the merged-save gate would refuse it too, naming no export path."""
+    model = _ep_patched_model()
+    assert model.get_input_embeddings().weight is model.get_output_embeddings().weight, "premise: the pair is tied"
+    head_lora = LoraConfig(**_EXPERT_LORA_SCALE, target_modules=["q_proj", "lm_head"], task_type="CAUSAL_LM")
+
+    with pytest.raises(ValueError, match="no tool can export"):
+        _trainer(tmp_path, head_lora, _EXPERT_LORA, merge_expert_lora_on_save=merge_expert_lora_on_save)
+
+
+def test_construction_takes_the_head_as_a_full_copy_under_the_merged_save(tmp_path):
+    full_copy = LoraConfig(
+        **_EXPERT_LORA_SCALE, target_modules=["q_proj"], modules_to_save=["lm_head"], task_type="CAUSAL_LM"
+    )
+
+    trainer = _trainer(tmp_path, full_copy, _EXPERT_LORA, merge_expert_lora_on_save=True)
+
+    assert isinstance(trainer.model, PeftModel)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,7 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.hub_layout import CheckpointNamespace
 from halo.checkpoint.reading import (
+    StreamingCheckpointReader,
     checkpoint_shard_files,
     detect_model_type,
     iter_checkpoint_shard_entries,
@@ -59,6 +60,8 @@ from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, 
 from halo.model_loading.model_preparation import resolve_auto_model_class, resolve_build_config
 from halo.model_loading.tokenizer_setup import load_processing_class
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, is_sink_key, neutralized_sink_value
+from halo.models.introspection.config_access import ties_word_embeddings
+from halo.models.introspection.module_tree import embedding_module, find_module_path
 from halo.models.introspection.unwrapping import PEFT_BASE_MODEL_PREFIX, plain_module_name
 from halo.models.moe.balancing import BALANCING_BIASES_ATTR
 from halo.models.moe.expert_layout import (
@@ -271,11 +274,15 @@ class _MergePlan:
 
 
 def _unmergeable_remedy(holds_expert_lora: bool) -> str:
-    """Where an adapter the streaming merge refuses folds instead; the in-memory merge drops native expert deltas."""
+    """Where an adapter the streaming merge refuses folds instead. The in-memory merge writes a tied embedding pair
+    untied but drops native expert deltas, and ``merge_expert_lora_on_save`` refuses a LoRA on either half of the
+    pair."""
     if holds_expert_lora:
         return (
             "an adapter holding native expert LoRA has no in-memory merge, which would drop its expert deltas: train "
-            "with merge_expert_lora_on_save: true, whose gathered save folds both halves"
+            "with merge_expert_lora_on_save: true, whose gathered save folds both halves and writes a tied embedding "
+            "pair untied. That flag refuses a LoRA on either half of a tied pair, so list such a half in "
+            "lora_modules_to_save instead of lora_target_modules, or leave it out"
         )
     return "a dense adapter merges in memory with merge_peft_adapters.py without --streaming"
 
@@ -373,14 +380,47 @@ def _release_slot_dtypes(layers: dict[str, _ExpertLayer], base: dict[str, _Store
     return {key: stored.dtype for key, stored in base.items() if key.rpartition(".")[2] in stems}
 
 
-def _stored_keys_by_live_name(
+class _LiveNames(NamedTuple):
+    """The base's module-tree tensor names: the key each is stored under, and those sharing one tensor (a tied pair)."""
+
+    stored: dict[str, str]
+    tied: frozenset[str]
+
+
+def _stored_tensors_equal(base_dir: str, first: str, second: str) -> bool:
+    with StreamingCheckpointReader(base_dir, (first, second)) as reader:
+        a, b = reader.get(first), reader.get(second)
+    return a.shape == b.shape and torch.equal(a, b)
+
+
+def _tied_names(shell: torch.nn.Module, config, stored: dict[str, str], base_dir: str) -> frozenset[str]:
+    """The weight names of ``shell``'s input embedding and output head where the load ties the pair, as
+    ``from_pretrained`` decides: ``config`` ties it, and the base does not store each half under a key of its own with
+    different values. Read off the config and the stored values, as a shell built on the meta device holds the pair as
+    two tensors."""
+    head = embedding_module(shell, "output")
+    if head is None or not ties_word_embeddings(config):
+        return frozenset()
+    embedding = embedding_module(shell, "input")
+    if embedding is None:
+        return frozenset()
+    names = frozenset(f"{find_module_path(shell, module)}.weight" for module in (embedding, head))
+    keys = sorted({stored[name] for name in names if name in stored})
+    if len(keys) == 2 and not _stored_tensors_equal(base_dir, *keys):
+        return frozenset()
+    return names
+
+
+def _live_names(
     base_dir: str, base_keys: Collection[str], required: Collection[str], trust_remote_code: bool, remedy: str
-) -> dict[str, str]:
+) -> _LiveNames:
     """Each tensor name of the base's module tree → the key ``base_dir`` stores it under, planned as ``from_pretrained``
-    renames the checkpoint onto the config's widest class, built without weights. A name the load fuses or splits out
-    of other keys, or that no stored key supplies, has no entry. Raises for a remote-code config (an ``auto_map``)
-    under ``trust_remote_code=False``. A class the meta device cannot build maps every stored key to itself when the
-    base stores each ``required`` name verbatim, and raises naming ``remedy`` otherwise."""
+    renames the checkpoint onto the config's widest class, built without weights, and the names its tied tensors take.
+    A name the load fuses or splits out of other keys, or that no stored key supplies, has no entry. Raises for a
+    remote-code config (an ``auto_map``) under ``trust_remote_code=False``. A class the meta device cannot build maps
+    every stored key to itself when the base stores each ``required`` name verbatim; it raises naming ``remedy`` where
+    the config ties the embedding pair and ``required`` is not empty, since no shell shows which tensors the tie joins,
+    and where one is missing."""
     try:
         config = resolve_build_config(base_dir, revision=None, trust_remote_code=trust_remote_code)
     except (ValueError, StrictDataclassError) as e:
@@ -397,16 +437,23 @@ def _stored_keys_by_live_name(
             base_dir, resolve_auto_model_class(config), config, trust_remote_code=trust_remote_code, config_only=True
         )
     except MetaShellBuildError as e:
+        if required and ties_word_embeddings(config):
+            raise ValueError(
+                f"{e} The base's config ties its input embedding to its output head (tie_word_embeddings), and without "
+                f"the shell the streaming merge cannot tell whether the {len(required)} tensor(s) the adapter rewrites "
+                f"include a half of that pair, which it would write as one weight for both; {remedy}."
+            ) from e
         if not set(required) <= set(base_keys):
             raise ValueError(
                 f"{e} The streaming merge reads the base's module names off this shell to find the key each adapter "
                 f"target is stored under; {remedy}."
             ) from e
         logger.warning(f"{e} The base stores every tensor the adapter rewrites under its module path; folding there.")
-        return {key: key for key in base_keys}
+        return _LiveNames({key: key for key in base_keys}, frozenset())
     namespace = CheckpointNamespace.of(shell)
     plan = build_key_plan(base_keys, shell.state_dict(), namespace.conversions, namespace.base_model_prefix)
-    return plan.live_renames()
+    stored = plan.live_renames()
+    return _LiveNames(stored, _tied_names(shell, config, stored, base_dir))
 
 
 def _read_balancing_sidecar(adapter_dir: str) -> dict[str, torch.Tensor]:
@@ -491,11 +538,18 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
     base = _base_tensors(base_dir)
     base_shapes = {key: stored.shape for key, stored in base.items()}
     remedy = _unmergeable_remedy(bool(experts))
-    stored = (
-        _stored_keys_by_live_name(base_dir, base_shapes, by_live_name, trust_remote_code, remedy)
+    stored, tied = (
+        _live_names(base_dir, base_shapes, by_live_name, trust_remote_code, remedy)
         if by_live_name or sidecar
-        else {}
+        else _LiveNames({}, frozenset())
     )
+    tied_rewrites = sorted(tied & set(by_live_name))
+    if tied_rewrites:
+        raise ValueError(
+            f"The adapter at {adapter_dir} rewrites {tied_rewrites}, which the base at {base_dir} ties to another "
+            f"tensor (tie_word_embeddings): the run computed the two with different weights, and the streaming merge, "
+            f"which keeps the base's keys and config, would write one weight for both; {remedy}."
+        )
     neutralizes_sinks = _has_neutralized_sinks(adapter_dir)
     sinks = {key for key in base if is_sink_key(key)} if neutralizes_sinks else set()
     rewritten = {stored[name] for name in by_live_name if name in stored} | (set(by_key) & set(base)) | sinks
@@ -506,10 +560,9 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
         raise ValueError(
             f"The adapter at {adapter_dir} rewrites {len(absent)} tensor(s) the base at {base_dir} does not store "
             f"under a key of their own (e.g. {absent[:3]}): its load fuses or splits them out of other keys, its "
-            f"class builds no such module (a text-only class's keys), they are tied to another tensor (a tied head), "
-            f"its hub layout respells an expert layer's path, or the adapter belongs to another base. The streaming "
-            f"merge folds a module's tensor under the key the base's load reads it from and an expert tensor under "
-            f"its layer's module path; {remedy}."
+            f"class builds no such module (a text-only class's keys), its hub layout respells an expert layer's path, "
+            f"or the adapter belongs to another base. The streaming merge folds a module's tensor under the key the "
+            f"base's load reads it from and an expert tensor under its layer's module path; {remedy}."
         )
     folds = {stored[name]: fold for name, fold in by_live_name.items()}
     folds.update(_balancing_folds(sidecar, spec, stored, base_shapes, remedy))

@@ -367,6 +367,38 @@ def test_an_expert_adapter_the_stream_cannot_fold_is_sent_to_the_merge_on_save(t
     assert not out.exists(), "a refused merge left an output directory behind"
 
 
+@pytest.mark.parametrize(
+    ("target", "refusal_match"),
+    [("lm_head", "ties to another tensor"), ("embed_tokens", "does not fold")],
+    ids=["head", "embedding"],
+)
+def test_an_expert_adapter_with_a_lora_on_a_tied_half_is_sent_to_a_full_copy_under_the_merge_on_save(
+    tmp_path, target, refusal_match
+):
+    """The in-memory merge would drop the expert deltas, and merge_expert_lora_on_save refuses a LoRA on a tied half,
+    so the remedy is a run that trains the half as a full copy."""
+    torch.manual_seed(0)
+    spec = ExpertLoraSpec(r=EXPERT_LORA_RANK_MULTIPLE, alpha=2 * EXPERT_LORA_RANK_MULTIPLE)
+    model = tiny_family_model(TINY_MOE_FAMILIES["lfm2_moe"]).to(torch.bfloat16)
+    assert model.get_input_embeddings().weight is model.get_output_embeddings().weight, "premise: the family ties"
+    model = apply_ep_layers(model, single_process_ep_config(expert_lora=spec))
+    run = make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=spec)
+    base, adapter, out = (tmp_path / name for name in ("base", "adapter", "out"))
+    save_ep_gathered_checkpoint(save_context(model, run, has_ep_layers=True), str(base))
+    model.name_or_path = str(base)
+    peft_model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=[target], task_type="CAUSAL_LM"))
+    _randomize_lora_b(peft_model)
+    mixed_run = {"has_ep_layers": True, "has_expert_lora": True, "training_checkpoint": True}
+    save_peft_adapters(save_context(peft_model, run, **mixed_run), str(adapter))
+
+    with pytest.raises(ValueError, match=refusal_match) as refusal:
+        merge_peft_adapter(str(adapter), str(out), verbose=False)
+    message = str(refusal.value)
+    assert "lora_modules_to_save" in message and "merge_expert_lora_on_save: true" in message, message
+    assert "without --streaming" not in message, message
+    assert not out.exists(), "a refused merge left an output directory behind"
+
+
 def _write_balancing_sidecar(
     model, adapter_dir: Path, prefix: str = PEFT_BASE_MODEL_PREFIX
 ) -> dict[str, torch.Tensor]:

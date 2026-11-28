@@ -359,11 +359,51 @@ local shard of the largest adapted tensor (a full copy on one device) to the syn
 the fold does not cover (LoRA on `nn.MultiheadAttention`, trainable tokens, quantized LoRA, a variant
 other than DoRA, a grouped conv) is refused when the trainer is built, and so is a PEFT adapter on a
 tensor the sync's dense push does not send (an EP layer's expert weights, which take native expert LoRA),
-since only that push folds PEFT adapters. Each sync checks again: the layers before it streams, the
+since only that push folds PEFT adapters, and a LoRA on either half of a tied embedding pair
+([Tied embedding pairs](#tied-embedding-pairs)). Each sync checks again: the layers before it streams, the
 targets as its dense push ends.
 
 Both trainers share this path (`gather_and_send_weights` in `halo/trainers/grpo/rollout/weight_push.py`),
 which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all ranks under FSDP2.
+
+## Tied embedding pairs
+
+Some models tie their output head to their input embedding (`tie_word_embeddings: true`), Qwen3-0.6B and Gemma 4
+among them. On such a model an adapter on `lm_head` or `embed_tokens` makes training compute the two halves with
+different weights. A LoRA on the head computes the input with `W` and the head with `W + s·B·A`; a
+`modules_to_save` copy of one half replaces only that half. Training, saving and resuming such a run work as for
+any adapter. The shared tensor matters where the trained policy is written out as one model:
+
+- The in-memory merge (`merge_peft_adapters.py`) writes the policy untied. It gives the head its own copy of `W`
+  before the fold, writes `tie_word_embeddings: false` on every config level that declares it, saves both tensors
+  and logs that it did so. The merged checkpoint reloads in transformers with the trained logits. An adapter that
+  leaves the pair alone merges tied, and so does PEFT's `ensure_weight_tying`, which hands both halves one
+  `modules_to_save` copy.
+- The weight sync of online and async GRPO refuses any adapter on either half at construction, a `modules_to_save`
+  copy included, since a server launched from the checkpoint holds the pair as one tensor
+  ([Rollout Servers → Construction gates](../infrastructure/rollout-servers.md#construction-gates)).
+- The out-of-place fold (`lora_fold_targets`) refuses a LoRA on either half, since it writes the shared tensor once
+  and both halves would carry the delta, so neither the merged save nor the weight sync writes such an adapter. A
+  `modules_to_save` copy of either half needs no fold: the merged save writes each half under its own key and writes
+  the config untied ([Checkpoints](../reference/checkpoints.md#exported-configjson)).
+- The [streaming merge](#streaming-merge) refuses an adapter on either half, since it keeps the base's key set and
+  config. It reads the tie as `from_pretrained` does: the config ties the pair, and the base does not store both
+  halves under keys of their own with different values. A config that says tied over two different stored tensors
+  loads untied, and an adapter on either half merges there. Where the meta device cannot build the base's class, no
+  shell shows which tensors the tie joins, so over a config that ties the pair the merge refuses any adapter that
+  rewrites a dense tensor. A dense adapter merges in memory instead.
+- A run with native expert LoRA and a LoRA on either half has no export at all: the in-memory merge refuses expert
+  LoRA, and the streaming merge and the merged save refuse the LoRA on the tied half. Construction refuses it,
+  whatever `merge_expert_lora_on_save` says (`reject_unexportable_tied_embedding_lora`). Such a run takes the half as
+  a full copy (`lora_modules_to_save: [lm_head]`) with `merge_expert_lora_on_save: true`, whose merged save writes
+  the pair untied, or leaves it out.
+- SMPO, offline GRPO and teacher distillation, handed a `PeftModel` together with a new `peft_config`, merge the
+  held adapter before the new wrap (`build_peft_model`). A held adapter on either half, a `modules_to_save` copy
+  included, raises there, since `merge_and_unload` would fold it into the shared tensor: merge it with
+  `merge_peft_adapters.py` first, which writes the pair untied, and train from that checkpoint, or pass no
+  `peft_config` to keep training it.
+- vLLM's LFM2 and LFM2-MoE classes tie the pair whatever the config says, so they serve an untied LFM2 export with
+  its input embedding as the head.
 
 ## Embedding models
 
@@ -558,7 +598,7 @@ as `from_pretrained` renames it, planned on a weightless shell of the class the 
 hub layout spells another way folds into its hub key (GLM-5 Next's `forget_gate.f_a_proj`, stored as `f_a_proj`;
 Laguna's `gate.e_score_correction_bias`, stored as `experts.e_score_correction_bias`). Where the meta device cannot
 build that class (Ling-3.0's remote code on the hub's `rope_scaling: null`), each tensor folds under the key spelling
-its module path, provided the base stores every one so. Expert tensors are matched under the layer's module path.
+its module path, provided the base stores every one so and its config ties no embedding pair. Expert tensors are matched under the layer's module path.
 Tensors keep the base's stored dtype and key spelling, balancing slots aside, so `--dtype` is ignored (logged) and
 `--device_map`, `--fp32_norms` and `--task classification` are refused. The shell's class comes from the base's
 config, so a remote-code base needs `--trust_remote_code`, off by default for an adapter on a Hub base.
@@ -566,7 +606,9 @@ config, so a remote-code base needs `--trust_remote_code`, off by default for an
 The tool resolves everything it rewrites against the base before the first write and raises, with no output, on:
 
 - a tensor with no stored key of its own: a `text_only_model` adapter over a multimodal base, a tensor the load fuses
-  or splits out of other keys, a tied head, a module path the base respells when the shell cannot be built;
+  or splits out of other keys, a module path the base respells when the shell cannot be built;
+- a LoRA or a `modules_to_save` tensor on either half of a tied embedding pair, and any dense rewrite of a base
+  whose config ties the pair when the shell cannot be built ([Tied embedding pairs](#tied-embedding-pairs));
 - expert tensors of a family whose hub layout respells the layer path: DeepSeek-V4, Nemotron-H, Step-3.7 Flash and
   the multimodal classes of Inkling and Mistral Small 4;
 - base experts outside the family's export layout, or a stored tensor the run resized (a grown vocabulary);

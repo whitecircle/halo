@@ -1,18 +1,26 @@
 #!/usr/bin/env python
 """The weight sync folds each LoRA layer out of place into exactly what PEFT's merge would write.
-The frozen base is never written; a layer the fold cannot reproduce, or a target the dense push skips, is refused."""
+The frozen base is never written; a layer the fold cannot reproduce, a target the dense push skips, or a LoRA on a tied
+embedding pair is refused."""
 
 import copy
 
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
+from peft.tuners.lora.layer import LoraLayer
 from torch import nn
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor, Shard, distribute_tensor
+from transformers import CLIPConfig, CLIPModel, Wav2Vec2Config, Wav2Vec2Model
 
 from halo.distributed.lora_fold import lora_folded_data
-from halo.models.peft_adapters import lora_fold_targets, lora_folded
+from halo.models.peft_adapters import (
+    adapted_tied_embeddings,
+    lora_adapted_tied_embeddings,
+    lora_fold_targets,
+    lora_folded,
+)
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, reject_unsyncable_model
 from tests.common.adapters import adapter_param_items, randomize_adapters
 from tests.common.ep_stubs import ReadyGatherMixin, StubEPLayerBase
@@ -42,6 +50,25 @@ class _Net(nn.Module):
         self.lm_head = nn.Linear(_DIM, _VOCAB, bias=False)
         if tied:
             self.lm_head.weight = self.embed_tokens.weight
+
+    def get_input_embeddings(self) -> nn.Module:
+        return self.embed_tokens
+
+    def get_output_embeddings(self) -> nn.Module:
+        return self.lm_head
+
+    def forward(self, x):  # pragma: no cover - never called
+        return x
+
+
+class _SharedWeightNet(nn.Module):
+    """Two projections holding one weight, a tie that is not the embedding pair."""
+
+    def __init__(self):
+        super().__init__()
+        self.proj = nn.Linear(_DIM, _DIM, bias=False)
+        self.twin = nn.Linear(_DIM, _DIM, bias=False)
+        self.twin.weight = self.proj.weight
 
     def forward(self, x):  # pragma: no cover - never called
         return x
@@ -102,8 +129,11 @@ _CASES = {
     "conv2d_kernel": (_Net, {"target_modules": ["conv2d"]}),
     "conv3d": (_Net, {"target_modules": ["conv3d"]}),
     "conv3d_dora": (_Net, {"target_modules": ["conv3d"], "use_dora": True}),
-    "tied_head": (lambda: _Net(tied=True), {"target_modules": ["lm_head", "proj"]}),
-    "tied_both": (lambda: _Net(tied=True), {"target_modules": ["embed_tokens", "lm_head"]}),
+    "head": (_Net, {"target_modules": ["lm_head"]}),
+    "tied_pair_untouched": (lambda: _Net(tied=True), {"target_modules": ["proj"]}),
+    # Both layers fold into the one tensor, which named_parameters() lists under the first owner's name alone.
+    "shared_weight": (_SharedWeightNet, {"target_modules": ["proj", "twin"]}),
+    "shared_weight_second_owner": (_SharedWeightNet, {"target_modules": ["twin"]}),
     "two_adapters": (_Net, {"target_modules": ["proj", "embed_tokens"]}),
     "param_wrapper": (_MoeNet, {"target_modules": [], "target_parameters": ["experts.gate_up_proj"]}),
 }
@@ -167,7 +197,8 @@ def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
 
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_the_push_carries_the_peft_merge(case):
-    """Each forwarded tensor is what PEFT's merge holds under that name; a tied head's delta rides on the embedding."""
+    """Each forwarded tensor is what PEFT's merge holds under that name; a tied pair untouched by the adapters goes
+    once, under the embedding's name."""
     model = _lora_model(case, _DTYPES["bf16"])
     expected = as_pushed(model, merged_by_peft(model))
     before = local_parameters(model)
@@ -184,6 +215,132 @@ def test_the_push_carries_the_peft_merge(case):
     wrong = sorted(name for name, value in pushed.items() if not torch.equal(value, expected[name]))
     assert not wrong, f"pushed tensors differ from PEFT's merge: {wrong}"
     assert not moved_parameters(before, local_parameters(model)), "the push wrote the model's own weights"
+
+
+@pytest.mark.parametrize(
+    ("targets", "roles"),
+    [
+        (["lm_head", "proj"], {"output head"}),
+        (["embed_tokens"], {"input embedding"}),
+        (["embed_tokens", "lm_head"], {"input embedding", "output head"}),
+    ],
+    ids=["head", "embedding", "both"],
+)
+def test_a_lora_on_a_tied_embedding_pair_is_refused(targets, roles):
+    """Training adds the delta to one half; folded into the one shared tensor, the push would serve it on both."""
+    model = get_peft_model(_Net(tied=True), LoraConfig(r=4, lora_alpha=8, target_modules=targets))
+    randomize_adapters(model, std=0.1)
+    assert set(lora_adapted_tied_embeddings(model).values()) == roles
+    with pytest.raises(ValueError, match="tied embedding pair") as refusal:
+        lora_fold_targets(model)
+    # It fires under the weight sync and merge_expert_lora_on_save, where the in-memory merge is no remedy.
+    assert "lora_modules_to_save" in str(refusal.value) and "merge_peft_adapters" not in str(refusal.value)
+    with pytest.raises(ValueError, match="tied embedding pair"):
+        reject_unsyncable_model(model, "vllm")
+    sender = RecordingSender()
+    with pytest.raises(ValueError, match="tied embedding pair"):
+        gather_and_send_weights(model, sender)
+    assert not sender.params, "a refused push must send nothing"
+
+
+def test_a_full_copy_of_a_tied_half_is_no_lora_to_fold():
+    """A ``modules_to_save`` copy splits the pair too, but holds no delta for the fold to misplace."""
+    config = LoraConfig(r=4, lora_alpha=8, target_modules=["proj"], modules_to_save=["lm_head"])
+    model = get_peft_model(_Net(tied=True), config)
+
+    assert list(adapted_tied_embeddings(model).values()) == ["output head"]
+    assert lora_adapted_tied_embeddings(model) == {}
+    lora_fold_targets(model)
+
+
+def test_an_untied_head_lora_reaches_the_head_alone():
+    """The delta rides on ``lm_head`` and the input embedding goes out as the frozen base."""
+    model = _lora_model("head", _DTYPES["fp32"])
+    sender = RecordingSender(keep_values=True)
+    gather_and_send_weights(model, sender)
+    pushed = {param.name: param.value for param in sender.params}
+    base = model.get_base_model()
+    assert torch.equal(pushed["embed_tokens.weight"], base.embed_tokens.weight)
+    delta = base.lm_head.get_delta_weight("default")
+    assert torch.equal(pushed["lm_head.weight"], base.lm_head.base_layer.weight + delta)
+
+
+def test_a_weight_two_modules_share_folds_both_owners_deltas():
+    model = _lora_model("shared_weight", _DTYPES["fp32"])
+    base = model.get_base_model()
+    shared = base.proj.base_layer.weight
+    assert shared is base.twin.base_layer.weight, "premise: the projections share one weight"
+
+    targets = lora_fold_targets(model)
+    folded = lora_folded(shared, targets[id(shared)])
+
+    deltas = [base.proj.get_delta_weight("default"), base.twin.get_delta_weight("default")]
+    assert all(delta.abs().max() > 0 for delta in deltas), "premise: both adapters move the weight"
+    assert torch.equal(folded, shared + deltas[0] + deltas[1]), "the fold missed one owner's delta"
+    sender = RecordingSender(keep_values=True)
+    gather_and_send_weights(model, sender)
+    pushed = {param.name: param.value for param in sender.params}
+    assert torch.equal(pushed["proj.weight"], folded)
+
+
+@pytest.mark.parametrize("state", ["inactive", "merged"])
+def test_a_head_lora_that_leaves_a_tied_pair_one_weight_is_not_refused(state):
+    """An inactive adapter adds no delta, and a merged one already sits in the shared tensor both halves read."""
+    model = get_peft_model(_Net(tied=True), LoraConfig(r=4, lora_alpha=8, target_modules=["proj"]))
+    model.add_adapter("head", LoraConfig(r=4, lora_alpha=8, target_modules=["lm_head"]))
+    randomize_adapters(model, std=0.1)
+    if state == "merged":
+        model.base_model.set_adapter(["default", "head"])
+        model.merge_adapter()
+    head = model.get_base_model().lm_head
+    assert isinstance(head, LoraLayer) and "head" in head.lora_A, "premise: the head carries the adapter"
+
+    assert adapted_tied_embeddings(model) == {}
+    assert lora_adapted_tied_embeddings(model) == {}
+    lora_fold_targets(model)
+    reject_unsyncable_model(model, "vllm")
+
+
+def _tiny_clip() -> nn.Module:
+    tower = {"hidden_size": _DIM, "num_hidden_layers": 1, "num_attention_heads": 2, "intermediate_size": 2 * _DIM}
+    return CLIPModel(
+        CLIPConfig(
+            text_config={"vocab_size": _VOCAB, "max_position_embeddings": 8, **tower},
+            vision_config={"image_size": 8, "patch_size": 4, **tower},
+            projection_dim=_DIM,
+        )
+    )
+
+
+def _tiny_wav2vec2() -> nn.Module:
+    return Wav2Vec2Model(
+        Wav2Vec2Config(
+            hidden_size=_DIM,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=2 * _DIM,
+            conv_dim=(8,),
+            conv_stride=(2,),
+            conv_kernel=(3,),
+            num_conv_pos_embeddings=4,
+            num_conv_pos_embedding_groups=2,
+        )
+    )
+
+
+@pytest.mark.parametrize("build", [_tiny_clip, _tiny_wav2vec2], ids=["clip", "wav2vec2"])
+@pytest.mark.parametrize("adapted", [False, True], ids=["bare", "lora"])
+def test_a_model_with_no_resolvable_input_embedding_has_no_tied_pair(build, adapted):
+    """transformers raises from get_input_embeddings here and answers None for the head, so there is no pair to read."""
+    model = build()
+    with pytest.raises(NotImplementedError):
+        model.get_input_embeddings()
+    if adapted:
+        model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj"]))
+        randomize_adapters(model, std=0.1)
+
+    assert adapted_tied_embeddings(model) == {}
+    assert bool(lora_fold_targets(model)) is adapted
 
 
 class _Attention(nn.Module):
