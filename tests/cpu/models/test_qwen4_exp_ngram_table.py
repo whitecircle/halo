@@ -280,9 +280,10 @@ def test_a_random_init_policy_load_is_refused_before_the_build(checkpoint, monke
             dtype=torch.float32,
             trust_remote_code=False,
             init_from_scratch=init_from_scratch,
+            init_seed=0 if init_from_scratch else None,
         )
 
-    with pytest.raises(ValueError, match="init_from_scratch"):
+    with pytest.raises(ValueError, match="its external tables are frozen"):
         load(init_from_scratch=True)
     assert builds == [], "the refusal came after the build"
     with pytest.raises(_Built):

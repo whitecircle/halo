@@ -2,6 +2,7 @@
 - every family's tensors are all drawn, constants exactly as ``from_config`` sets them and random ones from the same
   distribution,
 - the draw depends only on the seed and the model, not on the global random state, which it leaves as it found it,
+  DeepSeek-V4's routing table included,
 - an expert drawn alone, as a rank holding a slice of the bank will draw it, equals its slice of the whole draw,
 - no expert or layer starts as a copy of another,
 - a tied pair is drawn once, by the embedding, as ``from_config`` leaves it,
@@ -71,8 +72,10 @@ def _from_config(name: str) -> nn.Module:
 
 
 def _state_hash(model: nn.Module) -> str:
+    """Over the state dict and every buffer, as DeepSeek-V4's ``tid2eid`` table is a buffer the draw writes."""
+    tensors = {**dict(model.named_buffers()), **model.state_dict()}
     digest = hashlib.sha256()
-    for key, tensor in sorted(model.state_dict().items()):
+    for key, tensor in sorted(tensors.items()):
         digest.update(key.encode())
         digest.update(tensor.detach().to(torch.float32).contiguous().numpy().tobytes())
     return digest.hexdigest()
@@ -145,20 +148,24 @@ def test_a_norm_the_family_init_skips_takes_the_default_init(monkeypatch):
     assert norms and all(torch.equal(p, torch.ones_like(p)) for p in norms.values())
 
 
-def _keyed_from(config, seed: int = SEED) -> nn.Module:
-    family = FAMILIES["qwen3_moe"]
-    return build_keyed_model(family.load_class, config, torch.float32, seed=seed, trust_remote_code=False)
+def _keyed_from(config, seed: int = SEED, name: str = "qwen3_moe") -> nn.Module:
+    family = FAMILIES[name]
+    return build_keyed_model(
+        family.load_class, config, torch.float32, seed=seed, trust_remote_code=family.trust_remote_code
+    )
 
 
-def test_the_draw_ignores_the_global_random_state_and_leaves_it_as_it_was():
-    config = _config("qwen3_moe")
+@pytest.mark.parametrize("name", ["qwen3_moe", "deepseek_v4"])
+def test_the_draw_ignores_the_global_random_state_and_leaves_it_as_it_was(name):
+    """DeepSeek-V4 holds its routing table to its key as well, which ``_init_weights`` never draws."""
+    config = _config(name)
     torch.manual_seed(0)
     before = torch.random.get_rng_state()
-    first = _state_hash(_keyed_from(config))
+    first = _state_hash(_keyed_from(config, name=name))
     assert torch.equal(torch.random.get_rng_state(), before), "the build moved the global CPU generator"
     torch.manual_seed(99)
     torch.rand(1000)
-    assert _state_hash(_keyed_from(config)) == first
+    assert _state_hash(_keyed_from(config, name=name)) == first
 
 
 def test_another_seed_draws_every_random_tensor_anew():
