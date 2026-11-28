@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Inkling 2 adapters saved on Halo 1.3.0rc2, which shipped transformers 5.23: their keys name the attention linears
 5.24 moved inside projection modules. Each tool that reads a saved adapter refuses one by name, and the engine export
-refuses any name the base's checkpoint does not hold."""
+refuses any hub spelling the base's checkpoint stores no tensor under."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from safetensors.torch import load_file, save_file
 
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.parallel.adapters import restore_adapters, save_peft_adapters
+from halo.checkpoint.reading import checkpoint_module_paths
 from halo.checkpoint.tools.adapter_merge import load_base_for_adapter
 from halo.checkpoint.tools.adapter_stream_merge import merge_adapter_streaming
 from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
@@ -21,10 +22,10 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.entrypoints.engine_adapter_export import export_engine_adapter
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.moe.family_specs import INKLING2_PRE_524_ATTENTION_NAMES, inkling2_pre_524_adapter_reason
-from halo.trainers.grpo.rollout.adapter_sync import hub_spellings_absent_from_base
+from halo.trainers.grpo.rollout.adapter_sync import hub_spellings_absent_from_checkpoint
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
-from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 _RANK = EXPERT_LORA_RANK_MULTIPLE
 _SPEC = ExpertLoraSpec(r=_RANK, alpha=2 * _RANK)
@@ -82,6 +83,17 @@ def test_the_reason_names_an_inkling2_adapter_of_the_523_layout_alone():
     assert inkling2_pre_524_adapter_reason("inkling2", [f"{_LAYER}.o_proj.linear"]) is None
     assert inkling2_pre_524_adapter_reason("inkling2", ["model.language_model.layers.0.mlp.gate_proj"]) is None
     assert inkling2_pre_524_adapter_reason("qwen3_moe", [f"{_LAYER}.o_proj"]) is None
+    assert inkling2_pre_524_adapter_reason("inkling2", [f"base_model.model.{_LAYER}.o_proj"])
+    assert inkling2_pre_524_adapter_reason("inkling2_text", ["model.layers.0.self_attn.q_proj"])
+
+
+def test_the_vision_towers_attention_linears_are_not_the_523_layout():
+    """The vision tower's ``self_attn.{q,k,v}_proj`` are plain linears on 5.24 as on 5.23: a 5.24 adapter on the text
+    attention and the vision tower is no rc2 adapter."""
+    vision = "model.vision_tower.layers.0.self_attn"
+    assert inkling2_pre_524_adapter_reason("inkling2", [f"{vision}.{name}" for name in ("q_proj", "k_proj")]) is None
+    adapted = [f"base_model.model.{vision}.k_proj", f"base_model.model.{_LAYER}.o_proj.linear"]
+    assert inkling2_pre_524_adapter_reason("inkling2", adapted) is None
 
 
 @pytest.mark.parametrize("recipe", list(_RECIPES))
@@ -121,11 +133,31 @@ def test_a_resume_refuses_it_by_name(tmp_path, recipe):
 
 
 @pytest.mark.parametrize("live", [False, True], ids=["base", "peft"])
-def test_only_a_name_the_base_checkpoint_holds_has_a_hub_spelling(tmp_path, live):
-    model = _trained(tmp_path / "base", "attention") if live else tiny_family_model(_INKLING2)
+def test_only_a_name_the_base_checkpoint_stores_has_a_hub_spelling(tmp_path, live):
+    """Read off the checkpoint's keys, not the live model's parameters: a respelling this release gets wrong for a
+    module the model still holds is caught too."""
+    peft_model = _trained(tmp_path / "base", "attention")
+    model = peft_model if live else tiny_family_model(_INKLING2)
+    stored = checkpoint_module_paths(str(tmp_path / "base"))
     linear, wrapper = (f"base_model.model.{_LAYER}.o_proj.linear", f"base_model.model.{_LAYER}.o_proj")
-    assert hub_spellings_absent_from_base(model, [linear]) == {}
-    assert list(hub_spellings_absent_from_base(model, [linear, wrapper])) == [wrapper]
+    assert hub_spellings_absent_from_checkpoint(model, [linear], stored) == {}
+    assert list(hub_spellings_absent_from_checkpoint(model, [linear, wrapper], stored)) == [wrapper]
+    hub = "model.llm.layers.0.attn.wo_ud"
+    assert hub in stored, "premise: the checkpoint stores o_proj.linear's weight under the release's name"
+    assert hub_spellings_absent_from_checkpoint(model, [linear], stored - {hub}) == {linear: hub}
+
+
+def test_a_module_the_hub_layout_fuses_or_splits_is_left_to_the_engine_reasons():
+    """Step-3.7's vision ``k_proj`` has no hub spelling, which ``unservable_adapter_reasons`` names."""
+    model = tiny_family_model(TINY_MOE_FAMILIES.get("step3p7") or TINY_MOE_VLM_FAMILIES["step3p7"])
+    assert hub_spellings_absent_from_checkpoint(model, ["model.vision_model.layers.0.self_attn.k_proj"], set()) == {}
+
+
+def test_a_base_without_safetensors_has_no_key_set(tmp_path):
+    """A ``.bin``-only checkpoint is not refused for lacking safetensors keys: the export skips the check."""
+    (tmp_path / "base").mkdir()
+    torch.save({}, tmp_path / "base" / "pytorch_model.bin")
+    assert checkpoint_module_paths(str(tmp_path / "base")) is None
 
 
 if __name__ == "__main__":

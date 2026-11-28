@@ -15,7 +15,8 @@ from functools import cached_property
 from typing import Any
 
 import torch
-from huggingface_hub import try_to_load_from_cache
+from huggingface_hub import get_safetensors_metadata, try_to_load_from_cache
+from huggingface_hub.errors import NotASafetensorsRepoError, OfflineModeIsEnabled
 from safetensors import SafetensorError, safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from transformers.utils import CONFIG_NAME
@@ -192,6 +193,31 @@ def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
     if os.path.isfile(os.path.join(checkpoint_dir, LEGACY_WEIGHTS_FILE)):
         return CheckpointWeights(checkpoint_dir, legacy_bin=LEGACY_WEIGHTS_FILE)
     return CheckpointWeights(checkpoint_dir)
+
+
+def checkpoint_module_paths(path: str, *, revision: str | None = None) -> frozenset[str] | None:
+    """The module paths a checkpoint stores a tensor under (each key less its last segment), off its index or
+    safetensors headers alone: a local directory's, else a Hub repo's at ``revision``, from this host's cache where it
+    holds the index or the single file, else through ``get_safetensors_metadata``, which downloads no weight.
+    ``None`` for a checkpoint that stores no safetensors, or a Hub repo this host cannot read offline."""
+    if os.path.isdir(path):
+        if not os.path.isfile(os.path.join(path, SAFETENSORS_INDEX_FILE)) and not glob.glob(
+            os.path.join(path, SAFETENSORS_FAMILY_GLOB)
+        ):
+            return None
+        keys = [key for _shard, _reader, key in iter_checkpoint_shard_entries(path)]
+    elif isinstance(index := try_to_load_from_cache(path, SAFETENSORS_INDEX_FILE, revision=revision), str):
+        with open(index, encoding="utf-8") as handle:
+            keys = list(json.load(handle)["weight_map"])
+    elif isinstance(single := try_to_load_from_cache(path, SAFETENSORS_WEIGHTS_FILE, revision=revision), str):
+        with safe_open(single, framework="pt") as reader:
+            keys = list(reader.keys())  # noqa: SIM118 - safe_open has .keys() but is not a mapping
+    else:
+        try:
+            keys = list(get_safetensors_metadata(path, revision=revision).weight_map)
+        except (NotASafetensorsRepoError, OfflineModeIsEnabled):
+            return None
+    return frozenset(key.rpartition(".")[0] for key in keys)
 
 
 def has_whole_model_weight_file(checkpoint_dir: str, *, safetensors_only: bool = False) -> bool:

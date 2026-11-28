@@ -235,6 +235,37 @@ def test_whole_tensors_beside_the_adapters_are_refused(tmp_path):
     assert not (tmp_path / "exported").exists()
 
 
+def test_a_module_the_base_checkpoint_stores_nothing_under_is_refused_before_any_write(tmp_path):
+    """The live model still holds layer 0's ``o_proj.linear``; only the checkpoint's own keys show the engine would
+    find nothing at its hub spelling."""
+    peft_model = _trained(tmp_path / "base", experts=None)
+    _save(peft_model, tmp_path / "saved", None)
+    weights = tmp_path / "base" / "model.safetensors"
+    hub = "model.llm.layers.0.attn.wo_ud."
+    stored = load_file(str(weights))
+    assert any(key.startswith(hub) for key in stored), "premise: the release's name for layer 0's o_proj.linear"
+    save_file({key.replace(hub, "model.llm.layers.0.attn.wo_moved."): t for key, t in stored.items()}, str(weights))
+
+    with pytest.raises(ValueError, match=r"stores no tensor under .*spelled model\.llm\.layers\.0\.attn\.wo_ud\)"):
+        export_engine_adapter(str(tmp_path / "saved"), str(tmp_path / "exported"), rollout_backend="vllm")
+
+    assert not (tmp_path / "exported").exists()
+
+
+def test_a_module_the_hub_layout_fuses_or_splits_is_refused_with_the_merge_remedy(tmp_path):
+    """Step-3.7's vision ``k_proj`` has no hub spelling: the engine's own reason names it, not the layout check."""
+    family = TINY_MOE_FAMILIES.get("step3p7") or TINY_MOE_VLM_FAMILIES["step3p7"]
+    targets = r".*vision_model\.layers\.\d+\.self_attn\.k_proj"
+    peft_model = _trained(tmp_path / "base", experts=None, family=family, targets=targets)
+    _save(peft_model, tmp_path / "saved", None)
+
+    with pytest.raises(ValueError, match="fused or split in the hub layout") as refused:
+        export_engine_adapter(str(tmp_path / "saved"), str(tmp_path / "exported"), rollout_backend="vllm")
+
+    assert "another layout of this base" not in str(refused.value)
+    assert not (tmp_path / "exported").exists()
+
+
 _ATTENTION_TARGET_REMEDY = "lora_target_modules: [o_proj, gate_up_proj, down_proj], with o_proj.linear on Inkling 2"
 _MERGE_REMEDY = "merge_peft_adapters.py folds it into its base"
 

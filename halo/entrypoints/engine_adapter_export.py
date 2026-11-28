@@ -4,6 +4,7 @@ weights."""
 
 import logging
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import NamedTuple
 
@@ -16,7 +17,7 @@ from halo.checkpoint.adapters import (
     read_adapter_file,
 )
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_WEIGHT_NAMES
-from halo.checkpoint.reading import reject_partial_checkpoint
+from halo.checkpoint.reading import checkpoint_module_paths, reject_partial_checkpoint
 from halo.checkpoint.tools.adapter_merge import adapter_base_trust, load_base_for_adapter
 from halo.checkpoint.tools.adapter_stream_merge import resolve_expert_lora_spec
 from halo.checkpoint.tools.offline_export import resolve_adapter_base_revision
@@ -26,11 +27,12 @@ from halo.model_loading.model_preparation import (
     resolve_build_config,
     resolve_text_only_config,
 )
+from halo.models.moe.family_specs import CompositeTextLayout, find_moe_family_spec_for_config
 from halo.trainers.grpo.rollout.adapter_sync import (
     build_adapter_serving,
     build_engine_adapter,
     engine_adapter_refusal,
-    hub_spellings_absent_from_base,
+    hub_spellings_absent_from_checkpoint,
     unservable_adapter_reasons,
 )
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
@@ -103,6 +105,16 @@ def _remedy(rollout_backend: str, base, adapter: _SavedAdapter, engine_reasons: 
     return f"Serve it merged instead: {merged}."
 
 
+def _checkpoint_spelling(base, *, text_only: bool) -> Callable[[str], str]:
+    """How the base checkpoint spells a hub module path: a multimodal checkpoint's text-only class keeps its tower
+    under the wrapper's prefix (the family's ``text_only_layout``, else transformers' ``model.language_model.``)."""
+    if not text_only:
+        return lambda path: path
+    spec = find_moe_family_spec_for_config(base.config)
+    layout = (spec.text_only_layout if spec is not None else None) or CompositeTextLayout()
+    return lambda path: layout.to_composite_key(f"{path}.")[:-1]
+
+
 def export_engine_adapter(
     adapter_dir: str,
     output_dir: str,
@@ -143,7 +155,8 @@ def export_engine_adapter(
             revision=revision,
         )
 
-    base = load_base_for_adapter(adapter_dir, base_path, build_base, excuse_task_head=True, log=logger.info).model
+    loaded = load_base_for_adapter(adapter_dir, base_path, build_base, excuse_task_head=True, log=logger.info)
+    base = loaded.model
     reject_unsyncable_config(base.config, rollout_backend, adapter_sync=True)
     weight_file = find_adapter_weight_file(adapter_dir)
     if weight_file is None:
@@ -159,15 +172,6 @@ def export_engine_adapter(
         sorted({key.rpartition(".lora_")[0] for key in state if ".lora_" in key}),
     )
     whole = sorted(key for key in state if ".lora_" not in key)
-    unheld = hub_spellings_absent_from_base(base, adapter.module_names)
-    if unheld:
-        name, path = next(iter(unheld.items()))
-        raise ValueError(
-            f"{adapter_dir} adapts {len(unheld)} module(s) whose hub spelling names no weight the checkpoint of "
-            f"{base_path} holds (e.g. {name}, spelled {path}): an engine would load those adapters under names it "
-            f"finds nothing at. The adapter was saved against another layout of this base; export it with the Halo "
-            f"release it was trained on."
-        )
 
     engine_reasons = _engine_reasons(rollout_backend, base, adapter)
     # What no engine serves, whatever it serves of the family.
@@ -186,6 +190,22 @@ def export_engine_adapter(
         raise ValueError(
             f"{adapter_dir} cannot be served as an adapter by the {rollout_backend} engine: "
             f"{'; '.join([*engine_reasons, *held])}. {_remedy(rollout_backend, base, adapter, engine_reasons, held)}"
+        )
+    stored = checkpoint_module_paths(base_path, revision=revision)
+    if stored is None:
+        logger.warning(
+            f"{base_path} stores no safetensors this host can read, so the adapter's module names are not checked "
+            f"against its keys."
+        )
+    elif unheld := hub_spellings_absent_from_checkpoint(
+        base, adapter.module_names, stored, _checkpoint_spelling(base, text_only=loaded.text_only)
+    ):
+        name, path = next(iter(unheld.items()))
+        raise ValueError(
+            f"{adapter_dir} adapts {len(unheld)} module(s) whose hub spelling the checkpoint of {base_path} stores no "
+            f"tensor under (e.g. {name}, spelled {path}): an engine would load those adapters under names it finds "
+            f"nothing at. The adapter was saved against another layout of this base; export it with the Halo "
+            f"release it was trained on."
         )
     wire, engine_config = build_engine_adapter(
         base, build_adapter_serving(config, adapter.module_names), state, experts

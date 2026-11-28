@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
@@ -288,6 +289,12 @@ INKLING2_PRE_524_ATTENTION_NAMES = {
     "gate_proj": "o_proj.gate_proj",
 }
 _INKLING2_PRE_524_IMAGES = "public.ecr.aws/whitecircle/halo:hopper-1.3.0rc2 or blackwell-1.3.0rc2"
+# A whole decoder-layer attention path (PEFT's ``base_model.model.`` prefix optional), under the composite's
+# ``language_model`` or the text class's ``model``: the vision tower's ``self_attn.{q,k,v}_proj`` stay plain linears
+# on 5.24.
+_INKLING2_DECODER_ATTENTION = re.compile(
+    r"(?:base_model\.model\.)?(?:model\.)?(?:language_model\.)?layers\.\d+\.self_attn\.(\w+)"
+)
 
 
 def inkling2_pre_524_adapter_reason(model_type: str | None, module_paths: Iterable[str]) -> str | None:
@@ -298,8 +305,7 @@ def inkling2_pre_524_adapter_reason(model_type: str | None, module_paths: Iterab
     old = sorted(
         path
         for path in module_paths
-        if path.rpartition(".")[2] in INKLING2_PRE_524_ATTENTION_NAMES
-        and path.rpartition(".")[0].endswith("self_attn")
+        if (match := _INKLING2_DECODER_ATTENTION.fullmatch(path)) and match[1] in INKLING2_PRE_524_ATTENTION_NAMES
     )
     if not old:
         return None

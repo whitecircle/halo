@@ -35,6 +35,9 @@ if TYPE_CHECKING:
 _ProbeKey = tuple[type, int, int]
 
 
+_WEIGHT_IN_A_CHILD = "hold their weight in a child module"
+
+
 def split_expert_lora_targets(model_config: ModelArguments) -> ExpertLoraSpec | None:
     """Peel expert entries out of ``lora_target_modules`` (in place) into an :class:`ExpertLoraSpec`, as stock PEFT
     cannot wrap grouped expert tensors. COLLECTIVE-EQUIVALENT; runs before ``load_distributed_model``."""
@@ -149,7 +152,7 @@ def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[_ProbeKey, bool]
     map."""
     base = module.get_base_layer() if isinstance(module, BaseTunerLayer) else module
     if not any(True for _ in base.parameters(recurse=False)):
-        return "hold their weight in a child module" if any(True for _ in base.parameters()) else None
+        return _WEIGHT_IN_A_CHILD if any(True for _ in base.parameters()) else None
     if _inherits_its_layer_forward(type(base)) or not _is_probeable_linear(base):
         return None
     if _computes_its_layers_affine_map(base, verdicts):
@@ -157,12 +160,23 @@ def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[_ProbeKey, bool]
     return "compute something other than their layer's affine map"
 
 
+def _weight_child(module: torch.nn.Module) -> str | None:
+    """The child a wrapper keeps its weight in, ``linear`` first (Inkling 2's projection modules since
+    transformers 5.24)."""
+    holders = [name for name, child in module.named_modules() if name and any(True for _ in child.parameters(False))]
+    return "linear" if "linear" in holders else next(iter(holders), None)
+
+
 def _excluded_detail(model: torch.nn.Module, excluded: dict[str, list[str]]) -> str:
-    """One counted clause per reason, with an example path and its class."""
-    return "; ".join(
-        f"{len(names)} {reason} (e.g. {names[0]}, a {type(model.get_submodule(names[0])).__name__})"
-        for reason, names in excluded.items()
-    )
+    """One counted clause per reason, with an example path and its class, and for a wrapper the child to name."""
+    clauses = []
+    for reason, names in excluded.items():
+        example = model.get_submodule(names[0])
+        clause = f"{len(names)} {reason} (e.g. {names[0]}, a {type(example).__name__}"
+        if reason == _WEIGHT_IN_A_CHILD and (child := _weight_child(example)):
+            clause += f", whose weight is in its child {child}: target {names[0].rpartition('.')[2]}.{child}"
+        clauses.append(clause + ")")
+    return "; ".join(clauses)
 
 
 def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> None:

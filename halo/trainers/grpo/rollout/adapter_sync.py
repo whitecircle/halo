@@ -183,19 +183,21 @@ def _build_hub_respeller(model: torch.nn.Module) -> Callable[[str], str | None]:
     return respell
 
 
-def hub_spellings_absent_from_base(model: torch.nn.Module, module_names: Iterable[str]) -> dict[str, str | None]:
-    """Each of ``module_names`` (as PEFT keys spell them) whose hub spelling names no weight the base's own checkpoint
-    holds, with that spelling. ``model`` is the live model or the base's class built without weights; a module a later
-    transformers moved or wrapped respells to a name the engine would find nothing under."""
+def hub_spellings_absent_from_checkpoint(
+    model: torch.nn.Module,
+    module_names: Iterable[str],
+    stored: Collection[str],
+    stored_as: Callable[[str], str] = lambda path: path,
+) -> dict[str, str]:
+    """Each of ``module_names`` (as PEFT keys spell them) whose hub spelling is a module path the checkpoint stores no
+    tensor under (``stored``, :func:`~halo.checkpoint.reading.checkpoint_module_paths`), with that spelling: a module a
+    later transformers moved or wrapped respells to a name the engine finds nothing under. A module the hub layout fuses
+    or splits has no spelling, which :func:`unservable_adapter_reasons` names. ``stored_as`` maps a spelling into
+    the checkpoint's layout: a multimodal checkpoint's text-only class stores its tower under the wrapper's prefix."""
     respell = _build_hub_respeller(model)
-    base = base_transformers_model(model)
-    # A live PEFT model holds an adapted module's weight under ``base_layer``.
-    held = {
-        respell(name.removesuffix(".weight").removesuffix(".base_layer"))
-        for name, _ in base.named_parameters(remove_duplicate=False)
-        if name.endswith(".weight")
+    return {
+        name: path for name in module_names if (path := respell(name)) is not None and stored_as(path) not in stored
     }
-    return {name: path for name in module_names if (path := respell(name)) is None or path not in held}
 
 
 def _attention_lora_spec(config: Mapping) -> ExpertLoraSpec:
