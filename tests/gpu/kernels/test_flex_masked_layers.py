@@ -189,9 +189,9 @@ def test_one_warmup_serves_a_step3p7_run():
     assert graphs == 2 * len(calls), f"{graphs} compiled graphs; the warm-up compiles two per call"
 
 
-def test_a_tensor_parallel_share_of_the_heads_compiles_nothing():
-    """A TP rank's call carries its share of the heads, which the warm-up does not compile. Such a call must compile
-    nothing (Dynamo raises on any compile here) and match SDPA, while the module's own call runs FlexAttention."""
+def test_an_unwarmed_head_count_compiles_nothing():
+    """On an unsharded module, a call carrying half the heads is not what the warm-up compiled: it must compile nothing
+    (Dynamo raises on any compile here) and match SDPA, while the module's own call runs FlexAttention."""
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
     model = _step3p7(name).to(torch.bfloat16)
@@ -422,8 +422,8 @@ def run(ctx) -> dict:
     record_check(checks, "one_warmup_serves_a_step3p7_run", test_one_warmup_serves_a_step3p7_run)
     record_check(
         checks,
-        "a_tensor_parallel_share_of_the_heads_compiles_nothing",
-        test_a_tensor_parallel_share_of_the_heads_compiles_nothing,
+        "an_unwarmed_head_count_compiles_nothing",
+        test_an_unwarmed_head_count_compiles_nothing,
     )
     for lengths in PACKINGS:
         record_check(

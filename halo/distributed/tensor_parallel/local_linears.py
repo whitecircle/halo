@@ -18,6 +18,7 @@ from transformers.distributed.parallel_utils import _get_parameter_plan
 
 from halo.distributed.grad_reduce import SumAcrossGroup, SumGradAcrossGroup
 from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
+from halo.models.attention.layout import TP_OUTPUT_SHARD_SIZE_ATTR
 
 
 @dataclass(frozen=True)
@@ -159,6 +160,8 @@ def install_local_forward(linear: nn.Linear, style_name: str, *, name: str = "li
     build = _colwise_forward if style.colwise else _rowwise_forward
     # Bound, not closed over ``linear``: a deepcopy rebinds a method, so the copy computes with its own parameters.
     linear.forward = MethodType(build(name, matmul, group, rank, world, style.full_width), linear)
+    if style.colwise and not style.full_width:
+        setattr(linear, TP_OUTPUT_SHARD_SIZE_ATTR, world)
 
 
 def shard_linear(linear: nn.Linear, style_name: str, tp_mesh: DeviceMesh, *, name: str = "linear") -> None:

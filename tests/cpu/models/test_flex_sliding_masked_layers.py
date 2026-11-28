@@ -265,7 +265,7 @@ def test_flex_serves_masked_rows_past_a_tile_on_narrow_heads():
 
 
 def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
-    """Tensor parallelism hands each rank a share of the heads, which would compile a graph mid-run."""
+    """A call off the head count, width or scaling the warm-up compiled for the module keeps SDPA without compiling."""
     q = torch.zeros(2, 4, 300, 64)
     k = torch.zeros(2, 2, 300, 64)
     mask = torch.ones(2, 1, 300, 300, dtype=torch.bool)
@@ -274,8 +274,8 @@ def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
     assert _flex_serves(q, k, mask, None, module=module)
     with caplog.at_level("WARNING", logger=sdpa_flex_sliding.logger.name):
         for _ in range(2):
-            assert not _flex_serves(q[:, :2], k[:, :1], mask, None, module=module)  # the tp=2 share
-    assert len([r for r in caplog.records if "tensor parallelism" in r.getMessage()]) == 1
+            assert not _flex_serves(q[:, :2], k[:, :1], mask, None, module=module)
+    assert len([r for r in caplog.records if "not the call the FlexAttention warm-up compiles" in r.getMessage()]) == 1
     assert not _flex_serves(q, k, mask, None, value=k[..., :32], module=module)  # an MLA-style value width
     assert not _flex_serves(q, k, mask, None, scaling=0.25, module=module)
     bare = torch.nn.Module()

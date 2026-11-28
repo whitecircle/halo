@@ -371,8 +371,7 @@ def _flex_serves(
 ) -> bool:
     """Whether FlexAttention takes a masked call: more queries than the window and one tile (a single-tile row gives
     the block mask size-1 dims, which Dynamo specializes on), and the heads, widths and scaling of the call the warm-up
-    compiles for the module, so no call compiles mid-run. TP hands a call the rank's share of the heads, which the
-    module does not declare, so such a call keeps SDPA."""
+    compiles for the module, so no call compiles mid-run."""
     if not (
         attention_mask is not None
         and attention_mask.shape == (query.shape[0], 1, query.shape[-2], key.shape[-2])
@@ -390,8 +389,7 @@ def _flex_serves(
         _warned_unwarmed_calls,
         (type(module).__name__, made),
         "%s: a %s call (query / KV heads, query / value widths, scaling) %s is not the call the FlexAttention "
-        "warm-up compiles for its module, %s, so it runs SDPA; under tensor parallelism a call carries the "
-        "rank's share of the heads",
+        "warm-up compiles for its module, %s, so it runs SDPA",
         SDPA_FLEX_SLIDING,
         type(module).__name__,
         made,
