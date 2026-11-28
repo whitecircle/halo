@@ -80,11 +80,18 @@ output = model.generate(**inputs, max_new_tokens=256)
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
-A LoRA run saves an adapter, not a full checkpoint. Load it with
-`PeftModel.from_pretrained(base, path)` or merge it first (PEFT refuses a directory holding expert
-adapters, so merge that one with `halo run merge-peft-adapters`, which for GPT-OSS needs a BF16 base);
-`AutoModelForCausalLM.from_pretrained` does not load an adapter directory under
-PEFT 0.18.1. A run with `merge_expert_lora_on_save: true` saves the merged checkpoint instead.
+A LoRA run saves an adapter, not a full checkpoint. Merge it into its base with
+`halo run merge-peft-adapters` (GPT-OSS needs a BF16 base), or load it with
+`PeftModel.from_pretrained(base, path)`. Merge these three instead of loading them
+([PEFT](../../agent-docs/optimization/peft.md#checkpoint-saving) ↗):
+
+- a directory holding expert adapters, which PEFT refuses;
+- a Nemotron-H adapter on `out_proj`, which PEFT refuses too;
+- an adapter on Laguna's shared experts or on Inkling 2's `weight_proj`: PEFT loads it without those tensors
+  and only warns.
+
+`AutoModelForCausalLM.from_pretrained` loads an adapter directory through the same PEFT code. A run with
+`merge_expert_lora_on_save: true` saves the merged checkpoint instead.
 
 ## Serve from the host
 

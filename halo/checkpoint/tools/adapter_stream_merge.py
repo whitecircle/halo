@@ -16,6 +16,7 @@ from typing import NamedTuple
 
 import torch
 from huggingface_hub.errors import StrictDataclassError
+from peft import LoraConfig
 from peft.tuners.lora.layer import Linear as LoraLinear
 from peft.utils.other import get_pattern_key
 
@@ -207,15 +208,11 @@ def _lora_layer(config: dict, module: str, adapter: _LinearAdapter, weight: torc
     if bias is not None:
         base.bias = torch.nn.Parameter(bias, requires_grad=False)
     alpha, use_rslora, use_dora = _linear_scalars(config, module)
-    layer = LoraLinear(
-        base,
-        _ADAPTER_NAME,
-        r=adapter.a.shape[0],
-        lora_alpha=alpha,
-        use_rslora=use_rslora,
-        use_dora=use_dora,
-        lora_bias=adapter.b_bias is not None,
+    r = adapter.a.shape[0]
+    lora_config = LoraConfig(
+        r=r, lora_alpha=alpha, use_rslora=use_rslora, use_dora=use_dora, lora_bias=adapter.b_bias is not None
     )
+    layer = LoraLinear(base, _ADAPTER_NAME, config=lora_config, r=r, lora_alpha=alpha)
     layer.lora_A[_ADAPTER_NAME].weight.data = adapter.a
     layer.lora_B[_ADAPTER_NAME].weight.data = adapter.b
     if adapter.b_bias is not None:

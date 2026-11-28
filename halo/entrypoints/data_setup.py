@@ -263,8 +263,8 @@ def _refuse_a_batch_holding_no_image(model, args, kwargs) -> None:
 
 
 def carry_image_refusal_above_adapters(model) -> None:
-    """Call on the trainer's model: the adapter wrap reaches what it wraps through ``.forward()``, which runs no
-    pre-hook, and only past that wrap does a tower hold its adapters."""
+    """Call on the trainer's model, so the refusal fires above the adapter wrap first and names the adapter that
+    reached the tower: the hook on the wrapped model runs too, but cannot tell an adapter run."""
     peft_model = find_peft_model(unwrap_framework_wrappers(model))
     if (
         peft_model is not None

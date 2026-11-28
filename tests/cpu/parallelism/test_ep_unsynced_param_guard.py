@@ -100,6 +100,7 @@ class _FrozenFp32Block(nn.Module):
 class _ModeHost(DistributedTrainerMixin):
     _deferred_liger_kernel = False
     _accelerate_manages_fsdp = False
+    _fsdp_wrapped = False
     _accelerate_manages_ddp = False
 
     def __init__(self, config, layers):

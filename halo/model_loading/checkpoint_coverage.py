@@ -105,16 +105,24 @@ def full_weights_on_every_rank() -> Iterator[None]:
 
 
 def reject_adapter_directory(model_name_or_path: str) -> None:
-    """transformers' own adapter load imports a module the pinned PEFT lacks, an error that names neither the adapter
-    nor what to do."""
-    if os.path.isfile(os.path.join(model_name_or_path, ADAPTER_CONFIG_FILE)) and not os.path.isfile(
-        os.path.join(model_name_or_path, CONFIG_NAME)
-    ):
+    """Refuse a local directory holding a PEFT adapter: transformers applies it to the model beside it, else to the
+    base it names, and returns only the adapter load's report, so the coverage gate would pass every base tensor the
+    checkpoint lacks."""
+    if not os.path.isfile(os.path.join(model_name_or_path, ADAPTER_CONFIG_FILE)):
+        return
+    if not os.path.isfile(os.path.join(model_name_or_path, CONFIG_NAME)):
         raise ValueError(
             f"{model_name_or_path} holds a PEFT adapter and no {CONFIG_NAME}, so there is no model to load from it. "
             f"Load it onto its base with PeftModel.from_pretrained(base, path), or merge it first with "
             f"scripts/after_training/merge_peft_adapters.py."
         )
+    raise ValueError(
+        f"{model_name_or_path} holds a PEFT adapter ({ADAPTER_CONFIG_FILE}) beside a model's {CONFIG_NAME}: "
+        f"transformers would apply the adapter to those weights and report only the adapter's loading info, so a base "
+        f"tensor the checkpoint lacks would load as random init without an error. Move the adapter files to a "
+        f"directory of their own, from which scripts/after_training/merge_peft_adapters.py folds them into this "
+        f"checkpoint."
+    )
 
 
 def from_pretrained_verified(

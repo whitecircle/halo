@@ -81,6 +81,14 @@ def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
         adapters = _adapters_to_fold(module)
         if not adapters:
             continue
+        if len(adapters) > 1 and any(adapter in module.lora_variant for adapter in adapters):
+            raise ValueError(
+                f"{name}: folds {len(adapters)} active adapters {adapters}, one with a LoRA variant (DoRA). PEFT's "
+                f"merge computes a variant against the layer's base weight with the adapters merged before it taken "
+                f"out, where an out-of-place fold hands it the running sum, so the folded weights would differ from "
+                f"the merge. Keep one adapter active on the layer (set_adapter), or merge the others into the base "
+                f"first."
+            )
         targets.setdefault(id(_lora_weight(module)), []).append(module)
         bias = getattr(module.get_base_layer(), "bias", None)
         if bias is not None and any(module.lora_bias.get(adapter) for adapter in adapters):
@@ -108,6 +116,17 @@ def adapter_tensors_replaced(
             setattr(module, name, original)
 
 
+@contextmanager
+def _base_weight_replaced(layer: LoraLayer, weight: torch.Tensor) -> Iterator[None]:
+    base = layer.get_base_layer()
+    original = base.weight
+    base.weight = torch.nn.Parameter(weight, requires_grad=False)
+    try:
+        yield
+    finally:
+        base.weight = original
+
+
 @torch.no_grad()
 def lora_folded(
     param: torch.nn.Parameter,
@@ -127,15 +146,18 @@ def lora_folded(
                     if layer.lora_bias.get(adapter):
                         folded += layer.lora_B[adapter].bias * layer.scaling[adapter]
                 elif adapter in layer.lora_variant:
-                    # A variant caches what its unmerge needs; there is no unmerge here.
-                    cached = set(layer._caches)
-                    folded = layer.lora_variant[adapter].merge_safe(layer, adapter, folded)
-                    for key in set(layer._caches) - cached:
-                        layer._cache_pop(key)
+                    # A variant merges from the layer's own base weight, so the running fold stands in for it. Its
+                    # merge caches what an unmerge needs, re-caching the adapters merged before it as it merges them
+                    # again, and there is no unmerge here.
+                    cached = dict(layer._caches)
+                    with _base_weight_replaced(layer, folded):
+                        folded = layer.lora_variant[adapter].merge_safe(layer, adapter, folded)
+                    layer._caches.clear()
+                    layer._caches.update(cached)
                 else:
                     delta = layer.get_delta_weight(adapter)
-                    # Linear adds the delta in its own dtype; the other layers cast it first, as their merges do.
-                    folded += delta if isinstance(layer, Linear) else delta.to(folded.dtype)
+                    # Embedding casts the delta first, as its merge does; the other layers add it in its own dtype.
+                    folded += delta.to(folded.dtype) if isinstance(layer, Embedding) else delta
     return folded
 
 

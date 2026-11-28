@@ -192,7 +192,9 @@ def test_preset_exclusions_are_kept_alongside_the_found_ones():
     model = _Multimodal(_ClippableAttention())
     peft_config = LoraConfig(r=4, target_modules=ATTENTION_TARGETS, exclude_modules=["language_model.q_proj"])
 
-    peft_setup._exclude_unadaptable_lora_targets(model, peft_config)
+    peft_setup._exclude_unadaptable_lora_targets(
+        model, peft_config, peft_setup._matched_module_names(model, peft_config)
+    )
 
     assert peft_config.exclude_modules == ["language_model.q_proj", "vision_tower.o_proj", "vision_tower.q_proj"]
     assert _adapted_modules(get_peft_model(model, peft_config)) == {"base_model.model.language_model.o_proj"}

@@ -3,8 +3,12 @@
 reads differently from the release and both engines. ``in_proj`` is scaled up where a row must cross: at stock init a
 crossed boundary moves the logits by rounding alone."""
 
+from types import ModuleType, SimpleNamespace
+
+import peft.tuners.tuners_utils as peft_tuners_utils
 import pytest
 import torch
+from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import AutoModelForImageTextToText, NemotronHConfig, NemotronHForCausalLM
@@ -14,18 +18,20 @@ from transformers.models.nemotron_h_omni.modeling_nemotron_h_omni import Nemotro
 from transformers.models.radio import modeling_radio as radio_modeling
 from transformers.models.radio.configuration_radio import RadioConfig
 
+from halo.checkpoint.tools import adapter_merge
 from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.data.collators.factory import select_data_collator
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.lazy_safetensors.materialization import init_checkpoint_absent_modules
-from halo.model_loading.model_preparation import apply_family_patches
+from halo.model_loading.model_preparation import apply_family_patches, auto_load_model
 from halo.models.attention.tree import resolve_tree_plan_options
 from halo.models.families import nemotron_h
 from halo.models.families.nemotron_h import apply_nemotron_h_patches
 from halo.models.segment_markers import reject_pipeline_packed_rows, segment_markers_for
 from tests.common.models import TINY_NEMOTRON_H_CONFIG
+from tests.common.nemotron_h import write_tiny_hub_checkpoint
 from tests.common.packed_flash_varlen import padding_tokenizer
-from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model, word_level_tokenizer
 
 _SEED = 1234
 _COMPOSITE = TINY_MOE_VLM_FAMILIES["nemotron_h_omni"]
@@ -38,6 +44,7 @@ _STOCK_ATTRIBUTES = {
     (_MIXER, "__init__"): _MIXER.__init__,
     (_MIXER, "forward"): _MIXER.forward,
     (_SCALE, "__init__"): _SCALE.__init__,
+    (peft_tuners_utils, "_check_lora_target_modules_mamba"): peft_tuners_utils._check_lora_target_modules_mamba,
 }
 _STOCK_SCAN = nemotron_modeling.mamba2_chunk_scan
 _HEADS, _HEAD_DIM, _STATE, _GROUPS, _CHUNK = 8, 8, 8, 2, 8
@@ -50,10 +57,14 @@ _CROSSED = 1e-2
 _FLOOR_MOVES = 1e-3
 
 
-@pytest.fixture
-def stock(monkeypatch):
+def _restore_stock_attributes(monkeypatch) -> None:
     for (owner, name), value in _STOCK_ATTRIBUTES.items():
         monkeypatch.setattr(owner, name, value)
+
+
+@pytest.fixture
+def stock(monkeypatch):
+    _restore_stock_attributes(monkeypatch)
 
 
 @pytest.fixture
@@ -379,21 +390,27 @@ def _conv_dim(config) -> int:
     return config.mamba_num_heads * config.mamba_head_dim + 2 * config.n_groups * config.ssm_state_size
 
 
-def _conv_adapted():
-    model = _crossing_model().train()
-    adapted = get_peft_model(model, LoraConfig(r=_conv_dim(model.config), target_modules=["conv1d"]))
+def _conv_adapted(model):
+    config = model.config.get_text_config()
+    adapted = get_peft_model(model.train(), LoraConfig(r=_conv_dim(config), target_modules=["conv1d"]))
     return adapted, _row_ids(24)
 
 
-def test_an_adapter_on_the_conv_is_refused(patched):
-    adapted, ids = _conv_adapted()
+def test_peft_refuses_an_adapter_on_the_text_classs_conv(patched):
+    with pytest.raises(ValueError, match="Module 'conv1d' is incompatible with Mamba-based models"):
+        _conv_adapted(_crossing_model())
+
+
+def test_an_adapter_on_the_composites_conv_is_refused(patched):
+    """PEFT reads the root's model type, which the composite does not share, so the mixer refuses it."""
+    adapted, ids = _conv_adapted(_crossing_composite())
     with pytest.raises(TypeError, match="conv1d out of lora_target_modules"):
         adapted(input_ids=ids, use_cache=False)
 
 
 def test_upstream_lets_an_adapter_on_the_conv_do_nothing(stock):
     """Why it is refused: upstream reads the base weight, so the adapter's delta never reaches the row."""
-    adapted, ids = _conv_adapted()
+    adapted, ids = _conv_adapted(_crossing_composite())
     with torch.no_grad():
         before = adapted(input_ids=ids, use_cache=False).logits
         for name, param in adapted.named_parameters():
@@ -414,6 +431,57 @@ def test_an_adapter_on_the_projections_reaches_the_row(patched, target):
             if f"{target}.lora_" in name:
                 param.fill_(0.5)
         assert _rel(adapted(input_ids=ids, use_cache=False).logits, before) > _CROSSED
+
+
+def test_upstream_peft_refuses_an_adapter_on_out_proj(stock):
+    """Why PEFT's check is patched: it refuses every Mamba model type's out_proj, which a fused scan reads past."""
+    with pytest.raises(ValueError, match="Module 'out_proj' is incompatible with Mamba-based models"):
+        get_peft_model(_crossing_model().train(), LoraConfig(r=2, target_modules=["out_proj"]))
+
+
+@pytest.mark.parametrize(
+    ("model_type", "target", "admitted"),
+    [("nemotron_h", "out_proj", True), ("nemotron_h", "conv1d", False), ("mamba2", "out_proj", False)],
+    ids=["nemotron_h_out_proj", "nemotron_h_conv1d", "mamba2_out_proj"],
+)
+def test_the_patched_check_admits_out_proj_on_nemotron_h_only(patched, model_type, target, admitted):
+    model = SimpleNamespace(config=SimpleNamespace(model_type=model_type))
+    check = peft_tuners_utils._check_lora_target_modules_mamba
+    if admitted:
+        check(LoraConfig(target_modules=[target]), model, target)
+    else:
+        with pytest.raises(ValueError, match=f"Module '{target}' is incompatible"):
+            check(LoraConfig(target_modules=[target]), model, target)
+
+
+def test_the_in_memory_merge_takes_an_adapter_on_out_proj(stock, monkeypatch, tmp_path):
+    """The merge runs where no loader applied the family patches, so it applies them before PEFT loads the adapter."""
+    PartialState()
+    base, adapter, merged = tmp_path / "base", tmp_path / "adapter", tmp_path / "merged"
+    write_tiny_hub_checkpoint(base)
+    apply_nemotron_h_patches()
+    lora = LoraConfig(r=2, lora_alpha=4, target_modules=["out_proj"], task_type="CAUSAL_LM")
+    peft_model = get_peft_model(auto_load_model(str(base), text_only=True, dtype=torch.float32), lora)
+    with torch.no_grad():
+        for name, param in peft_model.named_parameters():
+            if "lora_B" in name:
+                param.normal_()
+    peft_model.save_pretrained(adapter)
+    word_level_tokenizer(("hello", "world")).save_pretrained(adapter)
+    ids = _row_ids(16)
+    with torch.no_grad():
+        reference = peft_model.merge_and_unload().eval()(input_ids=ids).logits
+        untrained = auto_load_model(str(base), text_only=True, dtype=torch.float32).eval()(input_ids=ids).logits
+    assert not torch.allclose(reference, untrained), "the adapter moves nothing, so the merge could be a no-op"
+    _restore_stock_attributes(monkeypatch)
+
+    adapter_merge.merge_peft_adapter(
+        adapter_dir=str(adapter), output_dir=str(merged), dtype=torch.float32, verbose=False
+    )
+
+    with torch.no_grad():
+        merged_logits = auto_load_model(str(merged), dtype=torch.float32).eval()(input_ids=ids).logits
+    torch.testing.assert_close(merged_logits, reference, rtol=1e-5, atol=1e-5)
 
 
 def test_a_fused_kernel_installed_later_cannot_take_the_row(stock, monkeypatch):
@@ -513,8 +581,9 @@ def test_a_training_step_leaves_the_layer_scale_alone(patched):
         (_MIXER, "__init__"),
         (_MIXER, "forward"),
         (_SCALE, "__init__"),
+        (peft_tuners_utils, "_check_lora_target_modules_mamba"),
     ],
-    ids=["chunk_scan", "mixer_init", "mixer_forward", "layer_scale_init"],
+    ids=["chunk_scan", "mixer_init", "mixer_forward", "layer_scale_init", "peft_mamba_check"],
 )
 def test_a_moved_upstream_signature_refuses_every_patch(stock, monkeypatch, owner_name):
     owner, name = owner_name
@@ -529,11 +598,25 @@ def test_a_moved_upstream_signature_refuses_every_patch(stock, monkeypatch, owne
     assert getattr(*fused) is _STOCK_ATTRIBUTES[fused], "a refused patch must leave nothing half-applied"
 
 
+def test_a_peft_release_without_the_mamba_target_check_refuses_every_patch(stock, monkeypatch):
+    """Every Nemotron-H load applies the patches, with or without adapters, so the absence names the PEFT symbol."""
+    monkeypatch.setattr(nemotron_h, "peft_tuners_utils", ModuleType(peft_tuners_utils.__name__))
+    with pytest.raises(RuntimeError, match="defines no _check_lora_target_modules_mamba.*re-derive"):
+        apply_nemotron_h_patches()
+    fused = (nemotron_modeling, "mamba2_split_conv1d_scan_combined")
+    assert getattr(*fused) is _STOCK_ATTRIBUTES[fused], "a refused patch must leave nothing half-applied"
+
+
 def test_the_patches_apply_once(stock):
     apply_nemotron_h_patches()
-    forward, init, scale_init = _MIXER.forward, _MIXER.__init__, _SCALE.__init__
+    patched = (_MIXER.forward, _MIXER.__init__, _SCALE.__init__, peft_tuners_utils._check_lora_target_modules_mamba)
     apply_nemotron_h_patches()
-    assert (_MIXER.forward, _MIXER.__init__, _SCALE.__init__) == (forward, init, scale_init)
+    assert (
+        _MIXER.forward,
+        _MIXER.__init__,
+        _SCALE.__init__,
+        peft_tuners_utils._check_lora_target_modules_mamba,
+    ) == patched
 
 
 @pytest.mark.parametrize(

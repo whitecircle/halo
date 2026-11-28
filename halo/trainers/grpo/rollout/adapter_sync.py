@@ -4,6 +4,7 @@ adapter is refused here, before the run or a saved adapter's export, with the re
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import os
 import uuid
@@ -15,6 +16,7 @@ import requests
 import torch
 from huggingface_hub import snapshot_download
 from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
+from peft import LoraConfig
 from peft.tuners.lora.layer import Linear, LoraLayer
 from transformers.core_model_loading import rename_source_key
 
@@ -217,6 +219,19 @@ def _unservable_module_reason(name: str, model: torch.nn.Module, client_cls) -> 
     )
 
 
+def _requested_lora_variants(config: Mapping) -> list[str]:
+    """The LoRA variants ``config`` requests that change the forward, read off ``LoraConfig``'s own declaration: every
+    field PEFT tags as a variant that is set. A sub-config saved as a dict is set even when empty, as PEFT's load
+    builds it into its config class before it reads the variant. An ``init_lora_weights`` variant (MiCA) only freezes
+    weights in training and serves as plain LoRA."""
+    return [
+        field.name
+        for field in dataclasses.fields(LoraConfig)
+        if field.metadata.get("is_lora_variant")
+        and (isinstance(config.get(field.name), dict) or config.get(field.name))
+    ]
+
+
 def unservable_adapter_reasons(
     config: Mapping,
     module_names: Collection[str],
@@ -228,8 +243,10 @@ def unservable_adapter_reasons(
     modules ``module_names`` of ``model``, with ``expert``'s native grouped expert adapters beside it: what the
     adapters declare, whether a live trainer or a saved adapter directory holds them."""
     reasons = _unservable_expert_lora(model, config, expert, client_cls) if expert is not None else []
+    reasons.extend(
+        f"the LoRA variant {variant}: the engine serves plain LoRA" for variant in _requested_lora_variants(config)
+    )
     for flag, why in (
-        ("use_dora", "DoRA: the engine refuses it"),
         ("lora_bias", "lora_bias: the engine refuses it"),
         ("modules_to_save", "modules_to_save: the engine has no route for a fully trained module, so it would drift"),
         ("rank_pattern", "rank_pattern: the engine reads one rank"),

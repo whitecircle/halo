@@ -12,7 +12,7 @@ import pytest
 from torch import nn
 
 import halo.checkpoint.tools.bf16_conversion as convert_module
-from halo.checkpoint.tools import offline_export
+from halo.checkpoint.tools import adapter_merge, offline_export
 from halo.checkpoint.tools.bf16_conversion import load_model
 from halo.checkpoint.tools.offline_export import ADAPTER_TASKS, TASK_MODEL_CLASSES
 from scripts.after_training import convert_to_bf16 as convert_script
@@ -22,9 +22,11 @@ from tests.common.tiny_models import word_level_tokenizer
 
 @pytest.fixture
 def finalized(monkeypatch) -> list:
-    """Stubbed because these tests hand the loader sentinels rather than modules."""
+    """Stubbed, with the family patches the adapter load applies, because these tests hand the loader sentinels rather
+    than modules."""
     seen: list = []
     monkeypatch.setattr(convert_module, "finalize_loaded_model", seen.append)
+    monkeypatch.setattr(adapter_merge, "apply_family_patches", lambda *_args: None)
     return seen
 
 
@@ -152,14 +154,14 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
             )
         ),
     )
-    base_model = object()
+    base_model = types.SimpleNamespace(config=None)
 
     def fake_load(path, **kwargs):
         seen["load"] = (path, kwargs)
         return base_model
 
     monkeypatch.setattr(offline_export, "auto_load_model", fake_load)
-    monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: (base, path))
+    monkeypatch.setattr(adapter_merge, "_load_adapter", lambda base, path, _log: (base, path))
 
     assert load_model("/adapter", "causal_lm", is_peft=True) == (base_model, "/adapter")
     assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False, "revision": None})
@@ -179,12 +181,14 @@ def test_the_task_head_excuse_follows_the_adapters_declaration(monkeypatch, fina
         ),
     )
     monkeypatch.setattr(
-        offline_export, "from_pretrained_verified", lambda cls, path, **kw: seen.setdefault("load", kw)
+        offline_export,
+        "from_pretrained_verified",
+        lambda cls, path, **kw: seen.setdefault("load", types.SimpleNamespace(config=None, kwargs=kw)),
     )
-    monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: base)
+    monkeypatch.setattr(adapter_merge, "_load_adapter", lambda base, path, _log: base)
 
     load_model("/adapter", "classification", is_peft=True)
-    assert seen["load"]["excuse_task_head"] is True
+    assert seen["load"].kwargs["excuse_task_head"] is True
     assert finalized == [seen["load"]]
 
 

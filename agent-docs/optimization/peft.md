@@ -14,7 +14,7 @@ accepts LoRA and DoRA, not QLoRA ([Embedding — PEFT / LoRA](../training-method
 
 ## Supported methods
 
-Uses the [PEFT library](https://github.com/huggingface/peft) (pinned 0.18.1). LoRA is the only method with tested
+Uses the [PEFT library](https://github.com/huggingface/peft) (pinned 0.22.0). LoRA is the only method with tested
 parallelism support; other PEFT methods (AdaLoRA, Prompt Tuning, (IA)3) reach the trainer through a custom
 `peft_config` but are untested with it. An AdaLoRA or (IA)3 layer is refused at construction wherever an
 out-of-place fold runs (the weight-sync trainers, embedding LoRA, `merge_expert_lora_on_save`): the fold
@@ -179,9 +179,31 @@ EP layers (`ep_size > 1`, or the default `use_grouped_gemm`), whatever it target
 is rejected too. It is PEFT's own mechanism for fused `nn.Parameter` experts, and it wraps the module
 *owning* the parameter, which sits above the EP layer and so escapes both EP validators.
 
+PEFT also adds such parameters on its own. On a family whose checkpoints transformers v5 converts (Qwen3 MoE,
+Qwen3-Next, GLM-4 MoE Lite and Cohere2 MoE in the roster), its wrap turns a regex or `all-linear` target into
+`target_parameters` on the fused experts and the router, and resolves a regex to bare leaf names, which reach every
+layer. `build_peft_config` runs that rewrite on a copy, and where it would change what the target adapts, hands PEFT
+the module paths the target matches as written (`resolve_lora_target_modules`): the wrap adapts the modules it
+adapted before the rewrite existed and no parameter. PEFT condenses a list of 20 or more targets to the shortest
+suffixes no other module shares, so on a full-size model the saved `adapter_config.json` holds leaf names again, and a
+reload through PEFT rewrites them: where a shared expert's `gate_proj`, `up_proj` or `down_proj` is among them
+(Qwen3-Next, GLM-4 MoE Lite, Cohere2 MoE) it also wraps the fused experts, warns that the file holds no tensors for
+them and leaves those adapters at zero, so a merge equals the trained model
+([peft#4253](https://github.com/huggingface/peft/issues/4253)). A list naming one projection of a
+fused pair (`gate_proj` without `up_proj`), which PEFT refuses, adapts the modules it names the same way, and one
+naming no module at all, the fused experts alone, is refused with the routes that train them. A target
+that names the router or a fused-expert module itself, which PEFT turns into a parameter even as a path, is refused:
+train the router through `lora_modules_to_save` and the experts through their projection names. Under EP,
+`reject_peft_lora_in_ep_layers` also refuses a tuner layer wrapped around an EP layer.
+
 Weights PEFT can't LoRA are **full-trained** (a trainable copy, not a low-rank adapter) via
 `lora_modules_to_save`: `embed_tokens` (an `nn.Embedding`), `lm_head` (excluded by `all-linear`), and the
-MoE `router` / `gate`. An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
+MoE `router` / `gate`. PEFT matches each entry against whole module names, so `gate` takes the router alone: on
+Qwen3-Next, Qwen3.5 MoE and Qwen3.8-Flash-Next list `shared_expert_gate` as well to train it. An adapter an earlier
+PEFT saved with `gate`, matching by suffix, holds both, so its `shared_expert_gate` copies refuse a resume (the
+layout check) until the run names `shared_expert_gate` too, and the in-memory merge until `adapter_config.json`
+does ([Merging adapters](#merging-adapters)).
+An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
 rather than leaving those modules silently frozen — add an attention target, or drop the field.
 `unfreeze_layers_patterns` / `freeze_layers_patterns` (`halo/model_loading/parallel/freeze_patterns.py`) are
 refused on any adapter run (attention LoRA or native expert LoRA): it freezes every base parameter and trains
@@ -312,13 +334,18 @@ from the frozen base instead of a second model copy. Under EP the mixin patches 
 (`install_ep_aware_disable_adapter`) so it reverts the native EP expert adapters too, giving a true frozen-base
 reference for both adapter halves; the patch also covers TRL's `use_adapter(None)` for online GRPO / DPO / KTO.
 
-The pinned PEFT 0.18.1 clears `requires_grad` on the adapters a module holds when `disable_adapter()`
-enters and restores it on the ones it holds at exit. A reference pass that is the first forward after an
-FSDP2 reshard (online GRPO at `beta > 0` with no old-logps recompute) enters on the sharded params and exits
-on the unsharded copies, which would freeze every sharded adapter silently. `install_fsdp2_safe_disable_adapter`
-wraps the context for every PEFT model: when the registered trainable params changed across it, it reshards
-before PEFT's exit, so the restore lands on the sharded params (upstream PEFT drops the freeze in
-huggingface/peft#3839, which 0.18.1 predates).
+PEFT clears `requires_grad` on the adapters when `disable_adapter()` enters and sets it again at exit. A
+reference pass that is the first forward after an FSDP2 reshard (online GRPO at `beta > 0` with no old-logps
+recompute) enters on the sharded params and exits on the unsharded copies the forward registered. PEFT compares
+the registered params across the context and, where they changed, reshards every FSDP2 module inside the
+`PeftModel` and enables the adapters again, so the flags land on the sharded params (huggingface/peft#3839,
+#3938). The trainer shards the `PeftModel` itself as the FSDP2 root, so that reaches every group. A wrapper applied
+above the `PeftModel` becomes the root instead, which PEFT does not reshard and ZeRO-2 leaves gathered after a
+forward, so construction refuses that layout under ZeRO-2 when an adapter tensor sits in the root group: a LoRA or
+`modules_to_save` copy on `lm_head`, or the token delta a tied embedding and head share, which the wrap keeps in the
+root group like every tensor reachable under two names (`reject_peft_model_below_fsdp2_root`). Attention adapters
+sit in the decoder layers' groups and an untied embedding's in the backbone's, both inside the `PeftModel`, and
+ZeRO-3 reshards the root after its forward, so those pass.
 
 An explicit reference model (DPO, KTO, self-distillation's KL `reference_model`) is never parallelized:
 under EP or TP it is a whole dense replica on every rank, warned about rather than refused. LoRA with the
@@ -432,9 +459,13 @@ specific to LoRA:
   while the live config keeps the wrapper's spelling.
 
 **Reloading elsewhere.** Attention adapters carry standard PEFT keys and load onto a stock
-`PeftModel.from_pretrained`. Native expert adapters do not: grouped `[E, K, r]` tensors have no PEFT
-representation, and PEFT drops unrecognized adapter keys without a warning (`load_adapter` filters
-`missing_keys` and never reads `unexpected_keys`).
+`PeftModel.from_pretrained`, with two exceptions. PEFT's load respells adapter keys through the base's checkpoint
+renames, which turn Laguna's `shared_experts` and Inkling 2's short-convolution `weight_proj` keys into paths no
+module has, so it drops those tensors with a warning; and it refuses `out_proj` on Nemotron-H, which only
+`apply_nemotron_h_patches` admits. The merge tools load both whole ([Merging adapters](#merging-adapters)).
+Native expert adapters do not load: grouped `[E, K, r]` tensors have no PEFT
+representation, and PEFT only warns about adapter keys it does not recognize unless the load passes
+`strict_adapter_check="error"`.
 
 Every directory carrying them is therefore labeled with a `peft_type` PEFT does not know, so an external load
 raises on the label rather than returning a half-adapted model: `EXPERT_LORA` for an expert-only save,
@@ -483,13 +514,28 @@ python scripts/after_training/merge_peft_adapters.py \
 Add `--task classification --num_labels N` for classification models. Handles causal LM, sequence
 classification, multimodal/VLM, and trust_remote_code architectures: `--trust_remote_code` defaults on for
 a local base and off for a Hub base ([Scripts](../reference/scripts-reference.md#post-training-scripts)). Use
-`--device_map auto` for large models.
+`--device_map auto` for large models. A map that places modules on disk is refused before PEFT loads the adapter:
+PEFT's load over disk-offloaded modules writes a copy of each shard holding them at the shard's path taken relative to
+the working directory, which from `/` is the base's own file. `--streaming` merges such a base.
 
 The base loads through the class the adapter's tensor keys address: an adapter from a `text_only_model: true`
 run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the multimodal wrapper, and keys
 naming no module of either class are refused — applied to the wrong class, PEFT matches nothing, warns, and
 the tool would write the bare base as a finished model.
 `--fp32_norms` writes every normalization leaf in fp32, the layout `convert_to_bf16.py` writes.
+
+The family patches run before PEFT loads the adapter (Nemotron-H's `out_proj` passes PEFT's target check only under
+them), and the merged `config.json` is written inside `config_export_ready`, so the run-scoped stamps they put on the
+config stay out of it. After `PeftModel.from_pretrained`, every tensor of the adapter file whose live value differs is
+copied onto the tensor a PEFT save writes under its key, with a log line: PEFT's load respells adapter keys through
+the base's checkpoint renames and drops the ones it turns into paths no module has (Laguna's `shared_experts`,
+Inkling 2's `*_sconv.weight_proj`). A tensor of a module the map placed on `cpu` beside a GPU is a `meta` placeholder
+whose value accelerate's offload hook holds: it is read and repaired there, which is what PEFT's merge onloads. A
+tensor the wrap builds nothing for, or builds at another shape, raises before
+anything is written, since the merged model would go without it: `adapter_config.json` resolves to other modules on
+this base than the file holds (a `modules_to_save: [gate]` adapter an earlier PEFT saved), and `--streaming` folds
+the file by its saved names (`apply_adapter`, `halo/checkpoint/tools/adapter_merge.py`). `convert_to_bf16.py
+--check_inference` loads an adapter the same way.
 
 A Hub base is read at the commit `adapter_config.json` records
 ([Checkpoints](../reference/checkpoints.md#peft-lora-saving)), by the in-memory merge, the streaming merge and
@@ -588,10 +634,13 @@ on the PEFT wrap before any mode wraps the model, so the check covers every mode
 holds no trainable parameter for an adapter meant to train: an active adapter whose config is not `inference_mode`,
 counting every tensor in the layer's `adapter_layer_names` (`lora_A`/`lora_B`, `lora_embedding_*`,
 `lora_magnitude_vector`, other tuners' own). It reads live `requires_grad` and holds no collective; every rank builds
-the same wrap and raises alike. PEFT 0.21 and later re-enable adapters by matching `named_parameters()` names against
-`named_modules()` prefixes, so `UlyssesModel` (its names omit the `original_attention` level) would leave every CP
-adapter frozen; the pin `peft<0.19` keeps that path unreachable, and a bump needs a release that fixes
-[peft#4181](https://github.com/huggingface/peft/issues/4181).
+the same wrap and raises alike. PEFT's wrap keeps trainable only the parameters whose `named_parameters()` name
+lies under a tuner layer's `named_modules()` name. `UlyssesModel`'s names omit the `original_attention` level, so
+under CP the wrap leaves every adapter frozen ([peft#4181](https://github.com/huggingface/peft/issues/4181)), and the
+native expert adapters sit in no tuner layer, so a mixed run's wrap freezes them. Before the check, construction marks
+the native expert adapters trainable again (`apply_expert_lora_trainability`) and, under `UlyssesModel`, every tensor
+an active adapter that trains holds, less the weights its variant keeps frozen, through PEFT's own `set_requires_grad`
+(`apply_cp_adapter_trainability`).
 
 ## Tests and benchmarks
 

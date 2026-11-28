@@ -1,7 +1,8 @@
 #!/usr/bin/env python
-"""``disable_adapter()`` under FSDP2 restores the sharded adapters, and reshards only when it must.
-A pass entering on sharded params and exiting on unsharded ones must reshard, or the sharded adapters stay frozen;
-a pass entering and exiting on the same params must not, or the backward re-gathers the whole model per micro-step."""
+"""PEFT's ``disable_adapter()`` under FSDP2, on the wrap the trainer builds, restores the sharded adapters and reshards
+only when it must (huggingface/peft#3839, #3938). A pass entering on sharded params and exiting on unsharded ones
+must reshard, or the sharded adapters stay frozen; a pass entering and exiting on the same params must not, or the
+backward re-gathers the whole model per micro-step."""
 
 import pytest
 import torch
@@ -13,12 +14,7 @@ from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.configs.script_arguments import ModelArguments
-from halo.distributed.fsdp import (
-    IdentityParamSet,
-    apply_fsdp2_per_layer,
-    install_fsdp2_safe_disable_adapter,
-    reshard_fsdp2_modules,
-)
+from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, reshard_fsdp2_modules
 from halo.model_loading.parallel.peft_setup import build_peft_config
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -55,7 +51,6 @@ def sharded_lora(tmp_path, reshard_after_forward, modules_to_save):
         apply_fsdp2_per_layer(
             model, init_device_mesh("cpu", (1,)), MixedPrecisionPolicy(), reshard_after_forward, IdentityParamSet()
         )
-        install_fsdp2_safe_disable_adapter(model, model)
         trained = {name for name, param in model.named_parameters() if param.requires_grad}
         yield model, trained
     finally:

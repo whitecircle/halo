@@ -331,7 +331,8 @@ Refused at construction, with the reason in the message: vLLM for any family but
 `routing_replay: rollout`, a
 `model_name` that is unset or holds a colon, QLoRA, TP, PP and CP, native expert LoRA (served on Inkling 2's experts
 alone, by `halo:vllm-0.1.dev25249`, at the attention adapters' rank and scaling:
-[Inkling 2](../models/inkling2.md#rollouts)), DoRA, `lora_bias`,
+[Inkling 2](../models/inkling2.md#rollouts)), a LoRA variant (DoRA and every other `LoraConfig` field PEFT tags
+as one), `lora_bias`,
 `modules_to_save`, `rank_pattern` and `alpha_pattern`, a grown vocabulary, any trainable parameter that is not an
 adapter, adapters not in bf16, an adapted module other than the attention and dense-MLP linears
 (`ADAPTER_SERVABLE_MODULES`), and one whose hub name a converter fuses or splits. Router bias-update balancing is

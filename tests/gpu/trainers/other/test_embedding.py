@@ -82,7 +82,7 @@ def make_config(output_dir: str, **overrides) -> EmbeddingConfig:
 
 
 def lora_model() -> SentenceTransformer:
-    """LoRA added through ``inject_adapter_in_model``, the script's call: ``ST.add_adapter`` needs peft>=0.19.1."""
+    """LoRA added through ``inject_adapter_in_model``, the script's call."""
     model = SentenceTransformer(MODEL_NAME)
     inject_adapter_in_model(
         LoraConfig(r=8, lora_alpha=16, target_modules=LORA_TARGET_MODULES, task_type=TaskType.FEATURE_EXTRACTION),

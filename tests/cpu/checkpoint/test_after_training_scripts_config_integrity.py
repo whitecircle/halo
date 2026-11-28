@@ -20,9 +20,10 @@ from halo.checkpoint.tools import adapter_merge as mpa
 from halo.checkpoint.tools import bf16_conversion as cb
 from halo.checkpoint.tools import model_merge as mm
 from halo.checkpoint.tools import offline_export
+from halo.model_loading.model_preparation import auto_load_model
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
-from tests.common.tiny_models import word_level_tokenizer
+from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint, word_level_tokenizer
 
 # The scripts run the genuine load → transform → save path.
 _TINY_QWEN3 = {
@@ -170,6 +171,25 @@ def test_merge_peft_adapters_keeps_model_type_and_clears_stale_weights():
         assert all(not torch.all(p == 0) for p in reloaded.parameters() if p.numel() > 1), (
             "a reloaded tensor is all-zero — the planted stub shadowed the fresh sharded save"
         )
+
+
+def test_merge_peft_adapters_writes_the_bases_config_without_run_stamps(tmp_path):
+    """The merge applies the family patches to the loaded base, and Qwen3.8-Flash-Next's stamps the config with a run's
+    n-gram table placement, which no artifact describes."""
+    base, adapter, out = tmp_path / "base", tmp_path / "adapter", tmp_path / "out"
+    build_tiny_family_checkpoint(TINY_MOE_FAMILIES["qwen4_exp_text"], str(base), word_level_tokenizer(), seed=0)
+    lora = LoraConfig(r=2, lora_alpha=4, target_modules=["in_proj_qkv"], base_model_name_or_path=str(base))
+    get_peft_model(auto_load_model(str(base), dtype=torch.float32), lora).save_pretrained(adapter)
+
+    mpa.merge_peft_adapter(adapter_dir=str(adapter), output_dir=str(out), verbose=False)
+
+    written, source = (json.loads((path / "config.json").read_text()) for path in (out, base))
+    differing = sorted(
+        key
+        for key in (written.keys() | source.keys()) - {"transformers_version"}
+        if written.get(key) != source.get(key)
+    )
+    assert not differing, f"the merged config.json differs from the base's in {differing}"
 
 
 def test_convert_to_bf16_carries_source_aux_files_without_shadowing_the_fresh_config():

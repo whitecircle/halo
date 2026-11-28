@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 
 ExpertAdapterShape = Literal["expert", "mixed"]
 
-# ``peft_type`` markers kept out of PEFT's config mapping, because stock PEFT drops unknown state-dict keys silently:
-# a ``LORA`` label would load the attention half and discard every expert delta, an unknown type makes the load raise.
+# ``peft_type`` markers kept out of PEFT's config mapping, because stock PEFT drops unknown state-dict keys with only a
+# warning: a ``LORA`` label would load the attention half and discard every expert delta, an unknown type makes the load
+# raise.
 EXPERT_LORA_PEFT_TYPE = "EXPERT_LORA"
 MIXED_EXPERT_LORA_PEFT_TYPE = "LORA_WITH_EP_EXPERT_LORA"
 EXPERT_LORA_PEFT_TYPES = frozenset({EXPERT_LORA_PEFT_TYPE, MIXED_EXPERT_LORA_PEFT_TYPE})

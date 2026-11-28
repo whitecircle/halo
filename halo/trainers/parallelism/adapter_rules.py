@@ -1,10 +1,14 @@
 """LoRA / PEFT / expert-LoRA refusals under the parallelism modes, read off the live model after its wrap."""
 
 from peft import PeftModel
+from peft.tuners.tuners_utils import BaseTunerLayer
+from peft.utils import AuxiliaryTrainingWrapper
+from torch.distributed.fsdp import FSDPModule
 
 from halo.checkpoint.parallel.adapters import live_adapter_tensors
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import fsdp2_param_groups
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.tokenizer_setup import vocabulary_grown
 from halo.models.introspection.unwrapping import find_peft_model
@@ -13,18 +17,27 @@ from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
 
 def reject_peft_lora_in_ep_layers(model) -> None:
     """PEFT-wrapped LoRA inside EP layers sees rank-specific (post-dispatch) inputs, which break gradient sync; only
-    the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there."""
-    if not isinstance(model, PeftModel):
+    the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there. A tuner layer wrapping an
+    EP layer, PEFT's ``target_parameters`` route, holds its adapters outside the EP gradient sync."""
+    if find_peft_model(model) is None:
         return
+    ep_layers = named_ep_layers(model)
     offending = []
-    for name, module in named_ep_layers(model):
+    for name, module in ep_layers:
         native = {adapter_name for adapter_name, _ in module.expert_lora_named_params()}
         for param_name, _ in module.named_parameters():
             if "lora_" in param_name and param_name not in native:
                 offending.append(f"{name}.{param_name}")
+    ep_ids = {id(module) for _, module in ep_layers}
+    offending.extend(
+        f"{name} (a {type(module).__name__} around an EP layer)"
+        for name, module in model.named_modules()
+        if isinstance(module, BaseTunerLayer)
+        and any(id(inner) in ep_ids for inner in module.get_base_layer().modules())
+    )
     if offending:
         raise ValueError(
-            f"PEFT-wrapped LoRA adapters detected inside EP-wrapped MoE layers. "
+            f"PEFT-wrapped LoRA adapters detected inside or around EP-wrapped MoE layers. "
             f"Expert layers are distributed across ranks by EP, so a PEFT LoraLayer on them would "
             f"have rank-specific inputs and break gradient sync.\n"
             f"\n"
@@ -34,8 +47,58 @@ def reject_peft_lora_in_ep_layers(model) -> None:
             + "\n\n"
             "To LoRA-tune experts under EP, list the expert projections (gate_proj/up_proj/"
             "down_proj/gate_up_proj/experts) in lora_target_modules: split_expert_lora_targets "
-            "routes them to native grouped adapters instead of PEFT. LoRA on non-EP layers "
-            "(attention, embeddings, lm_head) is unaffected."
+            "routes them to native grouped adapters instead of PEFT. Leave target_parameters "
+            "unset: PEFT wraps the module holding a targeted parameter, here the EP layer. LoRA on "
+            "non-EP layers (attention, embeddings, lm_head) is unaffected."
+        )
+
+
+def _adapter_param_ids(peft_model: PeftModel) -> set[int]:
+    """Every tensor ``disable_adapter()`` freezes and thaws: a tuner layer's beside its base layer's, and a
+    ``modules_to_save`` copy's or trainable-token delta's beside the module the wrapper holds."""
+    held = tuner_adapter_param_ids(peft_model)
+    for module in peft_model.modules():
+        if isinstance(module, AuxiliaryTrainingWrapper):
+            wrapped = {id(param) for param in module.original_module.parameters()}
+            held.update(id(param) for param in module.parameters() if id(param) not in wrapped)
+    return held
+
+
+def _adapters_held_outside(model, peft_model: PeftModel) -> list[str]:
+    """The trained adapter tensors an FSDP2 shard group outside ``peft_model`` holds, by parameter name. Read off the
+    groups themselves: the wrap keeps a tensor reachable under two names, a token delta a tied pair shares, in the
+    root's group, wherever the module tree shows it."""
+    adapters = _adapter_param_ids(peft_model)
+    inside = {id(group) for group in fsdp2_param_groups(peft_model)}
+    names = {id(param): name for name, param in model.named_parameters()}
+    return sorted(
+        names[id(fsdp_param.sharded_param)]
+        for group in fsdp2_param_groups(model)
+        if id(group) not in inside
+        for fsdp_param in group.fsdp_params
+        if fsdp_param.sharded_param.requires_grad and id(fsdp_param.sharded_param) in adapters
+    )
+
+
+def reject_peft_model_below_fsdp2_root(model, *, reshard_after_forward: bool) -> None:
+    """``model`` is the FSDP2 root. Under ZeRO-2 a forward leaves each group gathered, and PEFT's ``disable_adapter()``
+    reshards only the FSDP2 modules inside the ``PeftModel`` before it enables the adapters again, so the adapters a
+    group above it holds would stay frozen after a reference pass. Rank-uniform: every rank builds the same wrap."""
+    peft_model = find_peft_model(model)
+    if peft_model is None or peft_model is model or reshard_after_forward:
+        return
+    held = _adapters_held_outside(model, peft_model)
+    if held:
+        # FSDP2 swaps the root's class for a subclass of it.
+        wrapper = next(cls for cls in type(model).__mro__ if not issubclass(cls, FSDPModule)).__name__
+        raise ValueError(
+            f"The PeftModel sits inside a {wrapper}, which FSDP2 shards as its root, and under ZeRO-2 "
+            f"(fsdp_reshard_after_forward: false) a forward leaves the root group gathered. After a disable_adapter() "
+            f"reference pass PEFT reshards only the FSDP2 modules inside the PeftModel before it enables the adapters "
+            f"again, so the {len(held)} adapter tensors the root group holds would stay frozen "
+            f"({held[:KEY_PREVIEW_COUNT]}). Hand the trainer the PeftModel itself (get_peft_model over the "
+            f"{wrapper}), set fsdp_reshard_after_forward: true where the run has no EP group, or keep "
+            f"lora_target_modules and lora_modules_to_save off the modules those tensors adapt."
         )
 
 

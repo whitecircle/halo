@@ -9,11 +9,12 @@ import types
 import pytest
 import torch
 import torch.nn as nn
+from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification, Qwen3ForCausalLM
-from transformers.utils import CONFIG_NAME
 
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE
+from halo.model_loading import checkpoint_coverage
 from halo.model_loading.checkpoint_coverage import (
     ALLOW_MISSING_CHECKPOINT_KEYS_ENV,
     from_pretrained_verified,
@@ -201,19 +202,23 @@ def test_an_adapter_directory_is_refused_with_what_loads_it(tmp_path, load):
         load(str(tmp_path))
 
 
-def test_a_directory_with_a_model_config_is_not_read_as_an_adapter(tmp_path):
-    class _Reached(Exception):
-        pass
+@pytest.mark.parametrize(
+    "load",
+    [lambda path: from_pretrained_verified(AutoModelForCausalLM, path), auto_load_model],
+    ids=["verified_load", "widest_auto_class_load"],
+)
+def test_a_model_directory_holding_an_adapter_is_refused(tmp_path, monkeypatch, load):
+    """transformers applies the adapter to the weights beside it and returns only the adapter load's report, so a
+    tensor the checkpoint lacks would pass the coverage gate as random init."""
+    path = _write_checkpoint(tmp_path / "trunc", drop="layers.1.")
+    lora = LoraConfig(r=2, target_modules=["q_proj"])
+    get_peft_model(AutoModelForCausalLM.from_config(_tiny_config()), lora).save_pretrained(path)
+    with pytest.raises(ValueError, match="holds a PEFT adapter .* beside a model's config.json"):
+        load(path)
 
-    class _Stub:
-        @staticmethod
-        def from_pretrained(*args, **kwargs):
-            raise _Reached
-
-    (tmp_path / ADAPTER_CONFIG_FILE).write_text("{}")
-    (tmp_path / CONFIG_NAME).write_text("{}")
-    with pytest.raises(_Reached):
-        from_pretrained_verified(_Stub, str(tmp_path))
+    monkeypatch.setattr(checkpoint_coverage, "reject_adapter_directory", lambda _path: None)
+    model = from_pretrained_verified(AutoModelForCausalLM, path)
+    assert model._hf_peft_config_loaded, "premise: transformers applied the adapter and the gate passed the load"
 
 
 def test_importing_the_gate_makes_module_cache_copies_whole():

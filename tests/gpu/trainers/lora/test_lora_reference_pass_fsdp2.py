@@ -2,8 +2,9 @@
 """A reference pass under ``disable_adapter()`` leaves FSDP2-sharded LoRA adapters trainable.
 
 peft clears ``requires_grad`` on the sharded params at entry and restores it on the unsharded copies at exit, and FSDP2
-copies the sharded flag at each unshard. Unless ``install_fsdp2_safe_disable_adapter`` reshards before peft's exit,
-adapters stay frozen silently, since checkpointing's input-grad hook keeps the loss attached.
+copies the sharded flag at each unshard. Unless peft reshards before it enables the adapters again
+(huggingface/peft#3839, #3938), adapters stay frozen silently, since checkpointing's input-grad hook keeps the loss
+attached.
 """
 
 import torch

@@ -1,7 +1,6 @@
 """FSDP2 (``fully_shard``) data-parallel gradient sync for every torchrun mode, plus sharding-state helpers. A
 multi-layer unit's hooks and :func:`complete_fsdp2_post_backward` drive FSDP2 internals of the installed torch."""
 
-import contextlib
 import functools
 import logging
 from collections.abc import Sequence
@@ -655,36 +654,3 @@ def reject_unfinished_fsdp2_backward(groups: list[FSDPParamGroup]) -> None:
         f"(FSDPParamGroup.post_backward and the unsharded gradients it reduces) changed in torch "
         f"{torch.__version__}."
     )
-
-
-def install_fsdp2_safe_disable_adapter(peft_model: nn.Module, fsdp_root: nn.Module) -> None:
-    """Make ``peft_model.disable_adapter()`` restore ``requires_grad`` on the FSDP2 sharded params. peft clears the
-    flag on the params registered at entry and restores it on those registered at exit; a reference pass that is the
-    first forward after a reshard enters on sharded and exits on unsharded params, leaving the sharded adapters frozen.
-    So when the trainable slots' params changed, every FSDP2 module is resharded before peft's exit. The slots are read
-    once, since FSDP2 swaps what a slot holds, never the slot. Per-rank and idempotent."""
-    if getattr(peft_model, "_fsdp2_safe_disable_adapter", False):
-        return
-    disable_adapter = peft_model.disable_adapter
-    trainable_slots = [
-        (module, name)
-        for module in fsdp_root.modules()
-        for name, param in module.named_parameters(recurse=False)
-        if param.requires_grad
-    ]
-
-    @contextlib.contextmanager
-    def _fsdp2_safe_disable_adapter():
-        registered_at_entry = [getattr(module, name) for module, name in trainable_slots]
-        with disable_adapter():
-            try:
-                yield
-            finally:
-                if any(
-                    getattr(module, name) is not param
-                    for (module, name), param in zip(trainable_slots, registered_at_entry, strict=True)
-                ):
-                    reshard_fsdp2_modules(fsdp_root)
-
-    peft_model.disable_adapter = _fsdp2_safe_disable_adapter
-    peft_model._fsdp2_safe_disable_adapter = True

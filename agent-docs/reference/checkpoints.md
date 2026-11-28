@@ -546,6 +546,10 @@ passes `excuse_task_head=False` (reward-model inference), so a plain causal-LM d
 scoring through a random `score` head.
 `HALO_ALLOW_MISSING_CHECKPOINT_KEYS=1` downgrades the raise to a warning.
 
+A local directory holding `adapter_config.json` is refused before the load (`reject_adapter_directory`), with a
+model's `config.json` beside it or without: transformers applies the adapter to the weights beside it, else to the
+base it names, and returns only the adapter load's report, so the gate would pass a base tensor the directory lacks.
+
 ## Resuming training
 
 Set `resume_from_checkpoint: true` (or a `checkpoint-N` path) and re-run the same command, leaving
