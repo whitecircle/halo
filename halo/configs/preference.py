@@ -18,6 +18,14 @@ from halo.configs.script_arguments import (
 class DPOScriptArguments(VisionTrainingArguments, GenerationEvalArguments, CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "dpo-tuning"
 
+    use_chunked_dpo_logprobs: bool = field(
+        default=False,
+        metadata={
+            "help": "Score DPO policy and precomputed references from hidden states with Halo's bounded head. "
+            "Text-only full fine-tuning, sigmoid/reverse-KL, dense DP or Qwen3-MoE EP2; no active aux loss."
+        },
+    )
+
     images_field: str | None = field(
         default=None,
         metadata={

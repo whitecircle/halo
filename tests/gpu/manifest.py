@@ -2340,6 +2340,25 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=1, markers=("gpu", "core", "1gpu"), timeout=300
     ),
     "trainers/preference/test_dpo.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
+    "trainers/preference/test_dpo_chunked_lifecycle.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=(
+            Row("--family dense", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--family qwen3_moe", markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+        ),
+        timeout=1200,
+    ),
+    "trainers/preference/test_dpo_chunked_equivalence.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=(
+            Row("--family dense --dtype float32", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--family dense --dtype bfloat16", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--family qwen3_moe --dtype bfloat16", markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+        ),
+        timeout=1200,
+    ),
     "trainers/preference/test_dpo_vlm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "vlm"), timeout=900),
     "trainers/preference/test_smpo_vlm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "vlm"), timeout=900),
     "trainers/preference/test_smpo_text_on_vlm.py": TestSpec(

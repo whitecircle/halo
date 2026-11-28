@@ -36,6 +36,7 @@ from halo.trainers.parallelism.pipeline_rules import (
     reject_pp_compute_metrics,
     reject_pp_ref_model,
 )
+from halo.trainers.preference.chunked_dpo import CHUNKED_DPO_SCORER, DPO_SCORER_KEY, ChunkedDPOScoringMixin
 from halo.trainers.preference.preference_rules import reject_dpo_pp_objective
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from halo.trainers.trl_dataset_prep import TRLDatasetPrepMixin
@@ -60,7 +61,9 @@ _PP_PAIR_LOSSES: dict[str, Callable[[float, torch.Tensor, torch.Tensor, torch.Te
 }
 
 
-class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLDatasetPrepMixin, DPOTrainer):
+class DistributedDPOTrainer(
+    ChunkedDPOScoringMixin, TRLPreferenceMixin, DistributedTrainerMixin, TRLDatasetPrepMixin, DPOTrainer
+):
     _tag_names = ["trl", "dpo"]
 
     PP_REFUSAL = None
@@ -105,11 +108,14 @@ class DistributedDPOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
 
     def _reference_settings(self) -> dict:
         """The collator's truncation and ``ld_alpha``'s reshaping of the summed reference log-probs."""
-        return {
+        settings = {
             "max_length": self.args.max_length,
             "truncation_mode": self.args.truncation_mode,
             "ld_alpha": self.ld_alpha,
         }
+        if getattr(self, "use_chunked_dpo_logprobs", False):
+            settings[DPO_SCORER_KEY] = CHUNKED_DPO_SCORER
+        return settings
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """``completion_mask`` rides ``pad_spec`` for full-length tensors; reference log-probs ship interleaved to stay

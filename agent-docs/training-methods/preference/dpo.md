@@ -41,6 +41,16 @@ Terms TRL takes from the logits directly keep TRL's precision: the `sft` loss ty
 
 Every run takes the fp32 path. The trainer turns TRL's `use_liger_kernel` off at construction: the flag selects TRL's chunked log-prob path, which refuses the router aux loss and skips the family's head transform. Liger kernels applied at load are unaffected.
 
+### Bounded head scoring
+
+`use_chunked_dpo_logprobs: true` scores the policy and precomputed reference from completion hidden states with `chunked_head_logprobs`, without a full `[B, T, V]` logits plane. It applies the family's verified head transform inside the wrapped root forward, where FSDP2 holds the output head gathered. Sequence sums and reference columns stay fp32. Types and defaults: [DPOScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
+
+On CUDA, construction warms the reference and training scorer forms, including backward, after distributed wrapping. This avoids compiling the head kernels during the first optimizer step, including when a resume restores references without a sweep.
+
+This path supports padded text full fine-tuning, `sigmoid` with `reverse_kl`, on Halo-managed dense FSDP2 or Qwen3-MoE EP2 with no active router aux loss. It requires `precompute_ref_log_probs`. TP, ETP, CP, PP, Accelerate-managed wrapping, DeepSpeed, quantized weights, adapters, multimodal composites, other losses, weighting, length reshaping and nonzero label smoothing are refused.
+
+Loss-only evaluation keeps rewards, log-probs, entropy and token counts; raw-logit metrics and `compute_metrics` are unavailable. Passing the trainer's held eval split explicitly reuses its already-scored columns. Externally supplied reference columns are refused because they carry no scorer identity: remove them and let this path sweep. Its sidecar records the scorer, and a resume cannot substitute a full-logits sidecar or vice versa. Use the regeneration procedure [below](#resuming-a-precompute-run) when changing paths.
+
 ## Reference model
 
 Three shapes, decided by `load_reference_model_for_preference` (`halo/model_loading/parallel/frozen_models.py`):
@@ -61,7 +71,7 @@ TRL's constructor only records each split, and the sweep runs at the end of the 
 - A split whose settings record another log-prob precision, or none, is such a mismatch: its values carry that precision's rounding. The refusal names the one-step regeneration below.
 - Splits the resumed run does not precompute (an eval dataset switched off) ride unchanged into its checkpoints, for a later resume that uses them again.
 - To give a checkpoint without the file one, run the same config for one step from the base into a scratch directory outside the run's `output_dir`, whose rotation could otherwise delete the checkpoint (`--output_dir=<scratch> --max_steps=1 --save_strategy=steps --save_steps=1 --save_only_model=true --resume_from_checkpoint=null`; the refusal names a scratch path), and copy its `checkpoint-1/reference_logps.pt` into the checkpoint, on every node when checkpoints are node-local; the resume validates it like its own. A checkpoint whose save stopped before the file can take the previous checkpoint's copy, which holds the same values.
-- Columns the dataset already carries are read from it and not persisted.
+- The default full-logits path reads columns the dataset already carries without persisting them. [Bounded head scoring](#bounded-head-scoring) requires its own swept or restored columns.
 
 ## Launch
 
@@ -102,6 +112,7 @@ Covering tests:
 
 - `pytest tests/cpu/trainers -m cpu`
 - `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py`
+- bounded scoring: `tests/cpu/trainers/test_chunked_dpo.py`; dense DP2 and Qwen3-MoE EP2 token scores, references, every parameter gradient, two SGD updates and a zero-target rank against a full FP32 head in `tests/gpu/trainers/preference/test_dpo_chunked_equivalence.py` (dense FP32 masters with FP32 or BF16 compute; ordinary BF16 EP parameters); train, eval, save, resume and stock HF export in `test_dpo_chunked_lifecycle.py` beside it
 - pipeline parallelism on precomputed reference log-probs: `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer dpo`, and its save, exact resume and export: `test_pp_trainer_checkpoints.py --trainer dpo`
 - precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model in the core tier; every other EP family, with TP and EP+TP where its attention has a TP plan, and EP+ETP on four ranks for every EP family in the full tier)
 
@@ -117,6 +128,6 @@ Failure signatures:
 
 - A reference-model raise on a live-sinks policy — `use_peft: true`, or precompute under EP/TP. `beta: 0` does not help: it changes the loss, not whether a reference loads.
 - A host OOM while the frozen reference loads, or a CUDA OOM when the trainer places it, under EP or TP — the dense replica does not fit beside the sharded policy; set `precompute_ref_log_probs: true` (or `use_peft: true` under EP; TP rejects PEFT).
-- "Cannot resume precompute_ref_log_probs" — the checkpoint's `reference_logps.pt` is missing or lacks that split. Recover it with the one-step run [above](#resuming-a-precompute-run), or put the reference columns (computed on the base model) in the dataset.
+- "Cannot resume precompute_ref_log_probs" — the checkpoint's `reference_logps.pt` is missing or lacks that split. Recover it with the one-step run [above](#resuming-a-precompute-run).
 - "does not belong to this '`<split>`' dataset" on resume — the resumed data or reference settings differ from the saving run's (dataset, split, chat template, tokenizer, `max_length`, `truncation_mode`, `ld_alpha`). Resume with the saving run's data and settings, or regenerate the file with the one-step run [above](#resuming-a-precompute-run).
 - "Regenerate the '`<split>`' reference log-probs for this run" on resume — the saved split was summed at another [log-prob precision](#log-prob-precision), which no setting selects. Run the one-step regeneration the message names.

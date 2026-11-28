@@ -7,8 +7,10 @@ import secrets
 import socket
 from pathlib import Path
 
-# Ray's default worker ports end at 19999; the pool runs from here to the ephemeral floor.
+# Prefer the band above Ray's default workers; lower ephemeral floors need the non-Ray low band.
 POOL_FLOOR = 20000
+_UNPRIVILEGED_FLOOR = 1024
+_LOW_POOL_CEILING = 10000
 _EPHEMERAL_RANGE = Path("/proc/sys/net/ipv4/ip_local_port_range")
 
 # Never re-issued within a session.
@@ -19,22 +21,33 @@ def ephemeral_floor() -> int:
     return int(_EPHEMERAL_RANGE.read_text().split()[0])
 
 
-def worker_port_block() -> range:
-    """The slice of the pool this process allocates from, disjoint across one xdist session's workers."""
-    workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
-    # A restarted worker gets a fresh id past the count; wrap it back into the pool.
-    index = int(os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")) % workers
+def resolve_port_pool(workers: int) -> range:
+    """An unprivileged pool outside the kernel's ephemeral range and Ray's default worker ports."""
+    if workers < 1:
+        raise ValueError("The test worker count must be positive")
     floor = ephemeral_floor()
-    size = (floor - POOL_FLOOR) // workers
-    if size < 1:
+    pool = range(POOL_FLOOR, floor)
+    if len(pool) < workers:
+        pool = range(_UNPRIVILEGED_FLOOR, min(_LOW_POOL_CEILING, floor))
+    if len(pool) < workers:
         raise RuntimeError(
             f"net.ipv4.ip_local_port_range starts at {floor}, which leaves {workers} test worker(s) no port "
-            f"between {POOL_FLOOR} and the range. Move the range up to the Linux default: "
-            f'`sysctl -w net.ipv4.ip_local_port_range="32768 60999"` on the host (a --network host '
+            "outside privileged, ephemeral and Ray worker ranges. Move the range up to the Linux default: "
+            '`sysctl -w net.ipv4.ip_local_port_range="32768 60999"` on the host (a --network host '
             "container shares it), or "
             '`docker run --sysctl net.ipv4.ip_local_port_range="32768 60999"` for a container of its own.'
         )
-    start = POOL_FLOOR + index * size
+    return pool
+
+
+def worker_port_block() -> range:
+    """The slice of the pool this process allocates from, disjoint across one xdist session's workers."""
+    workers = int(os.environ.get("PYTEST_XDIST_WORKER_COUNT", "1"))
+    pool = resolve_port_pool(workers)
+    # A restarted worker gets a fresh id past the count; wrap it back into the pool.
+    index = int(os.environ.get("PYTEST_XDIST_WORKER", "gw0").removeprefix("gw")) % workers
+    size = len(pool) // workers
+    start = pool.start + index * size
     return range(start, start + size)
 
 
