@@ -72,6 +72,9 @@ jobs:
               `2. If it's accepted, a maintainer comments \`/approve @${author}\` on it — that adds you to \`.github/APPROVED_CONTRIBUTORS\`.`,
               `3. Open your PR against that issue. To reuse this one, reopen it, or ask on the issue and a maintainer will.`,
               ``,
+              // Temporary, for the Halo Competition: after Dec 18 remove this comment, the next line and the empty line after it.
+              `Taking part in the [Halo Competition](https://whitecircle.com/halo/competition)? Submissions go through the competition platform, in the format your track's rules set, and competition questions go to the organizers on Discord or at hello@whitecircle.com.`,
+              ``,
               `Details: [CONTRIBUTING.md](https://github.com/${owner}/${repo}/blob/${branch}/CONTRIBUTING.md). Thanks for understanding!`,
             ].join('\n');
             // The close is the enforcement and the comment the courtesy: the comment must not be

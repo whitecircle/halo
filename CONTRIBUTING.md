@@ -26,6 +26,22 @@ under maintainer control. Read this before opening an issue or PR; the full dev 
 
 Good bug reports, well-argued proposals, and code you understand are all welcome.
 
+## Halo Competition
+
+The gate applies as usual during the [Halo Competition](https://whitecircle.com/halo/competition), so an
+optimization you want merged into Halo starts as a Feature request / proposal issue. Competition
+submissions go through the competition platform, in the format your track's rules set
+([Terms](https://whitecircle.com/halo/competition/terms), section 4.1).
+
+- A Halo bug or a question about Halo goes in an issue here. Tick the Halo Competition box at the top of
+  the template and give the Halo version or commit you run, since your track's rules name the version a
+  submission must use. A security vulnerability is the exception: report it privately, as
+  [SECURITY.md](SECURITY.md) says.
+- Questions about the rules, teams, submissions or compute credits go to the organizers on the
+  competition Discord or at hello@whitecircle.com. A loophole in a track's benchmark, or a bug that
+  changes a track's score, goes to them too and not into a public issue (Terms, section 5.2).
+- Issues and pull requests here are public, so every team can read what you post in them.
+
 ## The one rule
 
 **You must understand your code.** If you can't explain what your change does, how it behaves at the
