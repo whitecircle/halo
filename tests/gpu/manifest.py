@@ -1740,7 +1740,7 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # Each row asserts logprobs only its own checkpoint's server can produce: VLLM_SERVER_URL serves
     # Qwen/Qwen3-30B-A3B-Instruct-2507 (MoE rows), HALO_TEST_VLLM_DENSE_SERVER_URL Qwen/Qwen3-0.6B (dense and
-    # one-process rows), HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL Qwen/Qwen3-8B (lora_head_fsdp_zero3). --servers 2 rows
+    # one-process rows), HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL Qwen/Qwen3-8B (lora_head_fsdp_zero3, the untied_dense pass). --servers 2 rows
     # skip without a second server in HALO_TEST_VLLM_SERVER_URLS. --resume rows run two trainers in one process and load
     # the policy twice, hence the longest timeouts of their policy.
     "trainers/grpo/test_online_grpo_vllm_e2e.py": TestSpec(
@@ -1818,7 +1818,7 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer online --mode lora_head_fsdp_zero3 --chunked",
                     "--trainer sdpg --mode lora_head_fsdp_zero3 --chunked",
                 ),
-                markers=("gpu", "full", "2gpu", "lora", "qwen3", "vllm_server"),
+                markers=("gpu", "full", "2gpu", "lora", "qwen3", "untied_dense", "vllm_server"),
                 timeout=900,
             ),
             *_rows(
@@ -2964,6 +2964,7 @@ ALL_MARKERS = (
     "sglang_server",
     "lora",
     "moe",
+    "untied_dense",
     "gptoss",
     "qwen3",
     "glm4",

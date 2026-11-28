@@ -83,7 +83,9 @@ MOE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_MOE_MODEL", QWEN3_30B_A3B)
 DENSE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_DENSE_MODEL", QWEN3_0_6B)
 UNTIED_DENSE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_UNTIED_DENSE_MODEL", QWEN3_8B)
 MOE_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"
-UNTIED_DENSE_SERVER_URL = env_str("HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL") or "http://localhost:8020"
+UNTIED_DENSE_SERVER_URL = (
+    env_str("HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL") or env_str("VLLM_SERVER_URL") or "http://localhost:8020"
+)
 # Comma-separated, each serving DENSE_MODEL on a GPU of its own; every one-process row drives the first.
 SERVER_URLS = [
     url.strip() for url in (env_str("HALO_TEST_VLLM_SERVER_URLS") or VLLM_DENSE_SERVER_URL).split(",") if url.strip()

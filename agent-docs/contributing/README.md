@@ -84,10 +84,10 @@ The SGLang server needs only cuMem parity on top, the compose default
 
 Each server tier runs **one pass per served model**: the tests broadcast the trainer's own weights into
 the served model and assert the served policy moved, so server and trainer hold the same checkpoint.
-`SERVER_TIER` defaults to `not moe` (serve `Qwen/Qwen3-0.6B`); the MoE passes restart the vLLM server on
+`SERVER_TIER` defaults to `not moe and not untied_dense` (serve `Qwen/Qwen3-0.6B`); the MoE passes restart the vLLM server on
 `Qwen/Qwen3-30B-A3B-Instruct-2507` for `SERVER_TIER='moe and not gptoss'` and on
 `unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE pass serves gpt-oss alone
-(`SERVER_TIER=moe`). On either engine the `moe` marker also selects the per-family rows of
+(`SERVER_TIER=moe`). The vLLM `SERVER_TIER=untied_dense` pass serves `Qwen/Qwen3-8B` for the rows that train a LoRA adapter on `lm_head`, which need a head not tied to the input embedding. On either engine the `moe` marker also selects the per-family rows of
 `trainers/grpo/test_weight_push_exact.py`, which skip unless `HALO_TEST_PUSH_EXACT_FRESH` is set and the
 server serves the row's checkpoint. The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
 per-effort CoT budget, which draws a 400 without a reasoning parser (the target's health guard prints
@@ -302,7 +302,7 @@ the script:
 | `HALO_TEST_RESUME_FSDP_RESHARD` | `fsdp_reshard_after_forward` (default off) for the `fsdp`, `fsdp_base` and `cp` modes of `tests/gpu/trainers/sft/test_sft_checkpoint_resume.py` (TP+DP+FULL_SHARD is config-rejected) |
 | `HALO_TEST_VLLM_DENSE_SERVER_URL` | Endpoint of the dense and one-process rows of `trainers/grpo/test_online_grpo_vllm_e2e.py` and of the vLLM re-init and pool-reconnect suites; the MoE rows train another checkpoint, so one `VLLM_SERVER_URL` cannot carry both (unset: `VLLM_SERVER_URL`, then `http://localhost:8010`) |
 | `HALO_TEST_ONLINE_GRPO_MOE_MODEL` / `HALO_TEST_ONLINE_GRPO_DENSE_MODEL` | Checkpoints of that e2e: MoE rows `Qwen/Qwen3-30B-A3B-Instruct-2507` (EP/ETP), dense rows `Qwen/Qwen3-0.6B` (TP, FSDP2-DP, one-process); the server must serve the same one |
-| `HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL` / `HALO_TEST_ONLINE_GRPO_UNTIED_DENSE_MODEL` | Endpoint (unset: `http://localhost:8020`) and checkpoint (default `Qwen/Qwen3-8B`) of that e2e's `lora_head_fsdp_zero3` rows, which train a LoRA adapter on `lm_head` and need a checkpoint whose head is not tied to its input embedding; the server must serve the same one |
+| `HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL` / `HALO_TEST_ONLINE_GRPO_UNTIED_DENSE_MODEL` | Endpoint (unset: `VLLM_SERVER_URL`, then `http://localhost:8020`) and checkpoint (default `Qwen/Qwen3-8B`) of that e2e's `lora_head_fsdp_zero3` rows, which train a LoRA adapter on `lm_head` and need a checkpoint whose head is not tied to its input embedding; the server must serve the same one |
 | `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and steps (default `2`; a `--prefetch-depth N` row runs `N + 2`: its `N` cold rounds, then two that pop a prefetched one) of the two-rank vLLM rows of the Environmental-GRPO e2e (`tests/common/env_grpo_e2e.py`) |
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` / `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoints of the SGLang rows and of the four-rank vLLM rows (EP+ETP, EP+TP, ep4) of `trainers/grpo/test_env_grpo_e2e.py`, both default `unsloth/gpt-oss-20b-BF16` |
 | `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` / `HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE` | Per-family overrides for that e2e: the policy's `attn_implementation` (unset: auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset: the attention projections read off the index; needed where they do not end in `_proj`, such as Ling's `query_key_value,dense`). `HALO_TEST_ENV_GRPO_TRUST_REMOTE_CODE` defaults on; set it to `0` for Step-3.7, whose `auto_map` is for the server: its trainer takes the native class. |
