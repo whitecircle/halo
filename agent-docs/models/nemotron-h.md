@@ -34,7 +34,7 @@ The family's layers, balancing and refused modes below apply, and these differ:
 - **Rows:** text only, as the release has no vision tower.
 - **Size:** 63 GB gathered and about 40 GB static per GPU for a full fine-tune at `ep8`, by arithmetic. So FSDP2 alone is not held back by size as it is on Super VL, though it has not run on these weights, and the figures under [EP layer](#ep-layer), [Memory](#memory) and HSDP below are Super VL's.
 - **Time-step limit:** the config declares none, so the class default (0, inf) applies, which both engines apply too. A stock reload keeps upstream's floor ([Mamba layers](#mamba-layers)).
-- **Recipe:** `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`.
+- **Recipes:** the full fine-tune `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml` and LoRA SFT `nemotron-3.5-lightning-ep8-lora.yaml` beside it, SMPO and DPO in `examples/preference/nemotron_h/`, and offline GRPO in `examples/grpo/offline/nemotron_h/`. DPO is a full fine-tune with `precompute_ref_log_probs`, and the LoRA recipe folds its expert adapters at every save (`merge_expert_lora_on_save`).
 - **Export:** the release's own `config.json` with this run's changes, its `auto_map` absent, so there are no modules to copy ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)). `layers_block_type` keeps `mamba` and `attention`, the spellings SGLang's config class requires, and no `time_step_limit` reaches the file, so it holds no JSON float tag. vLLM's and SGLang's config readers parse the file; SGLang's refuses transformers' `linear_attention` and `full_attention`. Stock `from_pretrained` reloads a tiny copy's export to the release's tensors and logits. A depth cut writes its layer list in transformers' spelling, which SGLang refuses, so serve a full-depth export.
 - **Head:** a run with no `mtp_loss_weight` exports no `mtp.*`, and `reattach_vision_tower.py` cannot restore one, as it needs a composite base. A run training the [head](#mtp-head) writes the release's 270 keys.
 
@@ -47,12 +47,23 @@ On the real weights:
 - **Recipe, memory and tok/s:** 20 steps at `ep8` and `max_length` 8,192 run 9,986 tok/s per rank with the optimizer and reduce, at 6.53 s a step, 47.4–47.9 GiB peak allocated and 55–60 GB reserved.
 - **Serving:** vLLM and SGLang each start an untrained export with the cookbook's flags and answered one text prompt. SGLang refuses transformers' native `config.json` at start. Online weight sync stays refused, as for the family.
 
+On 8× H200 (`hopper-1.3.0rc2`), the LoRA, SMPO, DPO and offline GRPO recipes each ran 20 steps at `ep8`. SFT resolves to FA3, and the preference and offline GRPO scripts to SDPA. The LoRA run read the first 24,000 UltraChat rows, SMPO the first 4,096 Tulu-3 rows and DPO the first 2,048. Offline GRPO read 1,400 GSM8K prompts with four completions each, sampled from the release on vLLM and scored with the `accuracy` term. Peak allocated and reserved are rank 0's (`enable_efficiency_metrics`), and the last column is what `nvidia-smi` showed in use across the eight GPUs:
+
+| Recipe | Attention | Loss, first → last | tok/s per rank | Peak allocated | Reserved | In use |
+|---|---|---|---|---|---|---|
+| LoRA SFT, 16,384 tokens packed | FA3 | 1.323 → 0.956 | 6,870 | 35.3 GiB | 55.6 GiB | 56–66 GiB |
+| SMPO | SDPA | 3.816 → 1.729 | 1,430 | 47.4 GiB | 58.5 GiB | 53–63 GiB |
+| DPO, precomputed reference | SDPA | 0.693 → 0.604 | 1,879 | 49.8 GiB | 64.4 GiB | 59–89 GiB |
+| Offline GRPO | SDPA | 0.035 → −0.028 | 772 | 42.0 GiB | 44.5 GiB | 45–48 GiB |
+
+Every grad norm was finite. The LoRA run's folded save (6,243 tensors, 63.16 GB) loads in stock transformers as `NemotronHForCausalLM` and generates, at an NLL of 1.205 on 32 UltraChat test rows where the release reads 1.521. The release answers most GSM8K prompts the same way four times, so 1,201 of the 1,400 groups tie and carry no advantage.
+
 ## Methods
 
-- **SFT:** full fine-tuning or LoRA, on text (`text_only_model: true`, the recipes) or images (the composite).
+- **SFT:** full fine-tuning or LoRA, on text (`text_only_model: true` on Super VL, the recipes) or images (the composite).
 - **SMPO:** text or images.
 - **Offline GRPO:** text, on either class. It needs no server ([Offline GRPO](../training-methods/grpo/offline.md)).
-- **DPO, KTO:** text, a full fine-tune with `precompute_ref_log_probs`, as a frozen reference holds 241 GB unsharded on every GPU. Image rows are refused before the load (`refuses_trl_image_rows`).
+- **DPO, KTO:** text, a full fine-tune with `precompute_ref_log_probs`, as a frozen reference holds the whole model unsharded on every GPU: 241 GB on Super VL, 63 GB on Lightning. Image rows are refused before the load (`refuses_trl_image_rows`).
 - **Self-distillation:** text or images. **Teacher distillation:** a frozen teacher of this size leaves a B300 no room for a student.
 - **Online and async GRPO, online SDPG:** refused ([RL weight sync](#rl-weight-sync)).
 - **Reward, classification, embedding:** no row; transformers has no sequence-classification class for the family.

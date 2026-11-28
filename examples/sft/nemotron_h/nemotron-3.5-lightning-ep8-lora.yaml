@@ -1,0 +1,82 @@
+# NVIDIA Nemotron 3.5 Lightning (nemotron_h, 31.6B parameters, 29.4B of them routed experts, text only) — EP=8 LoRA
+# SFT on UltraChat 200K, one 8-GPU node: attention and Mamba adapters via PEFT, routed experts via native grouped
+# expert-LoRA. Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 6,870 tok/s per rank, 55.6 GiB reserved on rank 0
+# and 56-66 GiB in use across the GPUs at this max_length.
+# See agent-docs/models/nemotron-h.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+# The router's own e_score_correction_bias, a buffer the adapters leave alone: the export carries what it learned.
+moe_balancing: bias_update
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 128 routed experts -> 16/rank; one dispatch group on 8 GPUs
+fp32_grad_reduce: true                # tighter gradient reduction; LoRA-cheap (adapter grads only)
+
+# --- LoRA — attention and Mamba via PEFT; up_proj/down_proj peel to native EP expert-LoRA ---
+use_peft: true
+lora_r: 32                            # a multiple of 8: the grouped kernel's stride
+lora_alpha: 64                        # scaling = alpha/r = 2
+lora_target_modules:
+# Attention (6/52 layers)
+- q_proj
+- k_proj
+- v_proj
+- o_proj
+# Mamba (23/52 layers). conv1d stays out: the mixer reads its weight directly, and an adapter on it is refused.
+- in_proj
+- out_proj
+# Routed experts (128 x 23 layers): peeled by split_expert_lora_targets to grouped adapters inside the EP layers. The
+# shared expert (inside the EP layer, no LoRA route) and the router stay frozen.
+- up_proj
+- down_proj
+merge_expert_lora_on_save: true       # fold both halves into the base at every save -> a servable checkpoint
+                                      #   (~59 GiB each); without it the adapter stays mixed, and
+                                      #   merge_peft_adapters.py refuses the whole adapter before
+                                      #   writing any output (the hub stores the experts under
+                                      #   backbone.*)
+
+# --- Attention & sequence ---
+# Packed rows keep their documents apart: the Mamba scan and conv read seq_idx, attention cu_seq_lens.
+packing: true
+max_length: 16384                     # a starting point; raise after reading reserved memory on the node
+
+# --- Training schedule ---
+per_device_train_batch_size: 1        # batch>1 flattens into one wider row; scale with GA
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
+num_train_epochs: 1.0
+
+# --- Optimizer & LR schedule ---
+learning_rate: 1.0e-04                # the generic LoRA SFT start (agent-docs/optimization/peft.md)
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/nemotron-3.5-lightning-ep8-lora
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- Tokens & chat template ---
+# The tokenizer pads with its eos, <|im_end|>; <unk> is the pad id the release's config records, so an export keeps it.
+pad_token: <unk>
+# The hub template renders every assistant turn with no reasoning as <think></think> plus its text, and the empty block
+# trains as part of the completion.
+assistant_message_template: "<|im_start|>assistant\n"
