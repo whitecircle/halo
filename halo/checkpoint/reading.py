@@ -17,7 +17,7 @@ from typing import Any
 import httpx
 import torch
 from huggingface_hub import get_safetensors_metadata, try_to_load_from_cache
-from huggingface_hub.errors import NotASafetensorsRepoError, OfflineModeIsEnabled
+from huggingface_hub.errors import HfHubHTTPError, NotASafetensorsRepoError, OfflineModeIsEnabled
 from safetensors import SafetensorError, safe_open
 from safetensors.torch import load_file as _safetensors_load_file
 from transformers.utils import CONFIG_NAME
@@ -198,15 +198,22 @@ def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
 
 def checkpoint_module_paths(path: str, *, revision: str | None = None) -> frozenset[str] | None:
     """The module paths a checkpoint stores a tensor under (each key less its last segment), off its index or
-    safetensors header alone: a local directory's (the index opens no shard, so one missing does not matter), else a
-    Hub repo's at ``revision``, from this host's cache where it holds the index or the single file, else through
-    ``get_safetensors_metadata``, which downloads no weight. ``None`` for a checkpoint that stores no safetensors, or a
-    Hub repo this host cannot reach (offline mode, or no network)."""
+    safetensors headers alone: a local directory's (the index opens no shard, so one missing does not matter; without
+    an index, every ``model*.safetensors`` header, the files an engine loads), else a Hub repo's at ``revision``, from
+    this host's cache where it holds the index or the single file, else through ``get_safetensors_metadata``, which
+    downloads no weight. ``None`` for a checkpoint that stores no safetensors, or a Hub repo this host cannot reach
+    (offline mode, no network, or an error status such as an outage or a mirror without the repo)."""
     if os.path.isdir(path):
         weights = resolve_checkpoint_weights(path)
-        if not weights.shard_files:
+        if weights.shard_files:
+            keys = list(weights.weight_map)
+        elif shards := sorted(glob.glob(os.path.join(path, SAFETENSORS_FAMILY_GLOB))):
+            keys = []
+            for shard in shards:
+                with safe_open(shard, framework="pt") as reader:
+                    keys.extend(reader.keys())  # noqa: SIM118 - safe_open has .keys() but is not a mapping
+        else:
             return None
-        keys = list(weights.weight_map)
     elif isinstance(index := try_to_load_from_cache(path, SAFETENSORS_INDEX_FILE, revision=revision), str):
         with open(index, encoding="utf-8") as handle:
             keys = list(json.load(handle)["weight_map"])
@@ -216,7 +223,7 @@ def checkpoint_module_paths(path: str, *, revision: str | None = None) -> frozen
     else:
         try:
             keys = list(get_safetensors_metadata(path, revision=revision).weight_map)
-        except (NotASafetensorsRepoError, OfflineModeIsEnabled, httpx.TransportError):
+        except (NotASafetensorsRepoError, OfflineModeIsEnabled, HfHubHTTPError, httpx.TransportError):
             return None
     return frozenset(key.rpartition(".")[0] for key in keys)
 

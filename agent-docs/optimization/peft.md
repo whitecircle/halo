@@ -65,7 +65,7 @@ output, which leaves two module shapes out of its reach:
 
 | Shape | Example | Without the exclusion |
 |---|---|---|
-| A wrapper holding its weight in a child module | Gemma 4's `Gemma4ClippableLinear`, the vision and audio towers' projections; since transformers 5.24, Inkling 2's decoder attention projections (`Inkling2QueryProjection`, `Inkling2KeyValueProjection`, `Inkling2GatedOutputProjection`), which keep it in `linear` | injection raises `Target module ... is not supported` |
+| A wrapper holding its weight in a child module | Gemma 4's `Gemma4ClippableLinear`, the vision and audio towers' projections; Inkling 2's decoder attention projections (`Inkling2QueryProjection`, `Inkling2KeyValueProjection`, `Inkling2GatedOutputProjection`), which keep it in `linear` | injection raises `Target module ... is not supported` |
 | A layer subclass computing something other than its base layer's affine map | DeepSeek-V4's grouped `o_a_proj`, whose block-diagonal output is one group wide | the delta has the wrong width and the first forward raises |
 
 Both are reachable by an ordinary target list — target names are matched by suffix over the whole

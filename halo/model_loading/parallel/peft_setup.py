@@ -160,7 +160,7 @@ def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[_ProbeKey, bool]
 
 
 def _weight_child(module: torch.nn.Module) -> str | None:
-    """The child a wrapper keeps its weight in: ``linear`` (Inkling 2's projection modules since transformers 5.24),
+    """The child a wrapper keeps its weight in: ``linear`` (Inkling 2's projection modules),
     else the only child holding a weight. A container of several projections (``mlp``, ``self_attn``) names none."""
     holders = [name for name, child in module.named_modules() if name and any(True for _ in child.parameters(False))]
     if "linear" in holders:

@@ -12,6 +12,7 @@ import httpx
 import huggingface_hub
 import pytest
 import torch
+from huggingface_hub.errors import HfHubHTTPError
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 
@@ -182,6 +183,20 @@ def test_a_local_base_is_read_off_its_index_without_opening_a_shard(tmp_path):
     assert checkpoint_module_paths(str(tmp_path / "base")) == {_HUB_O, "lm_head"}
 
 
+@pytest.mark.parametrize("layout", ["shards", "lone"])
+def test_a_local_base_without_an_index_is_read_off_its_shard_headers(tmp_path, layout):
+    """Shards with no index, or a lone ``model-00001-of-00001.safetensors``, which vLLM and SGLang load."""
+    (tmp_path / "base").mkdir()
+    if layout == "shards":
+        save_file({f"{_HUB_O}.weight": torch.zeros(1)}, str(tmp_path / "base" / "model-00001-of-00002.safetensors"))
+        save_file({"lm_head.weight": torch.zeros(1)}, str(tmp_path / "base" / "model-00002-of-00002.safetensors"))
+        expected = {_HUB_O, "lm_head"}
+    else:
+        save_file({f"{_HUB_O}.weight": torch.zeros(1)}, str(tmp_path / "base" / "model-00001-of-00001.safetensors"))
+        expected = {_HUB_O}
+    assert checkpoint_module_paths(str(tmp_path / "base")) == expected
+
+
 @pytest.fixture
 def hub_cache(tmp_path, monkeypatch):
     """An empty Hub cache of this test's own, so neither the host's cache nor the network answers for it."""
@@ -221,13 +236,21 @@ def _unreachable(*_args, **_kwargs):
     raise httpx.ConnectError("[Errno 101] Network is unreachable")
 
 
-@pytest.mark.parametrize("cause", ["offline", "no_network"])
+def _error_status(*_args, **_kwargs):
+    request = httpx.Request("GET", "https://huggingface.co/api/models/halo-test/uncached")
+    raise HfHubHTTPError("503 Server Error: Service Unavailable", response=httpx.Response(503, request=request))
+
+
+@pytest.mark.parametrize("cause", ["offline", "no_network", "error_status"])
 def test_a_hub_base_this_host_cannot_reach_has_no_key_set(hub_cache, monkeypatch, cause):
-    """Not in the cache and not reachable: the export skips the check with its warning instead of failing."""
+    """Not in the cache and not reachable, or answered with an error status (an outage, a mirror without the repo):
+    the export skips the check with its warning instead of failing."""
     if cause == "offline":
         monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
     else:
-        monkeypatch.setattr(reading, "get_safetensors_metadata", _unreachable)
+        monkeypatch.setattr(
+            reading, "get_safetensors_metadata", _unreachable if cause == "no_network" else _error_status
+        )
     assert checkpoint_module_paths("halo-test/uncached") is None
 
 
