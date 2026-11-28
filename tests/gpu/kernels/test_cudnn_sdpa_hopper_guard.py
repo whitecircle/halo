@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """pytorch/pytorch#196678 on the GPU at hand. After a model load's guard, a right-padded causal SDPA call whose every
-logsumexp sits below -ln(FLT_MAX) gives finite gradients equal to the mem-efficient kernel's, at key lengths 64 mod 128
-and beside them. Forced cuDNN on an affected Hopper still returns NaN in dQ at those lengths, so the check reaches the
+logsumexp sits below -ln(FLT_MAX) gives finite gradients within bf16 rounding of an fp64 reference, at key lengths 64
+mod 128 and beside them. Forced cuDNN on an affected Hopper still returns NaN in dQ at those lengths, so the check reaches the
 bug, and Blackwell keeps cuDNN SDPA on."""
 
 import contextlib
@@ -21,7 +21,7 @@ from tests.common.rank_log import log
 _LENGTHS = (640, 704, 768, 1472)
 _BUGGY_LENGTHS = (704, 1472)
 _BATCH, _HEADS, _HEAD_DIM = 3, 4, 128
-# bf16 kernels against each other: cuDNN (Blackwell's default) and mem-efficient accumulate in different orders.
+# A bf16 kernel against the fp64 math reference, as a fraction of the reference's largest entry.
 _RELATIVE_TOLERANCE = 2e-2
 
 
@@ -77,16 +77,22 @@ def check_the_load_turns_cudnn_sdpa_off_on_an_affected_hopper_alone() -> None:
     assert torch.backends.cuda.flash_sdp_enabled() and torch.backends.cuda.mem_efficient_sdp_enabled()
 
 
-def check_default_dispatch_is_finite_and_matches_the_mem_efficient_kernel() -> None:
+def check_default_dispatch_is_finite_and_matches_an_fp64_reference() -> None:
+    """dQ is compared outside dimension 0. Every key holds the same value there, so its true dQ is zero (each softmax
+    row's gradient sums to zero), and any bf16 kernel returns rounding noise in it larger than every real entry."""
     _load_guard()
     for length in _LENGTHS:
         inputs = _inputs(length)
+        query, key, value, mask, grad = inputs
         default = _grads(*inputs)
-        reference = _grads(*inputs, backend=SDPBackend.EFFICIENT_ATTENTION)
+        reference = _grads(query.double(), key.double(), value.double(), mask, grad.double(), SDPBackend.MATH)
         for name, got, want in zip(("dQ", "dK", "dV"), default, reference, strict=True):
             assert torch.isfinite(got).all(), f"{name} non-finite at length {length}"
-            gap = ((got.float() - want.float()).abs().max() / want.float().abs().max()).item()
-            assert gap <= _RELATIVE_TOLERANCE, f"{name} at length {length} is {gap:.3g} off the mem-efficient kernel"
+            if name == "dQ":
+                got, want = got[..., 1:], want[..., 1:]
+            gap = ((got.double() - want).abs().max() / want.abs().max()).item()
+            log(f"  length {length}, {name}: {gap:.3g} of the fp64 reference's largest entry")
+            assert gap <= _RELATIVE_TOLERANCE, f"{name} at length {length} is {gap:.3g} off the fp64 reference"
 
 
 def check_forced_cudnn_on_an_affected_hopper_still_hits_the_bug() -> None:
@@ -104,9 +110,7 @@ def run(ctx) -> dict:
     record_check(
         checks, "guard_follows_the_architecture", check_the_load_turns_cudnn_sdpa_off_on_an_affected_hopper_alone
     )
-    record_check(
-        checks, "default_dispatch_finite", check_default_dispatch_is_finite_and_matches_the_mem_efficient_kernel
-    )
+    record_check(checks, "default_dispatch_finite", check_default_dispatch_is_finite_and_matches_an_fp64_reference)
     if _affected():
         record_check(
             checks, "forced_cudnn_reaches_the_bug", check_forced_cudnn_on_an_affected_hopper_still_hits_the_bug
