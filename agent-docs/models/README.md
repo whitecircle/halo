@@ -26,6 +26,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Bailing MoE / Ling](bailing.md) | `bailing_moe` | Yes | Yes | Yes ⁷ | No | No | `examples/sft/bailing/*` |
 | [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |
 | [Mistral4 MoE](mistral4.md) | `mistral4` | Yes | Yes | Yes ⁸ | Yes | No | `examples/sft/mistral4/*` |
+| [Ministral 3 (dense)](ministral3.md) | `ministral3` | — | — | No | Yes ¹⁸ | No | `examples/*/ministral3/*` |
 | [DeepSeek-V4](deepseek-v4.md) | `deepseek_v4` | Yes | Yes ⁶ | No | No | Yes | `examples/sft/deepseek_v4/*` |
 | [Nemotron-H (Nemotron 3.5 Super VL, Lightning)](nemotron-h.md) | `nemotron_h` | Yes ¹⁵ | Yes ¹⁵ | No | No | Yes ¹⁰ ¹³ | `examples/sft/nemotron_h/*` |
 | [Zaya (ZAYA1)](zaya.md) | `zaya` | Yes ⁹ | Yes ⁹ | No | No | No | `examples/sft/zaya/*` |
@@ -69,6 +70,8 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 ¹⁶ [Dense hybrid SFT](../parallelism/context-parallelism.md#dense-hybrid-sft) restrictions apply.
 
 ¹⁷ The release ships its routed experts only as NVFP4/MXFP8, so it trains as LoRA (attention, alone or beside the experts) over frozen quantized experts at `expert_parallel_size` ≥ 2 ([Inkling 2](inkling2.md#frozen-quantized-experts)), where ETP is refused; full fine-tuning and ETP run on tiny bf16 models only.
+
+¹⁸ From the text config's `base_model_tp_plan`. TP has not run on a Ministral 3 release; its recipes train under FSDP2.
 
 ## MoE knobs
 
@@ -141,6 +144,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 - [Bailing MoE / Ling](bailing.md): softmax GQA + shared experts; needs `trust_remote_code`.
 - [LFM-2 MoE](lfm2.md): sigmoid routing with optional expert-bias buffer.
 - [Mistral4 MoE](mistral4.md): Mistral3 VLM text backbone, MLA attention.
+- [Ministral 3](ministral3.md): dense `mistral3` composites (Pixtral + `ministral3`), loaded whole; LoRA targets the language model by regex.
 - [DeepSeek-V4](deepseek-v4.md): hash-routing bootstrap + top-k MoE, compressed sparse attention, eager-only.
 - [Nemotron-H](nemotron-h.md): NVIDIA Nemotron 3.5 Super VL, a composite VLM with a text-only route, whose text model mixes Mamba-2, MoE and attention layers and runs gateless experts on a latent. Nemotron 3.5 Lightning is the text class alone, with no latent.
 - [Zaya](zaya.md): CCA-augmented MoE with cross-layer router state.

@@ -228,6 +228,7 @@ advanced parallelism. What each family is for:
 | Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP on a tiny-model LoRA test only |
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP on a tiny-model LoRA test only |
+| Ministral 3 (dense) | — | — | No | Yes | No | composite VLM loaded whole under FSDP2; the five recipes ran 20 steps each on 8× H200; TP not run on a release ([details](../agent-docs/models/ministral3.md) ↗) |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP on tiny models only; LoRA skips the grouped `o_a_proj` |
 | Nemotron-H (Nemotron 3.5 Super VL, Lightning) | Yes | Yes | No | No | Yes | EP8 on B300; Super VL's recipes, image SFT included, ran 5–20 steps on that release, PP ran Super VL's text tower for 13 steps with checkpointing on, the other modes and image SMPO on tiny models only; Lightning ran 20 steps at EP8 and served an untrained export on both engines; no video; no online RL; PP takes the text tower |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |

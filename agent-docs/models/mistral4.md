@@ -69,7 +69,7 @@ Both `Mistral3ForConditionalGeneration` and `Mistral4ForCausalLM` are registered
 
 | `model_type` | Class |
 |---|---|
-| `mistral3` | `Mistral3ForConditionalGeneration` (Pixtral vision + Mistral4 text) |
+| `mistral3` | `Mistral3ForConditionalGeneration` (Pixtral vision + Mistral4 text, or a dense `ministral3` text tower: [Ministral 3](ministral3.md)) |
 | `mistral4` | `Mistral4ForCausalLM` (text only — `mistral4` *is* the Mistral text decoder, so nothing is lost) |
 
 Pass `model_class=` to override; the same resolver backs `scripts/before_training/patch_vocab.py`.
