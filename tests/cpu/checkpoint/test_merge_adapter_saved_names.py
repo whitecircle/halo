@@ -1,23 +1,32 @@
 #!/usr/bin/env python
 """The in-memory merge folds every tensor of the adapter file under its saved name, where PEFT's own load respells the
-key through the base's checkpoint renames and drops the tensor with a warning, and refuses a tensor the wrap builds
-nothing for, which would leave the merged model without it."""
+key through the base's checkpoint renames and drops the tensor with a warning, also where accelerate offloads it, and
+refuses a tensor the wrap builds nothing for, which would leave the merged model without it, and a base on disk."""
 
 import json
 import os
 import warnings
 
+import accelerate.utils.modeling
 import pytest
 import torch
+import transformers.integrations.accelerate
+from accelerate import cpu_offload
+from accelerate.utils import align_module_device
 from peft import LoraConfig, PeftModel, get_peft_model
 from peft.utils import get_peft_model_state_dict
 from safetensors.torch import load_file
 
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
-from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.checkpoint.tools.adapter_merge import apply_adapter, merge_peft_adapter
 from halo.model_loading.model_preparation import auto_load_model
 from tests.common.adapters import randomize_adapters
-from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint, word_level_tokenizer
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILY,
+    TINY_MOE_FAMILIES,
+    build_tiny_family_checkpoint,
+    word_level_tokenizer,
+)
 
 
 def _save_adapter(base_dir: str, adapter_dir: str, config: LoraConfig) -> PeftModel:
@@ -85,6 +94,72 @@ def test_the_merge_folds_the_tensors_peft_renames_away(tmp_path, family, targets
     assert merged.keys() == expected.keys()
     wrong = [key for key in sorted(expected) if not torch.allclose(merged[key], expected[key])]
     assert not wrong, f"merged weights differ from PEFT's merge of the trained model: {wrong[:5]}"
+
+
+def _report_host_memory(monkeypatch, cpu_bytes: int) -> None:
+    """The probe transformers' and accelerate's ``auto`` device maps read reports ``cpu_bytes`` of host memory."""
+    probe = accelerate.utils.modeling.get_max_memory
+
+    def small_host(max_memory=None):
+        return {**probe(max_memory), "cpu": cpu_bytes}
+
+    monkeypatch.setattr(accelerate.utils.modeling, "get_max_memory", small_host)
+    monkeypatch.setattr(transformers.integrations.accelerate, "accelerate_max_memory", small_host)
+
+
+def test_a_base_the_device_map_places_on_disk_is_refused_before_pefts_load(tmp_path, monkeypatch):
+    """``--device_map auto`` on a host too small for the base places its last layers on ``disk``, and PEFT's load over
+    them writes a copy of each shard holding them at its path taken relative to the working directory: from / that is
+    the base's own shard."""
+    base_dir, adapter_dir = str(tmp_path / "base"), str(tmp_path / "adapter")
+    build_tiny_family_checkpoint(TINY_DENSE_FAMILY, base_dir, word_level_tokenizer(), seed=0)
+    _save_adapter(base_dir, adapter_dir, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"]))
+    base = auto_load_model(base_dir, dtype=torch.float32)
+    _report_host_memory(monkeypatch, sum(param.numel() * 4 for param in base.parameters()) // 2)
+    placed = auto_load_model(base_dir, dtype=torch.float32, device_map="auto").hf_device_map
+    assert "disk" in placed.values(), f"premise: the auto map offloads part of the base, got {placed}"
+    shards = _weights(base_dir)
+    # Where PEFT's copy would land without the refusal.
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match=r"placed \d+ module\(s\) of the base on disk(?s:.*)--streaming"):
+        merge_peft_adapter(
+            adapter_dir, str(tmp_path / "merged"), dtype=torch.float32, device_map="auto", verbose=False
+        )
+
+    kept = _weights(base_dir)
+    assert kept.keys() == shards.keys() and all(torch.equal(kept[key], shards[key]) for key in shards)
+
+
+def test_a_tensor_peft_dropped_on_an_offloaded_module_is_written_where_the_merge_onloads_it(tmp_path, monkeypatch):
+    """A base placed on a GPU and on ``cpu`` leaves PEFT's load with ``meta`` adapter placeholders whose values the
+    offload hooks keep; ``cpu_offload`` builds the same hooks over the whole wrap. A tensor PEFT's renames dropped is
+    written to the hook, which PEFT's merge onloads from."""
+    base_dir, adapter_dir = str(tmp_path / "base"), str(tmp_path / "adapter")
+    build_tiny_family_checkpoint(TINY_MOE_FAMILIES["laguna"], base_dir, word_level_tokenizer(), seed=0)
+    _save_adapter(base_dir, adapter_dir, LoraConfig(r=4, lora_alpha=8, target_modules=["gate_proj", "q_proj"]))
+    left = _left_by_peft(base_dir, adapter_dir)
+    assert left, "premise: stock PEFT drops the shared_experts tensors"
+    load = PeftModel.from_pretrained
+
+    def load_offloaded(model, model_id, **kwargs):
+        return cpu_offload(load(model, model_id, **kwargs), execution_device=torch.device("cpu"))
+
+    monkeypatch.setattr(PeftModel, "from_pretrained", load_offloaded)
+    peft_model = apply_adapter(
+        adapter_dir,
+        auto_load_model(base_dir, dtype=torch.float32),
+        adapter_processor=None,
+        base_processor=None,
+        log=lambda message: None,
+    )
+
+    saved = load_file(os.path.join(adapter_dir, ADAPTER_SAFETENSORS_FILE))
+    for key in left:
+        module = peft_model.get_submodule(key.removesuffix(".weight") + ".default")
+        assert module.weight.is_meta, f"premise: {key} is offloaded"
+        with align_module_device(module):
+            assert torch.equal(module.weight, saved[key]), f"{key}: the merge would onload PEFT's value"
 
 
 def test_a_saved_tensor_the_wrap_builds_nothing_for_is_refused(tmp_path):

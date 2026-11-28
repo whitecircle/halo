@@ -81,6 +81,16 @@ def test_the_supported_adapter_layouts_pass():
             r"inside or around EP-wrapped MoE layers(?s:.*)base_model\.model\.mlp \(a ParamWrapper around an EP layer\)",
         ),
         (
+            lambda: reject_peft_lora_in_ep_layers(unpatched_cp_wrapper(_peft(["shared_expert"]))),
+            r"inside or around EP-wrapped MoE layers(?s:.*)mlp\.shared_expert\.lora_A\.default\.weight",
+        ),
+        (
+            lambda: reject_peft_lora_in_ep_layers(
+                unpatched_cp_wrapper(_peft(["q_proj"], target_parameters=["mlp.down_proj"]))
+            ),
+            r"inside or around EP-wrapped MoE layers(?s:.*)base_model\.model\.mlp \(a ParamWrapper around an EP layer\)",
+        ),
+        (
             lambda: reject_expert_lora_peft_conflicts(_peft(["q_proj"], use_rslora=True), _SPEC),
             r"settings the native grouped expert adapters cannot reproduce(?s:.*)use_rslora=True",
         ),
@@ -93,7 +103,15 @@ def test_the_supported_adapter_layouts_pass():
             r"routed to native EP grouped-LoRA .* no EP/grouped MoE layer built the adapters",
         ),
     ],
-    ids=["peft-lora-in-ep-layer", "peft-lora-around-ep-layer", "rslora-mismatch", "dora", "unrealized-expert-lora"],
+    ids=[
+        "peft-lora-in-ep-layer",
+        "peft-lora-around-ep-layer",
+        "peft-lora-in-ep-layer-below-the-cp-wrapper",
+        "peft-lora-around-ep-layer-below-the-cp-wrapper",
+        "rslora-mismatch",
+        "dora",
+        "unrealized-expert-lora",
+    ],
 )
 def test_each_adapter_refusal_names_its_mechanism(refusal, match):
     with pytest.raises(ValueError, match=match):

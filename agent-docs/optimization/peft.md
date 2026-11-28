@@ -514,7 +514,9 @@ python scripts/after_training/merge_peft_adapters.py \
 Add `--task classification --num_labels N` for classification models. Handles causal LM, sequence
 classification, multimodal/VLM, and trust_remote_code architectures: `--trust_remote_code` defaults on for
 a local base and off for a Hub base ([Scripts](../reference/scripts-reference.md#post-training-scripts)). Use
-`--device_map auto` for large models.
+`--device_map auto` for large models. A map that places modules on disk is refused before PEFT loads the adapter:
+PEFT's load over disk-offloaded modules writes a copy of each shard holding them at the shard's path taken relative to
+the working directory, which from `/` is the base's own file. `--streaming` merges such a base.
 
 The base loads through the class the adapter's tensor keys address: an adapter from a `text_only_model: true`
 run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the multimodal wrapper, and keys
@@ -527,7 +529,9 @@ them), and the merged `config.json` is written inside `config_export_ready`, so 
 config stay out of it. After `PeftModel.from_pretrained`, every tensor of the adapter file whose live value differs is
 copied onto the tensor a PEFT save writes under its key, with a log line: PEFT's load respells adapter keys through
 the base's checkpoint renames and drops the ones it turns into paths no module has (Laguna's `shared_experts`,
-Inkling 2's `*_sconv.weight_proj`). A tensor the wrap builds nothing for, or builds at another shape, raises before
+Inkling 2's `*_sconv.weight_proj`). A tensor of a module the map placed on `cpu` beside a GPU is a `meta` placeholder
+whose value accelerate's offload hook holds: it is read and repaired there, which is what PEFT's merge onloads. A
+tensor the wrap builds nothing for, or builds at another shape, raises before
 anything is written, since the merged model would go without it: `adapter_config.json` resolves to other modules on
 this base than the file holds (a `modules_to_save: [gate]` adapter an earlier PEFT saved), and `--streaming` folds
 the file by its saved names (`apply_adapter`, `halo/checkpoint/tools/adapter_merge.py`). `convert_to_bf16.py

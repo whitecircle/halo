@@ -5,6 +5,7 @@ holds it, and a restarted server gets the base and the adapter again. And every 
 as an adapter is refused with its reason."""
 
 import asyncio
+import dataclasses
 import re
 import tempfile
 import time
@@ -39,6 +40,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
     reject_unadaptable_model,
     resolve_adapter_serving,
     resolve_live_versions,
+    unservable_adapter_reasons,
 )
 from halo.trainers.grpo.rollout.engine_preflight import AdapterRequirements, verify_adapter_servers
 from halo.weight_sync.adapter_routes import AdapterRoutes
@@ -1091,6 +1093,42 @@ def test_an_unvalidated_parallelism_mode_is_refused(mode, reason):
 
     with pytest.raises(ValueError, match=reason):
         reject_unadaptable_model(_peft_model(), parallelism, SGLangWeightSyncClient)
+
+
+def _saved_variant_values(*, built: bool) -> list:
+    """Each LoRA variant field with each value a saved config may hold there that PEFT's load takes, where the load
+    builds the variant (``built``) or plain LoRA: PEFT reads the field after its ``__post_init__``, which builds a
+    sub-config saved as a dict, an empty one too, into its class. The plain cases leave out an empty dict under a flag
+    or a token list, which no PEFT save writes and the refusal takes for a sub-config."""
+    cases = []
+    for field in dataclasses.fields(LoraConfig):
+        if not field.metadata.get("is_lora_variant"):
+            continue
+        for saved in (None, False, True, [], [5], {}):
+            try:
+                loaded = LoraConfig(task_type="CAUSAL_LM", **{field.name: saved})
+            except (TypeError, ValueError):
+                continue
+            if bool(getattr(loaded, field.name)) == built and (built or not isinstance(saved, dict)):
+                cases.append(pytest.param(field.name, saved, id=f"{field.name}={saved!r}"))
+    return cases
+
+
+def _variant_reasons(config: dict) -> list[str]:
+    """The variant refusals of a saved adapter config, as the export reads it: raw, off adapter_config.json."""
+    base = Qwen3ForCausalLM(Qwen3Config(hidden_size=32, intermediate_size=64, num_hidden_layers=1, vocab_size=64))
+    reasons = unservable_adapter_reasons(config, [], base, SGLangWeightSyncClient)
+    return [reason for reason in reasons if reason.startswith("the LoRA variant")]
+
+
+@pytest.mark.parametrize(("field", "saved"), _saved_variant_values(built=True))
+def test_a_saved_variant_pefts_load_builds_is_refused(field, saved):
+    assert _variant_reasons({field: saved}) == [f"the LoRA variant {field}: the engine serves plain LoRA"]
+
+
+@pytest.mark.parametrize(("field", "saved"), _saved_variant_values(built=False))
+def test_a_saved_variant_field_pefts_load_reads_as_plain_lora_is_served(field, saved):
+    assert not _variant_reasons({field: saved})
 
 
 def test_a_model_with_no_adapter_is_refused():

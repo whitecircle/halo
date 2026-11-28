@@ -195,6 +195,38 @@ def test_a_variant_beside_another_active_adapter_is_refused(target, first, secon
         lora_fold_targets(model)
 
 
+def test_a_dora_fold_beside_a_merged_dora_adapter_leaves_the_unmerge_its_cached_norm():
+    """PEFT's merge of a variant takes the adapters merged before it out and merges them again, re-caching each one's
+    weight norm from the recovered base, at bf16 another value; the fold leaves the cache as it found it, so a later
+    unmerge restores the base the merged adapter cached for."""
+    torch.manual_seed(0)
+    model = get_peft_model(
+        _Net().to(torch.bfloat16), LoraConfig(r=4, lora_alpha=8, target_modules=["proj"], use_dora=True)
+    )
+    model.add_adapter("second", LoraConfig(r=2, lora_alpha=4, target_modules=["proj"], use_dora=True))
+    model.base_model.set_adapter(["default", "second"])
+    randomize_adapters(model, std=0.1)
+    model.merge_adapter(adapter_names=["default"])
+    layer = model.get_submodule("base_model.model.proj")
+    cached = {key: value.clone() for key, value in layer._caches.items()}
+    peer = copy.deepcopy(model)
+    peer.merge_adapter(adapter_names=["second"])
+    recached = peer.get_submodule("base_model.model.proj")._caches["default-weight_norm"]
+    assert not torch.equal(recached, cached["default-weight_norm"]), "premise: merging a variant re-caches the norm"
+    unmerged = copy.deepcopy(model)
+    unmerged.unmerge_adapter()
+    weight = layer.get_base_layer().weight
+
+    lora_folded(weight, lora_fold_targets(model)[id(weight)])
+
+    assert layer._caches.keys() == cached.keys()
+    changed = [key for key in cached if not torch.equal(layer._caches[key], cached[key])]
+    assert not changed, f"the fold replaced the cached {changed}, which a later unmerge reads"
+    model.unmerge_adapter()
+    restored = layer.get_base_layer().weight
+    assert torch.equal(restored, unmerged.get_submodule("base_model.model.proj").get_base_layer().weight)
+
+
 @pytest.mark.parametrize("case", sorted(_CASES))
 def test_the_push_carries_the_peft_merge(case):
     """Each forwarded tensor is what PEFT's merge holds under that name; a tied head's delta rides on the embedding."""

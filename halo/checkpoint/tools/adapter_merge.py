@@ -7,11 +7,13 @@ import contextlib
 import itertools
 import logging
 import os
+from collections import ChainMap
 from collections.abc import Callable
 from functools import partial
 from typing import NamedTuple
 
 import torch
+from accelerate.utils import has_offloaded_params, named_module_tensors
 from peft import PeftConfig, PeftModel
 from peft.utils import get_peft_model_state_dict
 from transformers import PreTrainedModel
@@ -139,12 +141,38 @@ def _grown_vocabulary(model: PreTrainedModel, adapter_processor, base_processor)
     return num_tokens
 
 
+def _offloaded_holders(model: torch.nn.Module) -> dict[int, tuple[torch.nn.Module, str]]:
+    """The module and name under which an accelerate offload hook keeps each tensor a ``device_map`` placed on ``cpu``
+    or ``disk``, by the id of the ``meta`` placeholder the module holds outside a forward."""
+    return {
+        id(tensor): (module, name)
+        for module in model.modules()
+        if has_offloaded_params(module)
+        for name, tensor in named_module_tensors(module)
+        if tensor.is_meta
+    }
+
+
+def _held_value(tensor: torch.Tensor, holders: dict[int, tuple[torch.nn.Module, str]]) -> torch.Tensor:
+    holder = holders.get(id(tensor))
+    return tensor if holder is None else holder[0]._hf_hook.weights_map[holder[1]]
+
+
 def _load_adapter(model: PreTrainedModel, adapter_dir: str, log) -> PeftModel:
     """``PeftModel.from_pretrained``, then every tensor of the adapter file copied onto the live tensor a PEFT save
     writes under its key where the load left another value. PEFT's load respells adapter keys through the base's
     checkpoint renames (transformers' conversion mapping), and a rename that does not hold on a live name (Laguna's
     ``shared_experts``, Inkling 2's ``*_sconv.weight_proj``) leaves a key no module has, whose tensor it drops with a
-    warning. Raises for a tensor the wrap builds nothing for, or at another shape."""
+    warning. An offloaded tensor is read from, and written to, the offload hook that holds it. Raises for a base
+    placed partly on disk, and for a tensor the wrap builds nothing for, or at another shape."""
+    on_disk = sorted(name for name, device in getattr(model, "hf_device_map", {}).items() if device == "disk")
+    if on_disk:
+        raise ValueError(
+            f"The device_map placed {len(on_disk)} module(s) of the base on disk (e.g. {on_disk[0]}), and PEFT's load "
+            f"over disk-offloaded modules writes a copy of each shard holding them at the shard's path taken relative "
+            f"to the working directory, from / the base's own file. Merge with merge_peft_adapters.py --streaming, "
+            f"which loads no model, or on a host whose GPU and CPU memory hold the base."
+        )
     peft_model = PeftModel.from_pretrained(model, adapter_dir)
     saved = read_adapter_file(find_adapter_weight_file(adapter_dir))
     live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
@@ -162,7 +190,9 @@ def _load_adapter(model: PreTrainedModel, adapter_dir: str, log) -> PeftModel:
             f"PEFT matched by suffix and saved. Name every module the file holds there, or merge with "
             f"merge_peft_adapters.py --streaming, which folds the file's tensors by their saved names."
         )
-    missed = sorted(key for key, tensor in saved.items() if not torch.equal(targets[key], tensor.to(targets[key])))
+    holders = _offloaded_holders(peft_model)
+    held = {key: _held_value(targets[key], holders) for key in saved}
+    missed = sorted(key for key, tensor in saved.items() if not torch.equal(held[key], tensor.to(held[key])))
     if missed:
         log(
             f"PEFT's load left {len(missed)} adapter tensor(s) at other values than {adapter_dir} holds (e.g. "
@@ -171,7 +201,14 @@ def _load_adapter(model: PreTrainedModel, adapter_dir: str, log) -> PeftModel:
         )
         with torch.no_grad():
             for key in missed:
-                targets[key].copy_(saved[key])
+                holder = holders.get(id(targets[key]))
+                if holder is None:
+                    targets[key].copy_(saved[key])
+                    continue
+                # PEFT's merge onloads the tensor from its hook's map, which may read it from a safetensors file.
+                module, name = holder
+                hook = module._hf_hook
+                hook.weights_map = ChainMap({name: saved[key].to(held[key])}, hook.weights_map)
     return peft_model
 
 

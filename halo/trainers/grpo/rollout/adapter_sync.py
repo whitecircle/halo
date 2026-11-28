@@ -221,12 +221,14 @@ def _unservable_module_reason(name: str, model: torch.nn.Module, client_cls) -> 
 
 def _requested_lora_variants(config: Mapping) -> list[str]:
     """The LoRA variants ``config`` requests that change the forward, read off ``LoraConfig``'s own declaration: every
-    field PEFT tags as a variant that is set. An ``init_lora_weights`` variant (MiCA) only freezes weights in training
-    and serves as plain LoRA."""
+    field PEFT tags as a variant that is set. A sub-config saved as a dict is set even when empty, as PEFT's load
+    builds it into its config class before it reads the variant. An ``init_lora_weights`` variant (MiCA) only freezes
+    weights in training and serves as plain LoRA."""
     return [
         field.name
         for field in dataclasses.fields(LoraConfig)
-        if field.metadata.get("is_lora_variant") and config.get(field.name)
+        if field.metadata.get("is_lora_variant")
+        and (isinstance(config.get(field.name), dict) or config.get(field.name))
     ]
 
 

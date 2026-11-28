@@ -146,13 +146,14 @@ def lora_folded(
                     if layer.lora_bias.get(adapter):
                         folded += layer.lora_B[adapter].bias * layer.scaling[adapter]
                 elif adapter in layer.lora_variant:
-                    # A variant merges from the layer's own base weight, so the running fold stands in for it; it
-                    # caches what its unmerge needs, and there is no unmerge here.
-                    cached = set(layer._caches)
+                    # A variant merges from the layer's own base weight, so the running fold stands in for it. Its
+                    # merge caches what an unmerge needs, re-caching the adapters merged before it as it merges them
+                    # again, and there is no unmerge here.
+                    cached = dict(layer._caches)
                     with _base_weight_replaced(layer, folded):
                         folded = layer.lora_variant[adapter].merge_safe(layer, adapter, folded)
-                    for key in set(layer._caches) - cached:
-                        layer._cache_pop(key)
+                    layer._caches.clear()
+                    layer._caches.update(cached)
                 else:
                     delta = layer.get_delta_weight(adapter)
                     # Embedding casts the delta first, as its merge does; the other layers add it in its own dtype.

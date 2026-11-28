@@ -157,6 +157,7 @@ def _saved_mixed(tmp_path: Path, family: TinyFamily = _INKLING2) -> Path:
         ),
         (_INKLING2, "vllm", {"use_dora": True}, "the LoRA variant use_dora: the engine serves plain LoRA"),
         (_INKLING2, "vllm", {"alora_invocation_tokens": [5, 6]}, "the LoRA variant alora_invocation_tokens"),
+        (_INKLING2, "vllm", {"kasa_config": {}}, "the LoRA variant kasa_config: the engine serves plain LoRA"),
         (_INKLING2, "vllm", {"rank_pattern": {"o_proj": 4}}, "rank_pattern: the engine reads one rank"),
     ],
     ids=[
@@ -166,6 +167,7 @@ def _saved_mixed(tmp_path: Path, family: TinyFamily = _INKLING2) -> Path:
         "expert-rank",
         "dora",
         "alora",
+        "kasa-default",
         "rank-pattern",
     ],
 )

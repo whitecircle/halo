@@ -19,7 +19,7 @@ def reject_peft_lora_in_ep_layers(model) -> None:
     """PEFT-wrapped LoRA inside EP layers sees rank-specific (post-dispatch) inputs, which break gradient sync; only
     the native grouped adapters (``<attr>_lora_A`` / ``_lora_B`` leaves) are allowed there. A tuner layer wrapping an
     EP layer, PEFT's ``target_parameters`` route, holds its adapters outside the EP gradient sync."""
-    if not isinstance(model, PeftModel):
+    if find_peft_model(model) is None:
         return
     ep_layers = named_ep_layers(model)
     offending = []
