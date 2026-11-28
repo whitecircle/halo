@@ -258,7 +258,7 @@ def test_a_resume_sweeps_where_the_reference_weights_are_untrained(kind, tmp_pat
 @pytest.mark.parametrize(
     ("resumed_rows", "reason"),
     [
-        (lambda kind: token_rows(kind, N_ROWS - 1), f"saved for {N_ROWS} rows"),
+        (lambda kind: token_rows(kind, N_ROWS - 1), f"saved for {N_ROWS} rows.*an empty reply"),
         (lambda kind: token_rows(kind).select(list(reversed(range(N_ROWS)))), "differ from the saved run's"),
     ],
     ids=["fewer_rows", "reordered_rows"],

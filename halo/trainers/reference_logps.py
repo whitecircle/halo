@@ -197,7 +197,10 @@ class ReferenceLogpsMixin:
         if not is_reference_entry(entry):
             return f"its entry is not a saved reference split (expected {sorted(_IDENTITY_SCHEMA)})"
         if entry["num_rows"] != identity["num_rows"]:
-            return f"it was saved for {entry['num_rows']} rows and this dataset has {identity['num_rows']}"
+            return (
+                f"it was saved for {entry['num_rows']} rows and this dataset has {identity['num_rows']} (a changed "
+                f"dataset or split, or rows the data prep now drops, such as preference pairs with an empty reply)"
+            )
         if mismatch := self._reference_payload_mismatch(entry, dataset, needed):
             return mismatch
         if entry["settings"] != identity["settings"]:

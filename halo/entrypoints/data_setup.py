@@ -17,7 +17,11 @@ from halo.config_validation import differs_from_default, reject_non_default_args
 from halo.data.collators.vlm import VLMDataCollator
 from halo.data.conversation import template_column_kwargs
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, resolve_map_num_proc, run_load_rank_first
-from halo.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
+from halo.data.pipeline.preferences import (
+    drop_empty_reply_pairs,
+    prepare_generative_dataset,
+    prepare_preference_datasets,
+)
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.sources.loading import is_presharded_dataset_load_across_ranks, load_datasets, share_s3_control_files
@@ -619,13 +623,15 @@ def prepare_script_preference_data(
     else:
         num_proc = resolve_map_num_proc(training_config.dataset_num_proc)
         template_columns = template_column_kwargs(args)
+        # Before both template maps, so no template sees an empty reply and the generation prompts are the eval rows.
+        train_split, test_split = (drop_empty_reply_pairs(ds[split], split, num_proc) for split in ("train", "test"))
         train_dataset, eval_dataset = prepare_preference_datasets(
-            ds["train"], ds["test"], tokenizer, num_proc=num_proc, **template_columns
+            train_split, test_split, tokenizer, num_proc=num_proc, **template_columns
         )
         # Only when the callback will consume it: the prep tokenizes the whole test split.
         if args.generate_eval_examples:
             generate_dataset = prepare_generative_dataset(
-                ds["test"], tokenizer, generation_max_prompt_length, num_proc=num_proc, **template_columns
+                test_split, tokenizer, generation_max_prompt_length, num_proc=num_proc, **template_columns
             )
 
     log_script_dataset_examples(
