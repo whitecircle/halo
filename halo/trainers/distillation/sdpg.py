@@ -13,9 +13,10 @@ from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.trainers.distillation.divergences import pooled_token_mean, projected_divergence, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
-from halo.trainers.grpo.logprob_scoring import FULL_LOGITS_BYTES_PER_LOGIT, CompletionTerm, HeadSweep
+from halo.trainers.grpo.logprob_scoring import FULL_LOGITS_BYTES_PER_LOGIT, CompletionTerm
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rounds.rank_balance import PROMPT_ROWS
+from halo.trainers.head_projection import HeadProjector
 from halo.trainers.loop.evaluation import split_rows_head
 from halo.trainers.metrics.stored_metrics import StoredMetricsMixin
 from halo.trainers.metrics.token_metrics import effective_loss_mask
@@ -223,11 +224,16 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         )
 
     def _opd_scores(
-        self, teacher_hidden: torch.Tensor, head: HeadSweep, student: torch.Tensor, positions: torch.Tensor
+        self,
+        teacher_hidden: torch.Tensor,
+        head: HeadProjector,
+        student: list[torch.Tensor],
+        positions: torch.Tensor,
     ) -> torch.Tensor:
         """The divergence at ``positions`` of the ``[B, C]`` window, both sides projected through the head the GRPO
-        sweep gathered: the student's with a gradient, the teacher's without."""
-        teacher = teacher_hidden.flatten(0, 1).index_select(0, positions)
+        sweep gathered: the student's with a gradient, from the head inputs its log-probs read, the teacher's without
+        one and without the adapters' dropout, as its eval-mode pass runs."""
+        teacher = head.head_inputs(teacher_hidden.flatten(0, 1).index_select(0, positions), dropout=False)
         return projected_divergence(
             self.sdpg_loss_fn,
             head.project,

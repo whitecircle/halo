@@ -112,13 +112,21 @@ def test_chunked_matches_full_path_under_peft():
     torch.testing.assert_close(chunk, full, atol=1e-4, rtol=1e-4)
 
 
-def test_chunked_rejects_lm_head_adapter():
-    # get_output_embeddings() on an lm_head-targeted LoRA resolves to the base linear, so the chunked matmul would drop
-    # the adapter delta.
-    model = _lora_model(["q_proj", "lm_head"])
-    _logps(model, chunked=False)  # the full path applies the delta
-    with pytest.raises(ValueError, match="output embedding"):
-        _logps(model, chunked=True)
+def test_chunked_matches_full_path_with_lora_on_lm_head():
+    """The sweep adds the head adapter's delta, so the log-probs and the adapter's gradients match PEFT's own head."""
+    grads = {}
+    for chunked in (False, True):
+        model = _lora_model(["q_proj", "lm_head"])
+        logps = _logps(model, chunked=chunked)
+        logps.sum().backward()
+        grads[chunked] = logps.detach(), {n: p.grad for n, p in model.named_parameters() if "lm_head.lora_" in n}
+    with model.disable_adapter(), torch.no_grad():
+        base = _logps(model, chunked=True)
+    assert (base - grads[False][0]).abs().max() > 1e-3, "LoRA deltas inert; test cannot catch a dropped adapter"
+    torch.testing.assert_close(grads[True][0], grads[False][0], atol=1e-4, rtol=1e-4)
+    assert len(grads[False][1]) == 2
+    for name, grad in grads[False][1].items():
+        torch.testing.assert_close(grads[True][1][name], grad, atol=1e-4, rtol=1e-4, msg=name)
 
 
 class _OneTokenTokenizer:

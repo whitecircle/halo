@@ -279,24 +279,26 @@ def token_divergence(
 
 def projected_divergence(
     loss_fn: Callable,
-    student_logits: Callable[[torch.Tensor], torch.Tensor],
-    student_rows: torch.Tensor,
-    teacher_logits: Callable[[torch.Tensor], torch.Tensor],
-    teacher_rows: torch.Tensor,
+    student_logits: Callable[..., torch.Tensor],
+    student_rows: Sequence[torch.Tensor],
+    teacher_logits: Callable[..., torch.Tensor],
+    teacher_rows: Sequence[torch.Tensor],
     temperature: float,
     *,
     vocab: int,
 ) -> torch.Tensor:
-    """``[N]`` vocab-summed divergence of aligned ``[N, H]`` hidden states, one row per token. Each callable projects
-    its rows to ``[rows, vocab]`` logits one chunk at a time under a non-reentrant checkpoint, the teacher's with no
-    gradient, so no ``[N, vocab]`` plane outlives its chunk; both run again in the backward's recompute."""
+    """``[N]`` vocab-summed divergence of aligned ``[N, ...]`` rows, one row per token: each callable takes its side's
+    rows, in order. Each projects its rows to ``[rows, vocab]`` logits one chunk at a time under a non-reentrant
+    checkpoint, the teacher's with no gradient, so no ``[N, vocab]`` plane outlives its chunk; both run again in the
+    backward's recompute."""
+    student_inputs = len(student_rows)
 
-    def per_token(student: torch.Tensor, teacher: torch.Tensor) -> torch.Tensor:
+    def per_token(*rows: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
-            target = teacher_logits(teacher)
-        return _vocab_summed_divergence(loss_fn, student_logits(student), target, temperature)
+            target = teacher_logits(*rows[student_inputs:])
+        return _vocab_summed_divergence(loss_fn, student_logits(*rows[:student_inputs]), target, temperature)
 
-    chunks = checkpointed_chunks(per_token, student_rows, teacher_rows, chunk_rows=logit_chunk_rows(vocab))
+    chunks = checkpointed_chunks(per_token, *student_rows, *teacher_rows, chunk_rows=logit_chunk_rows(vocab))
     return torch.cat(list(chunks))
 
 

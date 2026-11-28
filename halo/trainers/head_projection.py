@@ -1,7 +1,9 @@
 """Logits of hidden-state rows through a model's output embedding, computed outside the embedding's forward: its weight
 read once per step, a LoRA adapter's delta added low-rank from ``lora_A`` and ``lora_B``, the family's head transform
-applied. A caller projects a few rows at a time, so the model's ``[tokens, V]`` logits never exist."""
+applied. A caller projects a few rows at a time, or sweeps the log-probs of target tokens, so the model's
+``[tokens, V]`` logits never exist."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import torch
@@ -10,6 +12,7 @@ from peft.tuners.lora.layer import Linear as LoraLinear
 from peft.tuners.tuners_utils import BaseTunerLayer
 from torch import nn
 
+from halo.kernels.head_logprobs import LowRankDelta, chunked_head_logprobs
 from halo.models.head_transform import HeadTransform
 from halo.models.introspection.unwrapping import base_transformers_model
 from halo.runtime.dtensor import materialize_dtensor
@@ -40,15 +43,16 @@ class HeadProjector:
     def width(self) -> int:
         return self.weight.size(0)
 
-    def head_inputs(self, hidden: torch.Tensor) -> tuple[torch.Tensor, ...]:
+    def head_inputs(self, hidden: torch.Tensor, *, dropout: bool = True) -> tuple[torch.Tensor, ...]:
         """``(scaled, *dropped)``: the head's input and each adapter's dropout of it, over the whole ``hidden``, so the
-        dropout draws the mask PEFT's own forward draws on the same input."""
+        dropout draws the mask PEFT's own forward draws on the same input. ``dropout=False`` hands each adapter its
+        input undropped, as an eval-mode forward does."""
         scaled = self.transform.scale_hidden(hidden)
         x, dropped = scaled, []
         for adapter in self.adapters:
             if self.casts_adapter_input:
                 x = x.to(adapter.lora_a.dtype)
-            dropped.append(adapter.dropout(x))
+            dropped.append(adapter.dropout(x) if dropout else x)
         return scaled, *dropped
 
     def head_inputs_at(self, hidden: torch.Tensor, positions: torch.Tensor) -> list[torch.Tensor]:
@@ -64,6 +68,37 @@ class HeadProjector:
             delta = F.linear(F.linear(x, adapter.lora_a), adapter.lora_b, adapter.lora_b_bias)
             logits = logits + delta * adapter.scaling
         return self.transform.scale_logits(logits.to(result_dtype))
+
+    def logprobs(
+        self,
+        inputs: Sequence[torch.Tensor],
+        targets: torch.Tensor,
+        temperature: float,
+        compute_entropy: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """``(logps, entropy)`` of ``targets`` (``chunked_head_logprobs``) at rows taken from :meth:`head_inputs`. Each
+        adapter's delta goes through the sweep as its low-rank pair and its ``lora_B`` bias joins the base bias, so no
+        ``[V, H]`` sum and no ``[rows, V]`` logits are built."""
+        scaled, *dropped = inputs
+        bias = self.bias
+        for adapter in self.adapters:
+            if adapter.lora_b_bias is not None:
+                scaled_bias = adapter.lora_b_bias * adapter.scaling
+                bias = scaled_bias if bias is None else bias + scaled_bias
+        return chunked_head_logprobs(
+            scaled,
+            self.weight,
+            targets,
+            bias,
+            temperature,
+            logit_scale=self.transform.logit_scale,
+            softcap=self.transform.softcap,
+            compute_entropy=compute_entropy,
+            low_rank=[
+                LowRankDelta(x, adapter.lora_a, adapter.lora_b, adapter.scaling)
+                for adapter, x in zip(self.adapters, dropped, strict=True)
+            ],
+        )
 
 
 def _active_adapters(tuner: LoraLinear) -> list[str]:

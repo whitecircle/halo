@@ -602,6 +602,8 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "kernels/test_lowp_production.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_frozen_bank_fused_dequant.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    # pytorch/pytorch#196678: forced cuDNN on an affected Hopper is the control, so the guard's check is not vacuous.
+    "kernels/test_cudnn_sdpa_hopper_guard.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "models/test_inkling2_relative_flex.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "models/test_inkling2_block_residual.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_param_buffer_cuda.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
@@ -1740,8 +1742,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # Each row asserts logprobs only its own checkpoint's server can produce: VLLM_SERVER_URL serves
     # Qwen/Qwen3-30B-A3B-Instruct-2507 (MoE rows), HALO_TEST_VLLM_DENSE_SERVER_URL Qwen/Qwen3-0.6B (dense and
-    # one-process rows). --servers 2 rows skip without a second server in HALO_TEST_VLLM_SERVER_URLS. --resume rows run
-    # two trainers in one process and load the policy twice, hence the longest timeouts of their policy.
+    # one-process rows), HALO_TEST_VLLM_UNTIED_DENSE_SERVER_URL Qwen/Qwen3-8B (lora_head_fsdp_zero3, the untied_dense pass). --servers 2 rows
+    # skip without a second server in HALO_TEST_VLLM_SERVER_URLS. --resume rows run two trainers in one process and load
+    # the policy twice, hence the longest timeouts of their policy.
     "trainers/grpo/test_online_grpo_vllm_e2e.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "ep", "etp", "moe", "qwen3", "vllm_server"),
@@ -1760,6 +1763,8 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer sdpg --mode full_ep2 --chunked",
             "--trainer sdpg --mode lora_ep2 --chunked",
             "--trainer sdpg --mode lora_etp2 --chunked",
+            "--trainer online --mode lora_head_ep2 --chunked",
+            "--trainer sdpg --mode lora_head_ep2 --chunked",
             *(
                 f"--trainer {trainer} --mode {mode}"
                 for mode in ("full_ep1", "full_ep1_unsharded")
@@ -1808,6 +1813,14 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer sdpg --mode lora_fsdp --resume",
                 ),
                 markers=("gpu", "full", "2gpu", "lora", "tp", "qwen3", "vllm_server"),
+                timeout=900,
+            ),
+            *_rows(
+                (
+                    "--trainer online --mode lora_head_fsdp_zero3 --chunked",
+                    "--trainer sdpg --mode lora_head_fsdp_zero3 --chunked",
+                ),
+                markers=("gpu", "full", "2gpu", "lora", "qwen3", "untied_dense", "vllm_server"),
                 timeout=900,
             ),
             *_rows(
@@ -2953,6 +2966,7 @@ ALL_MARKERS = (
     "sglang_server",
     "lora",
     "moe",
+    "untied_dense",
     "gptoss",
     "qwen3",
     "glm4",

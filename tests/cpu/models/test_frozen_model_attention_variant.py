@@ -38,6 +38,8 @@ def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out,
         patch.dict(os.environ, env),
         patch.object(torch.cuda, "is_available", lambda: True),
         patch.object(model_preparation, "patch_sdpa_for_wide_heads", lambda: pins.append(1)),
+        # The faked CUDA has no device for the Hopper guard to read.
+        patch.object(model_preparation, "ensure_cudnn_sdpa_off_on_affected_hopper", lambda: False),
     ):
         assert model_preparation.apply_family_patches(_wide_gemma4_config(), "sdpa") == built
     assert pins == [1], "the wide-head SDPA pin must apply whatever the model is built with"

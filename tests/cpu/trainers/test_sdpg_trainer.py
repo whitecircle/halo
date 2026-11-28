@@ -23,10 +23,16 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 
 import halo.trainers.distillation.sdpg as sdpg_module
 import halo.trainers.grpo.logprob_scoring as logprob_scoring
+import halo.trainers.head_projection as head_projection
 from halo.configs.distillation import SDPGArguments, SelfDistillationLoss
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
 from halo.kernels import logprobs
-from halo.trainers.distillation.divergences import pooled_token_mean, require_divergence, reverse_kl_loss
+from halo.trainers.distillation.divergences import (
+    pooled_token_mean,
+    require_divergence,
+    reverse_kl_loss,
+    token_divergence,
+)
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
 from halo.trainers.full_logits_memory import LogitsWidth
 from halo.trainers.grpo.logprob_scoring import CompletionTerm
@@ -455,14 +461,57 @@ def test_the_chunked_opd_term_matches_in_bf16():
     torch.testing.assert_close(chunked["opd_loss"].float(), full["opd_loss"].float(), rtol=2e-2, atol=0.0)
 
 
-def test_the_chunked_opd_term_matches_under_lora():
-    model = get_peft_model(_tiny_qwen3(), LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"]))
+def _lora_qwen3(target_modules: list[str], dropout: float = 0.0) -> nn.Module:
+    config = LoraConfig(r=4, lora_alpha=8, target_modules=target_modules, lora_dropout=dropout)
+    model = get_peft_model(_tiny_qwen3(), config)
+    # lora_B starts at zero, which would leave every adapted module as its base.
     with torch.no_grad():
         for name, param in model.named_parameters():
             if "lora_B" in name:
                 param.normal_(std=0.5)
-    grads = _assert_paths_agree(model, _real_inputs())
+    return model
+
+
+def test_the_chunked_opd_term_matches_under_lora():
+    grads = _assert_paths_agree(_lora_qwen3(["q_proj", "v_proj"]), _real_inputs())
     assert grads and all("lora_" in name for name in grads)
+
+
+def _head_adapter_grads(grads: dict) -> list[str]:
+    head = [name for name in grads if "lm_head.lora_" in name]
+    assert len(head) == 2 and all(grads[name].abs().sum() > 0 for name in head), head
+    return head
+
+
+@pytest.mark.parametrize("batch_size", [3, 1], ids=["padded", "dense"])
+def test_the_chunked_opd_term_matches_under_lora_on_the_head(batch_size):
+    """The GRPO and OPD terms both read the adapted head, so the OPD metric and every adapter gradient, the head's
+    included, match the full-logits path, where the head is the PEFT module's own forward."""
+    grads = _assert_paths_agree(_lora_qwen3(["q_proj", "v_proj", "lm_head"]), _real_inputs(), batch_size=batch_size)
+    _head_adapter_grads(grads)
+
+
+def test_the_teacher_rows_reach_the_adapted_head_without_its_dropout():
+    """The teacher's pass runs in eval mode, so its rows reach the head adapter undropped, also from inside the
+    student's train-mode forward; the student's rows carry the mask the log-probs drew."""
+    model = _lora_qwen3(["lm_head"], dropout=0.5).train()
+    trainer = _real_loss_trainer(model, chunked=True, batch_size=3)
+    trainer.sdpg = SDPGArguments(sdpg_temperature=1.3)
+    trainer.sdpg_loss_fn = reverse_kl_loss
+    head = trainer._head_projector(model)
+    generator = torch.Generator().manual_seed(1)
+    teacher = torch.randn(2, 3, TINY_QWEN3_CONFIG["hidden_size"], generator=generator)
+    student = torch.randn(4, TINY_QWEN3_CONFIG["hidden_size"], generator=generator)
+    positions = torch.tensor([0, 2, 3, 5])
+    got = trainer._opd_scores(teacher, head, list(head.head_inputs(student, dropout=False)), positions)
+    lm_head = model.get_output_embeddings()
+    with torch.no_grad():
+        lm_head.eval()
+        want = token_divergence(
+            reverse_kl_loss, lm_head(student), lm_head(teacher.flatten(0, 1)[positions]), trainer.sdpg.sdpg_temperature
+        )
+        lm_head.train()
+    torch.testing.assert_close(got.detach(), want, rtol=_RTOL, atol=1e-6)
 
 
 def test_a_batch_without_a_positive_advantage_projects_nothing(monkeypatch):
@@ -491,9 +540,9 @@ def test_the_teacher_side_projects_with_grad_disabled(monkeypatch):
     divergence = sdpg_module.projected_divergence
 
     def recording(loss_fn, student, student_rows, teacher, *args, **kwargs):
-        def project(rows):
+        def project(*rows):
             modes.append(torch.is_grad_enabled())
-            return teacher(rows)
+            return teacher(*rows)
 
         return divergence(loss_fn, student, student_rows, project, *args, **kwargs)
 
@@ -535,9 +584,9 @@ def test_the_chunked_term_builds_no_batch_by_completion_by_vocab_plane(monkeypat
     trainer = _real_loss_trainer(model, chunked=True, batch_size=3)
     trainer._head_transform(model)  # resolved once, its probe forward is not the term's
     shapes = []
-    linear = logprob_scoring.F.linear
+    linear = head_projection.F.linear
     monkeypatch.setattr(
-        logprob_scoring.F, "linear", lambda *args: shapes.append(tuple((out := linear(*args)).shape)) or out
+        head_projection.F, "linear", lambda *args: shapes.append(tuple((out := linear(*args)).shape)) or out
     )
     with torch.no_grad():
         _sdpg_step(model, inputs, chunked=True, trainer=trainer)
@@ -585,25 +634,46 @@ def _zero3_worker(rank: int, nprocs: int) -> None:
     torch.testing.assert_close(loss, expected_loss, rtol=_RTOL, atol=0.0)
     for name in ("lm_head.weight", "model.embed_tokens.weight"):
         torch.testing.assert_close(grads[name].full_tensor(), expected_grads[name], rtol=_RTOL, atol=1e-6, msg=name)
-    sweeps = []
-    head_sweep = DistributedSDPGTrainer._head_sweep
+    heads = []
+    head_projector = DistributedSDPGTrainer._head_projector
     with mock.patch.object(
         DistributedSDPGTrainer,
-        "_head_sweep",
-        lambda self, unwrapped: (sweep := head_sweep(self, unwrapped), sweeps.append(weakref.ref(sweep)))[0],
+        "_head_projector",
+        lambda self, unwrapped: (head := head_projector(self, unwrapped), heads.append(weakref.ref(head)))[0],
     ):
         values, head, trainer = _term_alone(model, inputs)
     torch.testing.assert_close(values, expected_values, rtol=_RTOL, atol=0.0)
     torch.testing.assert_close(head.full_tensor(), expected_head, rtol=_RTOL, atol=1e-6)
     # The trainer stays alive across the check, as it does for a whole run.
     gc.collect()
-    assert sweeps and all(sweep() is None for sweep in sweeps), "the gathered head outlived the term's backward"
+    assert heads and all(head() is None for head in heads), "the gathered head outlived the term's backward"
     assert isinstance(model.lm_head.weight, DTensor), "the head was left gathered after the backward"
     del trainer
 
 
 def test_the_chunked_term_backward_regathers_a_resharded_head():
     run_gloo_ranks(_zero3_worker, 2, 2)
+
+
+def _zero3_lora_head_worker(rank: int, nprocs: int) -> None:
+    """ZeRO-3 with LoRA on the head: the adapter's ``A`` and ``B`` are gathered inside the redirected forward beside the
+    base weight, and again before the backward recomputes the GRPO sweep and the OPD term."""
+    inputs = _real_inputs()
+    targets = ["q_proj", "lm_head"]
+    expected_loss, expected_grads, _ = _sdpg_step(_lora_qwen3(targets), inputs, chunked=True)
+    model = _lora_qwen3(targets)
+    policy = mixed_precision_policy(torch.float32, fp32_reduce=True, cast_forward_inputs=True)
+    apply_fsdp2_per_layer(model, init_device_mesh("cpu", (nprocs,)), policy, True, IdentityParamSet())
+    loss, grads, _ = _sdpg_step(model, inputs, chunked=True)
+    torch.testing.assert_close(loss, expected_loss, rtol=_RTOL, atol=0.0)
+    _head_adapter_grads(expected_grads)
+    assert grads.keys() == expected_grads.keys()
+    for name, grad in expected_grads.items():
+        torch.testing.assert_close(grads[name].full_tensor(), grad, rtol=_RTOL, atol=1e-6, msg=name)
+
+
+def test_a_head_adapter_trains_through_the_chunked_term_under_zero3():
+    run_gloo_ranks(_zero3_lora_head_worker, 2, 2)
 
 
 @pytest.mark.parametrize(

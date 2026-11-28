@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from urllib.parse import urlparse
 
 import torch
+from peft.tuners.tuners_utils import BaseTunerLayer
 from transformers import AutoTokenizer
 from transformers.trainer_callback import TrainerCallback
 from trl import GRPOConfig
@@ -17,10 +18,17 @@ from trl import GRPOConfig
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.models.introspection.unwrapping import base_transformers_model
 from halo.trainers.distillation.divergences import token_divergence
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from tests.common.adapters import check_only_adapters_trainable, snapshot_adapters, unwrap
+from tests.common.adapters import (
+    attention_target_modules,
+    check_only_adapters_trainable,
+    is_lora_b_key,
+    snapshot_adapters,
+    unwrap,
+)
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir, world_any, world_mean
 from tests.common.ep_reference import ep_layers
@@ -75,7 +83,8 @@ class _Mode:
     """One row's shape: its parallel layout, world size and adapter (``None``, ``"lora"`` or ``"expert_lora"``).
     ``beta`` is the KL coefficient; non-zero on a full fine-tune, the row holds a frozen reference.
     ``checkpoint_optimizer`` is off for a MoE full fine-tune, where AdamWBF16 moments cost over a hundred GB of disk
-    and the same in host RAM, for what the adapter rows and ``test_ep_optimizer_resume.py`` already cover."""
+    and the same in host RAM, for what the adapter rows and ``test_ep_optimizer_resume.py`` already cover.
+    ``adapts_head`` adds ``lm_head`` to the attention targets."""
 
     family: str
     layout: PolicyLayout = PolicyLayout()
@@ -85,6 +94,7 @@ class _Mode:
     rejects_expert_lora: bool = False
     beta: float = 0.0
     checkpoint_optimizer: bool = True
+    adapts_head: bool = False
 
     @property
     def expert_lora(self) -> bool:
@@ -96,6 +106,7 @@ MODES = {
     "lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="lora"),
     "expert_lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="expert_lora"),
     "lora_etp2": _Mode("moe", PolicyLayout(expert_tp_size=2), adapter="lora", rejects_expert_lora=True),
+    "lora_head_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="lora", adapts_head=True),
     # ep1: the experts in the FSDP2 shard as DTensors, or kept whole and FSDP-ignored.
     "full_ep1": _Mode("moe", checkpoint_optimizer=False),
     "full_ep1_unsharded": _Mode("moe", PolicyLayout(shard_ep1_experts=False), checkpoint_optimizer=False),
@@ -108,6 +119,10 @@ MODES = {
     "lora_tp2_rejected": _Mode("dense", PolicyLayout(tp_size=2), adapter="lora", refuses_lora_under_tp=True),
     "full_fsdp_kl": _Mode("dense", beta=0.01),
     "full_fsdp_zero3": _Mode("dense", PolicyLayout(reshard_after_forward=True)),
+    # An untied checkpoint: a tied one's sync pushes the adapted head as the input embedding too.
+    "lora_head_fsdp_zero3": _Mode(
+        "untied_dense", PolicyLayout(reshard_after_forward=True), adapter="lora", adapts_head=True
+    ),
     "full_tp2_dp2": _Mode("dense", PolicyLayout(tp_size=2), world_size=4),
     # Two simulated NVLink domains of two, sharded within each and replicated across them.
     "full_hsdp": _Mode("dense", PolicyLayout(use_hsdp=True, gpus_per_node=2), world_size=4),
@@ -184,7 +199,12 @@ def _build_trainer(
     resume checkpoint. ``maxrl`` turns on ``use_maxrl`` with ``scale_rewards: none`` and a non-negative reward;
     ``chunked`` turns on ``use_chunked_grpo_logprobs``."""
     parallelism_config = spec.layout.parallelism_config()
-    model, peft_config = load_policy(weights_source or model_name, parallelism_config, spec.adapter)
+    model, peft_config = load_policy(
+        weights_source or model_name,
+        parallelism_config,
+        spec.adapter,
+        lora_target_modules=[*attention_target_modules(model_name), "lm_head"] if spec.adapts_head else None,
+    )
     kwargs = {
         "model": model,
         "reward_funcs": [reward_len_positive if maxrl else reward_len],
@@ -480,8 +500,8 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
 
 def _unchunked_opd_scores(trainer, teacher_hidden, head, student, positions):
     """SDPG's ``_opd_scores`` with both sides projected in one ``[N, V]`` matmul, outside any checkpoint."""
-    teacher = head.project(teacher_hidden.flatten(0, 1).index_select(0, positions))
-    return token_divergence(trainer.sdpg_loss_fn, head.project(student), teacher, trainer.sdpg.sdpg_temperature)
+    teacher = head.project(*head.head_inputs(teacher_hidden.flatten(0, 1).index_select(0, positions), dropout=False))
+    return token_divergence(trainer.sdpg_loss_fn, head.project(*student), teacher, trainer.sdpg.sdpg_temperature)
 
 
 class _FirstGatedStepOPD:
@@ -605,6 +625,12 @@ def run_online_grpo_e2e(
         ok, detail = check_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  frozen base: {detail}")
+    if spec.adapts_head:
+        base = base_transformers_model(unwrap(trainer.model))
+        head = base.get_output_embeddings()
+        head = head.get_base_layer() if isinstance(head, BaseTunerLayer) else head
+        checks["policy_head_untied"] = head.weight is not base.get_input_embeddings().weight
+        log(f"  lm_head untied from embed_tokens: {checks['policy_head_untied']}")
 
     trainer.train()
     log("  training completed")
@@ -619,6 +645,13 @@ def run_online_grpo_e2e(
         moved = moved_parameters(base_before, frozen_base_weights(unwrap(trainer.model)))
         checks["training_syncs_left_the_base_weights_alone"] = bool(base_before) and not moved
         log(f"  frozen base weights the training syncs moved: {len(moved)}/{len(base_before)} {moved[:3]}")
+    if spec.adapts_head:
+        after = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
+        head = [name for name in adapters_before if "lm_head" in name and is_lora_b_key(name)]
+        unmoved = [name for name in head if torch.equal(adapters_before[name], after[name])]
+        # This row exists to prove the head adapter trains, so a run with no gradient fails here instead of passing.
+        checks["head_adapter_trained"] = bool(head) and trained and not unmoved
+        log(f"  lm_head lora_B: {len(head)} adapted, unmoved {unmoved} (run had a gradient: {trained})")
     record_dp_layout(ctx, trainer, spec.layout, checks)
 
     ctx.barrier()

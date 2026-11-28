@@ -10,6 +10,7 @@ from trl import GRPOTrainer
 from trl.trainer.utils import entropy_from_logits, selective_log_softmax
 
 import halo.trainers.grpo.logprob_scoring as logprob_scoring
+import halo.trainers.head_projection as head_projection
 from halo.kernels import head_logprobs
 from halo.kernels.head_logprobs import VOCAB_TILE, chunked_head_logprobs
 from halo.models.head_transform import HeadTransform
@@ -186,13 +187,13 @@ def test_single_row_dense_sweep_matches_padded_batch_on_real_positions():
 def test_dense_rows_share_one_head_sweep_that_matches_each_rows_own(monkeypatch):
     """One head call per row would zero-fill a full fp32 ``[V, H]`` head gradient each time in backward."""
     sweeps = []
-    real_sweep = logprob_scoring.chunked_head_logprobs
+    real_sweep = head_projection.chunked_head_logprobs
 
     def counting_sweep(hidden, *args, **kwargs):
         sweeps.append(tuple(hidden.shape))
         return real_sweep(hidden, *args, **kwargs)
 
-    monkeypatch.setattr(logprob_scoring, "chunked_head_logprobs", counting_sweep)
+    monkeypatch.setattr(head_projection, "chunked_head_logprobs", counting_sweep)
     input_ids, attention_mask, completion_mask, ltk = _ragged_batch()
     dense = EmbeddingBackboneHarness("flash_attention_4")
     logps, entropies, _ = dense._chunked_logps_impl(dense.model, input_ids, attention_mask, ltk, 2, True)
@@ -223,7 +224,7 @@ def _logsumexp_term(mask: torch.Tensor) -> tuple[CompletionTerm, list[torch.Tens
 
     def score(head, student, positions):
         seen.append(positions)
-        return head.project(student).logsumexp(-1)
+        return head.project(*student).logsumexp(-1)
 
     return CompletionTerm(mask, score), seen
 
