@@ -111,7 +111,7 @@ _SECOND_ADAPTER = {"two_adapters"}
 
 
 # (base, adapter) dtypes: the trainers' bf16 and fp32 alignments, and PEFT's default fp32 adapters on
-# a bf16 base, where Linear's merge adds the delta unrounded and the other layers round it first.
+# a bf16 base, where Embedding's merge rounds the delta first and the other layers add it unrounded.
 _DTYPES = {
     "bf16": (torch.bfloat16, torch.bfloat16),
     "fp32": (torch.float32, torch.float32),
@@ -147,6 +147,7 @@ def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
     model = _lora_model(case, _DTYPES[dtypes])
     expected = merged_by_peft(model)
     before = local_parameters(model)
+    identities = {name: id(param) for name, param in model.named_parameters()}
 
     targets = lora_fold_targets(model)
     folded = {
@@ -161,8 +162,37 @@ def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
     wrong = sorted(name for name, value in folded.items() if not torch.equal(value, expected[name]))
     assert not wrong, f"folded out of place differently from PEFT's merge: {wrong}"
     assert not moved_parameters(before, local_parameters(model)), "the fold wrote the model's own weights"
+    swapped = sorted(name for name, param in model.named_parameters() if id(param) != identities[name])
+    assert not swapped, f"the fold left another parameter in place of {swapped}"
     leaked = sorted(key for layers in targets.values() for layer in layers for key in layer._caches)
     assert not leaked, f"the fold left variant caches behind: {leaked}"
+
+
+@pytest.mark.parametrize(
+    ("target", "first", "second"),
+    [
+        ("proj", {}, {"use_dora": True}),
+        ("proj", {"use_dora": True}, {"use_dora": True}),
+        ("embed_tokens", {"use_dora": True}, {"use_dora": True}),
+    ],
+    ids=["linear_lora_then_dora", "linear_dora_twice", "embedding_dora_twice"],
+)
+def test_a_variant_beside_another_active_adapter_is_refused(target, first, second):
+    """PEFT computes a variant against the layer's base weight with the adapters merged before it taken out; the fold
+    would hand it the running sum, which is why it refuses the layer rather than fold it."""
+    torch.manual_seed(0)
+    model = get_peft_model(_Net(), LoraConfig(r=4, lora_alpha=8, target_modules=[target], **first))
+    model.add_adapter("second", LoraConfig(r=2, lora_alpha=4, target_modules=[target], **second))
+    model.base_model.set_adapter(["default", "second"])
+    randomize_adapters(model, std=0.1)
+    layer = model.get_submodule(f"base_model.model.{target}")
+    expected = merged_by_peft(model)[f"base_model.model.{target}.base_layer.weight"]
+    assert not torch.equal(lora_folded(layer.get_base_layer().weight, [layer]), expected), (
+        "premise: the fold differs from PEFT's merge here"
+    )
+
+    with pytest.raises(ValueError, match="one with a LoRA variant"):
+        lora_fold_targets(model)
 
 
 @pytest.mark.parametrize("case", sorted(_CASES))

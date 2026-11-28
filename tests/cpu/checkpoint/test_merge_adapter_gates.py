@@ -39,12 +39,6 @@ class _Merged:
         return self
 
 
-class _FakePeftModel:
-    @staticmethod
-    def from_pretrained(base_model, _adapter_dir):
-        return base_model
-
-
 def _adapter_dir(tmp_path: Path, base: Path, *, peft_type: str = "LORA") -> str:
     adapter = tmp_path / "adapter"
     adapter.mkdir()
@@ -85,7 +79,7 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, calls: list[tuple[str, str]]) -
 
         return record
 
-    monkeypatch.setattr(adapter_merge, "PeftModel", _FakePeftModel)
+    monkeypatch.setattr(adapter_merge, "_load_adapter", lambda base_model, _adapter_dir, _log: base_model)
     monkeypatch.setattr(adapter_merge, "apply_family_patches", lambda *_args: None)
     monkeypatch.setattr(
         adapter_merge, "resolve_peft_processing_class", stub("resolve_peft_processing_class", object())

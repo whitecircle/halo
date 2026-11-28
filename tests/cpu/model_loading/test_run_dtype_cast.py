@@ -72,7 +72,7 @@ ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_
 # weights.
 NON_TRAINING_BUILDS = frozenset(
     {
-        ("halo/checkpoint/tools/adapter_merge.py", "apply_adapter"),
+        ("halo/checkpoint/tools/adapter_merge.py", "_load_adapter"),
         ("halo/models/head_transform.py", "_probe_logits"),
     }
 )

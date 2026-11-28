@@ -3,7 +3,7 @@
 reads differently from the release and both engines. ``in_proj`` is scaled up where a row must cross: at stock init a
 crossed boundary moves the logits by rounding alone."""
 
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import peft.tuners.tuners_utils as peft_tuners_utils
 import pytest
@@ -593,6 +593,15 @@ def test_a_moved_upstream_signature_refuses_every_patch(stock, monkeypatch, owne
 
     monkeypatch.setattr(owner, name, moved)
     with pytest.raises(RuntimeError, match="re-derive"):
+        apply_nemotron_h_patches()
+    fused = (nemotron_modeling, "mamba2_split_conv1d_scan_combined")
+    assert getattr(*fused) is _STOCK_ATTRIBUTES[fused], "a refused patch must leave nothing half-applied"
+
+
+def test_a_peft_release_without_the_mamba_target_check_refuses_every_patch(stock, monkeypatch):
+    """Every Nemotron-H load applies the patches, with or without adapters, so the absence names the PEFT symbol."""
+    monkeypatch.setattr(nemotron_h, "peft_tuners_utils", ModuleType(peft_tuners_utils.__name__))
+    with pytest.raises(RuntimeError, match="defines no _check_lora_target_modules_mamba.*re-derive"):
         apply_nemotron_h_patches()
     fused = (nemotron_modeling, "mamba2_split_conv1d_scan_combined")
     assert getattr(*fused) is _STOCK_ATTRIBUTES[fused], "a refused patch must leave nothing half-applied"

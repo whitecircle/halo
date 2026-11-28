@@ -113,11 +113,11 @@ tokens.
 
 Every MoE layer in one forward sees the same count, so with `HALO_EP_CAPACITY_DEDUP` on (the default)
 the first MoE layer all-reduces the capacity and the rest reuse it, dropping N−1 collectives and their
-`.item()` syncs per forward. A forward pre-hook on the outermost module the loop calls opens each
+`.item()` syncs per forward. A forward pre-hook on the model EP patched (or the stage PP builds) opens each
 forward's scope (`capacity_scope`, a `CapacityScope` in
 `halo/distributed/expert_parallel/deepep/capacity.py`), so the first-layer miss lands on every rank
-together. The hook sits on the model EP patched, which every wrapper above it (`PeftModel`, `UlyssesModel`)
-calls as a module, so it runs once per forward. A caller entering the backbone directly
+together. Every wrapper above that model (`PeftModel`, `UlyssesModel`) calls it as a module, so the hook runs
+once per forward wherever the loop enters. A caller entering the backbone directly
 (the chunked log-prob path peels the hidden-state backbone off the wrapper) opens its own scope with
 `bump_forward_generation()`.
 

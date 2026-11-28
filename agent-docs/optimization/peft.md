@@ -189,7 +189,12 @@ layer. `build_peft_config` runs that rewrite on a copy and refuses a target it w
 
 Weights PEFT can't LoRA are **full-trained** (a trainable copy, not a low-rank adapter) via
 `lora_modules_to_save`: `embed_tokens` (an `nn.Embedding`), `lm_head` (excluded by `all-linear`), and the
-MoE `router` / `gate`. An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
+MoE `router` / `gate`. PEFT matches each entry against whole module names, so `gate` takes the router alone: on
+Qwen3-Next, Qwen3.5 MoE and Qwen3.8-Flash-Next list `shared_expert_gate` as well to train it. An adapter an earlier
+PEFT saved with `gate`, matching by suffix, holds both, so its `shared_expert_gate` copies refuse a resume (the
+layout check) until the run names `shared_expert_gate` too, and the in-memory merge until `adapter_config.json`
+does ([Merging adapters](#merging-adapters)).
+An **expert-only** run builds no `PeftModel`, so `lora_modules_to_save` raises there
 rather than leaving those modules silently frozen — add an attention target, or drop the field.
 `unfreeze_layers_patterns` / `freeze_layers_patterns` (`halo/model_loading/parallel/freeze_patterns.py`) are
 refused on any adapter run (attention LoRA or native expert LoRA): it freezes every base parameter and trains
@@ -440,7 +445,11 @@ specific to LoRA:
   while the live config keeps the wrapper's spelling.
 
 **Reloading elsewhere.** Attention adapters carry standard PEFT keys and load onto a stock
-`PeftModel.from_pretrained`. Native expert adapters do not: grouped `[E, K, r]` tensors have no PEFT
+`PeftModel.from_pretrained`, with two exceptions. PEFT's load respells adapter keys through the base's checkpoint
+renames, which turn Laguna's `shared_experts` and Inkling 2's short-convolution `weight_proj` keys into paths no
+module has, so it drops those tensors with a warning; and it refuses `out_proj` on Nemotron-H, which only
+`apply_nemotron_h_patches` admits. The merge tools load both whole ([Merging adapters](#merging-adapters)).
+Native expert adapters do not load: grouped `[E, K, r]` tensors have no PEFT
 representation, and PEFT only warns about adapter keys it does not recognize unless the load passes
 `strict_adapter_check="error"`.
 
@@ -498,6 +507,17 @@ run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the mult
 naming no module of either class are refused — applied to the wrong class, PEFT matches nothing, warns, and
 the tool would write the bare base as a finished model.
 `--fp32_norms` writes every normalization leaf in fp32, the layout `convert_to_bf16.py` writes.
+
+The family patches run before PEFT loads the adapter (Nemotron-H's `out_proj` passes PEFT's target check only under
+them), and the merged `config.json` is written inside `config_export_ready`, so the run-scoped stamps they put on the
+config stay out of it. After `PeftModel.from_pretrained`, every tensor of the adapter file whose live value differs is
+copied onto the tensor a PEFT save writes under its key, with a log line: PEFT's load respells adapter keys through
+the base's checkpoint renames and drops the ones it turns into paths no module has (Laguna's `shared_experts`,
+Inkling 2's `*_sconv.weight_proj`). A tensor the wrap builds nothing for, or builds at another shape, raises before
+anything is written, since the merged model would go without it: `adapter_config.json` resolves to other modules on
+this base than the file holds (a `modules_to_save: [gate]` adapter an earlier PEFT saved), and `--streaming` folds
+the file by its saved names (`apply_adapter`, `halo/checkpoint/tools/adapter_merge.py`). `convert_to_bf16.py
+--check_inference` loads an adapter the same way.
 
 A Hub base is read at the commit `adapter_config.json` records
 ([Checkpoints](../reference/checkpoints.md#peft-lora-saving)), by the in-memory merge, the streaming merge and

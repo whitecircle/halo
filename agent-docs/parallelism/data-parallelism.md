@@ -134,7 +134,7 @@ Two setups cannot pair those reduces, so a rank's training forward holding no im
 
 Both also take `freeze_vision_tower: true` or a dataset with no text-only rows. A run that holds an image on every rank pairs in either setup. At ZeRO-2 with no layer training, only end-of-backward groups reduce, so a tower beside a trained head pairs. A tower training alone leaves a text row's loss with no gradient, and autograd raises at that row's backward.
 
-An adapter run takes the same refusal: its embedding is frozen unless `modules_to_save` trains it, and `run_trainer` carries the hook onto the `PeftModel` the loop calls (`carry_image_refusal_above_adapters`), whose `.forward()` runs no pre-hook below it. The message names the parameter the adapter reached. Keep `lora_target_modules` off the tower, as `freeze_vision_tower` is refused there, or take a remedy above.
+An adapter run takes the same refusal: its embedding is frozen unless `modules_to_save` trains it, and `run_trainer` carries the hook onto the `PeftModel` the loop calls (`carry_image_refusal_above_adapters`), so it fires there before the hook on the model below, which cannot tell an adapter run, and its message names the parameter the adapter reached. Keep `lora_target_modules` off the tower, as `freeze_vision_tower` is refused there, or take a remedy above.
 
 With checkpointing on those adapters' reduces pair, and a tower block takes the same gradient under reentrant checkpointing as under non-reentrant ([Tower blocks under reentrant checkpointing](#tower-blocks-under-reentrant-checkpointing)).
 

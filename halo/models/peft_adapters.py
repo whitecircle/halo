@@ -81,6 +81,14 @@ def lora_fold_targets(model: torch.nn.Module) -> LoraFolds:
         adapters = _adapters_to_fold(module)
         if not adapters:
             continue
+        if len(adapters) > 1 and any(adapter in module.lora_variant for adapter in adapters):
+            raise ValueError(
+                f"{name}: folds {len(adapters)} active adapters {adapters}, one with a LoRA variant (DoRA). PEFT's "
+                f"merge computes a variant against the layer's base weight with the adapters merged before it taken "
+                f"out, where an out-of-place fold hands it the running sum, so the folded weights would differ from "
+                f"the merge. Keep one adapter active on the layer (set_adapter), or merge the others into the base "
+                f"first."
+            )
         targets.setdefault(id(_lora_weight(module)), []).append(module)
         bias = getattr(module.get_base_layer(), "bias", None)
         if bias is not None and any(module.lora_bias.get(adapter) for adapter in adapters):

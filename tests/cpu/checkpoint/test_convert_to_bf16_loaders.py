@@ -161,7 +161,7 @@ def test_a_peft_load_gates_the_base_the_adapter_names(monkeypatch, finalized):
         return base_model
 
     monkeypatch.setattr(offline_export, "auto_load_model", fake_load)
-    monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: (base, path))
+    monkeypatch.setattr(adapter_merge, "_load_adapter", lambda base, path, _log: (base, path))
 
     assert load_model("/adapter", "causal_lm", is_peft=True) == (base_model, "/adapter")
     assert seen["load"] == ("/base", {"excuse_task_head": False, "text_only": False, "revision": None})
@@ -185,7 +185,7 @@ def test_the_task_head_excuse_follows_the_adapters_declaration(monkeypatch, fina
         "from_pretrained_verified",
         lambda cls, path, **kw: seen.setdefault("load", types.SimpleNamespace(config=None, kwargs=kw)),
     )
-    monkeypatch.setattr(convert_module.PeftModel, "from_pretrained", lambda base, path: base)
+    monkeypatch.setattr(adapter_merge, "_load_adapter", lambda base, path, _log: base)
 
     load_model("/adapter", "classification", is_peft=True)
     assert seen["load"].kwargs["excuse_task_head"] is True

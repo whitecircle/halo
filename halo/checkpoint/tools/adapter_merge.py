@@ -4,6 +4,7 @@ shares; the causal-LM and classification merge drivers."""
 from __future__ import annotations
 
 import contextlib
+import itertools
 import logging
 import os
 from collections.abc import Callable
@@ -12,12 +13,15 @@ from typing import NamedTuple
 
 import torch
 from peft import PeftConfig, PeftModel
+from peft.utils import get_peft_model_state_dict
 from transformers import PreTrainedModel
 
 from halo.checkpoint.adapters import (
     adapter_module_paths,
+    find_adapter_weight_file,
     find_expert_lora_adapter_shape,
     read_adapter_config,
+    read_adapter_file,
     reject_expert_lora_adapter,
 )
 from halo.checkpoint.format import (
@@ -37,6 +41,7 @@ from halo.checkpoint.tools.offline_export import (
     resolve_adapter_base_revision,
     save_full_checkpoint,
 )
+from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.model_loading.tokenizer_setup import (
     grow_vocabulary,
@@ -44,6 +49,8 @@ from halo.model_loading.tokenizer_setup import (
     resolve_peft_processing_class,
     resolve_tokenizer,
 )
+from halo.models.introspection.config_access import config_export_ready
+from halo.models.introspection.param_roles import persistent_buffers
 
 logger = logging.getLogger(__name__)
 
@@ -132,16 +139,53 @@ def _grown_vocabulary(model: PreTrainedModel, adapter_processor, base_processor)
     return num_tokens
 
 
+def _load_adapter(model: PreTrainedModel, adapter_dir: str, log) -> PeftModel:
+    """``PeftModel.from_pretrained``, then every tensor of the adapter file copied onto the live tensor a PEFT save
+    writes under its key where the load left another value. PEFT's load respells adapter keys through the base's
+    checkpoint renames (transformers' conversion mapping), and a rename that does not hold on a live name (Laguna's
+    ``shared_experts``, Inkling 2's ``*_sconv.weight_proj``) leaves a key no module has, whose tensor it drops with a
+    warning. Raises for a tensor the wrap builds nothing for, or at another shape."""
+    peft_model = PeftModel.from_pretrained(model, adapter_dir)
+    saved = read_adapter_file(find_adapter_weight_file(adapter_dir))
+    live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
+    # One process holds the whole model, so PEFT's selection hands back the live tensors themselves.
+    targets = get_peft_model_state_dict(peft_model, state_dict=live, save_embedding_layers=True)
+    unmatched = sorted(saved.keys() - targets.keys())
+    reshaped = sorted(key for key in saved.keys() & targets.keys() if saved[key].shape != targets[key].shape)
+    if unmatched or reshaped:
+        raise ValueError(
+            f"The adapter at {adapter_dir} holds {len(unmatched)} tensor(s) the PEFT wrap of this base builds no "
+            f"adapter tensor for {unmatched[:KEY_PREVIEW_COUNT]} and {len(reshaped)} at another shape "
+            f"{reshaped[:KEY_PREVIEW_COUNT]}, which the merged model would go without. The wrap resolves "
+            f"adapter_config.json's target_modules and modules_to_save on this base, and PEFT matches a "
+            f"modules_to_save entry against whole module names: `gate` takes no `shared_expert_gate`, which an earlier "
+            f"PEFT matched by suffix and saved. Name every module the file holds there, or merge with "
+            f"merge_peft_adapters.py --streaming, which folds the file's tensors by their saved names."
+        )
+    missed = sorted(key for key, tensor in saved.items() if not torch.equal(targets[key], tensor.to(targets[key])))
+    if missed:
+        log(
+            f"PEFT's load left {len(missed)} adapter tensor(s) at other values than {adapter_dir} holds (e.g. "
+            f"{missed[0]}): it respells adapter keys through this model type's checkpoint renames. Copying them in "
+            f"under their saved names."
+        )
+        with torch.no_grad():
+            for key in missed:
+                targets[key].copy_(saved[key])
+    return peft_model
+
+
 def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_processor, base_processor, log) -> PeftModel:
-    """The saved adapter loaded onto ``model``, first grown to a vocabulary the run grew. The added rows start as NaN,
-    so an unset row is never served from uninitialized memory. An adapter lacking them has them rebuilt, with a
-    warning, as the checkpoint rows' mean, matching the run's frozen mean-resize draw (that mean plus 1e-9 of the rows'
-    covariance). The family patches come first, as PEFT's load runs the target check a patch lets past (Nemotron-H's
-    ``out_proj``)."""
+    """The saved adapter loaded onto ``model`` (:func:`_load_adapter`), first grown to a vocabulary the run grew. The
+    added rows start as NaN, so an unset row is never served from uninitialized memory. An adapter lacking them has
+    them rebuilt, with a warning, as the checkpoint rows' mean, matching the run's frozen mean-resize draw (that mean
+    plus 1e-9 of the rows' covariance). The family patches come first, as PEFT's load runs the target check a patch
+    lets past (Nemotron-H's ``out_proj``); they stamp run-scoped fields on ``model.config``, which a save writes only
+    inside :func:`config_export_ready`."""
     apply_family_patches(model.config, None)
     num_tokens = _grown_vocabulary(model, adapter_processor, base_processor)
     if num_tokens is None:
-        return PeftModel.from_pretrained(model, adapter_dir)
+        return _load_adapter(model, adapter_dir, log)
     rows = model.get_input_embeddings().weight.shape[0]
     log(
         f"Growing the base's embeddings from {rows} to {num_tokens} rows, the length of the adapter's tokenizer, "
@@ -151,7 +195,7 @@ def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_processor
     with torch.no_grad():
         for weight in _embedding_weights(model).values():
             weight[rows:] = float("nan")
-    peft_model = PeftModel.from_pretrained(model, adapter_dir)
+    peft_model = _load_adapter(model, adapter_dir, log)
     unset = {role: weight for role, weight in _embedding_weights(peft_model).items() if weight[rows:].isnan().any()}
     if unset:
         logger.warning(
@@ -242,15 +286,16 @@ def merge_adapter_into_base(
 
     log(f"Saving merged model to {output_dir}...")
     os.makedirs(output_dir, exist_ok=True)
-    save_full_checkpoint(
-        merged_model,
-        output_dir,
-        processing_class=processing_class,
-        source_dir=base_model_path,
-        source_revision=revision,
-        include_resume_sidecars=False,
-        max_shard_size=max_shard_size,
-    )
+    with config_export_ready(merged_model.config):
+        save_full_checkpoint(
+            merged_model,
+            output_dir,
+            processing_class=processing_class,
+            source_dir=base_model_path,
+            source_revision=revision,
+            include_resume_sidecars=False,
+            max_shard_size=max_shard_size,
+        )
     if base.text_only:
         for name in PROCESSOR_FILES:
             with contextlib.suppress(FileNotFoundError):

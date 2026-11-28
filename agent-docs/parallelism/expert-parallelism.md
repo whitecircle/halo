@@ -623,7 +623,7 @@ the training scripts seed it. A Python-API run that seeds ranks differently trai
 |---|---|---|
 | QLoRA / `load_in_4bit` | rejected — the EP loaders materialize plain de-quantized weights, losing `Params4bit` | `model_loading/parallel/load_rules.py` |
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `reject_unsupported_run` |
-| `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `reject_peft_lora_in_ep_layers` |
+| `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer, or wrapped **around** one (PEFT's `target_parameters` route), is rejected — expert LoRA must go through the native grouped adapters | `reject_peft_lora_in_ep_layers` |
 | expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads; rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `reject_lora_under_tp`, `halo/checkpoint/parallel/ep.py` |
 | `use_grouped_gemm: false` | drops the EP layers at `ep_group_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `reject_unrealized_expert_lora` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_reject_fsdp_settings` |

@@ -225,10 +225,20 @@ def _patch_mamba_mixer() -> None:
     patch_layer_forward(mixer_cls, forward)
 
 
-def _patch_peft_mamba_target_check() -> None:
+def _require_peft_mamba_target_check():
+    check = getattr(peft_tuners_utils, "_check_lora_target_modules_mamba", None)
+    if check is None:
+        raise RuntimeError(
+            "peft.tuners.tuners_utils defines no _check_lora_target_modules_mamba in this peft release, but the "
+            "toolkit's replacement (apply_nemotron_h_patches) wraps it to let LoRA on Nemotron-H's out_proj past "
+            "PEFT's Mamba target check: re-derive it on this release's target check."
+        )
+    return check
+
+
+def _patch_peft_mamba_target_check(stock_check) -> None:
     """PEFT refuses LoRA on ``out_proj`` of every Mamba model type, as a fused scan reads its weight past the adapter;
     with that scan pinned off (:func:`_no_fused_scan`) the mixer calls it as a module. ``conv1d`` stays refused."""
-    stock_check = peft_tuners_utils._check_lora_target_modules_mamba
 
     @functools.wraps(stock_check)
     def check(peft_config, model, target_name):
@@ -304,14 +314,13 @@ def apply_nemotron_h_patches() -> None:
         mixer_cls.forward, ("self", "hidden_states", "cache_params", "attention_mask", "kwargs"), patch
     )
     verify_upstream_parameters(radio_modeling.RadioLayerScale.__init__, ("self", "config"), patch)
-    verify_upstream_parameters(
-        peft_tuners_utils._check_lora_target_modules_mamba, ("peft_config", "model", "target_name"), patch
-    )
+    peft_mamba_check = _require_peft_mamba_target_check()
+    verify_upstream_parameters(peft_mamba_check, ("peft_config", "model", "target_name"), patch)
     nemotron_modeling.mamba2_chunk_scan = _document_chunk_scan
     nemotron_modeling.mamba2_split_conv1d_scan_combined = _no_fused_scan
     _patch_mamba_mixer()
     _patch_radio_layer_scale()
-    _patch_peft_mamba_target_check()
+    _patch_peft_mamba_target_check(peft_mamba_check)
     if is_global_main_process():
         logger.info(
             "Patched Nemotron-H's Mamba scan per group and document, its time-step limit, Radio's lambda1, and PEFT's "
