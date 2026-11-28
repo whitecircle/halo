@@ -1,7 +1,8 @@
 # DPO — NVIDIA Nemotron 3.5 Lightning on the Tulu-3 preference mixture, EP=8, one 8-GPU node, a full fine-tune.
 # precompute_ref_log_probs scores the reference once, from the untrained policy, so no second model loads: a frozen
 # reference would be the whole model, unsharded, on every rank.
-# Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 64.4 GiB reserved on rank 0 and 59-89 GiB in use across the GPUs.
+# Measured on 8x H200 (the 1.3.0rc2 Hopper image, 20 steps): 64.4 GiB reserved on rank 0 and 59-88 GiB in use
+# across the GPUs.
 # See agent-docs/models/nemotron-h.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/preference/dpo.py <this config>
 

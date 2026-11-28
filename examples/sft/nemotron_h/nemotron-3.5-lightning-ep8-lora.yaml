@@ -1,7 +1,7 @@
 # NVIDIA Nemotron 3.5 Lightning (nemotron_h, 31.6B parameters, 29.4B of them routed experts, text only) — EP=8 LoRA
 # SFT on UltraChat 200K, one 8-GPU node: attention and Mamba adapters via PEFT, routed experts via native grouped
-# expert-LoRA. Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 6,870 tok/s per rank, 55.6 GiB reserved on rank 0
-# and 56-66 GiB in use across the GPUs at this max_length.
+# expert-LoRA. Measured on 8x H200 (the 1.3.0rc2 Hopper image, 20 steps): 6,870 tok/s per rank, 55.6 GiB reserved
+# on rank 0 and 56-66 GiB in use across the GPUs at this max_length.
 # See agent-docs/models/nemotron-h.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 

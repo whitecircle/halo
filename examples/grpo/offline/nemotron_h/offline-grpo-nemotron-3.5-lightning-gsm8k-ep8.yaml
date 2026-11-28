@@ -1,6 +1,6 @@
 # Offline GRPO — NVIDIA Nemotron 3.5 Lightning on GSM8K (pre-computed completions + rewards), EP=8, one 8-GPU node.
-# Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 44.5 GiB reserved on rank 0 and 45-48 GiB in use across the GPUs on
-# GSM8K rows the release sampled.
+# Measured on 8x H200 (the 1.3.0rc2 Hopper image, 20 steps): 44.5 GiB reserved on rank 0 and 44-48 GiB in use
+# across the GPUs on GSM8K rows the release sampled.
 # Dataset rows need prompt/completions/rewards — generate via
 # scripts/inference/reward_model/rejection_sample.py --output_format offline_grpo (the default is preference).
 # See agent-docs/models/nemotron-h.md and agent-docs/training-methods/grpo/offline.md.

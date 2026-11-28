@@ -1,5 +1,5 @@
 # SMPO (reference-free preference optimization) — NVIDIA Nemotron 3.5 Lightning on the Tulu-3 preference mixture,
-# EP=8, one 8-GPU node. Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 58.5 GiB reserved on rank 0 and
+# EP=8, one 8-GPU node. Measured on 8x H200 (the 1.3.0rc2 Hopper image, 20 steps): 58.6 GiB reserved on rank 0 and
 # 53-63 GiB in use across the GPUs on these rows.
 # See agent-docs/models/nemotron-h.md and agent-docs/training-methods/preference/smpo.md.
 # Launch: torchrun --nproc_per_node=8 scripts/training/preference/smpo.py <this config>
