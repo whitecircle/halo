@@ -1,0 +1,144 @@
+# Halo Competition submission: .halo/submission.yaml in your PRIVATE repository.
+#
+# One file for every track. Fill sections 1 to 3, then the section for your kind of track:
+# 4 (optimization), 5 (fine-tune) or 6 (partner). Fill 6 as well if you list partner_tracks. Leave the
+# others as they are. Section 7 says whether this submission goes to final review.
+#
+# You submit with a non-draft pull request into main of the private repository. Opening one,
+# marking a draft ready, or pushing to one each submits the commit the pull request is at.
+# The bot answers there.
+#
+# The automated evaluation that replies afterwards is a reference and a helping hand. It guarantees no prize
+# and no place, even when it calls a contribution substantial. Places are decided later by the judges, who
+# weigh much besides the code: the write-up, how modular the change is, how it scales.
+
+schema: 1
+
+# ------------------------------------------------------------------------------------------------------------
+# 1. What this is                                                                               (every track)
+# ------------------------------------------------------------------------------------------------------------
+
+# Your track: its ID exactly as the competition page lists it. There are three kinds:
+#   optimization   opt-<model>   make Halo train that model faster or with less memory
+#   fine-tune      ft-<model>    post-train that model with Halo so it gets better at something useful
+#   partner        <partner>     best use of a partner's service with Halo
+track: ""
+
+# Partner tracks this submission also enters, because it uses that partner's service. An optimization or
+# fine-tune submission can enter any of the partner tracks as well. Each track is judged on its own.
+partner_tracks: []
+
+# One line naming what you did, for example "Fused MoE router removes two host syncs per layer".
+title: ""
+
+# What you changed, where, and why it is better. Private until the competition closes.
+description: ""
+
+# Commit of your PUBLIC fork your work starts from: 40 characters. It has to be a Halo commit, one your fork
+# got from whitecircle/halo by forking or syncing, not one you pushed there yourself. Sync your fork when
+# you choose: a base you picked does not move. Everything between it and the submitted commit is your
+# submission.
+base_commit: ""
+
+# ------------------------------------------------------------------------------------------------------------
+# 2. How we run it                                                                              (every track)
+# ------------------------------------------------------------------------------------------------------------
+# We run this from a clean checkout on the public Halo image, on one node, and compare with what you report
+# in section 3. Everything except retraining or evaluating a model has 30 minutes, then it is cut.
+run:
+  command: ""       # ONE command that reproduces your result
+  config: ""        # path of the configuration it uses, if any
+  gpus: 1           # GPUs it needs, 1 to 8, on one node
+  hardware: ""      # GPU type you measured on: H100 | H200 | B200 | B300 | RTX 6000 PRO. You are ranked per type.
+  minutes: null     # how long the command takes on that hardware
+
+# ------------------------------------------------------------------------------------------------------------
+# 3. What you measured                                                                          (every track)
+# ------------------------------------------------------------------------------------------------------------
+# Your own numbers. Ours are the ones that count; if they are far from yours we ask you to fix the submission
+# before we score it. Measure the base commit and your commit in the same job, same seed, same data.
+result:
+  metric: ""        # what you measured, for example "tokens per second per GPU" or "task success"
+  unit: ""
+  baseline: null    # headline number WITHOUT your change (base commit, or the base model)
+  value: null       # the same WITH it
+  repeats: null     # how many times you measured each side. At least 3.
+  seed: null
+  conditions: ""    # anything else that fixes the measurement: batch size, context length, sampling settings
+  # Every point you measured, slowdowns included. A submission with missing points is not judged.
+  # For SFT step time that is sequence lengths 1k, 2k, 4k, 8k, 16k and 32k, each at batch size 1 and at the
+  # largest batch that fits. Long-context work also needs 64k and 128k.
+  points: []        # - {label: "seq 4k, batch 1", baseline: 41200, value: 48900}
+
+# ------------------------------------------------------------------------------------------------------------
+# 4. Optimization tracks                                                                         (opt-* only)
+# ------------------------------------------------------------------------------------------------------------
+optimization:
+  # One of: data-processing | tokenization | sft-step-time | async-rl | weight-sync | other
+  # You are compared with submissions of the same category. On tracks whose model has no online RL in Halo,
+  # async-rl means offline RL and weight-sync means weight loading; the competition page says which.
+  category: ""
+  # You may measure on any dataset. The participant package has two reference splits, each with a fixed
+  # subset: a FineWeb split (plain text) and an instruction-following split (chat data, packed with the
+  # track model's chat template). We evaluate on both, on those subsets. Leave `dataset` and `subset` empty
+  # if you measured on them. If you measured on another dataset, or on another subset of either, name it
+  # here and say why in `dataset_reason`: we still run the two reference splits, so a gain that only shows
+  # on your data will not show in our numbers.
+  dataset: ""
+  subset: ""
+  dataset_reason: ""
+
+# ------------------------------------------------------------------------------------------------------------
+# 5. Fine-tune tracks                                                                             (ft-* only)
+# ------------------------------------------------------------------------------------------------------------
+finetune:
+  checkpoint: ""        # PRIVATE Hugging Face repository with your checkpoint or adapter; our bot must be able to read it
+  recipe: ""            # path of the Halo config you trained with
+  command: ""           # the training command you ran. Its seed goes in result.seed.
+  dataset: ""           # where your FULL training data is
+  dataset_code: ""      # path of the code that generated it
+  generated_with: []    # models that generated the data, each as "<service>: <model>"
+  eval_command: ""      # ONE command that scores a model. We run it on the base model and on yours, 3 seeds.
+  eval_data: ""         # where your eval data is. Your scores for base and yours go in result.baseline and result.value.
+  post: ""              # FOR FINAL REVIEW: address of your public post on X (https://x.com/<you>/status/<number>)
+                        # that shares what you fine-tuned with Halo and links to your write-up or blog post about it
+
+# ------------------------------------------------------------------------------------------------------------
+# 6. Partner tracks                                                 (partner tracks, and anything in partner_tracks)
+# ------------------------------------------------------------------------------------------------------------
+partner:
+  used: ""          # what of the partner's service you used, and for what
+  url: ""           # where to look at what you built
+  video: ""
+
+# ------------------------------------------------------------------------------------------------------------
+# 7. Final review and the rest                                                                  (every track)
+# ------------------------------------------------------------------------------------------------------------
+# FINAL REVIEW: which submission is judged for places. READ THIS.
+#   - ONE submission per track is judged for places, for the whole competition.
+#   - It is the LAST one you submitted with final_review: true. You can mark another one later; the earlier
+#     one then no longer counts.
+#   - If you never set final_review: true, your LAST submission in the track is the one judged, EVEN IF AN
+#     EARLIER ONE PERFORMED BETTER. So be careful what you push last, or mark the one you want.
+#   - final_review: true needs a PUBLIC write-up (writeup below: its address, on your own website, open to
+#     anybody without signing in). A fine-tune also needs the public post in finetune.post.
+final_review: false
+# TRAJECTORIES. Some tracks judge how you worked with coding agents and models. If you do not submit your
+# trajectories, your submission does not take part in those tracks. Trajectories are the records of the agent
+# sessions that made the submission, from your own harness too.
+# Compress them, in any format. Each entry is one of:
+#   - a path in this repository, for example trajectories/session-01.jsonl.gz
+#   - the address of a Hugging Face repository or file, if the files are too large to commit
+# Everything you commit counts toward the 100 MB limit of a submission, and GitHub refuses single files above
+# 100 MB. If yours are larger, split them, or put them on Hugging Face and link them.
+# Remove secrets and keys first.
+trajectories: []
+builds_on: []       # submission IDs or URLs of other participants' published work you used. You get credit for what you add.
+writeup: ""         # https address of your PUBLIC write-up, on your own website: what you did, why it
+                    # works, what it costs, where it does not help, how it scales. Required when final_review is true; we open it to check
+                    # that anybody can. It is linked from your public fork. Keep it online until results are out.
+artifacts: []       # paths with logs, traces or profiles
+agents: []          # coding agents used: - {name: "Claude Code", model: "..."}
+notes: ""           # free form: anything else the judges should know
+limitations: ""     # free form: where it does not help, what it costs, what you did not test
+extra: {}           # free form: any further named values, for example {warmup_steps: "200"}
