@@ -254,7 +254,9 @@ are enforced by `tests/cpu/conventions/`.
 - **Cover the matrix and the rejections.** Markers select the tier (`core` or `full`), the world size
   (`1gpu 2gpu 4gpu 8gpu`, matching the row's `nproc`) and capabilities (`ep cp tp etp pp hsdp vlm lora
   moe` plus the model family); `vllm_server` / `sglang_server` need a live container and are always
-  `full`, and their `moe`, `gptoss` and `untied_dense` markers pick the `SERVER_TIER` pass a row runs in. A new parallelism mode needs a correctness test per supported combination *and* a test that the
+  `full`, and a server row's markers pick its `SERVER_TIER` pass: neither `moe` nor `untied_dense` for the
+  dense pass, `moe` for a MoE pass (with `gptoss` on a gpt-oss row), `untied_dense` for the untied-dense
+  one. A new parallelism mode needs a correctness test per supported combination *and* a test that the
   unsupported ones are rejected.
 
 ### Test knobs
