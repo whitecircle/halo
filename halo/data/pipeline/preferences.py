@@ -1,5 +1,6 @@
 """Preparation of preference corpora (DPO, SMPO, reward): row normalization, chat-template maps, SMPO's tokenizers."""
 
+from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
@@ -9,17 +10,19 @@ from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, Processor
 
 from halo.data.chat_render import render_chat_template
 from halo.data.conversation import as_conversation, chat_template_kwargs, reject_image_content
-from halo.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_map
+from halo.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_filter, coordinated_map
 from halo.data.pipeline.prompt_completion import (
     render_prompt_completions,
     tokenize_completions_jointly,
     tokenize_prompt_completions,
 )
+from halo.data.pipeline.rejected_rows import report_rejected_rows
 from halo.data.pipeline.text_rows import prepare_generative_row
 from halo.data.pipeline.vlm_rows import normalize_vlm_conversation
 from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
 from halo.data.vlm_render import extract_conversation_images, render_vlm_text
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.runtime.consensus import agree_probe_across_ranks
 
 VLM_PREFERENCE_COLUMNS = ("chosen_text", "rejected_text", "images")
 
@@ -48,6 +51,57 @@ def _shared_message_prefix_len(a: list[dict[str, Any]], b: list[dict[str, Any]])
             break
         n += 1
     return n
+
+
+def is_empty_reply(message: Mapping[str, Any]) -> bool:
+    """An assistant turn with no tool call whose content is ``None``, empty or blank, as a string or as text chunks."""
+    if message.get("tool_calls"):
+        return False
+    content = message.get("content")
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content.strip()
+    return all(
+        isinstance(chunk, Mapping) and chunk.get("type") == "text" and not (chunk.get("text") or "").strip()
+        for chunk in content
+    )
+
+
+def has_a_reply_on_both_sides(row: Mapping[str, Any]) -> bool:
+    """False for a pair whose chosen or rejected reply, the side's last assistant turn, is empty
+    (:func:`is_empty_reply`). Against a real reply an empty one teaches when to end the turn, not which reply is
+    better, and a template that checks content (Mistral's) refuses to render it. A side that is missing or does not
+    end on an assistant turn passes, for :func:`normalize_preference_row` to refuse by name."""
+    for field in ("chosen", "rejected"):
+        side = row.get(field)
+        last = side[-1] if isinstance(side, list) and side else None
+        if isinstance(last, Mapping) and last.get("role") == "assistant" and is_empty_reply(last):
+            return False
+    return True
+
+
+def drop_empty_reply_pairs(dataset: Dataset, split_name: str, num_proc: int = DATASET_NUM_PROC) -> Dataset:
+    """COLLECTIVE: the pairs :func:`has_a_reply_on_both_sides` keeps, with the count line, before any template map. A
+    split the filter empties raises on every rank."""
+    before = len(dataset)
+    dataset = coordinated_filter(
+        dataset,
+        has_a_reply_on_both_sides,
+        desc=f"Dropping {split_name} preference pairs with an empty reply",
+        num_proc=num_proc,
+    )
+    # A per-rank fact on a presharded corpus, agreed so the raise lands on every rank at once.
+    if agree_probe_across_ranks(
+        before > 0 and len(dataset) == 0, f"the {split_name} split", "split emptied by the empty-reply filter"
+    ):
+        raise ValueError(
+            f"All {before} pairs of the {split_name} split have an empty or blank chosen or rejected reply on at "
+            f"least one data-parallel rank, so none is left to train on. Check the dataset's chosen and rejected "
+            f"columns."
+        )
+    report_rejected_rows(before, len(dataset), f"the {split_name} split (an empty or blank chosen or rejected reply)")
+    return dataset
 
 
 def normalize_preference_row(row: dict[str, Any]) -> dict[str, Any]:
