@@ -34,8 +34,10 @@ class CapacityScope:
 
     def __init__(self):
         self.generation = 0
-        # Hooked forwards entered and not yet left: only the outermost opens a scope.
+        # Hooked forwards entered and not yet left, and whether one of them has ended inside another still open:
+        # the outermost opens a scope, and so does each one that follows another inside it.
         self.open_forwards = 0
+        self.nested_forward_ended = False
         # id(group) -> (group, generation, top_k, capacity). The group is held because its id is the
         # key, which the allocator could otherwise recycle onto a rebuilt group.
         self._entries: dict[int, tuple[object, int, int, int]] = {}
@@ -77,21 +79,24 @@ def bump_forward_generation() -> None:
 
 
 def _enter_hooked_forward(*_hook_args) -> None:
-    if not capacity_scope.open_forwards:
+    if not capacity_scope.open_forwards or capacity_scope.nested_forward_ended:
         capacity_scope.bump()
+        capacity_scope.nested_forward_ended = False
     capacity_scope.open_forwards += 1
 
 
 def _leave_hooked_forward(*_hook_args) -> None:
-    capacity_scope.open_forwards -= 1
+    # Floored: torch runs this hook for a forward whose earlier pre-hook raised before the entering one ran.
+    capacity_scope.open_forwards = max(capacity_scope.open_forwards - 1, 0)
+    capacity_scope.nested_forward_ended = capacity_scope.open_forwards > 0
 
 
 def register_forward_generation_hook(model: torch.nn.Module) -> None:
-    """Open a capacity scope once per ``model`` forward that no other hooked forward encloses. Registered on the model
-    EP patches, the stage PP builds and the trainer's top-level model, which reaches the model below it as a module or
-    through ``.forward()``, which runs no hook: either way the generation advances once per forward of the outermost.
-    The hooks are module-level functions, which a deepcopied model shares with the original. Idempotence is read off
-    these hooks, since PEFT forwards a marker attribute to the wrapped model."""
+    """Open a capacity scope at each ``model`` forward, except the first one entered inside another hooked forward,
+    which shares that one's: a wrapper and the model it wraps can both be hooked, whether the wrapper calls the model
+    as a module or through ``.forward()``, which runs no hook. The hooks are module-level functions, which a
+    deepcopied model shares with the original. Idempotence is read off these hooks, since PEFT forwards a marker
+    attribute to the wrapped model."""
     if not EP_CAPACITY_DEDUP or _enter_hooked_forward in model._forward_pre_hooks.values():
         return
     model.register_forward_pre_hook(_enter_hooked_forward)

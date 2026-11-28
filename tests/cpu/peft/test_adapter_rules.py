@@ -101,15 +101,19 @@ def test_each_adapter_refusal_names_its_mechanism(refusal, match):
 
 
 TOKENS = torch.tensor([[6, 7, 8, 9, 10, 11]])
-# Adapters by where they sit: in the decoder layers' groups, on the head the root group holds, or on the embedding the
-# backbone's group holds.
+_TOKENS = {"target_modules": ["q_proj"], "trainable_token_indices": [1, 2, 3]}
+# Adapters (and model config) by where they sit: in the decoder layers' groups, on the head the root group holds, or on
+# the embedding the backbone's group holds. A tied pair shares one token delta, which the wrap keeps in the root group.
 _ADAPTERS = {
-    "attention": {"target_modules": ["q_proj", "v_proj"]},
-    "head_copy": {"target_modules": ["q_proj", "v_proj"], "modules_to_save": ["lm_head"]},
-    "head_lora": {"target_modules": ["q_proj", "lm_head"]},
-    "embedding_lora": {"target_modules": ["q_proj", "embed_tokens"]},
+    "attention": ({"target_modules": ["q_proj", "v_proj"]}, {}),
+    "head_copy": ({"target_modules": ["q_proj", "v_proj"], "modules_to_save": ["lm_head"]}, {}),
+    "head_lora": ({"target_modules": ["q_proj", "lm_head"]}, {}),
+    "frozen_head_lora": ({"target_modules": ["q_proj", "lm_head"], "inference_mode": True}, {}),
+    "embedding_lora": ({"target_modules": ["q_proj", "embed_tokens"]}, {}),
+    "tokens": (_TOKENS, {}),
+    "tied_tokens": (_TOKENS, {"tie_word_embeddings": True}),
 }
-_IN_THE_ROOT_GROUP = {"head_copy", "head_lora"}
+_IN_THE_ROOT_GROUP = {"head_copy", "head_lora", "tied_tokens"}
 
 
 @pytest.fixture
@@ -124,8 +128,9 @@ def one_gloo_rank(tmp_path):
 def _lora_qwen3(adapters: str, *, below_root: bool):
     """A tiny LoRA Qwen3, under the CP wrapper (the PeftModel below the root) when ``below_root``."""
     torch.manual_seed(0)
-    base = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG)).train()
-    peft_model = get_peft_model(base, LoraConfig(r=2, lora_alpha=4, init_lora_weights=False, **_ADAPTERS[adapters]))
+    lora, config = _ADAPTERS[adapters]
+    base = Qwen3ForCausalLM(Qwen3Config(**{**TINY_QWEN3_CONFIG, **config})).train()
+    peft_model = get_peft_model(base, LoraConfig(**{"r": 2, "lora_alpha": 4, "init_lora_weights": False, **lora}))
     return (unpatched_cp_wrapper(peft_model) if below_root else peft_model), peft_model
 
 
@@ -165,7 +170,7 @@ def test_the_below_root_refusal_fires_where_a_reference_pass_leaves_adapters_fro
     frozen = _left_frozen_by_a_reference_pass(root, peft_model)
     assert bool(frozen) == fails, frozen
     if fails:
-        assert "under ZeRO-2" in refusal and "lm_head" in refusal
+        assert "under ZeRO-2" in refusal and ("token_adapter" if adapters == "tied_tokens" else "lm_head") in refusal
 
 
 class _PastTheRootCheck(Exception):

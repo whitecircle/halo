@@ -188,7 +188,8 @@ adapted before the rewrite existed and no parameter. PEFT condenses a list of 20
 suffixes no other module shares, so on a full-size model the saved `adapter_config.json` holds leaf names again, and a
 reload through PEFT rewrites them: where a shared expert's `gate_proj`, `up_proj` or `down_proj` is among them
 (Qwen3-Next, GLM-4 MoE Lite, Cohere2 MoE) it also wraps the fused experts, warns that the file holds no tensors for
-them and leaves those adapters at zero, so a merge equals the trained model. A list naming one projection of a
+them and leaves those adapters at zero, so a merge equals the trained model
+([peft#4253](https://github.com/huggingface/peft/issues/4253)). A list naming one projection of a
 fused pair (`gate_proj` without `up_proj`), which PEFT refuses, adapts the modules it names the same way, and one
 naming no module at all, the fused experts alone, is refused with the routes that train them. A target
 that names the router or a fused-expert module itself, which PEFT turns into a parameter even as a path, is refused:
@@ -340,10 +341,11 @@ the registered params across the context and, where they changed, reshards every
 `PeftModel` and enables the adapters again, so the flags land on the sharded params (huggingface/peft#3839,
 #3938). The trainer shards the `PeftModel` itself as the FSDP2 root, so that reaches every group. A wrapper applied
 above the `PeftModel` becomes the root instead, which PEFT does not reshard and ZeRO-2 leaves gathered after a
-forward, so construction refuses that layout under ZeRO-2 when an adapter tensor sits in the root group, a LoRA or
-`modules_to_save` copy on `lm_head` (`reject_peft_model_below_fsdp2_root`). Attention adapters sit in the decoder
-layers' groups and the embedding in the backbone's, both inside the `PeftModel`, and ZeRO-3 reshards the root after
-its forward, so those pass.
+forward, so construction refuses that layout under ZeRO-2 when an adapter tensor sits in the root group: a LoRA or
+`modules_to_save` copy on `lm_head`, or the token delta a tied embedding and head share, which the wrap keeps in the
+root group like every tensor reachable under two names (`reject_peft_model_below_fsdp2_root`). Attention adapters
+sit in the decoder layers' groups and an untied embedding's in the backbone's, both inside the `PeftModel`, and
+ZeRO-3 reshards the root after its forward, so those pass.
 
 An explicit reference model (DPO, KTO, self-distillation's KL `reference_model`) is never parallelized:
 under EP or TP it is a whole dense replica on every rank, warned about rather than refused. LoRA with the

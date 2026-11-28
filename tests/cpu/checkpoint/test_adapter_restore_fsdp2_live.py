@@ -88,5 +88,20 @@ def test_a_key_peft_answers_with_a_tensor_derived_from_a_stand_in_is_refused(mon
         live_adapter_tensors(model)
 
 
+def test_a_key_peft_answers_with_a_tensor_it_read_itself_is_kept(monkeypatch):
+    """PEFT reads a buffer the selection lacks off the module, which is the live tensor already."""
+    base = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"]))
+    select = adapters_mod.get_peft_model_state_dict
+    read_by_peft = torch.ones(3)
+    monkeypatch.setattr(
+        adapters_mod,
+        "get_peft_model_state_dict",
+        lambda *args, **kwargs: {**select(*args, **kwargs), "kept": read_by_peft},
+    )
+
+    assert live_adapter_tensors(model)["kept"] is read_by_peft
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

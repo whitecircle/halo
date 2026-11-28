@@ -8,6 +8,7 @@ from torch.distributed.fsdp import FSDPModule
 from halo.checkpoint.parallel.adapters import live_adapter_tensors
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.fsdp import fsdp2_param_groups
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.tokenizer_setup import vocabulary_grown
 from halo.models.introspection.unwrapping import find_peft_model
@@ -64,30 +65,25 @@ def _adapter_param_ids(peft_model: PeftModel) -> set[int]:
 
 
 def _adapters_held_outside(model, peft_model: PeftModel) -> list[str]:
-    """The trained adapter tensors an FSDP2 shard group outside ``peft_model`` holds, by module path: a group holds
-    its module's parameters except those under a group nested in it."""
+    """The trained adapter tensors an FSDP2 shard group outside ``peft_model`` holds, by parameter name. Read off the
+    groups themselves: the wrap keeps a tensor reachable under two names, a token delta a tied pair shares, in the
+    root's group, wherever the module tree shows it."""
     adapters = _adapter_param_ids(peft_model)
-    inside = {id(module) for module in peft_model.modules() if isinstance(module, FSDPModule)}
-    outside: dict[str, bool] = {}
-    held = []
-    for name, module in model.named_modules():
-        if isinstance(module, FSDPModule):
-            outside[name] = id(module) not in inside
-        else:
-            outside[name] = outside.get(name.rpartition(".")[0], False)
-        if outside[name]:
-            held += [
-                f"{name}.{param_name}" if name else param_name
-                for param_name, param in module.named_parameters(recurse=False)
-                if param.requires_grad and id(param) in adapters
-            ]
-    return held
+    inside = {id(group) for group in fsdp2_param_groups(peft_model)}
+    names = {id(param): name for name, param in model.named_parameters()}
+    return sorted(
+        names[id(fsdp_param.sharded_param)]
+        for group in fsdp2_param_groups(model)
+        if id(group) not in inside
+        for fsdp_param in group.fsdp_params
+        if fsdp_param.sharded_param.requires_grad and id(fsdp_param.sharded_param) in adapters
+    )
 
 
 def reject_peft_model_below_fsdp2_root(model, *, reshard_after_forward: bool) -> None:
     """``model`` is the FSDP2 root. Under ZeRO-2 a forward leaves each group gathered, and PEFT's ``disable_adapter()``
     reshards only the FSDP2 modules inside the ``PeftModel`` before it enables the adapters again, so the adapters a
-    group above it holds would stay frozen after a reference pass. Rank-uniform: it reads the module tree."""
+    group above it holds would stay frozen after a reference pass. Rank-uniform: every rank builds the same wrap."""
     peft_model = find_peft_model(model)
     if peft_model is None or peft_model is model or reshard_after_forward:
         return

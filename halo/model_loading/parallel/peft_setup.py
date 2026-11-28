@@ -261,9 +261,10 @@ def resolve_lora_target_modules(model: torch.nn.Module, peft_config, matched: se
         raise ValueError(
             f"lora_target_modules={peft_config.target_modules!r} matches no module of this "
             f"{model.config.model_type} model: transformers v5 holds its experts as fused parameters, which PEFT would "
-            f"adapt as target_parameters in the target's place. Name a module to adapt (an attention projection), "
-            f"train the experts as the native grouped expert adapters on EP layers (use_grouped_gemm, the default), "
-            f"or, without EP layers, list the fused tensors in lora_target_parameters."
+            f"adapt as target_parameters in the target's place. Name a module to adapt (an attention projection). "
+            f"To train the experts, list their projections by name (gate_proj, up_proj, down_proj) on EP layers "
+            f"(use_grouped_gemm, the default), where they train as the native grouped expert adapters, or, without EP "
+            f"layers, list the fused tensors in lora_target_parameters."
         )
     resolved = copy.deepcopy(peft_config)
     resolved.target_modules = matched

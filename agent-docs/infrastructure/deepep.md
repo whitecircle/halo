@@ -116,10 +116,12 @@ the first MoE layer all-reduces the capacity and the rest reuse it, dropping Nâˆ
 `.item()` syncs per forward. A forward pre-hook on the model EP patched (or the stage PP builds) and on the
 trainer's top-level model opens each forward's scope (`capacity_scope`, a `CapacityScope` in
 `halo/distributed/expert_parallel/deepep/capacity.py`), so the first-layer miss lands on every rank
-together. A hooked forward inside another opens none, so the generation advances once per forward whether a wrapper
-calls the patched model as a module (`PeftModel`, `UlyssesModel`) or through `.forward()`, which runs none of its
-hooks. A paired forward hook closes the scope on a raise too, and a gradient-checkpointing recompute reruns layers
-only, outside every hooked forward. A caller entering the backbone directly
+together. The first hooked forward entered inside another shares that one's scope, so the generation advances once
+per forward whether a wrapper calls the patched model as a module (`PeftModel`, `UlyssesModel`) or through
+`.forward()`, which runs none of its hooks; a second pass through the patched model inside one forward opens its
+own. A paired forward hook marks where a hooked forward ends, also when it raises an `Exception`, and a
+gradient-checkpointing recompute reruns layers only, outside every hooked forward. A caller entering the backbone
+directly
 (the chunked log-prob path peels the hidden-state backbone off the wrapper) opens its own scope with
 `bump_forward_generation()`.
 

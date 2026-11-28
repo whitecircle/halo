@@ -145,6 +145,56 @@ def test_a_forward_that_raises_leaves_the_next_forward_its_own_scope():
     assert _generation() == before + 1, "a raise inside a hooked forward left its scope open"
 
 
+def test_a_pre_hook_raising_ahead_of_the_scope_hooks_leaves_later_forwards_their_scopes():
+    """torch then runs the closing hook for a forward the opening one never saw, as FSDP2's pre-forward on a sharded
+    root would make it; a count left below zero would open no scope again."""
+    model = _TwoLayerModel()
+
+    def failing_gather(*_):
+        raise RuntimeError("all-gather of the root group")
+
+    ahead = model.register_forward_pre_hook(failing_gather)
+    capacity_mod.register_forward_generation_hook(model)
+    with pytest.raises(RuntimeError, match="all-gather"):
+        model(torch.zeros(2, 4))
+    ahead.remove()
+
+    before = _generation()
+    for forwards in (1, 2, 3):
+        model(torch.zeros(2, 4))
+        assert _generation() == before + forwards
+
+
+class _TwoPasses(nn.Module):
+    """A hooked model running the model it holds twice per forward, recording the scope each pass ran in."""
+
+    def __init__(self, inner: nn.Module):
+        super().__init__()
+        self.inner = inner
+        self.scopes: list[int] = []
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for _ in range(2):
+            x = self.inner(x)
+            self.scopes.append(_generation())
+        return x
+
+
+@pytest.mark.parametrize("wrapped", [False, True], ids=["patched_model", "wrapper_around_it"])
+def test_a_second_pass_inside_one_forward_opens_its_own_scope(wrapped):
+    """Each pass dispatches its own token count; sharing the first pass's capacity refuses a longer second one."""
+    patched = _TwoLayerModel()
+    inner = _Outer(patched, as_module=True) if wrapped else patched
+    outer = _TwoPasses(inner)
+    for model in (patched, inner, outer):
+        capacity_mod.register_forward_generation_hook(model)
+
+    before = _generation()
+    outer(torch.zeros(2, 4))
+
+    assert outer.scopes == [before + 1, before + 2]
+
+
 def test_a_deep_copy_opens_scopes_on_the_shared_generation():
     """A reference model copied from the policy dispatches through the same capacity cache."""
     model = _TwoLayerModel()
