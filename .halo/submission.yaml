@@ -92,7 +92,7 @@ optimization:
 # 5. Fine-tune tracks                                                                             (ft-* only)
 # ------------------------------------------------------------------------------------------------------------
 finetune:
-  checkpoint: ""        # PRIVATE Hugging Face repository with your checkpoint or adapter; our bot must be able to read it
+  checkpoint: ""        # PUBLIC Hugging Face repository with your checkpoint or adapter
   recipe: ""            # path of the Halo config you trained with
   command: ""           # the training command you ran. Its seed goes in result.seed.
   dataset: ""           # where your FULL training data is
