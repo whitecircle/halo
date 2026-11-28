@@ -21,6 +21,7 @@ from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.lazy_safetensors.materialization import materialize_empty_like
 from halo.model_loading.lazy_safetensors.meta_shell import build_config_meta_shell
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 
 logger = logging.getLogger(__name__)
 
@@ -70,10 +71,9 @@ def fused_expert_banks(model: nn.Module) -> dict[str, int]:
     banks: dict[str, int] = {}
     for _path, block in ep_claimed_blocks(model):
         layer_cls = MOE_LAYER_MAP[type(block).__name__]
-        experts = next(
-            (getattr(block, attr) for attr in layer_cls.FAMILY.experts_container_attrs if hasattr(block, attr)), None
-        )
-        if experts is None or isinstance(experts, nn.ModuleList):
+        # The EP layer's own lookup: Gemma 4's claimed block is the container itself.
+        experts = layer_cls._find_experts_container(block)
+        if isinstance(experts, nn.ModuleList):
             continue
         banks[names[id(experts)]] = layer_cls.detect_num_experts(block)
     return banks
@@ -169,6 +169,26 @@ def keyed_init_(model: nn.Module, seed: int, *, init_weights: InitWeights | None
             drawn.update(id(p) for p in own.values())
 
 
+def draw_token_indexed_tables_(model: nn.Module, seed: int, *, prefix: str = "") -> None:
+    """Draw the routing table the family indexes by token id (DeepSeek-V4's hash layers' ``gate.tid2eid``), which its
+    ``_init_weights`` zeroes for the checkpoint to fill: from scratch that sends every token to expert 0 ``top_k``
+    times, which the EP layer refuses and plain data parallelism trains as one expert. Each row takes ``top_k``
+    distinct experts of its router's ``num_experts``, uniformly, keyed on the table's name."""
+    config = getattr(model, "config", None)
+    spec = None if config is None else find_moe_family_spec_for_config(config)
+    table = None if spec is None else spec.token_indexed_table
+    if table is None:
+        return
+    for name, buffer in model.named_buffers():
+        if name != table and not name.endswith(f".{table}"):
+            continue
+        router = model.get_submodule(name.rpartition(".")[0])
+        rows, top_k = buffer.shape
+        with _cpu_stream(init_key(seed, f"{prefix}.{name}" if prefix else name)):
+            picks = torch.rand(rows, router.num_experts).argsort(dim=-1)[:, :top_k]
+        buffer.copy_(picks)
+
+
 def undrawn_parameters(model: nn.Module) -> list[str]:
     """Float parameters still holding the NaN fill."""
     return [
@@ -188,6 +208,7 @@ def draw_from_scratch_(
             if param.is_floating_point():
                 param.fill_(float("nan"))
     keyed_init_(model, seed, init_weights=init_weights, prefix=prefix)
+    draw_token_indexed_tables_(model, seed, prefix=prefix)
     undrawn = undrawn_parameters(model)
     if undrawn:
         raise RuntimeError(

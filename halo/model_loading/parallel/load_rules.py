@@ -227,7 +227,7 @@ def reject_unsupported_load(
     quantization_config,
     init_from_scratch: bool,
     wraps_experts: bool,
-    dense_tp: bool = False,
+    dense_tp: bool,
 ) -> None:
     """Refuse a QLoRA, from-scratch or low-precision load ``pc`` and ``dtype`` cannot take, before any weight read."""
     if quantization_config is not None and (pc.has_ep_group or pc.is_tp_mode or pc.is_pp_mode or wraps_experts):
@@ -251,13 +251,19 @@ def reject_unsupported_load(
             raise NotImplementedError(
                 f"init_from_scratch is not supported under {', '.join(unsupported)} yet: those loaders read only "
                 "their own part of a checkpoint and have no random-init route. Data parallelism, EP, CP and "
-                "attention-only TP on a MoE are supported. To train from scratch under these axes, build the "
-                "model once outside the job (AutoModelForCausalLM.from_config + save_pretrained), point "
-                "model_name_or_path at it and drop init_from_scratch — see 'Large models, PP, ETP or dense TP' in "
-                "agent-docs/training-methods/pretraining.md."
+                "attention-only TP on a MoE are supported. To train from scratch under these axes, draw the model "
+                "once outside the job (halo.model_loading.parallel.keyed_init.build_keyed_model under the run's "
+                "seed, then save_pretrained), point model_name_or_path at it and drop init_from_scratch — see "
+                "'Large models, PP, ETP or dense TP' in agent-docs/training-methods/pretraining.md."
             )
         if quantization_config is not None:
             raise ValueError("init_from_scratch is incompatible with quantization (QLoRA loads pretrained weights).")
+        if pc.frozen_quantized_experts:
+            # The random-init route builds bf16 experts and never reaches the lazy loader that installs frozen banks.
+            raise ValueError(
+                "init_from_scratch is incompatible with frozen_quantized_experts: the experts would be random bf16 "
+                "weights, not the release's packed NVFP4/MXFP8 banks the adapters are meant to train over. Drop one."
+            )
     if pc.lowp.enabled:
         if quantization_config is not None:
             raise ValueError(

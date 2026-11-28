@@ -21,10 +21,11 @@ Data parallelism (DDP, FSDP2, `ep1`), EP, CP, EP+CP, attention-only TP on a MoE 
 
 A resumed run restores its checkpoint. Under EP, CP and TP the policy loads from the checkpoint and draws nothing. Under data parallelism the run first draws the keyed weights, and the trainer restores the checkpoint over them. A GptOss run's sinks keep the from-scratch handling they started with, so `reset_sinks` never neutralizes the trained ones.
 
-Four refusals:
+Five refusals:
 
 - **PP, ETP or dense TP** raise `NotImplementedError`: those loaders read only their own part of a checkpoint and have no random-init route yet.
 - **Quantization** raises — QLoRA loads pretrained weights.
+- **`frozen_quantized_experts`** raises: the random-init route builds bf16 experts and never reaches the lazy loader that installs the release's packed banks, so the adapters would train over random experts.
 - **A multimodal checkpoint** raises at the VLM load; `text_only_model: true` routes it to the text-only sibling, which does random-init.
 - **A model with external tables** raises `ValueError` (`reject_random_init_tables`): Qwen3.8-Flash-Next's n-gram table is frozen and comes only from the checkpoint, so random weights would train against a pretrained table.
 
@@ -44,15 +45,19 @@ model_init_kwargs:
 Under PP, ETP or dense TP, or where a whole model per rank does not fit in host memory, materialize the random-init checkpoint once outside the distributed job, then train from it. The host memory is saved only by a loader that reads just its rank's part of the checkpoint: lazy EP, PP and dense TP. Data parallelism, CP and attention-only TP on a MoE hold a whole model per rank either way:
 
 ```python
+import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
+
+from halo.model_loading.parallel.keyed_init import build_keyed_model
 
 config = AutoConfig.from_pretrained("Qwen/Qwen3-30B-A3B")
 config.num_hidden_layers = 32   # optional resize before init
-AutoModelForCausalLM.from_config(config).save_pretrained("/mnt/init/fresh", safe_serialization=True)
+model = build_keyed_model(AutoModelForCausalLM, config, torch.bfloat16, seed=42, trust_remote_code=False)
+model.save_pretrained("/mnt/init/fresh")
 AutoTokenizer.from_pretrained("Qwen/Qwen3-30B-A3B").save_pretrained("/mnt/init/fresh")
 ```
 
-Point `model_name_or_path` at that directory, drop `init_from_scratch`, and keep the init seed fixed. Profile that artifact before committing to the long run ([benchmarks](../optimization/throughput-benchmarks.md#running-benchmarks)).
+`build_keyed_model` is the draw `init_from_scratch` makes, so at the run's `seed` this checkpoint holds the weights a supported layout would start from. `from_config` draws other values from the same distribution. Point `model_name_or_path` at that directory and drop `init_from_scratch`. Profile that artifact before committing to the long run ([benchmarks](../optimization/throughput-benchmarks.md#running-benchmarks)).
 
 ## Raw-text data preparation
 

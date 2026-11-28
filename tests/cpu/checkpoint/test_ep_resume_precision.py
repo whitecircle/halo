@@ -190,7 +190,7 @@ def _construct(
     )
     loader = {"ep_cp": load_ep_cp_model, "ep": load_ep_model, "ep1": _load_undistributed_model}[mode]
     config = AutoConfig.from_pretrained(path)
-    extra = {"wraps_experts": True, "init_from_scratch": False} if mode == "ep1" else {}
+    extra = {"wraps_experts": True} if mode == "ep1" else {}
     model = loader(
         ModelSource(path, None, path),
         pc,
