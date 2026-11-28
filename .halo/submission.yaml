@@ -120,8 +120,8 @@ partner:
 #     one then no longer counts.
 #   - If you never set final_review: true, your LAST submission in the track is the one judged, EVEN IF AN
 #     EARLIER ONE PERFORMED BETTER. So be careful what you push last, or mark the one you want.
-#   - final_review: true needs a PUBLIC write-up (writeup below: its address, on your own website, open to
-#     anybody without signing in). A fine-tune also needs the public post in finetune.post.
+#   - final_review: true needs a PUBLIC write-up (writeup below: its address, on your own website or on
+#     Lovable, open to anybody without signing in). A fine-tune also needs the public post in finetune.post.
 final_review: false
 # TRAJECTORIES. Some tracks judge how you worked with coding agents and models. If you do not submit your
 # trajectories, your submission does not take part in those tracks. Trajectories are the records of the agent
@@ -134,7 +134,7 @@ final_review: false
 # Remove secrets and keys first.
 trajectories: []
 builds_on: []       # submission IDs or URLs of other participants' published work you used. You get credit for what you add.
-writeup: ""         # https address of your PUBLIC write-up, on your own website: what you did, why it
+writeup: ""         # https address of your PUBLIC write-up, on your own website or on Lovable: what you did, why it
                     # works, what it costs, where it does not help, how it scales. Required when final_review is true; we open it to check
                     # that anybody can. It is linked from your public fork. Keep it online until results are out.
 artifacts: []       # paths with logs, traces or profiles
