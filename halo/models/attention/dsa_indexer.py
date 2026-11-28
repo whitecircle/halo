@@ -62,10 +62,10 @@ def select_keys_in_query_chunks(
     return topk_indices.masked_fill(~attention_mask[..., None], -1).to(torch.int32)
 
 
-def _forward(indexer, hidden_states, q_resid, attention_mask, past_key_values):
+def _forward(indexer, hidden_states, q_resid, attention_mask, cache):
     """A cache holds keys of earlier calls and a static one its own key length: upstream's forward keeps those."""
-    if past_key_values is not None:
-        return _stock_forward(indexer, hidden_states, q_resid, attention_mask, past_key_values)
+    if cache is not None:
+        return _stock_forward(indexer, hidden_states, q_resid, attention_mask, cache)
     return select_keys_in_query_chunks(indexer, hidden_states, q_resid, attention_mask)
 
 

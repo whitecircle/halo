@@ -30,7 +30,8 @@ def _scored(forward, module, block_states, partial):
 @pytest.mark.parametrize("blocks", BLOCK_COUNTS)
 def test_the_patch_is_the_upstream_residual(num_queries, blocks):
     torch.manual_seed(0)
-    module = Inkling2BlockAttentionResidual(SimpleNamespace(hidden_size=HIDDEN), num_queries=num_queries)
+    config = SimpleNamespace(hidden_size=HIDDEN, _attn_implementation="eager")
+    module = Inkling2BlockAttentionResidual(config, num_queries=num_queries)
     torch.nn.init.normal_(module.query, std=1.0)
     block_states = torch.randn(2, 7, blocks, HIDDEN, requires_grad=True)
     partial = torch.randn(2, 7, HIDDEN, requires_grad=True)

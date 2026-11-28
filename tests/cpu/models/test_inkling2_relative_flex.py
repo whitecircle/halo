@@ -9,6 +9,7 @@ from unittest import mock
 
 import pytest
 import torch
+import transformers.models.inkling2.modeling_inkling2 as inkling2_modeling
 from torch.nn.attention import flex_attention as flex_attention_module
 from torch.nn.attention.flex_attention import create_block_mask, create_mask, flex_attention
 
@@ -22,7 +23,7 @@ from halo.models.attention.inkling2_relative_flex import (
     warm_inkling2_relative_flex_kernels,
 )
 from halo.models.attention.selection import _TOOLKIT_ATTENTION_REGISTRARS, resolve_attn_implementation
-from halo.models.families.inkling2 import apply_inkling2_patches
+from halo.models.families.inkling2 import UPSTREAM_GET_RELATIVE_DISTANCE, apply_inkling2_patches
 from halo.models.moe.family_specs import MOE_FAMILY_SPECS, find_moe_family_spec
 from tests.common.composite_rows import composite_model_and_rows
 from tests.common.flex_sliding import no_device_check
@@ -175,6 +176,32 @@ def test_a_padded_batch_matches_eager():
     assert _gap(flex[real], eager[real]) < TOLERANCE
 
 
+def test_an_uncached_forward_builds_no_dense_relative_distance():
+    """transformers 5.24 builds two int64 ``[q_len, kv_len]`` distance matrices per forward, of which the kernel reads
+    the shape alone: every layer gets a zero-stride view."""
+    bias_cls = inkling2_modeling.Inkling2RelativePositionBias
+    patched, seen = bias_cls.forward, []
+
+    def recording(self, hidden_states, relative_distance, position_ids):
+        seen.append(relative_distance)
+        return patched(self, hidden_states, relative_distance, position_ids)
+
+    model = _model()
+    with mock.patch.object(bias_cls, "forward", recording), kernel_on_cpu():
+        _logits(model, INKLING2_RELATIVE_FLEX, _ids(model, 1, LENGTH))
+    assert len(seen) == model.config.num_hidden_layers
+    assert all(d.shape == (LENGTH, LENGTH) and d.untyped_storage().nbytes() == d.element_size() for d in seen)
+
+
+def test_the_eager_bias_rebuilds_the_distances_upstream_builds():
+    model = _model()
+    input_ids = _ids(model, 2, LENGTH)
+    patched = _logits(model, "eager", input_ids)
+    with mock.patch.object(inkling2_modeling, "get_relative_distance", UPSTREAM_GET_RELATIVE_DISTANCE):
+        upstream = _logits(model, "eager", input_ids)
+    torch.testing.assert_close(patched, upstream, rtol=0, atol=0)
+
+
 def test_an_image_row_runs_its_vision_tower_on_the_eager_attention():
     """The composite's vision config takes the kernel's name with the text config, and its attention passes no
     relative bias or sinks."""
@@ -282,7 +309,7 @@ def test_generation_decodes_on_the_eager_attention():
 def _train_only_output_projections(model) -> None:
     """The first layer's attention inputs then require no gradient while grad mode is on."""
     for name, parameter in model.named_parameters():
-        parameter.requires_grad_(name.endswith("o_proj.weight"))
+        parameter.requires_grad_(name.endswith("o_proj.linear.weight"))
 
 
 @pytest.mark.usefixtures("fresh_dynamo")

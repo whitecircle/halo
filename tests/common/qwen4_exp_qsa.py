@@ -64,7 +64,7 @@ def build_inputs(config, rows: Rows, hidden: torch.Tensor | None = None) -> Inpu
         config=config,
         inputs_embeds=hidden,
         attention_mask=padding_mask,
-        past_key_values=None,
+        cache=None,
         position_ids=position_ids,
         allow_is_causal_skip=False,
     )

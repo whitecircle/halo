@@ -56,6 +56,7 @@ from halo.models.introspection.unwrapping import (
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
+from halo.models.moe.family_specs import inkling2_pre_524_adapter_reason
 from halo.runtime.consensus import DeferredRankFailure, agree_across_ranks, barrier_on_exit, reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor, gather_full_tensors
 from halo.runtime.filesystem import fs_aware_makedirs
@@ -325,8 +326,12 @@ def _load_peft_adapter_state(live_tensors: dict[str, torch.Tensor], attn_state: 
                 copy_full_tensor(target, value)
 
 
-def _attention_adapter_mismatch(live_tensors: dict | None, attn_state: dict, checkpoint: str) -> str | None:
-    """Why ``attn_state`` does not restore ``live_tensors`` (None without a PeftModel) one for one, or None."""
+def _attention_adapter_mismatch(
+    live_tensors: dict | None, attn_state: dict, checkpoint: str, model_type: str | None = None
+) -> str | None:
+    """Why ``attn_state`` does not restore ``live_tensors`` (None without a PeftModel) one for one, or None. An
+    Inkling 2 adapter saved on Halo 1.3.0rc2, which shipped transformers 5.23, is named as such: its own targets build
+    no more."""
     if live_tensors is None:
         if not attn_state:
             return None
@@ -337,6 +342,11 @@ def _attention_adapter_mismatch(live_tensors: dict | None, attn_state: dict, che
             f"{sorted(attn_state)[:KEY_PREVIEW_COUNT]}"
         )
     mismatch = adapter_layout_mismatch(attn_state, {key: tuple(tensor.shape) for key, tensor in live_tensors.items()})
+    pre_524 = mismatch and inkling2_pre_524_adapter_reason(
+        model_type, {key.partition(".lora_")[0] for key in attn_state if ".lora_" in key}
+    )
+    if pre_524:
+        return f"The PEFT adapter at {checkpoint} cannot resume on this release: {pre_524}."
     return mismatch and (
         f"The PEFT adapter at {checkpoint} does not match the adapters this model builds: {mismatch}. Resume with "
         f"the lora_target_modules, lora_r, modules_to_save and added_special_tokens it was saved with, from a "
@@ -391,8 +401,10 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
         live_tensors = _without_unsaved_grown_rows(peft_model, live_tensors, attn_state, checkpoint)
     # Joined before the expert load, whose own join precedes its first copy, so neither population writes until both
     # have matched on every rank.
+    model_type = getattr(getattr(base_transformers_model(unwrapped), "config", None), "model_type", None)
     reject_across_ranks(
-        _attention_adapter_mismatch(live_tensors, attn_state, checkpoint), f"PEFT adapter resume from {checkpoint}"
+        _attention_adapter_mismatch(live_tensors, attn_state, checkpoint, model_type),
+        f"PEFT adapter resume from {checkpoint}",
     )
     load_expert_lora_adapters(expert_model, expert_state)
     if attn_state:

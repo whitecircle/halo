@@ -26,7 +26,7 @@ _DOCUMENT_ISOLATED_ATTR = "_halo_document_isolated"
 def apply_zaya_patches() -> None:
     verify_upstream_parameters(
         zaya_modeling.ZayaCCAProjection.forward,
-        ("self", "hidden_states", "past_key_values", "conv_mask"),
+        ("self", "hidden_states", "cache", "conv_mask"),
         "_install_document_isolated_cca",
     )
     verify_upstream_parameters(
@@ -41,7 +41,7 @@ def apply_zaya_patches() -> None:
             "input_ids",
             "attention_mask",
             "position_ids",
-            "past_key_values",
+            "cache",
             "inputs_embeds",
             "use_cache",
             "kwargs",
@@ -156,9 +156,9 @@ def _install_document_isolated_cca(projection_cls) -> None:
     original_forward = projection_cls.forward
 
     @functools.wraps(original_forward)
-    def forward(self, hidden_states, past_key_values, conv_mask=None):
-        if past_key_values is not None and past_key_values.has_previous_state(self.layer_idx):
-            return original_forward(self, hidden_states, past_key_values, conv_mask)
+    def forward(self, hidden_states, cache, conv_mask=None):
+        if cache is not None and cache.has_previous_state(self.layer_idx):
+            return original_forward(self, hidden_states, cache, conv_mask)
         if conv_mask is not None:
             hidden_states = hidden_states * conv_mask[:, :, None].to(hidden_states.dtype)
 
@@ -175,9 +175,9 @@ def _install_document_isolated_cca(projection_cls) -> None:
         query_residual = (query_residual + key_residual) * 0.5
         key_residual = query_residual.view(*input_shape, -1, self.num_key_value_groups, self.head_dim).mean(dim=-2)
 
-        if past_key_values is not None:
+        if cache is not None:
             conv_state = F.pad(qk_states.transpose(1, 2), (self.conv_kernel_size, 0))[..., -self.conv_kernel_size :]
-            past_key_values.update_conv_state(conv_state, self.layer_idx)
+            cache.update_conv_state(conv_state, self.layer_idx)
 
         same_document = _same_document_masks(
             get_stashed_position_ids(self), input_shape[1], self.conv_kernel_size, hidden_states.device
@@ -194,8 +194,8 @@ def _install_document_isolated_cca(projection_cls) -> None:
         previous_v_state = torch.cat([start_v_state, delayed_v_state[:, :-1]], dim=1)
         value_delayed = torch.where(same_document[0][..., None], previous_v_state, start_v_state)
 
-        if past_key_values is not None:
-            past_key_values.update_recurrent_state(delayed_v_state[:, -1, :], self.layer_idx)
+        if cache is not None:
+            cache.update_recurrent_state(delayed_v_state[:, -1, :], self.layer_idx)
 
         value = torch.cat([value_current, value_delayed], dim=-1).view(*hidden_shape)
         return query, key, value

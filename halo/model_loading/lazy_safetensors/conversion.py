@@ -13,6 +13,7 @@ import torch
 from transformers.core_model_loading import (
     Chunk,
     Concatenate,
+    Inkling2UnpadVocab,
     Interleave,
     PermuteForRope,
     WeightConverter,
@@ -45,6 +46,21 @@ class TakeChunk:
 
     def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
         return torch.chunk(tensor, self.count, dim=self.dim)[self.index].contiguous()
+
+
+@dataclass(frozen=True)
+class TakeRows:
+    """The first ``rows`` rows on dim 0, equal to transformers' ``Inkling2UnpadVocab``: the release stores its
+    unembedding padded past the real vocabulary, which the live head holds unpadded."""
+
+    rows: int
+
+    @property
+    def dim(self) -> int:
+        return 0
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        return tensor[: self.rows].contiguous()
 
 
 @dataclass(frozen=True)
@@ -144,7 +160,7 @@ def mxfp4_dequantize_conversions() -> list[WeightConverter]:
     ]
 
 
-_TensorOp = Deinterleave | TakeChunk | PermuteRope
+_TensorOp = Deinterleave | TakeChunk | PermuteRope | TakeRows
 # A converted disk key's targets: (canonical key, op pipeline) per target.
 ConvertTargets = tuple[tuple[str, tuple[FanIn | _TensorOp, ...]], ...]
 
@@ -156,6 +172,8 @@ def _op_kind(op) -> str:
         return "permute_rope"
     if isinstance(op, Concatenate):
         return "concat"
+    if isinstance(op, Inkling2UnpadVocab):
+        return "unpad_vocab" if not op.inverse else "unpad_vocab_inverse"
     return "chunk" if isinstance(op, Chunk) else type(op).__name__
 
 
@@ -173,8 +191,9 @@ def _permute_rope(op: PermuteForRope, config, entry: WeightConverter) -> Permute
 
 def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tuple[_TensorOp, ...], ...], int | None]:
     """A ``WeightConverter`` → its op pipeline per target and a fan-in's concat dim (``None`` for one source).
-    Supported: ``[Interleave]``, ``[Chunk]``, ``[Interleave, Chunk]``, ``[Chunk, PermuteForRope]``, and
-    ``[Concatenate]`` over several sources; anything else is refused rather than materialized incorrectly."""
+    Supported: ``[Interleave]``, ``[Chunk]``, ``[Interleave, Chunk]``, ``[Chunk, PermuteForRope]``,
+    ``[Inkling2UnpadVocab]``, and ``[Concatenate]`` over several sources; anything else is refused rather than
+    materialized incorrectly."""
     ops = tuple(entry.operations)
     targets = tuple(entry.target_patterns)
     multi_source = len(entry.source_patterns) > 1
@@ -191,6 +210,10 @@ def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tupl
         concat_dim = ops[0].dim
     elif kinds == ("interleave",) and len(targets) == 1:
         pipelines = ((Deinterleave(ops[0].dim),),)
+    elif kinds == ("unpad_vocab",) and len(targets) == 1:
+        if config is None:
+            raise ValueError(f"Inkling2UnpadVocab for {entry.source_patterns[0]!r} needs the model config's vocab.")
+        pipelines = ((TakeRows(config.get_text_config().unpadded_vocab_size),),)
     elif kinds == ("chunk",) and len(targets) > 1:
         pipelines = tuple((TakeChunk(ops[0].dim, i, len(targets)),) for i in range(len(targets)))
     elif kinds == ("interleave", "chunk") and len(targets) > 1:
@@ -209,8 +232,8 @@ def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tupl
     else:
         raise ValueError(
             f"Unsupported conversion ops {list(kinds)} → {len(targets)} target(s) for "
-            f"{entry.source_patterns[0]!r}: the lazy loaders support Interleave/Chunk/PermuteForRope "
-            f"pipelines and a multi-source Concatenate only."
+            f"{entry.source_patterns[0]!r}: the lazy loaders support Interleave/Chunk/PermuteForRope/"
+            f"Inkling2UnpadVocab pipelines and a multi-source Concatenate only."
         )
     return pipelines, concat_dim
 

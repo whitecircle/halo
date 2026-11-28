@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -267,6 +269,56 @@ INKLING2 = MoEFamilySpec(
     # Attention LoRA over the release's frozen experts, the adapters loaded by vLLM beside its launch base.
     adapter_sync_backends=("vllm",),
 )
+# Inkling 2's attention linears, each inside a projection module of its own (transformers 5.24), so LoRA targets the
+# ``linear`` under it: a recipe's attention targets and what vLLM serves.
+INKLING2_ATTENTION_LINEARS = (
+    "q_proj.linear",
+    "k_proj.linear",
+    "v_proj.linear",
+    "relative_position_bias.linear",
+    "o_proj.linear",
+)
+# Each Inkling 2 attention linear as Halo 1.3.0rc2, which shipped transformers 5.23, named it under ``self_attn``, and
+# its path since.
+INKLING2_PRE_524_ATTENTION_NAMES = {
+    "q_proj": "q_proj.linear",
+    "k_proj": "k_proj.linear",
+    "v_proj": "v_proj.linear",
+    "r_proj": "relative_position_bias.linear",
+    "o_proj": "o_proj.linear",
+    "gate_proj": "o_proj.gate_proj",
+}
+_INKLING2_PRE_524_IMAGES = "public.ecr.aws/whitecircle/halo:hopper-1.3.0rc2 or blackwell-1.3.0rc2"
+# A whole decoder-layer attention path (PEFT's ``base_model.model.`` prefix optional), under the composite's
+# ``language_model`` or the text class's ``model``: the vision tower's ``self_attn.{q,k,v}_proj`` stay plain linears
+# on 5.24.
+_INKLING2_DECODER_ATTENTION = re.compile(
+    r"(?:base_model\.model\.)?(?:model\.)?(?:language_model\.)?layers\.\d+\.self_attn\.(\w+)"
+)
+
+
+def inkling2_pre_524_adapter_reason(model_type: str | None, module_paths: Iterable[str]) -> str | None:
+    """Why an Inkling 2 adapter addressing ``module_paths`` was saved on Halo 1.3.0rc2, which shipped transformers 5.23
+    and its plain attention linears, or ``None`` for another family or the current layout."""
+    if find_moe_family_spec(model_type) is not INKLING2:
+        return None
+    old = sorted(
+        path
+        for path in module_paths
+        if (match := _INKLING2_DECODER_ATTENTION.fullmatch(path)) and match[1] in INKLING2_PRE_524_ATTENTION_NAMES
+    )
+    if not old:
+        return None
+    renames = ", ".join(f"{name} to {path}" for name, path in INKLING2_PRE_524_ATTENTION_NAMES.items())
+    return (
+        f"it was saved on Halo 1.3.0rc2, which shipped transformers 5.23 and kept Inkling 2's attention projections as "
+        f"plain linears (e.g. {old[0]}). transformers 5.24 moved each inside a projection module ({renames}), so "
+        f"its keys name no linear on this release. Load, merge or export it on the 1.3.0rc2 image "
+        f"({_INKLING2_PRE_524_IMAGES}), or train it again here with the attention targets "
+        f"{', '.join(INKLING2_ATTENTION_LINEARS)}"
+    )
+
+
 # GLM-4 MoE Lite's layout under a hub spelling of its own, pinned to transformers' ``laguna`` WeightRenaming entries.
 LAGUNA = MoEFamilySpec(
     model_types=("laguna",),
@@ -410,6 +462,12 @@ def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
         if spec := find_moe_family_spec(getattr(source, "model_type", None)):
             return spec
     return None
+
+
+def composite_text_layout(spec: MoEFamilySpec | None) -> CompositeTextLayout:
+    """Where a multimodal checkpoint keeps its text tower: the family's ``text_only_layout``, else transformers'
+    ``model.language_model.``."""
+    return (spec.text_only_layout if spec is not None else None) or CompositeTextLayout()
 
 
 def attention_reads_row_positions(config) -> bool:

@@ -286,7 +286,7 @@ def apply_nemotron_h_patches() -> None:
     mixer_cls = nemotron_modeling.NemotronHMamba2Mixer
     verify_upstream_parameters(mixer_cls.__init__, ("self", "config", "layer_idx", "initialize_mixer_weights"), patch)
     verify_upstream_parameters(
-        mixer_cls.forward, ("self", "hidden_states", "cache_params", "attention_mask", "kwargs"), patch
+        mixer_cls.forward, ("self", "hidden_states", "cache", "attention_mask", "kwargs"), patch
     )
     verify_upstream_parameters(radio_modeling.RadioLayerScale.__init__, ("self", "config"), patch)
     nemotron_modeling.mamba2_chunk_scan = _document_chunk_scan

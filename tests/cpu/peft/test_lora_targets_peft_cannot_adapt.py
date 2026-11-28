@@ -13,6 +13,7 @@ from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 
 import halo.model_loading.parallel.peft_setup as peft_setup
 from halo.configs.script_arguments import ModelArguments
@@ -20,6 +21,7 @@ from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.model_loading.parallel.peft_setup import build_peft_config, configure_adapter_training
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.tiny_models import TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 ATTENTION_TARGETS = ["q_proj", "k_proj", "v_proj", "o_proj"]
 
@@ -96,6 +98,55 @@ def test_no_adaptable_target_left_fails_loud():
 
     with pytest.raises(ValueError, match="PEFT can adapt none of them"):
         build_peft_config(model, _model_config())
+
+
+def test_a_wrapper_refusal_names_the_child_linear_to_target():
+    """An Inkling 2 run on 1.3.0rc2's targets: since transformers 5.24 ``o_proj`` wraps ``linear`` (and a gate), so
+    the refusal names the target that adapts it."""
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES["inkling2"])
+
+    with pytest.raises(ValueError, match="PEFT can adapt none of them") as refused:
+        build_peft_config(model, _model_config(targets=["o_proj"]))
+
+    assert "whose weight is in its child linear: target o_proj.linear" in str(refused.value)
+
+
+class _SoleChildWrapper(nn.Module):
+    def __init__(self, width: int = 8):
+        super().__init__()
+        self.inner = nn.Linear(width, width, bias=False)
+
+
+class _SoleChildAttention(nn.Module):
+    def __init__(self, width: int = 8):
+        super().__init__()
+        self.q_proj = _SoleChildWrapper(width)
+
+
+def test_a_wrapper_refusal_names_its_only_weight_holder():
+    with pytest.raises(ValueError, match="PEFT can adapt none of them") as refused:
+        build_peft_config(_SoleChildAttention(), _model_config(targets=["q_proj"]))
+
+    assert "whose weight is in its child inner: target q_proj.inner" in str(refused.value)
+
+
+@pytest.mark.parametrize("container", ["mlp", "self_attn"])
+def test_a_container_of_several_projections_names_no_child(container):
+    """Any one of ``mlp``'s projections would be an arbitrary pick, so the refusal names none."""
+    config = Qwen3Config(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+    )
+
+    with pytest.raises(ValueError, match="hold their weight in a child module") as refused:
+        build_peft_config(Qwen3ForCausalLM(config), _model_config(targets=[container]))
+
+    assert "whose weight is in its child" not in str(refused.value)
 
 
 def test_unclipped_wrapper_is_excluded_too():
@@ -321,6 +372,7 @@ def test_the_two_reasons_are_reported_separately():
 
     message = "\n".join(str(record.message) for record in records)
     assert "hold their weight in a child module" in message
+    assert "whose weight is in its child linear: target q_proj.linear" in message
     assert "compute something other than their layer's affine map" in message
     assert any(name.endswith("o_a_proj") for name in peft_config.exclude_modules)
     assert "model.layers.0.self_attn.q_proj" in peft_config.exclude_modules

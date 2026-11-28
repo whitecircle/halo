@@ -1,0 +1,258 @@
+#!/usr/bin/env python
+"""Inkling 2 adapters saved on Halo 1.3.0rc2, which shipped transformers 5.23: their keys name the attention linears
+5.24 moved inside projection modules. Each tool that reads a saved adapter refuses one by name, and the engine export
+refuses any hub spelling the base's checkpoint stores no tensor under."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import huggingface_hub
+import pytest
+import torch
+from huggingface_hub.errors import HfHubHTTPError
+from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file, save_file
+
+import halo.checkpoint.reading as reading
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE
+from halo.checkpoint.parallel.adapters import restore_adapters, save_peft_adapters
+from halo.checkpoint.reading import checkpoint_module_paths
+from halo.checkpoint.tools.adapter_merge import load_base_for_adapter
+from halo.checkpoint.tools.adapter_stream_merge import merge_adapter_streaming
+from halo.distributed.expert_parallel.moe_layer.expert_lora import EXPERT_LORA_RANK_MULTIPLE
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.entrypoints.engine_adapter_export import export_engine_adapter
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.family_specs import INKLING2_PRE_524_ATTENTION_NAMES, inkling2_pre_524_adapter_reason
+from halo.trainers.grpo.rollout.adapter_sync import hub_spellings_absent_from_checkpoint
+from tests.common.checkpoint_io import save_context
+from tests.common.parallelism import make_parallelism_config, single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
+
+_RANK = EXPERT_LORA_RANK_MULTIPLE
+_SPEC = ExpertLoraSpec(r=_RANK, alpha=2 * _RANK)
+_INKLING2 = TINY_MOE_VLM_FAMILIES["inkling2"]
+# The shipped recipes' PEFT targets: the text tower's attention, and o_proj beside the experts.
+_ATTENTION = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|relative_position_bias|o_proj)\.linear"
+_RECIPES = {"attention": (None, _ATTENTION), "expert": (_SPEC, ["o_proj.linear"])}
+_REFUSED = r"saved on Halo 1\.3\.0rc2, which shipped transformers 5\.23"
+_LAYER = "model.language_model.layers.0.self_attn"
+_HUB_O = "model.llm.layers.0.attn.wo_ud"
+_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+
+
+def _trained(base_dir: Path, recipe: str):
+    """A PeftModel over the tiny model saved at ``base_dir``, under ``recipe``'s targets, its adapters off zero."""
+    experts, targets = _RECIPES[recipe]
+    torch.manual_seed(0)
+    model = tiny_family_model(_INKLING2).to(torch.bfloat16)
+    model.save_pretrained(base_dir)
+    model.name_or_path = str(base_dir)
+    if experts is not None:
+        model = apply_ep_layers(model, single_process_ep_config(expert_lora=experts))
+    peft_model = get_peft_model(model, LoraConfig(r=_RANK, lora_alpha=2 * _RANK, target_modules=targets))
+    peft_model = peft_model.to(torch.bfloat16)
+    with torch.no_grad():
+        for name, param in peft_model.named_parameters():
+            if "lora_" in name:
+                param.normal_(std=0.05)
+    return peft_model
+
+
+def _as_saved_on_523(key: str) -> str:
+    for old, path in INKLING2_PRE_524_ATTENTION_NAMES.items():
+        key = key.replace(f".{path}.", f".{old}.")
+    return key
+
+
+def _saved_on_523(tmp_path: Path, recipe: str) -> Path:
+    """``recipe``'s adapter saved on this release, its keys respelled as the 1.3.0rc2 layout had them."""
+    experts, _ = _RECIPES[recipe]
+    adapter = tmp_path / "rc2"
+    run = make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=experts)
+    mixed = experts is not None
+    peft_model = _trained(tmp_path / "base", recipe)
+    save_peft_adapters(save_context(peft_model, run, has_ep_layers=mixed, has_expert_lora=mixed), str(adapter))
+    path = adapter / ADAPTER_SAFETENSORS_FILE
+    saved = load_file(str(path))
+    respelled = {_as_saved_on_523(key): tensor for key, tensor in saved.items()}
+    assert respelled.keys() != saved.keys(), "premise: the recipe adapts a projection 5.24 wrapped"
+    save_file(respelled, str(path), metadata={"format": "pt"})
+    return adapter
+
+
+def test_the_reason_names_an_inkling2_adapter_of_the_523_layout_alone():
+    assert inkling2_pre_524_adapter_reason("inkling2_text", [f"{_LAYER}.r_proj"])
+    assert inkling2_pre_524_adapter_reason("inkling2", [f"{_LAYER}.o_proj"])
+    assert inkling2_pre_524_adapter_reason("inkling2", [f"{_LAYER}.o_proj.linear"]) is None
+    assert inkling2_pre_524_adapter_reason("inkling2", ["model.language_model.layers.0.mlp.gate_proj"]) is None
+    assert inkling2_pre_524_adapter_reason("qwen3_moe", [f"{_LAYER}.o_proj"]) is None
+    assert inkling2_pre_524_adapter_reason("inkling2", [f"base_model.model.{_LAYER}.o_proj"])
+    assert inkling2_pre_524_adapter_reason("inkling2_text", ["model.layers.0.self_attn.q_proj"])
+
+
+def test_the_vision_towers_attention_linears_are_not_the_523_layout():
+    """The vision tower's ``self_attn.{q,k,v}_proj`` are plain linears on 5.24 as on 5.23: a 5.24 adapter on the text
+    attention and the vision tower is no rc2 adapter."""
+    vision = "model.vision_tower.layers.0.self_attn"
+    assert inkling2_pre_524_adapter_reason("inkling2", [f"{vision}.{name}" for name in ("q_proj", "k_proj")]) is None
+    adapted = [f"base_model.model.{vision}.k_proj", f"base_model.model.{_LAYER}.o_proj.linear"]
+    assert inkling2_pre_524_adapter_reason("inkling2", adapted) is None
+
+
+@pytest.mark.parametrize("recipe", list(_RECIPES))
+def test_the_engine_export_refuses_it_by_name_before_any_write(tmp_path, recipe):
+    """The expert recipe's ``o_proj`` still names a module on 5.24, the wrapper, so without the refusal it exported
+    under a name the release does not hold."""
+    adapter = _saved_on_523(tmp_path, recipe)
+    with pytest.raises(ValueError, match=_REFUSED):
+        export_engine_adapter(str(adapter), str(tmp_path / "exported"), rollout_backend="vllm")
+    assert not (tmp_path / "exported").exists()
+
+
+@pytest.mark.parametrize("recipe", list(_RECIPES))
+def test_the_merge_and_bf16_check_loader_refuses_it_by_name(tmp_path, recipe):
+    adapter = _saved_on_523(tmp_path, recipe)
+
+    def load(base_model_path, *, excuse_task_head, text_only=False):
+        return tiny_family_model(_INKLING2)
+
+    with pytest.raises(ValueError, match=_REFUSED):
+        load_base_for_adapter(str(adapter), str(tmp_path / "base"), load, excuse_task_head=False, log=print)
+
+
+def test_the_streaming_merge_refuses_it_by_name_before_any_write(tmp_path):
+    adapter = _saved_on_523(tmp_path, "attention")
+    with pytest.raises(ValueError, match=_REFUSED):
+        merge_adapter_streaming(str(adapter), str(tmp_path / "merged"), verbose=False)
+    assert not (tmp_path / "merged").exists()
+
+
+@pytest.mark.parametrize("recipe", list(_RECIPES))
+def test_a_resume_refuses_it_by_name(tmp_path, recipe):
+    """The restore's own mismatch would ask for the targets it was saved with, which 5.24 no longer builds."""
+    adapter = _saved_on_523(tmp_path, recipe)
+    with pytest.raises(RuntimeError, match=_REFUSED):
+        restore_adapters(str(adapter), _trained(tmp_path / "fresh", recipe), is_cp_mode=False)
+
+
+@pytest.mark.parametrize("live", [False, True], ids=["base", "peft"])
+def test_only_a_name_the_base_checkpoint_stores_has_a_hub_spelling(tmp_path, live):
+    """Read off the checkpoint's keys, not the live model's parameters: a respelling this release gets wrong for a
+    module the model still holds is caught too."""
+    peft_model = _trained(tmp_path / "base", "attention")
+    model = peft_model if live else tiny_family_model(_INKLING2)
+    stored = checkpoint_module_paths(str(tmp_path / "base"))
+    linear, wrapper = (f"base_model.model.{_LAYER}.o_proj.linear", f"base_model.model.{_LAYER}.o_proj")
+    assert hub_spellings_absent_from_checkpoint(model, [linear], stored) == {}
+    assert list(hub_spellings_absent_from_checkpoint(model, [linear, wrapper], stored)) == [wrapper]
+    hub = "model.llm.layers.0.attn.wo_ud"
+    assert hub in stored, "premise: the checkpoint stores o_proj.linear's weight under the release's name"
+    assert hub_spellings_absent_from_checkpoint(model, [linear], stored - {hub}) == {linear: hub}
+
+
+def test_a_module_the_hub_layout_fuses_or_splits_is_left_to_the_engine_reasons():
+    """Step-3.7's vision ``k_proj`` has no hub spelling, which ``unservable_adapter_reasons`` names."""
+    model = tiny_family_model(TINY_MOE_FAMILIES.get("step3p7") or TINY_MOE_VLM_FAMILIES["step3p7"])
+    assert hub_spellings_absent_from_checkpoint(model, ["model.vision_model.layers.0.self_attn.k_proj"], set()) == {}
+
+
+def test_a_base_without_safetensors_has_no_key_set(tmp_path):
+    """A ``.bin``-only checkpoint is not refused for lacking safetensors keys: the export skips the check."""
+    (tmp_path / "base").mkdir()
+    torch.save({}, tmp_path / "base" / "pytorch_model.bin")
+    assert checkpoint_module_paths(str(tmp_path / "base")) is None
+
+
+def _index(directory: Path) -> None:
+    weight_map = {
+        f"{_HUB_O}.weight": "model-00001-of-00002.safetensors",
+        "lm_head.weight": "model-00002-of-00002.safetensors",
+    }
+    (directory / SAFETENSORS_INDEX_FILE).write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+
+
+def test_a_local_base_is_read_off_its_index_without_opening_a_shard(tmp_path):
+    """A directory holding the index and none of its shards still has a key set, so the export goes on to the
+    loader's own message for what it lacks."""
+    (tmp_path / "base").mkdir()
+    _index(tmp_path / "base")
+    assert checkpoint_module_paths(str(tmp_path / "base")) == {_HUB_O, "lm_head"}
+
+
+@pytest.mark.parametrize("layout", ["shards", "lone"])
+def test_a_local_base_without_an_index_is_read_off_its_shard_headers(tmp_path, layout):
+    """Shards with no index, or a lone ``model-00001-of-00001.safetensors``, which vLLM and SGLang load."""
+    (tmp_path / "base").mkdir()
+    if layout == "shards":
+        save_file({f"{_HUB_O}.weight": torch.zeros(1)}, str(tmp_path / "base" / "model-00001-of-00002.safetensors"))
+        save_file({"lm_head.weight": torch.zeros(1)}, str(tmp_path / "base" / "model-00002-of-00002.safetensors"))
+        expected = {_HUB_O, "lm_head"}
+    else:
+        save_file({f"{_HUB_O}.weight": torch.zeros(1)}, str(tmp_path / "base" / "model-00001-of-00001.safetensors"))
+        expected = {_HUB_O}
+    assert checkpoint_module_paths(str(tmp_path / "base")) == expected
+
+
+@pytest.fixture
+def hub_cache(tmp_path, monkeypatch):
+    """An empty Hub cache of this test's own, so neither the host's cache nor the network answers for it."""
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(cache))
+    return cache
+
+
+def _snapshot(cache: Path, repo_id: str) -> Path:
+    repo = cache / f"models--{repo_id.replace('/', '--')}"
+    (repo / "refs").mkdir(parents=True)
+    (repo / "refs" / "main").write_text(_COMMIT)
+    snapshot = repo / "snapshots" / _COMMIT
+    snapshot.mkdir(parents=True)
+    return snapshot
+
+
+def _no_network(*_args, **_kwargs):
+    raise AssertionError("read through the network although this host's cache holds the file")
+
+
+@pytest.mark.parametrize("layout", ["index", "single"])
+def test_a_hub_base_is_read_off_what_this_hosts_cache_holds(hub_cache, monkeypatch, layout):
+    monkeypatch.setattr(reading, "get_safetensors_metadata", _no_network)
+    snapshot = _snapshot(hub_cache, "halo-test/cached")
+    if layout == "index":
+        _index(snapshot)
+        expected = {_HUB_O, "lm_head"}
+    else:
+        save_file({f"{_HUB_O}.weight": torch.zeros(1)}, str(snapshot / SAFETENSORS_WEIGHTS_FILE))
+        expected = {_HUB_O}
+    assert checkpoint_module_paths("halo-test/cached") == expected
+
+
+def _unreachable(*_args, **_kwargs):
+    raise httpx.ConnectError("[Errno 101] Network is unreachable")
+
+
+def _error_status(*_args, **_kwargs):
+    request = httpx.Request("GET", "https://huggingface.co/api/models/halo-test/uncached")
+    raise HfHubHTTPError("503 Server Error: Service Unavailable", response=httpx.Response(503, request=request))
+
+
+@pytest.mark.parametrize("cause", ["offline", "no_network", "error_status"])
+def test_a_hub_base_this_host_cannot_reach_has_no_key_set(hub_cache, monkeypatch, cause):
+    """Not in the cache and not reachable, or answered with an error status (an outage, a mirror without the repo):
+    the export skips the check with its warning instead of failing."""
+    if cause == "offline":
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    else:
+        monkeypatch.setattr(
+            reading, "get_safetensors_metadata", _unreachable if cause == "no_network" else _error_status
+        )
+    assert checkpoint_module_paths("halo-test/uncached") is None
+
+
+if __name__ == "__main__":
+    raise SystemExit(pytest.main([__file__, "-v"]))

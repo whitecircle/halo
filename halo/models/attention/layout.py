@@ -394,7 +394,9 @@ def attention_calls(model: torch.nn.Module) -> set[AttentionCall]:
 
 def non_causal_attention_calls(model: torch.nn.Module, attn_implementation: str) -> set[tuple[int, int]]:
     """``(heads, head_dim)`` of each module running ``attn_implementation`` with no causal mask, a vision tower's, which
-    :func:`attention_calls` leaves out as no decoder layer makes that call."""
+    :func:`attention_calls` leaves out as no decoder layer makes that call. A non-causal module with no ``head_dim`` is
+    no head-split call: Inkling 2's block residual (transformers 5.24) mixes block states under one query, and the
+    toolkit runs it as two matmuls."""
     return {
         (
             getattr(module, "num_heads", None)
@@ -404,6 +406,7 @@ def non_causal_attention_calls(model: torch.nn.Module, attn_implementation: str)
         )
         for module in model.modules()
         if getattr(module, "is_causal", None) is False
+        and hasattr(module, "head_dim")
         and getattr(getattr(module, "config", None), "_attn_implementation", None) == attn_implementation
     }
 

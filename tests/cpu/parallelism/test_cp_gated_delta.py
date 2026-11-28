@@ -79,7 +79,7 @@ def _layer_worker(rank):
         } == original_keys
         with patch.object(dist, "all_to_all_single", wraps=dist.all_to_all_single) as observed:
             for kwargs in (
-                {"cache_params": object()},
+                {"cache": object()},
                 {"use_cache": True},
                 {"seq_idx": torch.zeros(1, length // 2)},
                 {"attention_mask": local_mask},

@@ -45,10 +45,10 @@ def _with_composite_level_dropped(entries: list[WeightTransform]) -> list[Weight
     return [_CompositeLevelDrop(), *entries]
 
 
-def _with_vision_norm_under_its_projector(entries: list[WeightTransform]) -> list[WeightTransform]:
-    """The release stores the norm where its remote file keeps it; transformers' class declares it absent, so a native
-    load would keep its identity init with no missing key."""
-    return [*entries, WeightRenaming(r"^vision_projector\.vision_final_layernorm\.", r"vision_final_layernorm\.")]
+def _as_shipped(entries: list[WeightTransform]) -> list[WeightTransform]:
+    """transformers 5.24 ships the vision-norm rename the toolkit used to add, so nothing is rewritten. The key stays
+    an override so ``verify_conversion_overrides_intact`` still refuses a remote file that replaced it."""
+    return entries
 
 
 CONVERSION_OVERRIDES: tuple[ConversionOverride, ...] = (
@@ -67,12 +67,13 @@ CONVERSION_OVERRIDES: tuple[ConversionOverride, ...] = (
             ((r"^mlp1\.0\.",), ("multi_modal_projector.layer_norm.",)),
             ((r"^mlp1\.1\.",), ("multi_modal_projector.linear_1.",)),
             ((r"^mlp1\.3\.",), ("multi_modal_projector.linear_2.",)),
+            ((r"^vision_projector\.vision_final_layernorm\.",), ("vision_final_layernorm.",)),
             ((r"^sound_encoder\.encoder\.",), ("audio_tower.",)),
             ((r"^sound_projection\.norm\.",), ("embed_audio.layer_norm.",)),
             ((r"^sound_projection\.linear1\.",), ("embed_audio.linear_1.",)),
             ((r"^sound_projection\.linear2\.",), ("embed_audio.linear_2.",)),
         ),
-        _with_vision_norm_under_its_projector,
+        _as_shipped,
     ),
 )
 

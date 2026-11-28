@@ -1,4 +1,4 @@
-"""Sequence-classification heads transformers 5.23 does not ship (Gemma 4, MoE Qwen3.5/3.6), registered at import; a
+"""Sequence-classification heads transformers 5.24 does not ship (Gemma 4, MoE Qwen3.5/3.6), registered at import; a
 release that lands a native head takes precedence."""
 
 from transformers import AutoModelForSequenceClassification

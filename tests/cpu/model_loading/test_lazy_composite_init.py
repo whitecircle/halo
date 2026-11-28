@@ -111,7 +111,8 @@ def test_the_gate_reads_what_a_tower_declares():
     model = _nemotron_on_meta()
     layerscale = [key for key in model.state_dict() if key.endswith(_LAYERSCALE)]
     assert layerscale, "the fixture carries no layer scale, so nothing is under test"
-    assert not [p for p in type(model)._keys_to_ignore_on_load_missing if _LAYERSCALE in p], "composite class declares"
+    declared = type(model)._keys_to_ignore_on_load_missing or ()  # None from transformers 5.24
+    assert not [p for p in declared if _LAYERSCALE in p], "composite class declares"
     assert unexpected_missing_keys(model, layerscale) == []
     undeclared = next(key for key in model.state_dict() if key.startswith("language_model.model.layers.0"))
     assert unexpected_missing_keys(model, [undeclared]) == [undeclared]

@@ -260,11 +260,14 @@ def _derived_family_verdicts(model_type: str) -> dict[str, str]:
     is_moe = find_moe_family_spec(model_type) is not None
     # CP needs a wrapped attention class and no layer carrying state along the sequence axis.
     cp = bool(classes & ULYSSES_ATTENTION_MAP.keys()) and not classes & _UNSUPPORTED_SEQUENCE_AXIS_LAYERS.keys()
-    # A MoE takes the selective attention-only path; a dense model shards off its config's own HF plan.
+    # A MoE takes the selective attention-only path; a dense model shards off its config's own HF plan, which must
+    # reach past the embedding (Qwen3-VL's names only ``embed_tokens`` from transformers 5.24, and the load refuses it).
     tp = (
         bool(classes & TP_SHARDABLE_ATTENTION_CLASSES)
         if is_moe
-        else bool(CONFIG_MAPPING[model_type].base_model_tp_plan)
+        else any(
+            key.rsplit(".", 1)[-1] != "embed_tokens" for key in CONFIG_MAPPING[model_type].base_model_tp_plan or {}
+        )
     )
     pp = any(PP_SPEC_MAP[name].validated for name in classes & PP_SPEC_MAP.keys())
     verdicts = {"EP": "Yes" if is_moe else "—", "ETP": "Yes" if is_moe else "—"}

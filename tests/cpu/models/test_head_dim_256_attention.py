@@ -76,17 +76,18 @@ def _resolved(family: str, arch: str, collator: str) -> str:
 
 
 # (family, arch) -> (packed, padded). On Blackwell, Gemma 2/3 and GLM-4.7-Flash (MLA) leave FA4 for FA2 by head width,
-# PaliGemma's prefix-LM mask and Gemma 4's 512-wide heads reach no flash kernel, and head_dim-256 GatedDeltaNet
-# families take FA2 on packed rows only. On Hopper a padded script requests SDPA, which a softcap turns into FA3 and
-# GPT-J's class (no SDPA path) into eager. A remote-code config requests SDPA when padded; packed, it keeps the
+# PaliGemma's prefix-LM mask and Gemma 4's 512-wide heads reach no flash kernel, Gemma 3's composite class declares no
+# flash from transformers 5.24 (its bidirectional mask over image tokens), and head_dim-256 GatedDeltaNet
+# families take FA2 on packed rows only. On Hopper a padded script requests SDPA, which a softcap turns into FA3. A
+# remote-code config requests SDPA when padded; packed, it keeps the
 # loader's pick, which its build may refuse.
 _EXPECTED = {
     ("gemma2", "blackwell"): (FA2, FA2),
     ("gemma2", "hopper"): (FA3, FA3),
     ("gemma3_text", "blackwell"): (FA2, FA2),
     ("gemma3_text", "hopper"): (FA3, SDPA),
-    ("gemma3", "blackwell"): (FA2, FA2),
-    ("gemma3", "hopper"): (FA3, SDPA),
+    ("gemma3", "blackwell"): (SDPA, SDPA),
+    ("gemma3", "hopper"): (SDPA, SDPA),
     ("gemma", "blackwell"): (FA4, FA4),
     ("gemma", "hopper"): (FA3, SDPA),
     ("paligemma", "blackwell"): (SDPA, SDPA),
@@ -120,7 +121,7 @@ def test_the_resolved_backend_per_family_arch_and_collator(family, arch, collato
 @pytest.mark.parametrize(
     ("family", "arch", "request_label"),
     [
-        pytest.param("gptj", "blackwell", None, id="blackwell-None-gptj"),
+        pytest.param("gpt_neo", "blackwell", None, id="blackwell-None-gpt_neo"),
         pytest.param("gpt_neo", "blackwell", FA4, id="blackwell-flash_attention_4-gpt_neo"),
         pytest.param("falcon", "hopper", None, id="hopper-None-falcon"),
     ],
@@ -131,7 +132,8 @@ def test_a_legacy_class_table_refuses_a_flash_label_it_does_not_list(family, arc
         _resolve(_config(family), request_label)
 
 
-@pytest.mark.parametrize("family", ["gptj", "gpt_neo", "falcon"])
+# GPT-J left the per-backend table for the attention interface in transformers 5.24.
+@pytest.mark.parametrize("family", ["gpt_neo", "falcon"])
 def test_a_legacy_class_table_keeps_what_it_lists(family):
     with _on("blackwell"):
         assert _resolve(_config(family), FA2) == FA2
@@ -142,6 +144,13 @@ def test_a_legacy_class_table_keeps_what_it_lists(family):
 def test_a_config_attention_dropout_refuses_a_kernel_that_drops_it(label):
     with _on("blackwell"), pytest.raises(ValueError, match="takes no attention dropout"):
         _resolve(_config("llama", attention_dropout=0.1), label)
+
+
+@pytest.mark.parametrize("label", [FA3, FA4])
+def test_gpt_j_attn_pdrop_refuses_a_kernel_that_drops_it(label):
+    """GPT-J keeps its attention dropout as ``attn_pdrop`` and reaches FA3 and FA4 since transformers 5.24."""
+    with _on("blackwell"), pytest.raises(ValueError, match="takes no attention dropout.*attn_pdrop=0.1"):
+        _resolve(_config("gptj", attn_pdrop=0.1), label)
 
 
 def test_a_config_attention_dropout_refuses_an_unset_pick_of_such_a_kernel():

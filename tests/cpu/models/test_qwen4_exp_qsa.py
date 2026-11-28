@@ -187,7 +187,7 @@ def test_no_tensor_grows_with_the_square_of_the_row(attention, config):
             config=config,
             inputs_embeds=inputs.hidden,
             attention_mask=None,
-            past_key_values=None,
+            cache=None,
             position_ids=None,
             allow_is_causal_skip=False,
         )
@@ -243,7 +243,7 @@ def test_a_no_grad_pass_through_a_checkpoint_keeps_no_selection(attention, confi
     ("change", "message"),
     [
         ("dense-mask", "2-D mask"),
-        ("cache", "past_key_values"),
+        ("cache", "a call with cache"),
         ("interleaved-padding", "contiguous"),
         ("seq-idx-shape", "integer"),
         ("dropout", "dropout"),
@@ -256,7 +256,7 @@ def test_refusals(attention, config, change, message):
     if change == "dense-mask":
         kwargs["attention_mask"] = inputs.dense_mask
     elif change == "cache":
-        kwargs["past_key_values"] = object()
+        kwargs["cache"] = object()
     elif change == "interleaved-padding":
         padding = torch.ones(1, 300, dtype=torch.long)
         padding[0, 100:120] = 0

@@ -4,7 +4,7 @@ Thinking Machines' `InklingForConditionalGeneration` (`thinkingmachines/Inkling-
 
 Attention is hybrid sliding (5 sliding : 1 full, period 6) with **no RoPE** — position enters as an additive relative-logits bias — plus depthwise causal short convolutions (`InklingShortConvolution`) on the projected K/V and around each decoder sublayer.
 
-Transformers ships `transformers.models.inkling` natively (the image pins 5.23.0), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
+Transformers ships `transformers.models.inkling` natively (the image pins 5.24.1), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and TP are out for architectural reasons, not a missing registration ([why](#why-cp-and-tp-are-out)). Pipeline parallelism splits the text tower on whole six-layer `layer_types` periods, with packing refused whatever `allow_cross_document_linear_attention` says ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). LoRA is tiny-model verified only (`test_lora_merged_save_resume.py --family inkling_text`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume).
 
@@ -28,7 +28,7 @@ One contract fails closed: the spec's `weight_sync_refusal` refuses online/async
 
 The release's MTP tail (`model.mtp.*`, eight layers) drops at load and exports carry none, so `method=mtp` refuses them; `mtp_loss_weight` [refuses the family](../optimization/mtp-heads.md).
 
-The hub config spells the expert width `intermediate_size: 2048` beside `dense_intermediate_size: 16384`. transformers 5.23 reads those as `moe_intermediate_size` 2048 and `intermediate_size` 16384, so a run needs no override: the built expert tensors match the hub's shard shapes.
+The hub config spells the expert width `intermediate_size: 2048` beside `dense_intermediate_size: 16384`. transformers 5.24 reads those as `moe_intermediate_size` 2048 and `intermediate_size` 16384, so a run needs no override: the built expert tensors match the hub's shard shapes.
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 

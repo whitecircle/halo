@@ -69,7 +69,12 @@ from halo.models.moe.expert_layout import (
     to_hub_expert_tensors,
 )
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_lora_delta
-from halo.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec, moe_model_types
+from halo.models.moe.family_specs import (
+    MoEFamilySpec,
+    find_moe_family_spec,
+    inkling2_pre_524_adapter_reason,
+    moe_model_types,
+)
 from halo.models.peft_adapters import lora_folded
 
 logger = logging.getLogger(__name__)
@@ -483,7 +488,8 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
     for module, adapter in linear.items():
         by_live_name.update(_linear_folds(config, module, adapter))
     by_live_name.update({name: _replacement(saved) for name, saved in replacements.items()})
-    spec = find_moe_family_spec(detect_model_type(base_dir))
+    model_type = detect_model_type(base_dir)
+    spec = find_moe_family_spec(model_type)
     layers = _expert_layers(experts, config, spec, base_dir)
     by_key = {key: layer for layer in layers.values() for key in layer.hub_shapes}
     sidecar = _read_balancing_sidecar(adapter_dir)
@@ -502,6 +508,9 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
     stored_dtypes = {key: base[key].dtype for key in rewritten}
     _reject_packed_tensors(base_dir, adapter_dir, stored_dtypes | _release_slot_dtypes(layers, base))
     absent = sorted((set(by_live_name) - set(stored)) | (set(by_key) - set(base_shapes)))
+    pre_524 = absent and inkling2_pre_524_adapter_reason(model_type, (name.rpartition(".")[0] for name in absent))
+    if pre_524:
+        raise ValueError(f"The adapter at {adapter_dir} cannot be merged on this release: {pre_524}.")
     if absent:
         raise ValueError(
             f"The adapter at {adapter_dir} rewrites {len(absent)} tensor(s) the base at {base_dir} does not store "

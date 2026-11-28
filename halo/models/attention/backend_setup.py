@@ -183,17 +183,13 @@ def patch_transformers_packed_sequence_probe() -> None:
         return
 
     @functools.wraps(fn)
-    def preprocess(
-        config, inputs_embeds, attention_mask, past_key_values, position_ids, layer_idx, encoder_hidden_states=None
-    ):
+    def preprocess(config, inputs_embeds, attention_mask, cache, position_ids, layer_idx, encoder_hidden_states=None):
         interfaces = masking_utils.ALL_MASK_ATTENTION_FUNCTIONS
         impl = config._attn_implementation
         # An implementation outside the global table exits before the probe, and indexing it would raise.
         if impl in interfaces._global_mapping and interfaces[impl] is masking_utils.flash_attention_mask:
             position_ids = None
-        return fn(
-            config, inputs_embeds, attention_mask, past_key_values, position_ids, layer_idx, encoder_hidden_states
-        )
+        return fn(config, inputs_embeds, attention_mask, cache, position_ids, layer_idx, encoder_hidden_states)
 
     expected, found = inspect.signature(preprocess).parameters, inspect.signature(fn).parameters
     if list(found) != list(expected) or found["encoder_hidden_states"].default is not None:

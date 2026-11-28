@@ -12,6 +12,7 @@ from torch.autograd.function import once_differentiable
 from halo.kernels.fp32_matmul import GEMM_ALIGNMENT, bmm_fp32, wide_dtype
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.introspection.config_access import text_config
+from halo.models.upstream.upstream_guard import takes_legacy_cache_names
 
 # fp32 scores one DSA indexer selection call holds on a tree row or a padded one (queries x candidate pools x indexer
 # heads): 1 GiB.
@@ -208,19 +209,20 @@ def _reject_unfoldable_layer(attention) -> None:
 
 
 def tree_sparse_forward(forward):
+    @takes_legacy_cache_names
     @functools.wraps(forward)
-    def with_tree_plan(self, hidden_states, attention_mask, past_key_values=None, prev_topk_indices=None, **kwargs):
+    def with_tree_plan(self, hidden_states, attention_mask, cache=None, prev_topk_indices=None, **kwargs):
         plan = kwargs.pop(TREE_ATTENTION_KEY, None)
         if plan is None:
             return forward(
                 self,
                 hidden_states,
                 attention_mask,
-                past_key_values=past_key_values,
+                cache=cache,
                 prev_topk_indices=prev_topk_indices,
                 **kwargs,
             )
-        if past_key_values is not None or hidden_states.shape[0] != 1:
+        if cache is not None or hidden_states.shape[0] != 1:
             raise ValueError("a tree row is one flattened training row, run without a KV cache")
         _reject_unfoldable_layer(self)
         tokens, heads = hidden_states.shape[1], self.num_heads

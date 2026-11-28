@@ -138,8 +138,8 @@ def test_a_cached_call_keeps_transformers_forwards(model):
 
     def generate_step():
         with torch.no_grad():
-            cache = model(input_ids=ids[:, :-1], use_cache=True).past_key_values
-            return model(input_ids=ids[:, -1:], past_key_values=cache, use_cache=True).logits
+            cache = model(input_ids=ids[:, :-1], use_cache=True).cache
+            return model(input_ids=ids[:, -1:], cache=cache, use_cache=True).logits
 
     patched = generate_step()
     with transformers_forwards():
@@ -200,7 +200,7 @@ class _UnmaskedLinearModel(torch.nn.Module):
         input_ids=None,
         attention_mask=None,
         position_ids=None,
-        past_key_values=None,
+        cache=None,
         inputs_embeds=None,
         use_cache=None,
         ple_input_ids=None,

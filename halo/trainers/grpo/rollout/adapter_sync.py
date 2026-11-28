@@ -183,6 +183,23 @@ def _build_hub_respeller(model: torch.nn.Module) -> Callable[[str], str | None]:
     return respell
 
 
+def hub_spellings_absent_from_checkpoint(
+    model: torch.nn.Module,
+    module_names: Iterable[str],
+    stored: Collection[str],
+    stored_as: Callable[[str], str] = lambda path: path,
+) -> dict[str, str]:
+    """Each of ``module_names`` (as PEFT keys spell them) whose hub spelling is a module path the checkpoint stores no
+    tensor under (``stored``, :func:`~halo.checkpoint.reading.checkpoint_module_paths`), with that spelling: a module a
+    later transformers moved or wrapped respells to a name the engine finds nothing under. A module the hub layout fuses
+    or splits has no spelling, which :func:`unservable_adapter_reasons` names. ``stored_as`` maps a spelling into
+    the checkpoint's layout: a multimodal checkpoint's text-only class stores its tower under the wrapper's prefix."""
+    respell = _build_hub_respeller(model)
+    return {
+        name: path for name in module_names if (path := respell(name)) is not None and stored_as(path) not in stored
+    }
+
+
 def _attention_lora_spec(config: Mapping) -> ExpertLoraSpec:
     return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=bool(config.get("use_rslora")))
 
@@ -239,7 +256,12 @@ def unservable_adapter_reasons(
         if config.get(flag):
             reasons.append(why)
     unservable = next(
-        (name for name in module_names if name.rsplit(".", 1)[-1] not in client_cls.ADAPTER_SERVABLE_MODULES), None
+        (
+            name
+            for name in module_names
+            if not any(f".{name}".endswith(f".{servable}") for servable in client_cls.ADAPTER_SERVABLE_MODULES)
+        ),
+        None,
     )
     if unservable is not None:
         reasons.append(_unservable_module_reason(unservable, model, client_cls))

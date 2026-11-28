@@ -174,7 +174,7 @@ def test_validate_accepts_a_sharded_pair_the_plan_shards():
 
 
 def test_a_tied_pair_reaches_the_export_as_one_key():
-    """transformers 5.23 gathers per key, then de-duplicates, writing ``lm_head.weight`` again, which sends the next
+    """transformers 5.24 gathers per key, then de-duplicates, writing ``lm_head.weight`` again, which sends the next
     load into the tie collective."""
     tied_keys = _saved_keys(_tiny_tied_model())
     assert "model.embed_tokens.weight" in tied_keys

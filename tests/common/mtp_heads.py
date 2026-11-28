@@ -187,7 +187,12 @@ def write_checkpoint_with_tail(
     head = build_mtp_head(model, spec, device="cpu")
     torch.manual_seed(seed)
     fused = {}
-    pinned = fp32_pin_matches(head.state_dict(), declared_fp32_pins(model)) if spec.tail_keeps_fp32_pins else ()
+    # A release stores its pinned buffers (e_score_correction_bias) at fp32 and its router weight, which transformers
+    # 5.24 also pins, at bf16: nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16 stores mtp.layers.1.mixer.gate.weight so.
+    buffers = {name for name, _ in head.named_buffers()}
+    pinned = (
+        fp32_pin_matches(head.state_dict(), declared_fp32_pins(model)) & buffers if spec.tail_keeps_fp32_pins else ()
+    )
     for key, tensor in head.state_dict().items():
         drawn = torch.randn_like(tensor.float()) * 0.02 if tensor.dim() > 1 else torch.ones_like(tensor.float())
         fused[f"{path}.{key}"] = drawn if key in pinned else drawn.to(torch.bfloat16)

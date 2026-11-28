@@ -24,7 +24,7 @@ moe_balancing: none
 # --- LoRA (the default r=16, alpha 32, on the text tower's attention; the vision tower's attention also names q/k/v_proj) ---
 use_peft: true
 lora_dropout: 0.0
-lora_target_modules: '.*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)'
+lora_target_modules: '.*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|relative_position_bias|o_proj)\.linear'
 
 # --- Environment ---
 environment_type: exam_qa

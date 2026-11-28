@@ -71,7 +71,9 @@ def test_an_export_keeps_a_pinned_buffer_at_fp32():
     assert buffers and all(b.dtype == torch.float32 for b in buffers.values()), buffers
     cast = save_dtype_caster(model)
     assert {name: cast(name, b).dtype for name, b in buffers.items()} == dict.fromkeys(buffers, torch.float32)
-    weight = next(name for name, p in model.named_parameters() if name.endswith("gate.weight"))
+    # transformers 5.24 pins the router weight too, so the unpinned example is an expert bank.
+    weight = next(name for name, _ in model.named_parameters() if name.endswith("experts.down_proj"))
+    assert weight not in fp32_pinned_names(model)
     assert cast(weight, model.get_parameter(weight)).dtype == torch.bfloat16, "an unpinned tensor is exported too"
 
 

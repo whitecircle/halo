@@ -61,6 +61,8 @@ FA4_DEDICATED_HEAD_DIM = 256
 # transformers' switch for its flash kernels' ``deterministic`` argument; ``full_determinism`` sets it.
 FLASH_ATTENTION_DETERMINISTIC_ENV = "FLASH_ATTENTION_DETERMINISTIC"
 _KERNELS_DROPPING_ATTENTION_DROPOUT = ("flash_attention_3", "flash_attention_4")
+# The config fields an attention module reads its dropout from.
+_ATTENTION_DROPOUT_FIELDS = ("attention_dropout", "attn_pdrop")
 _ATTENTION_CLASS_TABLE_SUFFIX = "_ATTENTION_CLASSES"
 
 
@@ -360,8 +362,9 @@ def verify_live_sinks_carried(model) -> None:
 
 
 def _attention_class_table(model_config) -> dict | None:
-    """A legacy modeling file's per-backend attention classes (GPT-J, GPT-Neo, Falcon, Bark), on which a label it does
-    not list fails the build with a bare ``KeyError``. ``None`` for every other class."""
+    """A legacy modeling file's per-backend attention classes (GPT-Neo, Falcon, Bark, and GPT-J before transformers 5.24
+    moved it to the attention interface), on which a label it does not list fails the build with a bare ``KeyError``.
+    ``None`` for every other class."""
     model_class = declared_model_class(model_config)
     if model_class is None:
         return None
@@ -381,12 +384,16 @@ def _reject_unbuildable_attention(model_config, attn_implementation: str) -> Non
 
 
 def _reject_dropped_attention_dropout(model_config, attn_implementation: str) -> None:
-    """transformers hands only FA2 ``dropout_p``, so the others would train without the dropout the config asks for."""
-    attention_dropout = getattr(text_config(model_config), "attention_dropout", 0.0)
+    """transformers hands only FA2 ``dropout_p``, so the others would train without the dropout the config asks for.
+    GPT-J, on the attention interface since transformers 5.24, keeps it as ``attn_pdrop``."""
+    config = text_config(model_config)
+    field, attention_dropout = next(
+        ((name, value) for name in _ATTENTION_DROPOUT_FIELDS if (value := getattr(config, name, 0.0))), (None, 0.0)
+    )
     if attention_dropout and attn_implementation in _KERNELS_DROPPING_ATTENTION_DROPOUT:
         raise ValueError(
             f"attn_implementation='{attn_implementation}' takes no attention dropout, but this model's config sets "
-            f"attention_dropout={attention_dropout}. Set it to 0 (model_init_kwargs), or set attn_implementation: "
+            f"{field}={attention_dropout}. Set it to 0 (model_init_kwargs), or set attn_implementation: "
             f"flash_attention_2 or sdpa, which apply it."
         )
 

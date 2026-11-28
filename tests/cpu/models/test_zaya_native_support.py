@@ -304,8 +304,8 @@ def test_patched_cca_prefill_keeps_the_decode_cache(upstream_zaya):
     def prefill_then_step():
         cache = DynamicCache(config=model.config)
         with torch.no_grad():
-            model(input_ids=input_ids[:, :-1], past_key_values=cache, use_cache=True)
-            return model(input_ids=input_ids[:, -1:], past_key_values=cache, use_cache=True).logits
+            model(input_ids=input_ids[:, :-1], cache=cache, use_cache=True)
+            return model(input_ids=input_ids[:, -1:], cache=cache, use_cache=True).logits
 
     reference = prefill_then_step()
     patch_zaya_packed_document_isolation()

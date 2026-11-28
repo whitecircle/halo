@@ -368,8 +368,8 @@ def reject_frozen_experts_without_peft_adapters(dist_args, model_config) -> None
             "frozen_quantized_experts needs a LoRA target outside the routed experts, and lora_target_modules "
             f"{targets!r} names none: expert targets train as native expert adapters with no PEFT model beside them, "
             "which adapter sync and the export-engine-adapter tool serve only beside an attention adapter, and no "
-            "merge folds a delta into the packed experts. Add an attention target, such as o_proj: "
-            "lora_target_modules: [o_proj, gate_up_proj, down_proj]."
+            "merge folds a delta into the packed experts. Add an attention target, such as the linear inside o_proj: "
+            "lora_target_modules: [o_proj.linear, gate_up_proj, down_proj]."
         )
 
 

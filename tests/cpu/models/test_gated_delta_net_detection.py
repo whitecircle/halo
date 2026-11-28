@@ -33,7 +33,8 @@ SEQ_IDX_PREFIXES = ("lfm2", "nemotron_h")
 ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 # The transformers configs whose verdict moves: GatedDeltaNet under a name the list never held, and the Qwen3.5
 # vision towers the prefix matched, which hold no GatedDeltaNet layer.
-MOVED = {"olmo_hybrid", "qwen4_exp", "qwen4_exp_text", "qwen3_5_vision", "qwen3_5_moe_vision"}
+# Lara Mini (transformers 5.24) interleaves LaraMiniGatedDeltaNet layers, which read cu_seq_lens_q.
+MOVED = {"lara_mini", "olmo_hybrid", "qwen4_exp", "qwen4_exp_text", "qwen3_5_vision", "qwen3_5_moe_vision"}
 # The configs that refuse default construction, so the sweep cannot judge them.
 UNCONSTRUCTIBLE = {"gemma4_assistant", "nougat"}
 GDN_HEADS = {"linear_num_key_heads": 2, "linear_num_value_heads": 4}

@@ -49,9 +49,14 @@ from tests.common.tiny_models import (
 _RANK = EXPERT_LORA_RANK_MULTIPLE
 _SPEC = ExpertLoraSpec(r=_RANK, alpha=2 * _RANK)
 # The shipped Inkling 2 examples' PEFT targets: the text tower's attention, and o_proj beside the experts.
-_ATTENTION = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r_proj|o_proj)"
+_ATTENTION = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|relative_position_bias|o_proj)\.linear"
 _NO_PARALLELISM = SimpleNamespace(is_tp_mode=False, is_pp_mode=False, is_cp_mode=False)
 _INKLING2 = TINY_MOE_VLM_FAMILIES["inkling2"]
+
+
+def _output_projection(model: torch.nn.Module) -> str:
+    """``o_proj``, or on Inkling 2 the linear inside its output projection module."""
+    return "o_proj.linear" if any(name.endswith("o_proj.linear") for name, _ in model.named_modules()) else "o_proj"
 
 
 def _trained(base_dir: Path, *, experts: ExpertLoraSpec | None, family: TinyFamily = _INKLING2, targets=_ATTENTION):
@@ -63,7 +68,7 @@ def _trained(base_dir: Path, *, experts: ExpertLoraSpec | None, family: TinyFami
     model.name_or_path = str(base_dir)
     if experts is not None:
         model = apply_ep_layers(model, single_process_ep_config(expert_lora=experts))
-        targets = ["o_proj"]
+        targets = [_output_projection(model)]
     # Adapter sync serves bf16 adapters only, the dtype the engine stores.
     peft_model = get_peft_model(model, LoraConfig(r=_RANK, lora_alpha=2 * _RANK, target_modules=targets))
     peft_model = peft_model.to(torch.bfloat16)
@@ -156,7 +161,7 @@ def _saved_mixed(tmp_path: Path, family: TinyFamily = _INKLING2) -> Path:
             "another rank or scaling than the",
         ),
         (_INKLING2, "vllm", {"use_dora": True}, "DoRA: the engine refuses it"),
-        (_INKLING2, "vllm", {"rank_pattern": {"o_proj": 4}}, "rank_pattern: the engine reads one rank"),
+        (_INKLING2, "vllm", {"rank_pattern": {"o_proj.linear": 4}}, "rank_pattern: the engine reads one rank"),
     ],
     ids=["sglang-experts", "sglang-experts-the-base-fuses", "expert-scaling", "expert-rank", "dora", "rank-pattern"],
 )
@@ -183,7 +188,8 @@ def test_what_the_engine_cannot_serve_is_refused_with_its_reason_before_any_writ
 def test_a_family_adapter_sync_refuses_on_the_engine_is_refused(tmp_path, family, reason):
     """SGLang's client refuses no adapter of its own; the family's spec and the client's unservable model types do,
     as they refuse the run that would sync these adapters."""
-    peft_model = _trained(tmp_path / "base", experts=None, family=family, targets=["o_proj"])
+    targets = [_output_projection(tiny_family_model(family))]
+    peft_model = _trained(tmp_path / "base", experts=None, family=family, targets=targets)
     _save(peft_model, tmp_path / "saved", None)
 
     with pytest.raises(ValueError, match=reason):
@@ -229,7 +235,38 @@ def test_whole_tensors_beside_the_adapters_are_refused(tmp_path):
     assert not (tmp_path / "exported").exists()
 
 
-_ATTENTION_TARGET_REMEDY = "lora_target_modules: [o_proj, gate_up_proj, down_proj]"
+def test_a_module_the_base_checkpoint_stores_nothing_under_is_refused_before_any_write(tmp_path):
+    """The live model still holds layer 0's ``o_proj.linear``; only the checkpoint's own keys show the engine would
+    find nothing at its hub spelling."""
+    peft_model = _trained(tmp_path / "base", experts=None)
+    _save(peft_model, tmp_path / "saved", None)
+    weights = tmp_path / "base" / "model.safetensors"
+    hub = "model.llm.layers.0.attn.wo_ud."
+    stored = load_file(str(weights))
+    assert any(key.startswith(hub) for key in stored), "premise: the release's name for layer 0's o_proj.linear"
+    save_file({key.replace(hub, "model.llm.layers.0.attn.wo_moved."): t for key, t in stored.items()}, str(weights))
+
+    with pytest.raises(ValueError, match=r"stores no tensor under .*spelled model\.llm\.layers\.0\.attn\.wo_ud\)"):
+        export_engine_adapter(str(tmp_path / "saved"), str(tmp_path / "exported"), rollout_backend="vllm")
+
+    assert not (tmp_path / "exported").exists()
+
+
+def test_a_module_the_hub_layout_fuses_or_splits_is_refused_with_the_merge_remedy(tmp_path):
+    """Step-3.7's vision ``k_proj`` has no hub spelling: the engine's own reason names it, not the layout check."""
+    family = TINY_MOE_FAMILIES.get("step3p7") or TINY_MOE_VLM_FAMILIES["step3p7"]
+    targets = r".*vision_model\.layers\.\d+\.self_attn\.k_proj"
+    peft_model = _trained(tmp_path / "base", experts=None, family=family, targets=targets)
+    _save(peft_model, tmp_path / "saved", None)
+
+    with pytest.raises(ValueError, match="fused or split in the hub layout") as refused:
+        export_engine_adapter(str(tmp_path / "saved"), str(tmp_path / "exported"), rollout_backend="vllm")
+
+    assert "another layout of this base" not in str(refused.value)
+    assert not (tmp_path / "exported").exists()
+
+
+_ATTENTION_TARGET_REMEDY = "lora_target_modules: [o_proj, gate_up_proj, down_proj], with o_proj.linear on Inkling 2"
 _MERGE_REMEDY = "merge_peft_adapters.py folds it into its base"
 
 

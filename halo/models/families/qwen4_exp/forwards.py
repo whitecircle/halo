@@ -32,7 +32,7 @@ from halo.models.gradient_checkpointing import patch_layer_forward
 from halo.models.introspection.config_access import get_config_field, set_config_field_run_scoped
 from halo.models.kernel_warmups import register_kernel_warmup
 from halo.models.segment_markers import document_starts
-from halo.models.upstream.upstream_guard import verify_upstream_parameters
+from halo.models.upstream.upstream_guard import takes_legacy_cache_names, verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -55,20 +55,20 @@ def apply_qwen4_exp_patches(model_config) -> None:
     set_config_field_run_scoped(model_config, EXTERNAL_TABLES_STAMP, True)
 
 
-def _host_table_forward(module: nn.Module, input_ids: torch.Tensor, past_key_values) -> torch.Tensor:
+def _host_table_forward(module: nn.Module, input_ids: torch.Tensor, cache) -> torch.Tensor:
     """Upstream's forward over a host table: the same history, cache update and ids, the rows from its own lookup."""
     input_ids = input_ids.long()
-    resumed = past_key_values is not None and past_key_values.has_previous_state(module.layer_idx, state_idx=2)
+    resumed = cache is not None and cache.has_previous_state(module.layer_idx, state_idx=2)
     if resumed:
-        previous = past_key_values.layers[module.layer_idx].conv_states[2].clone()
+        previous = cache.layers[module.layer_idx].conv_states[2].clone()
     else:
         previous = input_ids.new_full((input_ids.shape[0], module.context_len), module.eos_token_id)
-    if past_key_values is not None:
+    if cache is not None:
         cached = input_ids
         # The cache pads a short first chunk with zeros; the history pads with eos.
         if not resumed and input_ids.shape[1] < module.context_len:
             cached = F.pad(cached, (module.context_len - input_ids.shape[1], 0), value=module.eos_token_id)
-        past_key_values.update_conv_state(cached, module.layer_idx, state_idx=2, conv_kernel_size=module.context_len)
+        cache.update_conv_state(cached, module.layer_idx, state_idx=2, conv_kernel_size=module.context_len)
     history = torch.cat([previous, input_ids], dim=-1)
     one_document = document_starts(None, *history.shape, history.device)
     ids = document_ngram_ids(module, history, one_document)[:, -input_ids.shape[1] :]
@@ -85,7 +85,7 @@ def patch_qwen4_exp_ngram_embedding() -> None:
     verify_upstream_parameters(
         embedding_cls.__init__, ("self", "config", "embedding_dim", "layer_idx", "ple_layer_index"), patch
     )
-    verify_upstream_parameters(embedding_cls.forward, ("self", "input_ids", "past_key_values"), patch)
+    verify_upstream_parameters(embedding_cls.forward, ("self", "input_ids", "cache"), patch)
     verify_upstream_parameters(embedding_cls._shift_right_ignore_eos, ("self", "token_ids", "shift"), patch)
     pretrained_cls = qwen4_exp_modeling.Qwen4ExpPreTrainedModel
     original_init, original_forward = embedding_cls.__init__, embedding_cls.forward
@@ -113,11 +113,12 @@ def patch_qwen4_exp_ngram_embedding() -> None:
             stock.num_embeddings, stock.embedding_dim, part_count, stock.weight.dtype
         )
 
+    @takes_legacy_cache_names
     @functools.wraps(original_forward)
-    def forward(self, input_ids, past_key_values):
+    def forward(self, input_ids, cache):
         if not isinstance(self.ngram_embedding, HostNGramTable):
-            return original_forward(self, input_ids, past_key_values)
-        return _host_table_forward(self, input_ids, past_key_values)
+            return original_forward(self, input_ids, cache)
+        return _host_table_forward(self, input_ids, cache)
 
     @functools.wraps(original_save)
     def save_pretrained(self, *args, **kwargs):
@@ -198,9 +199,9 @@ def document_padding_mask(config, rows: torch.Tensor, attention_mask, position_i
     return create_recurrent_attention_mask(config, rows, attention_mask)
 
 
-def _is_document_call(attention_mask, past_key_values) -> bool:
+def _is_document_call(attention_mask, cache) -> bool:
     """No cache, and the 2-D padding mask (or none) where upstream's own forward hands every layer a 4-D mask."""
-    return past_key_values is None and (attention_mask is None or attention_mask.ndim == 2)
+    return cache is None and (attention_mask is None or attention_mask.ndim == 2)
 
 
 def _document_decoder_forward(
@@ -213,7 +214,7 @@ def _document_decoder_forward(
         )
     hidden_states, hyper_input, injection_weights = layer.attn_hyper_connection(hidden_states)
     if layer.layer_type == "linear_attention":
-        hidden_states = layer.linear_attn(hidden_states, cache_params=None, attention_mask=conv_mask, **kwargs)
+        hidden_states = layer.linear_attn(hidden_states, cache=None, attention_mask=conv_mask, **kwargs)
     else:
         hidden_states, _ = layer.self_attn(hidden_states, position_embeddings, attention_mask=attention_mask, **kwargs)
     hidden_states = inject_block(hyper_input, hidden_states, injection_weights)
@@ -239,7 +240,7 @@ def patch_qwen4_exp_document_forwards() -> None:
             "input_ids",
             "attention_mask",
             "position_ids",
-            "past_key_values",
+            "cache",
             "inputs_embeds",
             "use_cache",
             "ple_input_ids",
@@ -256,7 +257,7 @@ def patch_qwen4_exp_document_forwards() -> None:
             "position_embeddings",
             "attention_mask",
             "conv_mask",
-            "past_key_values",
+            "cache",
             "ple_input_ids",
             "kwargs",
         ),
@@ -264,43 +265,44 @@ def patch_qwen4_exp_document_forwards() -> None:
     )
     verify_upstream_parameters(
         qwen4_exp_modeling.Qwen4ExpTextPLELayer.forward,
-        ("self", "hidden_states", "input_ids", "past_key_values", "conv_mask"),
+        ("self", "hidden_states", "input_ids", "cache", "conv_mask"),
         patch,
     )
     verify_upstream_parameters(
-        qwen4_exp_modeling.Qwen4ExpTextPLELayer._short_conv, ("self", "hidden_states", "past_key_values"), patch
+        qwen4_exp_modeling.Qwen4ExpTextPLELayer._short_conv, ("self", "hidden_states", "cache"), patch
     )
     verify_upstream_parameters(qwen4_exp_modeling.Qwen4ExpTextGatedResidual.forward, ("self", "hyper_input"), patch)
     verify_upstream_parameters(
         create_recurrent_attention_mask,
-        ("config", "inputs_embeds", "attention_mask", "past_key_values", "kwargs"),
+        ("config", "inputs_embeds", "attention_mask", "cache", "past_key_values", "kwargs"),
         patch,
     )
     verify_upstream_parameters(
         attention_cls.forward,
-        ("self", "hidden_states", "position_embeddings", "attention_mask", "past_key_values", "kwargs"),
+        ("self", "hidden_states", "position_embeddings", "attention_mask", "cache", "kwargs"),
         patch,
     )
     verify_upstream_parameters(
         qwen4_exp_modeling.Qwen4ExpTextQSAIndexer.forward,
-        ("self", "hidden_states", "position_embeddings", "attention_mask", "past_key_values"),
+        ("self", "hidden_states", "position_embeddings", "attention_mask", "cache"),
         patch,
     )
     original_model, original_layer, original_attention = model_cls.forward, layer_cls.forward, attention_cls.forward
 
+    @takes_legacy_cache_names
     @functools.wraps(original_model)
     def model_forward(
         self,
         input_ids=None,
         attention_mask=None,
         position_ids=None,
-        past_key_values=None,
+        cache=None,
         inputs_embeds=None,
         use_cache=None,
         ple_input_ids=None,
         **kwargs,
     ):
-        cached = past_key_values is not None or bool(use_cache)
+        cached = cache is not None or bool(use_cache)
         if not (
             cached or isinstance(attention_mask, dict) or (attention_mask is not None and attention_mask.ndim != 2)
         ):
@@ -313,13 +315,14 @@ def patch_qwen4_exp_document_forwards() -> None:
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            cache=cache,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
             ple_input_ids=ple_input_ids,
             **kwargs,
         )
 
+    @takes_legacy_cache_names
     @functools.wraps(original_layer)
     def layer_forward(
         self,
@@ -327,21 +330,19 @@ def patch_qwen4_exp_document_forwards() -> None:
         position_embeddings,
         attention_mask=None,
         conv_mask=None,
-        past_key_values=None,
+        cache=None,
         ple_input_ids=None,
         **kwargs,
     ):
         # A layer without PLE keeps upstream's body unless the kernels take its injections.
-        if (self.ple is None and not uses_gated_residual_kernels()) or not _is_document_call(
-            attention_mask, past_key_values
-        ):
+        if (self.ple is None and not uses_gated_residual_kernels()) or not _is_document_call(attention_mask, cache):
             return original_layer(
                 self,
                 hidden_states,
                 position_embeddings,
                 attention_mask=attention_mask,
                 conv_mask=conv_mask,
-                past_key_values=past_key_values,
+                cache=cache,
                 ple_input_ids=ple_input_ids,
                 **kwargs,
             )
@@ -349,12 +350,11 @@ def patch_qwen4_exp_document_forwards() -> None:
             self, hidden_states, position_embeddings, attention_mask, conv_mask, ple_input_ids, **kwargs
         )
 
+    @takes_legacy_cache_names
     @functools.wraps(original_attention)
-    def attention_forward(self, hidden_states, position_embeddings, attention_mask, past_key_values=None, **kwargs):
-        if not _is_document_call(attention_mask, past_key_values):
-            return original_attention(
-                self, hidden_states, position_embeddings, attention_mask, past_key_values=past_key_values, **kwargs
-            )
+    def attention_forward(self, hidden_states, position_embeddings, attention_mask, cache=None, **kwargs):
+        if not _is_document_call(attention_mask, cache):
+            return original_attention(self, hidden_states, position_embeddings, attention_mask, cache=cache, **kwargs)
         return qsa_attention_forward(self, hidden_states, position_embeddings, attention_mask, **kwargs)
 
     setattr(model_forward, _DOCUMENT_FORWARDS_ATTR, True)

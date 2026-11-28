@@ -42,8 +42,8 @@ MAX_SEQ_LENGTH = 64
 LEARNING_RATE = 1e-3
 SEED = 42
 WORDS = [f"w{i}" for i in range(TINY_INKLING2_TEXT["unpadded_vocab_size"] - 2)]
-# The shipped Inkling 2 expert-LoRA recipe's: o_proj for PEFT, the experts peeled into native adapters.
-LORA_TARGET_MODULES = ["o_proj", "gate_up_proj", "down_proj"]
+# The shipped Inkling 2 expert-LoRA recipe's: the linear inside o_proj for PEFT, the experts peeled into native adapters.
+LORA_TARGET_MODULES = ["o_proj.linear", "gate_up_proj", "down_proj"]
 
 
 def _text_dataset(rows: int) -> Dataset:

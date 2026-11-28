@@ -167,7 +167,9 @@ def _trained_adapter_sites(adapters: dict[str, torch.Tensor], attention_targets:
         layer = _layer_index(key)
         if key.endswith(".lora_B") and ".experts." in key:
             experts.add(layer)
-        elif ".lora_B." in key and (leaf := key.split(".lora_B.")[0].rsplit(".", 1)[-1]) in attention_targets:
+        elif ".lora_B." in key and (
+            leaf := next((t for t in attention_targets if key.split(".lora_B.")[0].endswith(f".{t}")), None)
+        ):
             attention.add((layer, leaf))
         else:
             continue

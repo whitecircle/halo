@@ -22,7 +22,7 @@ from halo.checkpoint.tools.offline_export import (
 )
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.model_loading.model_preparation import declared_load_ignores
-from halo.models.moe.family_specs import CompositeTextLayout, find_moe_family_spec
+from halo.models.moe.family_specs import CompositeTextLayout, composite_text_layout, find_moe_family_spec
 from halo.models.mtp.spec import find_mtp_head_spec, stored_tail_keys
 
 logger = logging.getLogger(__name__)
@@ -127,7 +127,7 @@ def reattach_vision_tower(
     # The writer's close removes every model*.safetensors it did not write, so an output at the base would replace it.
     reject_in_place_conversion(base_dir, output_dir)
     composite = _grafted_composite_config(base_dir, text_config, trust_remote_code)
-    layout = _declared_text_layout(composite.model_type) or CompositeTextLayout()
+    layout = composite_text_layout(find_moe_family_spec(composite.model_type))
 
     input_shards = checkpoint_shard_files(input_dir)
     base_shards = checkpoint_shard_files(base_dir)

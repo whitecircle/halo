@@ -65,7 +65,7 @@ output, which leaves two module shapes out of its reach:
 
 | Shape | Example | Without the exclusion |
 |---|---|---|
-| A wrapper holding its weight in a child module | Gemma 4's `Gemma4ClippableLinear`, the vision and audio towers' projections | injection raises `Target module ... is not supported` |
+| A wrapper holding its weight in a child module | Gemma 4's `Gemma4ClippableLinear`, the vision and audio towers' projections; Inkling 2's decoder attention projections (`Inkling2QueryProjection`, `Inkling2KeyValueProjection`, `Inkling2GatedOutputProjection`), which keep it in `linear` | injection raises `Target module ... is not supported` |
 | A layer subclass computing something other than its base layer's affine map | DeepSeek-V4's grouped `o_a_proj`, whose block-diagonal output is one group wide | the delta has the wrong width and the first forward raises |
 
 Both are reachable by an ordinary target list — target names are matched by suffix over the whole
@@ -75,7 +75,9 @@ by `all-linear`, which reaches every `nn.Linear` subclass a family defines.
 `build_peft_config` (`halo/model_loading/parallel/peft_setup.py`) scans the live model with PEFT's own
 matcher and puts those modules in the `LoraConfig`'s `exclude_modules` by full path (PEFT also honors
 an entry as a dotted suffix), so an identically named leaf elsewhere keeps its adapter. A warning names
-the count and one example path per reason. If it leaves no adaptable target at all, the run is rejected
+the count and one example path per reason, and for a wrapper the child to target when that child is `linear`
+or the wrapper's only weight holder (`o_proj.linear` on Inkling 2). A container of several projections, such
+as `mlp`, names none. If it leaves no adaptable target at all, the run is rejected
 rather than trained with nothing — or, when native expert adapters are live, with the attention half
 missing. The verdict is agreed across ranks: a rank whose probe faulted would otherwise adapt a
 different parameter set and surface only as a hang.

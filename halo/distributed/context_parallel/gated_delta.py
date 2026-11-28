@@ -47,10 +47,10 @@ class Qwen3_5UlyssesGatedDelta(UlyssesSequenceLayerBase):
                 "Hybrid CP requires the native bias-free GatedDeltaNet convolution. Use the unmodified model, or train without CP."
             )
 
-    def forward(self, hidden_states, cache_params=None, attention_mask=None, **kwargs):
+    def forward(self, hidden_states, cache=None, attention_mask=None, **kwargs):
         """COLLECTIVE over the CP group: return this rank's sequence chunk, refusing caches and packed rows."""
         if (
-            cache_params is not None
+            cache is not None
             or any(kwargs.get(key) is not None for key in ("past_key_value", "past_key_values"))
             or kwargs.get("use_cache") not in (None, False)
         ):

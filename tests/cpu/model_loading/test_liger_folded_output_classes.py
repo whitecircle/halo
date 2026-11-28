@@ -41,6 +41,16 @@ def _output_constructions(module) -> list[tuple[type, set[str]]]:
     return constructions
 
 
+def _accepted(output_class: type, keyword: str) -> bool:
+    """Whether the class takes ``keyword`` though no field carries it: transformers 5.24 renamed ``past_key_values`` to
+    ``cache`` and still takes the old name, with a deprecation warning, as liger-kernel's forwards pass it."""
+    try:
+        output_class(**{keyword: None})
+    except TypeError:
+        return False
+    return True
+
+
 def test_the_roster_reads_modules_that_construct_outputs():
     ensure_folded_output_classes()
     constructing = [name for name in FUSED_FORWARD_MODULES if _output_constructions(importlib.import_module(name))]
@@ -54,7 +64,11 @@ def test_a_fused_forward_imports_and_its_output_takes_what_it_passes(subtests):
         with subtests.test(module_name):
             module = importlib.import_module(module_name)
             for output_class, keywords in _output_constructions(module):
-                unknown = keywords - {field.name for field in fields(output_class)}
+                unknown = {
+                    keyword
+                    for keyword in keywords - {field.name for field in fields(output_class)}
+                    if not _accepted(output_class, keyword)
+                }
                 assert not unknown, f"{module_name} passes {sorted(unknown)} to {output_class.__name__}"
 
 

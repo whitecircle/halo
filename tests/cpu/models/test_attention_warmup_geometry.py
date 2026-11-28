@@ -297,10 +297,11 @@ def test_every_tower_on_fa4_reports_its_heads_and_a_decoder_none(name):
     towers = non_causal_attention_calls(model, FA4)
     assert all(heads > 0 and head_dim > 0 for heads, head_dim in towers)
     assert not non_causal_attention_calls(model, "sdpa")
+    # Inkling 2's block residual (transformers 5.24) is non-causal with no head_dim: a one-query mix, no tower call.
     expected = {
         module.config.num_attention_heads if not hasattr(module, "num_heads") else module.num_heads
         for module in model.modules()
-        if getattr(module, "is_causal", None) is False
+        if getattr(module, "is_causal", None) is False and hasattr(module, "head_dim")
     }
     assert {heads for heads, _ in towers} == expected
 

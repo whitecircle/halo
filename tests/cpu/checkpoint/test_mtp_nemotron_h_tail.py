@@ -22,6 +22,7 @@ from halo.checkpoint.tools.vocab_patch import patch_vocabulary
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.mtp_head import attach_mtp_head
+from halo.models.introspection.param_roles import declared_fp32_pins, fp32_pin_matches
 from halo.models.moe.family_specs import NEMOTRON_H
 from halo.models.mtp.spec import MtpHeadRequest, MtpObjective
 from tests.common.checkpoint_io import save_context
@@ -234,19 +235,25 @@ def _no_tail_warning(caplog) -> None:
 
 @pytest.mark.parametrize("name", _ROUTES)
 def test_a_bf16_conversion_keeps_the_trained_head_and_its_fp32_bias(name, tmp_path, corpus, caplog):
-    """The trunk's bias keeps its width through the class's pin, so the head's must, or a converted head flips near-ties
-    its fit never saw."""
+    """The trunk's pinned tensors keep their width through the class's pins, so the head's must, or a converted head
+    flips near-ties its fit never saw. transformers 5.24 pins the router weight beside the bias."""
     checkpoint = _trained(name, tmp_path, corpus)
     trained = _head_of(saved_tensors(checkpoint), name)
     with caplog.at_level(logging.WARNING, logger=offline_export.__name__):
         convert_to_bf16(str(checkpoint), str(tmp_path / "out"), "causal_lm", trust_remote_code=False)
     _no_tail_warning(caplog)
-    written = _head_of(saved_tensors(tmp_path / "out"), name)
+    everything = saved_tensors(tmp_path / "out")
+    written = _head_of(everything, name)
     assert set(written) == set(trained)
-    bias = f"{_PREFIXES[name]}{_BIAS}"
-    assert written[bias].dtype == torch.float32 and torch.equal(written[bias], trained[bias])
+    pinned = fp32_pin_matches(trained, declared_fp32_pins(tiny_family_model(MTP_TINY_FAMILIES[name])))
+    assert f"{_PREFIXES[name]}{_BIAS}" in pinned
     for key, value in trained.items():
-        if key != bias:
+        if key in pinned:
+            assert written[key].dtype == torch.float32 and torch.equal(written[key], value), key
+            leaf = key.rsplit(".", 3)[-3:]
+            trunk = [v for k, v in everything.items() if k not in written and k.endswith(".".join(leaf))]
+            assert trunk and all(v.dtype == torch.float32 for v in trunk), f"the trunk's {'.'.join(leaf)} width"
+        else:
             assert written[key].dtype == torch.bfloat16, key
             assert torch.equal(written[key], value.to(torch.bfloat16)), key
 
