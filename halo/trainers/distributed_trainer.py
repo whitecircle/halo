@@ -10,6 +10,7 @@ import torch.nn as nn
 from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from halo.configs.script_arguments import DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
 from halo.distributed.expert_parallel.deepep.backends import free_retired_ep_buffers, free_unclaimed_ep_buffers
+from halo.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     install_ep_aware_disable_adapter,
     model_has_expert_lora,
@@ -420,7 +421,9 @@ class DistributedTrainerMixin(
         self._wrap_for_parallel_mode()
 
         if self._fsdp_wrapped:
-            reject_peft_model_below_fsdp2_root(self._top_level_model())
+            reject_peft_model_below_fsdp2_root(
+                self._top_level_model(), reshard_after_forward=config.fsdp_reshard_after_forward
+            )
         if config.needs_ep_layers:
             reject_peft_lora_in_ep_layers(self._top_level_model())
             self._install_ep_layer_hooks()
@@ -514,6 +517,10 @@ class DistributedTrainerMixin(
             )
 
     def _install_ep_layer_hooks(self) -> None:
+        if self._ep_layers():
+            # The loop calls this model, which may reach the EP-patched one through .forward(), running none of its
+            # hooks; nested in this one's, the patched model's hook opens no second scope.
+            register_forward_generation_hook(self.model)
         # modules_to_save swaps in a router copy the ctor-time DP-sync hook never saw.
         if find_peft_model(self.model) is not None:
             attached = sum(module.reattach_dp_average_grad_hooks() for module in self._ep_layers())

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 from peft import IA3Config, LoraConfig, PeftModel, get_peft_model
 from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
@@ -24,6 +25,7 @@ from halo.model_loading.parallel.peft_setup import (
     build_peft_model,
     verify_adapters_trainable,
 )
+from halo.models.introspection.unwrapping import plain_adapter_key
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
@@ -44,17 +46,20 @@ _ARGS = SimpleNamespace(gradient_checkpointing=False, bf16=False)
 _FROZEN = r"hold no trainable parameter after the PEFT wrap.*peft#4181"
 
 
-def _tiny_qwen3() -> Qwen3ForCausalLM:
-    return Qwen3ForCausalLM._from_config(_TINY_QWEN3, attn_implementation="sdpa")
+def _tiny_qwen3(**config) -> Qwen3ForCausalLM:
+    torch.manual_seed(0)
+    return Qwen3ForCausalLM._from_config(
+        Qwen3Config(**{**_TINY_QWEN3.to_dict(), **config}), attn_implementation="sdpa"
+    )
 
 
 def _qwen3(**lora) -> LoraConfig:
-    return LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"], **lora)
+    return LoraConfig(**{"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], **lora})
 
 
-def _under_ulysses(peft_config: LoraConfig) -> PeftModel:
+def _under_ulysses(peft_config: LoraConfig, **config) -> PeftModel:
     """``cp_size=1`` still wraps and patches every attention layer, so the names are the real CP ones."""
-    inner = _tiny_qwen3()
+    inner = _tiny_qwen3(**config)
     inner.config._attn_implementation = SUPPORTED_ATTN_IMPLEMENTATIONS[0]
     wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
     model, _ = build_peft_model(wrapper, peft_config, _ARGS)
@@ -75,40 +80,65 @@ def test_peft_leaves_every_adapter_under_the_real_cp_wrapper_frozen():
         verify_adapters_trainable(model)
 
 
+# A LoRA bias and bias="lora_only" need biased projections; bias="all" trains every bias, adapter or not.
+_BIASED = {"attention_bias": True}
+_ADAPTER_KINDS = {
+    "lora": ({}, {}),
+    "dora": ({"use_dora": True}, {}),
+    "rslora_lora_bias": ({"use_rslora": True, "lora_bias": True}, _BIASED),
+    "bias_all": ({"bias": "all"}, _BIASED),
+    "bias_lora_only": ({"bias": "lora_only"}, _BIASED),
+    "modules_to_save": ({"modules_to_save": ["lm_head"]}, {}),
+    "modules_to_save_embedding_and_head": ({"modules_to_save": ["embed_tokens", "lm_head"]}, {}),
+    "trainable_tokens": ({"trainable_token_indices": [1, 2, 3]}, {}),
+    "embedding_lora": ({"target_modules": ["q_proj", "embed_tokens"]}, {}),
+    "target_parameters": ({"target_modules": ["q_proj"], "target_parameters": ["layers.0.mlp.down_proj.weight"]}, {}),
+    "inference_mode": ({"inference_mode": True}, {}),
+    "mica": ({"init_lora_weights": "mica"}, {}),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_ADAPTER_KINDS))
+def test_the_cp_repair_trains_what_the_plain_wrap_trains(kind):
+    lora, config = _ADAPTER_KINDS[kind]
+    plain = get_peft_model(_tiny_qwen3(**config), _qwen3(**lora))
+    expected = {name for name, param in plain.named_parameters() if param.requires_grad}
+    model = _under_ulysses(_qwen3(**lora), **config)
+
+    apply_cp_adapter_trainability(model)
+
+    trained = {plain_adapter_key(name) for name, param in model.named_parameters() if param.requires_grad}
+    assert trained == expected, (sorted(expected - trained)[:3], sorted(trained - expected)[:3])
+
+
+@pytest.mark.parametrize("active", ["default", "other"])
+def test_the_cp_repair_trains_the_active_adapter_alone(active):
+    model = _under_ulysses(_qwen3())
+    model.add_adapter("other", _qwen3(target_modules=["q_proj", "k_proj"]))
+    model.set_adapter(active)
+    _freeze_adapters(model)
+
+    apply_cp_adapter_trainability(model)
+
+    trained = {name for name, param in model.named_parameters() if param.requires_grad}
+    assert trained == {name for name, _ in model.named_parameters() if f".{active}." in name}
+
+
 @pytest.mark.parametrize(
     "lora",
-    [{}, {"use_dora": True}, {"modules_to_save": ["lm_head"]}],
-    ids=["lora", "dora", "modules_to_save"],
+    [{"modules_to_save": ["lm_head"]}, {"trainable_token_indices": [1, 2, 3]}],
+    ids=["modules_to_save", "tokens"],
 )
-def test_the_cp_repair_trains_exactly_the_adapters(lora):
+def test_the_cp_repair_trains_what_peft_wraps_beside_its_tuner_layers(lora):
     model = _under_ulysses(_qwen3(**lora))
-    adapter = {n for n, _ in model.named_parameters() if "lora_" in n or "modules_to_save" in n}
-    assert adapter, "premise: the wrap built adapters"
+    wrapped = {name for name, param in model.named_parameters() if param.requires_grad and "lora_" not in name}
+    assert wrapped, "premise: the wrap left the wrapper's copy trainable"
+    for param in model.parameters():
+        param.requires_grad_(False)
 
     apply_cp_adapter_trainability(model)
 
-    trained = {n for n, p in model.named_parameters() if p.requires_grad}
-    assert trained == adapter, (sorted(adapter - trained)[:3], sorted(trained - adapter)[:3])
-    verify_adapters_trainable(model)
-
-
-def test_the_cp_repair_keeps_the_weights_a_variant_freezes():
-    """MiCA trains ``lora_A`` alone; marking every adapter tensor would train its ``lora_B`` too."""
-    plain = get_peft_model(_tiny_qwen3(), _qwen3(init_lora_weights="mica"))
-    plain_a = {n for n, _ in plain.named_parameters() if "lora_A" in n}
-    assert {n for n, p in plain.named_parameters() if p.requires_grad} == plain_a, "premise: MiCA trains lora_A alone"
-    model = _under_ulysses(_qwen3(init_lora_weights="mica"))
-
-    apply_cp_adapter_trainability(model)
-
-    trained = {n for n, p in model.named_parameters() if p.requires_grad}
-    assert trained and trained == {n for n, _ in model.named_parameters() if "lora_A" in n}
-
-
-def test_the_cp_repair_leaves_an_inference_mode_adapter_frozen():
-    model = _under_ulysses(_qwen3(inference_mode=True))
-    apply_cp_adapter_trainability(model)
-    assert not any(p.requires_grad for p in model.parameters())
+    assert wrapped <= {name for name, param in model.named_parameters() if param.requires_grad}
 
 
 def test_frozen_adapters_are_refused():

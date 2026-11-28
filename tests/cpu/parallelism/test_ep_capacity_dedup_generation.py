@@ -4,6 +4,7 @@ rarely it under-sizes. The cache holds its group, cleared at EP teardown."""
 
 from __future__ import annotations
 
+import copy
 import importlib
 from types import SimpleNamespace
 
@@ -105,6 +106,54 @@ def test_registration_is_idempotent():
     before = _generation()
     model(x)
     assert _generation() == before + 1, "duplicate registration must not add a second hook"
+
+
+class _Outer(nn.Module):
+    """A hooked model around another, reached as a module or through ``.forward()``."""
+
+    def __init__(self, inner: nn.Module, *, as_module: bool):
+        super().__init__()
+        self.inner = inner
+        self.as_module = as_module
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.inner(x) if self.as_module else self.inner.forward(x)
+
+
+@pytest.mark.parametrize("as_module", [True, False], ids=["as_module", "through_forward"])
+def test_a_hooked_forward_inside_another_opens_no_scope(as_module):
+    inner = _TwoLayerModel()
+    outer = _Outer(inner, as_module=as_module)
+    capacity_mod.register_forward_generation_hook(inner)
+    capacity_mod.register_forward_generation_hook(outer)
+
+    before = _generation()
+    outer(torch.zeros(2, 4))
+    assert _generation() == before + 1
+    inner(torch.zeros(2, 4))
+    assert _generation() == before + 2, "the inner model called on its own opens its own scope"
+
+
+def test_a_forward_that_raises_leaves_the_next_forward_its_own_scope():
+    model = _TwoLayerModel()
+    capacity_mod.register_forward_generation_hook(model)
+
+    with pytest.raises(RuntimeError):
+        model(torch.zeros(2, 5))
+    before = _generation()
+    model(torch.zeros(2, 4))
+    assert _generation() == before + 1, "a raise inside a hooked forward left its scope open"
+
+
+def test_a_deep_copy_opens_scopes_on_the_shared_generation():
+    """A reference model copied from the policy dispatches through the same capacity cache."""
+    model = _TwoLayerModel()
+    capacity_mod.register_forward_generation_hook(model)
+    copied = copy.deepcopy(model)
+
+    before = _generation()
+    copied(torch.zeros(2, 4))
+    assert _generation() == before + 1
 
 
 def test_a_pipeline_stage_bumps_the_generation_it_is_never_registered_for():

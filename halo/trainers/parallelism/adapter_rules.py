@@ -2,6 +2,8 @@
 
 from peft import PeftModel
 from peft.tuners.tuners_utils import BaseTunerLayer
+from peft.utils import AuxiliaryTrainingWrapper
+from torch.distributed.fsdp import FSDPModule
 
 from halo.checkpoint.parallel.adapters import live_adapter_tensors
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
@@ -50,17 +52,57 @@ def reject_peft_lora_in_ep_layers(model) -> None:
         )
 
 
-def reject_peft_model_below_fsdp2_root(model) -> None:
-    """``model`` is the FSDP2 root. PEFT's ``disable_adapter()`` reshards only the FSDP2 modules inside the
-    ``PeftModel`` before it enables the adapters again, so a wrapper above it would keep the root group's adapters
-    frozen after a reference pass."""
+def _adapter_param_ids(peft_model: PeftModel) -> set[int]:
+    """Every tensor ``disable_adapter()`` freezes and thaws: a tuner layer's beside its base layer's, and a
+    ``modules_to_save`` copy's or trainable-token delta's beside the module the wrapper holds."""
+    held = tuner_adapter_param_ids(peft_model)
+    for module in peft_model.modules():
+        if isinstance(module, AuxiliaryTrainingWrapper):
+            wrapped = {id(param) for param in module.original_module.parameters()}
+            held.update(id(param) for param in module.parameters() if id(param) not in wrapped)
+    return held
+
+
+def _adapters_held_outside(model, peft_model: PeftModel) -> list[str]:
+    """The trained adapter tensors an FSDP2 shard group outside ``peft_model`` holds, by module path: a group holds
+    its module's parameters except those under a group nested in it."""
+    adapters = _adapter_param_ids(peft_model)
+    inside = {id(module) for module in peft_model.modules() if isinstance(module, FSDPModule)}
+    outside: dict[str, bool] = {}
+    held = []
+    for name, module in model.named_modules():
+        if isinstance(module, FSDPModule):
+            outside[name] = id(module) not in inside
+        else:
+            outside[name] = outside.get(name.rpartition(".")[0], False)
+        if outside[name]:
+            held += [
+                f"{name}.{param_name}" if name else param_name
+                for param_name, param in module.named_parameters(recurse=False)
+                if param.requires_grad and id(param) in adapters
+            ]
+    return held
+
+
+def reject_peft_model_below_fsdp2_root(model, *, reshard_after_forward: bool) -> None:
+    """``model`` is the FSDP2 root. Under ZeRO-2 a forward leaves each group gathered, and PEFT's ``disable_adapter()``
+    reshards only the FSDP2 modules inside the ``PeftModel`` before it enables the adapters again, so the adapters a
+    group above it holds would stay frozen after a reference pass. Rank-uniform: it reads the module tree."""
     peft_model = find_peft_model(model)
-    if peft_model is not None and peft_model is not model:
+    if peft_model is None or peft_model is model or reshard_after_forward:
+        return
+    held = _adapters_held_outside(model, peft_model)
+    if held:
+        # FSDP2 swaps the root's class for a subclass of it.
+        wrapper = next(cls for cls in type(model).__mro__ if not issubclass(cls, FSDPModule)).__name__
         raise ValueError(
-            f"The PeftModel sits inside a {type(model).__name__}, which FSDP2 shards as its root: after a "
-            f"disable_adapter() reference pass PEFT reshards only the FSDP2 modules inside the PeftModel, so adapters "
-            f"in the root group (lm_head, embeddings) would stay frozen. Apply get_peft_model over the wrapper instead "
-            f"(over the UlyssesModel the loader returns under context parallelism)."
+            f"The PeftModel sits inside a {wrapper}, which FSDP2 shards as its root, and under ZeRO-2 "
+            f"(fsdp_reshard_after_forward: false) a forward leaves the root group gathered. After a disable_adapter() "
+            f"reference pass PEFT reshards only the FSDP2 modules inside the PeftModel before it enables the adapters "
+            f"again, so the {len(held)} adapter tensors the root group holds would stay frozen "
+            f"({held[:KEY_PREVIEW_COUNT]}). Hand the trainer the PeftModel itself (get_peft_model over the "
+            f"{wrapper}), set fsdp_reshard_after_forward: true where the run has no EP group, or keep "
+            f"lora_target_modules and lora_modules_to_save off the modules those tensors adapt."
         )
 
 

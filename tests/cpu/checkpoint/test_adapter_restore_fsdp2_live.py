@@ -1,7 +1,10 @@
 #!/usr/bin/env python
 """An adapter resume onto an FSDP2-sharded PEFT model writes the saved values into the live sharded adapters, on two
 gloo ranks. PEFT gathers every DTensor it selects into a CPU copy, so a restore copying into what PEFT's selection
-returns would land in temporaries and resume the adapters from initialization."""
+returns would land in temporaries and resume the adapters from initialization; the selection runs over meta stand-ins,
+and a key PEFT answers with a tensor it derived from one is refused."""
+
+import re
 
 import pytest
 import torch
@@ -13,6 +16,7 @@ from torch.distributed.tensor import DTensor
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.checkpoint.adapters import write_adapter_file
+from halo.checkpoint.parallel import adapters as adapters_mod
 from halo.checkpoint.parallel.adapters import live_adapter_tensors, restore_adapters
 from tests.common.gloo import run_gloo_ranks
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -65,6 +69,23 @@ def _restore_worker(rank: int, adapter_dir: str, modules_to_save: list[str] | No
 @pytest.mark.parametrize("modules_to_save", [None, ["lm_head"]], ids=["lora", "lora_and_modules_to_save"])
 def test_resume_writes_the_live_sharded_adapters(tmp_path, modules_to_save):
     run_gloo_ranks(_restore_worker, WORLD, str(tmp_path), modules_to_save)
+
+
+def test_a_key_peft_answers_with_a_tensor_derived_from_a_stand_in_is_refused(monkeypatch):
+    """A restore's copy into a meta tensor writes nothing and raises nothing."""
+    torch.manual_seed(0)
+    base = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
+    model = get_peft_model(base, LoraConfig(r=4, lora_alpha=8, target_modules=["q_proj", "v_proj"]))
+    select = adapters_mod.get_peft_model_state_dict
+    derived = sorted(select(model))[1]
+
+    def selection_deriving_one_key(*args, **kwargs):
+        selected = select(*args, **kwargs)
+        return {**selected, derived: selected[derived].clone()}
+
+    monkeypatch.setattr(adapters_mod, "get_peft_model_state_dict", selection_deriving_one_key)
+    with pytest.raises(RuntimeError, match=rf"built from the meta stand-ins(?s:.*){re.escape(derived)}"):
+        live_adapter_tensors(model)
 
 
 if __name__ == "__main__":
