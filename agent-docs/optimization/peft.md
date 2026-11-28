@@ -188,7 +188,9 @@ adapted before the rewrite existed and no parameter. PEFT condenses a list of 20
 suffixes no other module shares, so on a full-size model the saved `adapter_config.json` holds leaf names again, and a
 reload through PEFT rewrites them: where a shared expert's `gate_proj`, `up_proj` or `down_proj` is among them
 (Qwen3-Next, GLM-4 MoE Lite, Cohere2 MoE) it also wraps the fused experts, warns that the file holds no tensors for
-them and leaves those adapters at zero, so a merge equals the trained model. A target
+them and leaves those adapters at zero, so a merge equals the trained model. A list naming one projection of a
+fused pair (`gate_proj` without `up_proj`), which PEFT refuses, adapts the modules it names the same way, and one
+naming no module at all, the fused experts alone, is refused with the routes that train them. A target
 that names the router or a fused-expert module itself, which PEFT turns into a parameter even as a path, is refused:
 train the router through `lora_modules_to_save` and the experts through their projection names. Under EP,
 `reject_peft_lora_in_ep_layers` also refuses a tuner layer wrapped around an EP layer.

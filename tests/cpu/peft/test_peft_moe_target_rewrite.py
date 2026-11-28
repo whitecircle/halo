@@ -142,5 +142,37 @@ def test_a_target_peft_still_turns_into_parameters_is_refused_with_a_remedy_that
     assert any("mlp.gate.modules_to_save" in name for name, p in peft_model.named_parameters() if p.requires_grad)
 
 
+@pytest.mark.parametrize("family", _REWRITTEN_FAMILIES)
+def test_one_projection_of_a_fused_pair_adapts_the_modules_it_names(family):
+    """PEFT refuses ``gate_proj`` without ``up_proj``, which the experts fuse; a shared expert holds both as modules."""
+    target = ["q_proj", "gate_proj"]
+    with pytest.raises(ValueError, match="without also targeting up_proj"):
+        get_peft_model(_moe(family, layout="hf_layout"), LoraConfig(r=2, target_modules=list(target)))
+    model = _moe(family, layout="hf_layout")
+    expected = {name for name, _ in model.named_modules() if name.rsplit(".", 1)[-1] in target}
+    assert expected, "premise: the list names modules on this model"
+
+    modules, parameters = _adapted(get_peft_model(model, build_peft_config(model, _run_config(target))))
+
+    assert modules == expected, (sorted(modules - expected)[:3], sorted(expected - modules)[:3])
+    assert not parameters
+
+
+@pytest.mark.parametrize(
+    "target",
+    [["gate_proj", "up_proj", "down_proj"], r".*\.(gate_proj|up_proj|down_proj)"],
+    ids=["names", "regex"],
+)
+def test_a_target_naming_the_fused_experts_alone_is_refused_with_its_routes(target):
+    """Every expert of Qwen3 MoE is fused, so the target names no module, and PEFT alone adapts parameters for it."""
+    _, parameters = _adapted(
+        get_peft_model(_moe("qwen3_moe", layout="hf_layout"), LoraConfig(r=2, target_modules=target))
+    )
+    assert parameters, "premise: PEFT's rewrite adapts the fused experts as parameters"
+
+    with pytest.raises(ValueError, match=r"matches no module of this qwen3_moe model(?s:.*)lora_target_parameters"):
+        build_peft_config(_moe("qwen3_moe", layout="hf_layout"), _run_config(target))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

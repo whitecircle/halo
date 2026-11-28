@@ -248,10 +248,23 @@ def _peft_rewrite_additions(model: torch.nn.Module, peft_config, matched: set[st
 def resolve_lora_target_modules(model: torch.nn.Module, peft_config, matched: set[str]) -> str | set[str]:
     """The ``target_modules`` to hand PEFT: as written, or, where PEFT's rewrite for a fused-expert MoE would change
     what they adapt, the paths they match (``matched``), so the wrap adapts what the target names and nothing else;
-    ``exclude_modules`` applies to the paths as to any target. Raises when PEFT would rewrite the paths too.
-    Rank-local, and alike on every rank: it reads only the module tree."""
-    if _peft_rewrite_additions(model, peft_config, matched) == ([], []):
+    ``exclude_modules`` applies to the paths as to any target. Raises when the target then names no module, or when
+    PEFT would rewrite the paths too. Rank-local, and alike on every rank: it reads only the module tree."""
+    try:
+        kept = _peft_rewrite_additions(model, peft_config, matched) == ([], [])
+    except ValueError:
+        # PEFT refuses one projection of a fused pair named without the other; the paths name modules alone.
+        kept = False
+    if kept:
         return peft_config.target_modules
+    if not matched:
+        raise ValueError(
+            f"lora_target_modules={peft_config.target_modules!r} matches no module of this "
+            f"{model.config.model_type} model: transformers v5 holds its experts as fused parameters, which PEFT would "
+            f"adapt as target_parameters in the target's place. Name a module to adapt (an attention projection), "
+            f"train the experts as the native grouped expert adapters on EP layers (use_grouped_gemm, the default), "
+            f"or, without EP layers, list the fused tensors in lora_target_parameters."
+        )
     resolved = copy.deepcopy(peft_config)
     resolved.target_modules = matched
     added, widened = _peft_rewrite_additions(model, resolved, matched)
