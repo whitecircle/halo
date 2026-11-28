@@ -37,6 +37,7 @@ from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
 from halo.runtime.ranks import (
+    get_global_world_size,
     get_local_rank,
     get_local_world_size,
     get_node_rank,
@@ -75,7 +76,8 @@ def resolve_writer_stripe(*, is_save_rank: bool) -> WriterStripe:
     requested = validate_checkpoint_writers_per_node(resolve_checkpoint_writers_per_node())
     if requested == 0 or not is_output_shared_filesystem():
         return WriterStripe(0 if is_save_rank else None, 1)
-    per_node = min(requested, get_local_world_size())
+    # The node size can be the visible device count (no launcher variable), which a lone process does not fill.
+    per_node = min(requested, get_local_world_size(), get_global_world_size())
     count = get_num_nodes() * per_node
     if is_save_rank:
         return WriterStripe(0, count)

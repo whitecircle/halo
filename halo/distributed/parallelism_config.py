@@ -193,8 +193,8 @@ class ParallelismConfig:
         if self.gpus_per_node <= 0:
             raise ValueError(
                 f"gpus_per_node resolved to {self.gpus_per_node}, but every domain rule below divides "
-                f"by it. It comes from LOCAL_WORLD_SIZE / SLURM_NTASKS_PER_NODE / the visible device "
-                f"count — set one of them, or pass gpus_per_node explicitly."
+                f"by it. It comes from LOCAL_WORLD_SIZE, the srun step (SLURM_STEP_TASKS_PER_NODE) or the visible "
+                f"device count: set LOCAL_WORLD_SIZE to the ranks per node, or pass gpus_per_node explicitly."
             )
         if self.nvlink_domain_size < 0:
             # A negative multiple passes Python's modulo in both divisibility gates below.

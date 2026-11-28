@@ -32,7 +32,7 @@ The log-writing rank (global rank 0 on a shared output filesystem, each node's l
 
 Exactly **one** task per node — `srun` launches one `torchrun` per node, which forks the per-GPU ranks. `--ntasks-per-node=8` would launch 8 torchruns × 8 = 64 procs/node.
 
-A bare `srun --ntasks-per-node=N <script>` — one task per GPU, no `torchrun` — is refused at startup: SLURM declares the world through `SLURM_NTASKS` but supplies no `env://` rendezvous, so `MASTER_ADDR`/`MASTER_PORT` are unset and no process group can be built. Use the recipe below, or export both identically on every task.
+A bare `srun --ntasks-per-node=N <script>` — one task per GPU, no `torchrun` — is refused at startup: the step declares its world through `SLURM_STEP_NUM_TASKS` but supplies no `env://` rendezvous, so `MASTER_ADDR`/`MASTER_PORT` are unset and no process group can be built. Use the recipe below, or export both identically on every task, and pass the step's `SLURM_*` variables into a container started per task. Only an `srun` step is read as a world. A `python` started once from an `sbatch` script or an `salloc` shell runs as one process, whatever task count the job asked for.
 
 Ranks must sit `gpus_per_node` per machine in rank order: every node-local EP/CP/TP/ETP group is a contiguous rank block, so `ParallelismConfig` rejects a round-robin placement (`srun --distribution=cyclic` with an exported rendezvous). One `torchrun` per node, or `--distribution=block`, satisfies it.
 

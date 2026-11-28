@@ -19,6 +19,7 @@ from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from halo.checkpoint.parallel.writing import WriterStripe, resolve_writer_stripe
 from halo.checkpoint.writing import StreamedParts, StreamingShardWriter, merge_streamed_parts
+from halo.runtime.ranks import get_local_world_size
 from tests.common.checkpoint_io import file_digests, safetensors_state_dict, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
@@ -47,7 +48,8 @@ class _GatherStub(StubEPLayerBase):
             self.add_module(name, child)
 
     def gather_layer_state_dict(self, layer_name, *, merge_lora=False, retain=True):
-        dist.all_reduce(torch.zeros(1))
+        if dist.is_initialized():
+            dist.all_reduce(torch.zeros(1))
         return {f"{layer_name}.{name}": p.detach().clone() for name, p in self.named_parameters()} if retain else {}
 
 
@@ -212,6 +214,7 @@ def test_the_stripe_follows_the_filesystem_and_node_layout(
     monkeypatch.setenv(WRITERS_ENV, str(per_node))
     monkeypatch.setenv(SHARED_ENV, "1" if shared else "0")
     monkeypatch.setattr(gathered_writing, "get_num_nodes", lambda: 4)
+    monkeypatch.setattr(gathered_writing, "get_global_world_size", lambda: 4 * local_world_size)
     monkeypatch.setattr(gathered_writing, "get_local_world_size", lambda: local_world_size)
     monkeypatch.setattr(gathered_writing, "get_node_rank", lambda: rank // local_world_size)
     monkeypatch.setattr(gathered_writing, "get_local_rank", lambda: rank % local_world_size)
@@ -219,11 +222,42 @@ def test_the_stripe_follows_the_filesystem_and_node_layout(
     assert resolve_writer_stripe(is_save_rank=is_save_rank) == expected
 
 
+@pytest.mark.parametrize("rank", [0, 1])
+def test_the_stripe_is_capped_at_the_ranks_that_run(monkeypatch, rank):
+    """Two ranks on one node sized by its eight devices: both write, and no index is left without a holder."""
+    monkeypatch.setenv(WRITERS_ENV, "4")
+    monkeypatch.setenv(SHARED_ENV, "1")
+    monkeypatch.setattr(gathered_writing, "get_num_nodes", lambda: 1)
+    monkeypatch.setattr(gathered_writing, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(gathered_writing, "get_local_world_size", lambda: 8)
+    monkeypatch.setattr(gathered_writing, "get_node_rank", lambda: 0)
+    monkeypatch.setattr(gathered_writing, "get_local_rank", lambda: rank)
+    assert resolve_writer_stripe(is_save_rank=rank == 0) == WriterStripe(rank, 2)
+
+
 def test_a_negative_writer_count_is_refused(monkeypatch):
     monkeypatch.setenv(WRITERS_ENV, "-1")
     monkeypatch.setenv(SHARED_ENV, "1")
     with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITERS_PER_NODE=-1"):
         resolve_writer_stripe(is_save_rank=True)
+
+
+def test_a_lone_process_on_a_multi_device_host_writes_every_tensor(striped_run, tmp_path, monkeypatch):
+    """Plain ``python`` sets no ``LOCAL_WORLD_SIZE``, so the node is sized by its visible devices; the one process is
+    still the only writer there is."""
+    ctx = save_context(_model(), has_ep_layers=True, max_shard_size=SHARD_SIZE)
+    monkeypatch.delenv("LOCAL_WORLD_SIZE", raising=False)
+    monkeypatch.delenv("SLURM_STEP_TASKS_PER_NODE", raising=False)
+    monkeypatch.setenv(WRITERS_ENV, "4")
+    monkeypatch.setenv(SHARED_ENV, "1")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 8)
+    assert not dist.is_initialized() and get_local_world_size() == 8, "premise: one process sees eight devices"
+    save_ep_gathered_checkpoint(ctx, str(tmp_path))
+    want, got = safetensors_state_dict(striped_run / "reference"), safetensors_state_dict(tmp_path)
+    assert set(got) == set(want), f"missing: {sorted(set(want) - set(got))[:6]}"
+    for key, tensor in want.items():
+        assert got[key].dtype == tensor.dtype and torch.equal(got[key], tensor), f"{key} differs"
 
 
 if __name__ == "__main__":

@@ -36,26 +36,33 @@ def launcher_global_rank() -> int:
 
 
 def launcher_global_world_size() -> int:
-    """World size from the live group, else ``WORLD_SIZE`` / ``SLURM_NTASKS``. ``SLURM_NTASKS`` counts only with
-    ``SLURM_PROCID`` (bare ``srun``): ``sbatch`` and ``salloc`` export it to a world-1 ``python`` launch."""
+    """World size from the live group, else ``WORLD_SIZE``, else the task count of this ``srun`` step
+    (``SLURM_STEP_NUM_TASKS``). The job's ``SLURM_NTASKS`` is no world: an ``sbatch`` script holds it, beside
+    ``SLURM_PROCID=0``, for a ``python`` it starts once, and so does an ``salloc`` shell."""
     if has_process_group():
         return dist.get_world_size()
-    slurm_world = os.environ.get("SLURM_NTASKS") if "SLURM_PROCID" in os.environ else None
-    return int(os.environ.get("WORLD_SIZE") or slurm_world or 1)
+    return int(os.environ.get("WORLD_SIZE") or os.environ.get("SLURM_STEP_NUM_TASKS") or 1)
 
 
 def get_local_world_size() -> int:
-    """``LOCAL_WORLD_SIZE`` / ``SLURM_NTASKS_PER_NODE``, else the visible CUDA device count, else the global world size
-    (warned once, since it collapses the run to one node)."""
+    """``LOCAL_WORLD_SIZE``, else the tasks per node of the ``srun`` step that launched the ranks
+    (``SLURM_STEP_TASKS_PER_NODE``; an uneven step raises), else the visible CUDA device count, else the global world
+    size (warned once, since it collapses the run to one node)."""
     if "LOCAL_WORLD_SIZE" in os.environ:
         return int(os.environ["LOCAL_WORLD_SIZE"])
 
-    # SLURM may report a compact form ("8(x2)", "4,8"); take the leading int.
-    slurm_ntpn = os.environ.get("SLURM_NTASKS_PER_NODE")
-    if slurm_ntpn:
-        m = re.match(r"\d+", slurm_ntpn.strip())
-        if m:
-            return int(m.group())
+    # The step's count, since a step smaller than its job inherits the job's SLURM_NTASKS_PER_NODE. Not under
+    # WORLD_SIZE: there another launcher forked the ranks, and the step counts its parents.
+    step_tasks_per_node = os.environ.get("SLURM_STEP_TASKS_PER_NODE")
+    if step_tasks_per_node and "WORLD_SIZE" not in os.environ:
+        even_step = re.fullmatch(r"(\d+)(\(x\d+\))?", step_tasks_per_node.strip())
+        if even_step is None:
+            raise ValueError(
+                f"This srun step places its tasks unevenly (SLURM_STEP_TASKS_PER_NODE={step_tasks_per_node}), and "
+                f"every node-local group is sized in whole nodes of one size. Give srun --ntasks-per-node, or "
+                f"launch one torchrun per node."
+            )
+        return int(even_step.group(1))
 
     if torch.cuda.is_available():
         count = torch.cuda.device_count()
@@ -70,7 +77,7 @@ def get_local_world_size() -> int:
             _local_world_size_fallback_warned,
             "local_world_size",
             "Could not determine local world size from LOCAL_WORLD_SIZE / "
-            "SLURM_NTASKS_PER_NODE / CUDA device count; falling back to global "
+            "SLURM_STEP_TASKS_PER_NODE / CUDA device count; falling back to global "
             f"world_size={world} (assuming single node). On a real multi-node job "
             "this builds WRONG node-local EP/CP groups — set LOCAL_WORLD_SIZE "
             "explicitly or pass gpus_per_node to ParallelismConfig.",
