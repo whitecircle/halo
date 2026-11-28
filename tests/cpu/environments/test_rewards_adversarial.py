@@ -198,6 +198,48 @@ def test_numeric_match_rejects_expressions_and_hedges(predicted, expected):
 
 
 @pytest.mark.parametrize(
+    ("predicted", "expected"),
+    [
+        ("895", "902"),  # inside the 1% band, but another integer
+        ("990", "999"),
+        ("1008", "999"),
+        ("101", "100"),
+        ("2017", "2016"),
+        ("49%", "50%"),  # an integer percent caps at 0.005
+    ],
+)
+def test_numeric_match_pays_an_integer_gold_no_other_integer(predicted, expected):
+    assert numeric_match(predicted, expected) is False
+    assert is_correct_answer(predicted, expected) is False
+
+
+@pytest.mark.parametrize(
+    ("predicted", "expected", "verdict"),
+    [
+        ("902.4", "902", True),  # rounds to the integer gold
+        ("902.6", "902", False),
+        ("901.9999999", "902", True),  # float noise
+        ("50.4%", "50%", True),
+        ("4.0033", "4.003334361", True),  # a gold with a decimal point keeps the 1% band
+        ("0.54", "0.5", False),
+        ("12", "12.1", True),
+        ("1010", "1e3", True),  # so does one with an exponent
+    ],
+)
+def test_numeric_match_caps_only_a_gold_written_as_an_integer(predicted, expected, verdict):
+    assert numeric_match(predicted, expected) is verdict
+
+
+@pytest.mark.parametrize("predicted", ["5", "1.26765e430", "inf"])
+def test_numeric_match_rejects_a_non_finite_gold(predicted):
+    assert numeric_match(predicted, "1.26765e430") is False
+
+
+def test_a_non_finite_gold_grades_a_finite_answer_wrong():
+    assert is_correct_answer("5", "1e309") is False
+
+
+@pytest.mark.parametrize(
     ("predicted", "expected", "verdict"),
     [
         ("18", "$18", True),  # the expected answer is read like a prediction
