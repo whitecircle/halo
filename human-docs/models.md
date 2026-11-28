@@ -16,6 +16,7 @@ of them are MoE.
 | [GLM-4 MoE Lite](cookbooks/halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | MoE | compressed (MLA) attention |
 | [Gemma 4 MoE](cookbooks/halo-gemma4-moe-cookbook.md) | `google/gemma-4-26B-A4B-it` | MoE | no flash kernel (SDPA, FlexAttention on sliding layers); no router balancing |
 | [Mistral 4 MoE](cookbooks/halo-mistral4-moe-cookbook.md) | `mistralai/Mistral-Small-4-119B-2603` | MoE | convert the fp8 release to bf16 first |
+| [Ministral 3](../agent-docs/models/ministral3.md) ↗ | `mistralai/Ministral-3-8B-Instruct-2512-BF16` | dense | composite VLM loaded whole; LoRA targets the language model by regex; no packing; no online RL |
 | [Laguna 2.1](cookbooks/halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1` | MoE | SDPA through `trust_remote_code: true`, and a flash pin is refused |
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | hybrid short-convolution layers |
 | [ZAYA1](cookbooks/halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | MoE | trains without gradient checkpointing, always |
@@ -45,7 +46,7 @@ LoRA and RL variants the family supports. If your family has one, start there.
 
 ## Multimodal checkpoints
 
-Gemma 4, Mistral 4, Command A+, Inkling, Inkling 2, GLM-5 Next, Step-3.7 Flash,
+Gemma 4, Mistral 4, Ministral 3, Command A+, Inkling, Inkling 2, GLM-5 Next, Step-3.7 Flash,
 Nemotron 3.5 Super VL, Qwen3.5/3.6, Qwen3.8-Flash-Next and Qwen3-VL are natively
 multimodal. Halo loads the full vision-and-text model and picks the data path from your
 dataset, not the checkpoint:
@@ -53,7 +54,9 @@ dataset, not the checkpoint:
 - Rows with images train through the VLM pipeline, with standard padding.
   Images can't be packed.
 - A text-only dataset on the same checkpoint trains through the text pipeline,
-  with packing available.
+  with packing available. Ministral 3 is the exception: keep packing off until a
+  GPU isolation row passes
+  ([Ministral 3 → Recipe settings](../agent-docs/models/ministral3.md#recipe-settings) ↗).
 
 To load a multimodal checkpoint as text-only, set `text_only_model: true`, as the
 Qwen3.8-Flash-Next and Nemotron 3.5 Super VL recipes do. Qwen3.5/3.6,

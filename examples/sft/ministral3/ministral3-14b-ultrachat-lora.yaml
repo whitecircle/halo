@@ -1,0 +1,60 @@
+# SFT — Ministral 3 14B LoRA on UltraChat 200K, FSDP2 on one 8-GPU node (base frozen, adapters mergeable after
+# training). The release is a dense mistral3 composite (Pixtral vision tower + ministral3 text tower).
+# Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 2,808 tok/s per rank, 64.6 GiB reserved on rank 0 and 66-70 GiB in
+# use across the GPUs.
+# See agent-docs/models/ministral3.md.
+# Launch: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: mistralai/Ministral-3-14B-Instruct-2512-BF16
+use_liger_kernel: false               # Liger has no applier for this class; on, the run only warns
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- LoRA ---
+use_peft: true
+lora_r: 64
+lora_alpha: 128
+# The language model's projections only. A name list (q_proj, ..., down_proj) also matches Pixtral's attention and
+# feed-forward, 168 more modules, and all-linear adapts the tower and the projector too.
+lora_target_modules: '.*language_model\.layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))'
+
+# --- Training ---
+per_device_train_batch_size: 4
+per_device_eval_batch_size: 4
+num_train_epochs: 1.0
+gradient_accumulation_steps: 2        # 4 x 2 x 8 GPUs = a 64-conversation effective batch
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+learning_rate: 1.0e-04
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Sequence Length & Packing ---
+max_length: 4096
+# Off until a flash isolation row shows packed documents stay apart on ministral3 (issue #225).
+packing: false
+
+# --- Output ---
+output_dir: checkpoints/sft-ministral3-14b-ultrachat-lora
+eval_strategy: steps
+eval_steps: 500
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 4
+
+# --- Tokens & chat template ---
+# [/INST] immediately precedes the assistant content, so it is the completions marker; the span ends at </s>.
+# The hub template adds its default system prompt to every conversation without one, UltraChat's included.
+assistant_message_template: "[/INST]"

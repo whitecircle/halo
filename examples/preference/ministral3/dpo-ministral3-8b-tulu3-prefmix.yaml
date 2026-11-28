@@ -1,0 +1,56 @@
+# DPO — Ministral 3 8B on the Tulu-3 preference mixture, FSDP2 on one 8-GPU node (reference model auto-loaded from
+# model_name_or_path).
+# Measured on 8x H200 (hopper-1.3.0rc2, 20 steps): 52.6 GiB reserved on rank 0 and 54-55 GiB in use across the GPUs.
+# See agent-docs/models/ministral3.md.
+# Launch: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --nproc_per_node=8 scripts/training/preference/dpo.py <this config>
+
+# --- Model ---
+model_name_or_path: mistralai/Ministral-3-8B-Instruct-2512-BF16
+use_liger_kernel: false               # Liger has no applier for this class; on, the run only warns
+
+# --- Dataset ---
+# The Tulu-3 mixture less the 940 of its 272,898 rows whose chosen or rejected reply is empty or blank: the hub template
+# refuses an empty assistant turn, and the run stops at the template map. Write the file once:
+#   python -c "from datasets import load_dataset; ok = lambda r: all((m['content'] or '').strip() for s in ('chosen', 'rejected') for m in r[s] if m['role'] == 'assistant'); load_dataset('allenai/llama-3.1-tulu-3-8b-preference-mixture', split='train').filter(ok).select_columns(['prompt', 'chosen', 'rejected']).to_json('tulu3-prefmix-nonempty.jsonl')"
+dataset: path/to/tulu3-prefmix-nonempty.jsonl
+test_size: 0.005
+
+# --- DPO Hyperparameters ---
+beta: 0.1
+loss_type: sigmoid
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+num_train_epochs: 2
+gradient_accumulation_steps: 8
+gradient_checkpointing_kwargs:
+  use_reentrant: false
+learning_rate: 5.0e-07
+lr_scheduler_type: cosine
+warmup_steps: 20
+
+# --- Sequence Lengths ---
+# DPO has no training-side prompt cap: TRL truncates prompt + completion to max_length keep_start,
+# so an over-long prompt eats its own completion. generation_max_prompt_length bounds eval generation only.
+max_length: 4096
+generation_max_prompt_length: 2048
+
+# --- Output ---
+output_dir: checkpoints/dpo-ministral3-8b-tulu3-prefmix
+save_steps: 200
+eval_strategy: steps
+eval_steps: 200
+save_total_limit: 3
+save_only_model: true
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+
+# --- Data ---
+dataloader_num_workers: 2
+
+# --- PEFT (optional) ---
+use_peft: false
