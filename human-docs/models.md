@@ -54,7 +54,9 @@ dataset, not the checkpoint:
 - Rows with images train through the VLM pipeline, with standard padding.
   Images can't be packed.
 - A text-only dataset on the same checkpoint trains through the text pipeline,
-  with packing available.
+  with packing available. Ministral 3 is the exception: keep packing off until a
+  GPU isolation row passes
+  ([Ministral 3 → Recipe settings](../agent-docs/models/ministral3.md#recipe-settings) ↗).
 
 To load a multimodal checkpoint as text-only, set `text_only_model: true`, as the
 Qwen3.8-Flash-Next and Nemotron 3.5 Super VL recipes do. Qwen3.5/3.6,

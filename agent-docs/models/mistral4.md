@@ -1,6 +1,6 @@
-# Mistral4 (text backbone of Mistral3 VLMs)
+# Mistral4 (text backbone of Mistral Small 4)
 
-`Mistral4ForCausalLM` is the text side of `Mistral3ForConditionalGeneration` — the LM in `mistralai/Mistral-Small-4-*` and any `mistral3` VLM. It is a DeepSeek-V3 clone: softmax + group-topk routing with an always-on shared expert, MLA (multi-head latent attention) with llama-4 logarithmic position scaling, and YARN RoPE.
+`Mistral4ForCausalLM` is the text side of `Mistral3ForConditionalGeneration` — the LM in `mistralai/Mistral-Small-4-*` and any other `mistral3` VLM with a `mistral4` text tower. It is a DeepSeek-V3 clone: softmax + group-topk routing with an always-on shared expert, MLA (multi-head latent attention) with llama-4 logarithmic position scaling, and YARN RoPE. A `mistral3` VLM with a dense text tower is not this model: [Ministral 3](ministral3.md) wraps `ministral3`, Mistral Small 3.x wraps `mistral`.
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). The Mistral4 suite runs EP+ETP as `ep_size=2, expert_tp_size=4`; the legal sibling `ep4+etp2` is not in it. EP+CP is a valid shape whose only GPU test on this model is a tiny-model LoRA row: `tests/gpu/trainers/lora/test_lora_merged_save_resume.py --family mistral4 --cp-size 2` (ep2+cp2).
 
