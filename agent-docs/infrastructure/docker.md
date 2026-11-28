@@ -57,8 +57,25 @@ Load-bearing flags:
   off the small root FS. None is a code default: unset, they fall back to `~/.cache/huggingface`, the
   system `/tmp` and `~/.cache/halo`. Keep `TMPDIR` a short path: a multiprocessing socket under it
   caps at 108 bytes ([Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)).
-- `--ipc=host`, `--shm-size=128g` and the two `ulimit`s are required by NCCL and the DataLoader.
+- `--ipc=host` shares the host's IPC namespace. A trainer and a rollout server in separate containers on
+  one host need it for weight sync, and `docker-compose.vllm.yml` sets `ipc: host` on both. The
+  container then gets the host's `/dev/shm`, so `--shm-size` has no effect beside it.
+- `--shm-size=128g` sizes `/dev/shm` in a container with its own IPC namespace, where docker's default
+  is 64 MB. NCCL creates its shared-memory segments there, and DataLoader workers
+  (`dataloader_num_workers` above 0) pass every batch through it. A worker whose batch does not fit
+  logs `unable to allocate shared memory(shm)` and the run hangs.
+- `--ulimit memlock=-1` lifts the locked-memory limit. NCCL's container guidance asks for it beside a
+  larger `/dev/shm`, and the EFA compose overlays set it on every service.
+- `--ulimit stack=67108864` holds the stack limit at 64 MiB, which the environment sandbox's compiled
+  programs take as their cap ([Sandbox → Limits](../training-methods/async-grpo/environments/sandbox.md#limits)).
 - `--cap-add=SYS_PTRACE` lets py-spy attach for hang triage (`halo run py-spy-diag`).
+
+One process on one GPU needs neither `--ipc=host` nor `--ulimit memlock=-1`. It needs `--shm-size`
+only when the batches its DataLoader workers hold at once do not fit in docker's 64 MB `/dev/shm`:
+that is `dataloader_num_workers` × `dataloader_prefetch_factor` batches, and the factor defaults to 2.
+It keeps `--ulimit stack=67108864` when an environment grades compiled programs in the local sandbox,
+because their stack cap is the container's hard stack limit, which is otherwise whatever the docker
+daemon or the platform sets.
 
 `HALO_SCRATCH` is the one knob for that volume: the Makefile derives the mount and the four variables
 from it, the dev container requires it, and `docker-compose.vllm.yml` mounts it. Unset, the Makefile
@@ -313,7 +330,47 @@ means the container ran without `--gpus all`. Containers carry no AWS credential
 
 ## Cloud and dev setup
 
-- **RunPod** — override the CMD with `sleep infinity`: the default CMD prints a banner and exits, which
-  stops a pod ([RunPod](runpod.md)).
+- **RunPod** — override the CMD with `sleep infinity`: the default CMD prints `Halo ready.` and exits,
+  which stops a pod ([RunPod](runpod.md)).
 - **SkyPilot / Nomad** — [SkyPilot](skypilot.md), [Nomad](nomad.md).
 - **VS Code, dev container, host `.venv`** — [Development Environment](../contributing/development-environment.md).
+
+### Platforms that start the container
+
+Modal and similar platforms start the container themselves and take no `docker run` flags. The image's
+ENTRYPOINT is NGC's `nvidia_entrypoint.sh`, which prints the NGC banner and then runs the command it is
+given (`exec "$@"`), or bash when it gets none. The default CMD prints `Halo ready.` and exits, so a
+platform that runs the CMD stops there. Give it a command instead, such as `sleep infinity` on RunPod.
+Clear the entrypoint only to drop the banner.
+
+`halo launch` and `halo run` work from any directory, because the package is installed editable at
+`/workspace`. `halo launch` resolves a relative config against your directory first and the repo root
+second, and runs the script from the repo root. Every recipe sets a relative `output_dir`
+(`checkpoints/<run>`), so its checkpoints land under `/workspace` inside the container. Pass
+`--output_dir` on a mounted volume so they outlast it. Check `df -h /dev/shm` in the platform's
+container before you raise `dataloader_num_workers` ([Standard training launch](#standard-training-launch)).
+
+A minimal Modal app that runs one SFT recipe and keeps its checkpoints on a volume. Most recipes report to
+Weights & Biases, so it passes `--report_to=none` to run without a key:
+
+```python
+import subprocess
+
+import modal
+
+image = modal.Image.from_registry("public.ecr.aws/whitecircle/halo:hopper").entrypoint([])  # drops the banner
+app = modal.App("halo-sft", image=image)
+volume = modal.Volume.from_name("halo-runs", create_if_missing=True)
+
+
+@app.function(gpu="H100", volumes={"/vol": volume}, timeout=60 * 60)
+def train():
+    subprocess.run(
+        [
+            "halo", "launch", "sft", "examples/sft/<family>/<recipe>.yaml",
+            "--output_dir=/vol/runs/<run>", "--report_to=none",
+        ],
+        check=True,
+    )
+    volume.commit()
+```

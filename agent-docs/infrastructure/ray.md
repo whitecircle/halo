@@ -203,8 +203,10 @@ logprobs, and, under
 the routing mask, which stays base64-encoded end to end and so remains compact on this path. The
 trainer gathers lightweight per-episode summaries across ranks, never full trajectories.
 
-The object store itself runs at Ray's defaults (~30% of RAM, capped by `/dev/shm`); the standard
-`--shm-size=128g` launch covers it, and the toolkit configures no spilling.
+The object store itself runs at Ray's defaults (~30% of RAM, capped by `/dev/shm`), and the toolkit
+configures no spilling. The standard launch passes `--ipc=host`, so the container sees the host's
+`/dev/shm`, whose size caps the store, and `--shm-size` does not apply
+([Docker → Standard training launch](docker.md#standard-training-launch)).
 
 ## Monitoring
 

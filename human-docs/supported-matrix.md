@@ -34,7 +34,8 @@ Pull the prebuilt images or build them from source:
 ## Attention backends
 
 Leave `attn_implementation` unset unless a recipe pins it. Halo picks FA4 on
-Blackwell, FA3 on Hopper and FA2 as the fallback, except:
+Blackwell, FA3 on Hopper and FA2 as the fallback (SDPA on a GPU older than Ampere,
+which no FlashAttention build runs on), except:
 
 | Family | Backend |
 | --- | --- |

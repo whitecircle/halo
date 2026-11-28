@@ -119,8 +119,12 @@ docker run --rm -it --gpus all \
     halo:blackwell bash
 ```
 
-- `--ipc=host`, `--shm-size=128g` and the two ulimits are required. NCCL and the
-  dataloaders fail without them.
+- `--ipc=host`, `--shm-size=128g` and the two ulimits serve NCCL across GPUs, a rollout
+  server in a second container and the environment sandbox. If you run one process on one
+  GPU, you need none of them, with two exceptions. Raise `--shm-size` when the batches your
+  DataLoader workers hold at once (workers × prefetch factor) outgrow docker's 64 MB
+  `/dev/shm`, and keep the stack ulimit when an environment grades compiled programs in the
+  local sandbox ([what each flag does](../agent-docs/infrastructure/docker.md#standard-training-launch) ↗).
 - `--cap-add=SYS_PTRACE` lets py-spy attach to a hung run. Without it, that works
   only on hosts where `kernel.yama.ptrace_scope` is 0.
 - For an RL run, add `--network host` so the trainer can reach a rollout server

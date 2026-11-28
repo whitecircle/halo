@@ -60,14 +60,9 @@ job "halo-qwen3-4b-lora" {
         # /workspace ships in the image; `volumes` needs client docker.volumes.enabled = true.
         volumes = ["${var.scratch_host_path}:${var.scratch_host_path}"]
 
-        # Single-process, so host IPC and host networking buy nothing. /dev/shm still has to hold the
-        # dataloader workers' tensors — docker's 64 MB default is what breaks them — and the loader
-        # pins that memory, so the memlock ceiling still has to come off.
+        # Single-process, so it takes no host IPC, host networking or memlock ulimit. /dev/shm still has
+        # to hold the dataloader workers' tensors, which docker's 64 MB default cannot.
         shm_size = 17179869184 # bytes = 16 GiB, and it counts against resources.memory
-
-        ulimit {
-          memlock = "-1"
-        }
 
         command = "bash"
         args = ["-lc", <<-EOT

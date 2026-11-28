@@ -87,7 +87,7 @@ the served model and assert the served policy moved, so server and trainer hold 
 `SERVER_TIER` defaults to `not moe and not untied_dense` (serve `Qwen/Qwen3-0.6B`); the MoE passes restart the vLLM server on
 `Qwen/Qwen3-30B-A3B-Instruct-2507` for `SERVER_TIER='moe and not gptoss'` and on
 `unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`, while SGLang's MoE pass serves gpt-oss alone
-(`SERVER_TIER=moe`). The vLLM `SERVER_TIER=untied_dense` pass serves `Qwen/Qwen3-8B` for the rows that train a LoRA adapter on `lm_head`, which need a head not tied to the input embedding. On either engine the `moe` marker also selects the per-family rows of
+(`SERVER_TIER=moe`). The vLLM `SERVER_TIER=untied_dense` pass serves `Qwen/Qwen3-8B` for the two dense `lora_head_fsdp_zero3` rows, whose LoRA adapter on `lm_head` needs a head not tied to the input embedding. On either engine the `moe` marker also selects the per-family rows of
 `trainers/grpo/test_weight_push_exact.py`, which skip unless `HALO_TEST_PUSH_EXACT_FRESH` is set and the
 server serves the row's checkpoint. The vLLM server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a
 per-effort CoT budget, which draws a 400 without a reasoning parser (the target's health guard prints
@@ -254,7 +254,9 @@ are enforced by `tests/cpu/conventions/`.
 - **Cover the matrix and the rejections.** Markers select the tier (`core` or `full`), the world size
   (`1gpu 2gpu 4gpu 8gpu`, matching the row's `nproc`) and capabilities (`ep cp tp etp pp hsdp vlm lora
   moe` plus the model family); `vllm_server` / `sglang_server` need a live container and are always
-  `full`. A new parallelism mode needs a correctness test per supported combination *and* a test that the
+  `full`, and a server row's markers pick its `SERVER_TIER` pass: neither `moe` nor `untied_dense` for the
+  dense pass, `moe` for a MoE pass (with `gptoss` on a gpt-oss row), `untied_dense` for the untied-dense
+  one. A new parallelism mode needs a correctness test per supported combination *and* a test that the
   unsupported ones are rejected.
 
 ### Test knobs

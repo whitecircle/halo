@@ -13,7 +13,7 @@ import torch
 from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.utils import is_flash_attn_2_available
 
-from halo.hardware import is_blackwell_gpu, is_hopper_gpu
+from halo.hardware import is_blackwell_gpu, is_hopper_gpu, supports_flash_attention
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.models.attention.gpt_oss_sinks import (
     RESOLVED_SINKS_RESET_ATTR,
@@ -112,10 +112,18 @@ def preferred_flash_impl(*, allow_fa4: bool = True) -> str:
 
 
 def _detect_attention_impl() -> str:
-    """A broken (not absent) build warns, since nothing else would report the slower kernel."""
+    """``sdpa`` below SM80, where no FlashAttention build runs. A broken (not absent) build warns, since nothing else
+    would report the slower kernel."""
     if not torch.cuda.is_available():
         return "flash_attention_2"  # CPU host; the choice is re-validated against the model downstream
     preferred = preferred_flash_impl()
+    if preferred == "flash_attention_2" and not supports_flash_attention():
+        if is_global_main_process():
+            logger.info(
+                "sdpa is this GPU's attention backend (FlashAttention needs SM80 or newer); model-level checks may "
+                "move a model off it."
+            )
+        return "sdpa"
     detected, build_note = preferred, ""
     if preferred != "flash_attention_2":
         build = _FLASH_KERNEL_MODULES[preferred][-1]
@@ -306,7 +314,7 @@ def select_supported_attn_implementation(
         if dtype != torch.float32 and not has_head_dim_beyond_flash(model_config):
             if is_hopper_gpu() and _flash_build_imports("flash_attention_3"):
                 candidates.append("flash_attention_3")
-            if is_flash_attn_2_available():
+            if is_flash_attn_2_available() and supports_flash_attention():
                 candidates.append("flash_attention_2")
         candidates.append("flex_attention")
     if sdpa_ok:

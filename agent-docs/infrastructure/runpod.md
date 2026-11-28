@@ -21,8 +21,8 @@ With only EP active, `data_parallel_size = world_size` — EP is orthogonal to D
 - HuggingFace token for gated models, optionally a WandB key.
 
 The `halo:hopper` image ships everything the run needs, including the Mellanox NCCL defaults
-([Docker](docker.md)). Override the CMD with `sleep infinity` — the default CMD prints a
-banner and exits, which stops a RunPod pod.
+([Docker](docker.md)). Override the CMD with `sleep infinity` — the default CMD prints
+`Halo ready.` and exits, which stops a RunPod pod.
 
 ## Network setup
 

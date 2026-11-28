@@ -73,6 +73,9 @@ different collective (a **collective mismatch**), raised, or is still compiling 
    step, and a logging window with no applied step logs `loss: nan`. Past `max_consecutive_nonfinite_steps` in a
    row, or with weights already non-finite, it raises on every rank:
    [Trainer Architecture → Non-finite steps](../../agent-docs/reference/trainer-architecture.md#non-finite-steps).
+   Skips that recur on Hopper under a cuDNN before 9.26, with SDPA and more than one padded row per micro-batch,
+   on an image without the cuDNN SDPA guard, can be the cuDNN backward's:
+   [Troubleshooting](../../agent-docs/reference/troubleshooting.md).
 2. **Which model + attention impl?** When a head_dim-256 family (qwen3.5/3.6/Qwen3-Next) diverges on FA4, run
    `tests/gpu/kernels/test_fa4_hd256_strided_inputs.py` and `test_fa4_hd256_family_parity.py --family <family>` on
    the installed FA4: they hold its head_dim-256 path to FA2's error on the strided q/k/v these families hand it.
