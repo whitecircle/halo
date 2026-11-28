@@ -1,6 +1,8 @@
 """MCP client environment: connects to MCP servers and exposes their tools in OpenAI-compatible format."""
 
 import asyncio
+import base64
+import json
 import logging
 import os
 import shutil
@@ -86,6 +88,50 @@ def _require_transport(owner: str, transport: str, server_url: str | None, **spa
             f"{owner}: {set_options} configure a spawned server, but transport={transport!r} connects to one running "
             f"server and spawns none. Use the stdio transport, or drop them."
         )
+
+
+def _format_binary_data(data: str) -> str:
+    try:
+        size = len(base64.b64decode("".join(data.split()), validate=True))
+    except ValueError:
+        return f"[Binary data: {len(data)} base64 chars]"
+    return f"[Binary data: {size} bytes]"
+
+
+def _format_resource_link(item: Any) -> str:
+    header = f"[Resource: {item.name} ({item.uri})]"
+    return f"{header} {item.description}" if item.description else header
+
+
+def _format_mcp_tool_result(result: Any) -> str:
+    """Format an MCP ``CallToolResult``, appending ``structuredContent`` JSON when no nonempty ``TextContent``
+    block is present."""
+    content_parts: list[str] = []
+    has_text = False
+    for c in result.content or ():
+        if (text := getattr(c, "text", None)) is not None:
+            content_parts.append(text)
+            if text:
+                has_text = True
+        elif (data := getattr(c, "data", None)) is not None:
+            content_parts.append(_format_binary_data(data))
+        elif (resource := getattr(c, "resource", None)) is not None:
+            if (resource_text := getattr(resource, "text", None)) is not None:
+                content_parts.append(resource_text)
+            elif (blob := getattr(resource, "blob", None)) is not None:
+                content_parts.append(_format_binary_data(blob))
+            else:
+                content_parts.append(str(c))
+        elif getattr(c, "type", None) == "resource_link":
+            content_parts.append(_format_resource_link(c))
+        else:
+            content_parts.append(str(c))
+
+    structured = getattr(result, "structuredContent", None)
+    if not has_text and structured is not None:
+        content_parts = [part for part in content_parts if part]
+        content_parts.append(json.dumps(structured, ensure_ascii=False))
+    return "\n".join(content_parts)
 
 
 class _ServerConnection:
@@ -320,16 +366,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         session = await self._call_session()
         result = await session.call_tool(name, arguments=arguments)
 
-        content_parts = []
-        for c in result.content:
-            if hasattr(c, "text"):
-                content_parts.append(c.text)
-            elif hasattr(c, "data"):
-                content_parts.append(f"[Binary data: {len(c.data)} bytes]")
-            else:
-                content_parts.append(str(c))
-
-        content = "\n".join(content_parts)
+        content = _format_mcp_tool_result(result)
         if result.isError:
             raise RuntimeError(content or f"MCP tool {name} returned an error")
         return content
