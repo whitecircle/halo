@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import Any
 
+import httpx
 import torch
 from huggingface_hub import get_safetensors_metadata, try_to_load_from_cache
 from huggingface_hub.errors import NotASafetensorsRepoError, OfflineModeIsEnabled
@@ -197,15 +198,15 @@ def resolve_checkpoint_weights(checkpoint_dir: str) -> CheckpointWeights:
 
 def checkpoint_module_paths(path: str, *, revision: str | None = None) -> frozenset[str] | None:
     """The module paths a checkpoint stores a tensor under (each key less its last segment), off its index or
-    safetensors headers alone: a local directory's, else a Hub repo's at ``revision``, from this host's cache where it
-    holds the index or the single file, else through ``get_safetensors_metadata``, which downloads no weight.
-    ``None`` for a checkpoint that stores no safetensors, or a Hub repo this host cannot read offline."""
+    safetensors header alone: a local directory's (the index opens no shard, so one missing does not matter), else a
+    Hub repo's at ``revision``, from this host's cache where it holds the index or the single file, else through
+    ``get_safetensors_metadata``, which downloads no weight. ``None`` for a checkpoint that stores no safetensors, or a
+    Hub repo this host cannot reach (offline mode, or no network)."""
     if os.path.isdir(path):
-        if not os.path.isfile(os.path.join(path, SAFETENSORS_INDEX_FILE)) and not glob.glob(
-            os.path.join(path, SAFETENSORS_FAMILY_GLOB)
-        ):
+        weights = resolve_checkpoint_weights(path)
+        if not weights.shard_files:
             return None
-        keys = [key for _shard, _reader, key in iter_checkpoint_shard_entries(path)]
+        keys = list(weights.weight_map)
     elif isinstance(index := try_to_load_from_cache(path, SAFETENSORS_INDEX_FILE, revision=revision), str):
         with open(index, encoding="utf-8") as handle:
             keys = list(json.load(handle)["weight_map"])
@@ -215,7 +216,7 @@ def checkpoint_module_paths(path: str, *, revision: str | None = None) -> frozen
     else:
         try:
             keys = list(get_safetensors_metadata(path, revision=revision).weight_map)
-        except (NotASafetensorsRepoError, OfflineModeIsEnabled):
+        except (NotASafetensorsRepoError, OfflineModeIsEnabled, httpx.TransportError):
             return None
     return frozenset(key.rpartition(".")[0] for key in keys)
 

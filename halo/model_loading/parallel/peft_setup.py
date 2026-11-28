@@ -31,11 +31,10 @@ if TYPE_CHECKING:
     # Annotation only: the entry scripts' argument layer sits beside this package.
     from halo.configs.script_arguments import ModelArguments
 
+_WEIGHT_IN_A_CHILD = "hold their weight in a child module"
+
 # The forward-probe verdict cache key: a class can be grouped at one width and plain at another.
 _ProbeKey = tuple[type, int, int]
-
-
-_WEIGHT_IN_A_CHILD = "hold their weight in a child module"
 
 
 def split_expert_lora_targets(model_config: ModelArguments) -> ExpertLoraSpec | None:
@@ -161,10 +160,12 @@ def _unadaptable_reason(module: torch.nn.Module, verdicts: dict[_ProbeKey, bool]
 
 
 def _weight_child(module: torch.nn.Module) -> str | None:
-    """The child a wrapper keeps its weight in, ``linear`` first (Inkling 2's projection modules since
-    transformers 5.24)."""
+    """The child a wrapper keeps its weight in: ``linear`` (Inkling 2's projection modules since transformers 5.24),
+    else the only child holding a weight. A container of several projections (``mlp``, ``self_attn``) names none."""
     holders = [name for name, child in module.named_modules() if name and any(True for _ in child.parameters(False))]
-    return "linear" if "linear" in holders else next(iter(holders), None)
+    if "linear" in holders:
+        return "linear"
+    return holders[0] if len(holders) == 1 else None
 
 
 def _excluded_detail(model: torch.nn.Module, excluded: dict[str, list[str]]) -> str:

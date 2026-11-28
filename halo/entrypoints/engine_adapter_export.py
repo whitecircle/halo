@@ -27,7 +27,7 @@ from halo.model_loading.model_preparation import (
     resolve_build_config,
     resolve_text_only_config,
 )
-from halo.models.moe.family_specs import CompositeTextLayout, find_moe_family_spec_for_config
+from halo.models.moe.family_specs import composite_text_layout, find_moe_family_spec_for_config
 from halo.trainers.grpo.rollout.adapter_sync import (
     build_adapter_serving,
     build_engine_adapter,
@@ -110,8 +110,7 @@ def _checkpoint_spelling(base, *, text_only: bool) -> Callable[[str], str]:
     under the wrapper's prefix (the family's ``text_only_layout``, else transformers' ``model.language_model.``)."""
     if not text_only:
         return lambda path: path
-    spec = find_moe_family_spec_for_config(base.config)
-    layout = (spec.text_only_layout if spec is not None else None) or CompositeTextLayout()
+    layout = composite_text_layout(find_moe_family_spec_for_config(base.config))
     return lambda path: layout.to_composite_key(f"{path}.")[:-1]
 
 
@@ -194,8 +193,8 @@ def export_engine_adapter(
     stored = checkpoint_module_paths(base_path, revision=revision)
     if stored is None:
         logger.warning(
-            f"{base_path} stores no safetensors this host can read, so the adapter's module names are not checked "
-            f"against its keys."
+            f"{base_path} stores no safetensors this host can read, or its Hub repo cannot be reached from here, so "
+            f"the adapter's module names are not checked against its keys."
         )
     elif unheld := hub_spellings_absent_from_checkpoint(
         base, adapter.module_names, stored, _checkpoint_spelling(base, text_only=loaded.text_only)

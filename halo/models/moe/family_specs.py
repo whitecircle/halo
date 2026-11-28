@@ -464,6 +464,12 @@ def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
     return None
 
 
+def composite_text_layout(spec: MoEFamilySpec | None) -> CompositeTextLayout:
+    """Where a multimodal checkpoint keeps its text tower: the family's ``text_only_layout``, else transformers'
+    ``model.language_model.``."""
+    return (spec.text_only_layout if spec is not None else None) or CompositeTextLayout()
+
+
 def attention_reads_row_positions(config) -> bool:
     """Read off the text tower's own type, since the composite ``mistral3`` also wraps a dense ``mistral`` tower."""
     spec = find_moe_family_spec(getattr(text_config(config), "model_type", None)) if config is not None else None

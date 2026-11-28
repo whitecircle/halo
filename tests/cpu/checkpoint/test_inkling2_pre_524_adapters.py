@@ -5,14 +5,18 @@ refuses any hub spelling the base's checkpoint stores no tensor under."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import httpx
+import huggingface_hub
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 
-from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+import halo.checkpoint.reading as reading
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE
 from halo.checkpoint.parallel.adapters import restore_adapters, save_peft_adapters
 from halo.checkpoint.reading import checkpoint_module_paths
 from halo.checkpoint.tools.adapter_merge import load_base_for_adapter
@@ -35,6 +39,8 @@ _ATTENTION = r".*language_model\.layers\.\d+\.self_attn\.(q_proj|k_proj|v_proj|r
 _RECIPES = {"attention": (None, _ATTENTION), "expert": (_SPEC, ["o_proj.linear"])}
 _REFUSED = r"saved on Halo 1\.3\.0rc2, which shipped transformers 5\.23"
 _LAYER = "model.language_model.layers.0.self_attn"
+_HUB_O = "model.llm.layers.0.attn.wo_ud"
+_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _trained(base_dir: Path, recipe: str):
@@ -158,6 +164,71 @@ def test_a_base_without_safetensors_has_no_key_set(tmp_path):
     (tmp_path / "base").mkdir()
     torch.save({}, tmp_path / "base" / "pytorch_model.bin")
     assert checkpoint_module_paths(str(tmp_path / "base")) is None
+
+
+def _index(directory: Path) -> None:
+    weight_map = {
+        f"{_HUB_O}.weight": "model-00001-of-00002.safetensors",
+        "lm_head.weight": "model-00002-of-00002.safetensors",
+    }
+    (directory / SAFETENSORS_INDEX_FILE).write_text(json.dumps({"metadata": {}, "weight_map": weight_map}))
+
+
+def test_a_local_base_is_read_off_its_index_without_opening_a_shard(tmp_path):
+    """A directory holding the index and none of its shards still has a key set, so the export goes on to the
+    loader's own message for what it lacks."""
+    (tmp_path / "base").mkdir()
+    _index(tmp_path / "base")
+    assert checkpoint_module_paths(str(tmp_path / "base")) == {_HUB_O, "lm_head"}
+
+
+@pytest.fixture
+def hub_cache(tmp_path, monkeypatch):
+    """An empty Hub cache of this test's own, so neither the host's cache nor the network answers for it."""
+    cache = tmp_path / "hub"
+    cache.mkdir()
+    monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_CACHE", str(cache))
+    return cache
+
+
+def _snapshot(cache: Path, repo_id: str) -> Path:
+    repo = cache / f"models--{repo_id.replace('/', '--')}"
+    (repo / "refs").mkdir(parents=True)
+    (repo / "refs" / "main").write_text(_COMMIT)
+    snapshot = repo / "snapshots" / _COMMIT
+    snapshot.mkdir(parents=True)
+    return snapshot
+
+
+def _no_network(*_args, **_kwargs):
+    raise AssertionError("read through the network although this host's cache holds the file")
+
+
+@pytest.mark.parametrize("layout", ["index", "single"])
+def test_a_hub_base_is_read_off_what_this_hosts_cache_holds(hub_cache, monkeypatch, layout):
+    monkeypatch.setattr(reading, "get_safetensors_metadata", _no_network)
+    snapshot = _snapshot(hub_cache, "halo-test/cached")
+    if layout == "index":
+        _index(snapshot)
+        expected = {_HUB_O, "lm_head"}
+    else:
+        save_file({f"{_HUB_O}.weight": torch.zeros(1)}, str(snapshot / SAFETENSORS_WEIGHTS_FILE))
+        expected = {_HUB_O}
+    assert checkpoint_module_paths("halo-test/cached") == expected
+
+
+def _unreachable(*_args, **_kwargs):
+    raise httpx.ConnectError("[Errno 101] Network is unreachable")
+
+
+@pytest.mark.parametrize("cause", ["offline", "no_network"])
+def test_a_hub_base_this_host_cannot_reach_has_no_key_set(hub_cache, monkeypatch, cause):
+    """Not in the cache and not reachable: the export skips the check with its warning instead of failing."""
+    if cause == "offline":
+        monkeypatch.setattr(huggingface_hub.constants, "HF_HUB_OFFLINE", True)
+    else:
+        monkeypatch.setattr(reading, "get_safetensors_metadata", _unreachable)
+    assert checkpoint_module_paths("halo-test/uncached") is None
 
 
 if __name__ == "__main__":

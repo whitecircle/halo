@@ -13,6 +13,7 @@ from peft import LoraConfig, get_peft_model
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
+from transformers.models.qwen3 import Qwen3Config, Qwen3ForCausalLM
 
 import halo.model_loading.parallel.peft_setup as peft_setup
 from halo.configs.script_arguments import ModelArguments
@@ -108,6 +109,44 @@ def test_a_wrapper_refusal_names_the_child_linear_to_target():
         build_peft_config(model, _model_config(targets=["o_proj"]))
 
     assert "whose weight is in its child linear: target o_proj.linear" in str(refused.value)
+
+
+class _SoleChildWrapper(nn.Module):
+    def __init__(self, width: int = 8):
+        super().__init__()
+        self.inner = nn.Linear(width, width, bias=False)
+
+
+class _SoleChildAttention(nn.Module):
+    def __init__(self, width: int = 8):
+        super().__init__()
+        self.q_proj = _SoleChildWrapper(width)
+
+
+def test_a_wrapper_refusal_names_its_only_weight_holder():
+    with pytest.raises(ValueError, match="PEFT can adapt none of them") as refused:
+        build_peft_config(_SoleChildAttention(), _model_config(targets=["q_proj"]))
+
+    assert "whose weight is in its child inner: target q_proj.inner" in str(refused.value)
+
+
+@pytest.mark.parametrize("container", ["mlp", "self_attn"])
+def test_a_container_of_several_projections_names_no_child(container):
+    """Any one of ``mlp``'s projections would be an arbitrary pick, so the refusal names none."""
+    config = Qwen3Config(
+        vocab_size=64,
+        hidden_size=16,
+        intermediate_size=32,
+        num_hidden_layers=1,
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        head_dim=8,
+    )
+
+    with pytest.raises(ValueError, match="hold their weight in a child module") as refused:
+        build_peft_config(Qwen3ForCausalLM(config), _model_config(targets=[container]))
+
+    assert "whose weight is in its child" not in str(refused.value)
 
 
 def test_unclipped_wrapper_is_excluded_too():
