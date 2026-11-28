@@ -31,6 +31,13 @@ schema. Array `items`, nested objects and `anyOf` survive. Halo drops the `$sche
 checks the declared properties, so calls with extra keys allowed by `additionalProperties` or `patternProperties`
 are refused before they reach the server. A call that hangs returns a tool error after 120 s.
 
+Tool results reach the model as newline-joined text. `TextContent` blocks and embedded text resources pass
+through verbatim, resource links format their name, URI and description, and images, audio and embedded blobs
+appear as `[Binary data: N bytes]` with their decoded byte size (falling back to `[Binary data: N base64 chars]`
+when decoding fails). When a result has no nonempty `TextContent` block and carries `structuredContent`, Halo
+appends its JSON (or returns it alone when `content` is empty), and `isError` raises the formatted text as a
+tool error.
+
 Environmental GRPO discovers tools at startup for the context-window check and for trainer-side prompt renders.
 The training leader shares its schema with its TP/ETP group. Each probe closes its discovery connection before
 continuing, without starting episode servers. Startup fails if discovery fails or returns no tools. The server

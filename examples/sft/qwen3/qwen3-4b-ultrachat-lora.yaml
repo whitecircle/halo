@@ -1,4 +1,6 @@
 # SFT — Qwen3-4B LoRA on UltraChat 200K (base frozen, adapters mergeable after training).
+# Peaks at 25.4 GiB allocated as written (batch 4). On a 24 GB GPU add --per_device_train_batch_size=1
+#   --gradient_accumulation_steps=16: 12.8 GiB peak, the same 16 packed rows per optimizer step.
 # Launch: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True python scripts/training/sft.py <this config>
 #   or: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml scripts/training/sft.py <this config>
 
