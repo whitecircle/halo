@@ -69,6 +69,10 @@ _INDEXER_FIELDS = (
 # Read before ``config.layer_types``, as a sliced pipeline stage re-bases list positions.
 _LAYER_TYPE_ATTRS = ("layer_type", "attention_type", "block_type")
 
+# Stamped by install_local_forward on ungathered colwise TP projections.
+TP_OUTPUT_SHARD_SIZE_ATTR = "_halo_tp_output_shard_size"
+_QUERY_PROJECTION_ATTRS = ("q_proj", "q_b_proj")
+
 
 @dataclass(frozen=True)
 class LayerAttention:
@@ -371,10 +375,18 @@ def _module_window(module: torch.nn.Module) -> int | None:
     return get_config_field(module.config, "sliding_window") or None
 
 
+def _query_tp_shard_size(module: torch.nn.Module) -> int:
+    for name in _QUERY_PROJECTION_ATTRS:
+        proj = getattr(module, name, None)
+        if proj is not None:
+            return getattr(proj, TP_OUTPUT_SHARD_SIZE_ATTR, 1)
+    return 1
+
+
 def attention_call(module: torch.nn.Module) -> AttentionCall | None:
     if not getattr(module, "is_causal", False) or not hasattr(module, "num_key_value_groups"):
         return None
-    heads = _module_heads(module)
+    heads = _module_heads(module) // _query_tp_shard_size(module)
     head_dim = getattr(module, "qk_head_dim", None) or module.head_dim
     return AttentionCall(
         heads=heads,

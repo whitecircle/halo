@@ -190,8 +190,8 @@ def test_one_warmup_serves_a_step3p7_run():
 
 
 def test_a_tensor_parallel_share_of_the_heads_compiles_nothing():
-    """A TP rank's call carries its share of the heads, which the warm-up does not compile. Such a call must compile
-    nothing (Dynamo raises on any compile here) and match SDPA, while the module's own call runs FlexAttention."""
+    """On an unsharded module, a call carrying half the heads is not what the warm-up compiled: it must compile nothing
+    (Dynamo raises on any compile here) and match SDPA, while the module's own call runs FlexAttention."""
     name = register_flex_sliding_attention()
     torch.manual_seed(0)
     model = _step3p7(name).to(torch.bfloat16)
