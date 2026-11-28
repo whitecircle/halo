@@ -34,12 +34,13 @@ TP = 2
 DP = 2
 PACKED_LENGTHS = (150, 30, 90)
 HF_CASES = ("mistral", "cohere2", "olmo3")
-CASES = (*HF_CASES, "cohere2_moe")
+CASES = (*HF_CASES, "cohere2_moe", "mistral4")
 EXPECTED_HEADS = {
     "mistral": (2, 1),
     "cohere2": (2, 1),
     "olmo3": (4, 2),
     "cohere2_moe": (2, 1),
+    "mistral4": (4, 4),
 }
 
 
