@@ -17,7 +17,7 @@ from halo.models.attention.layout import (
     has_linear_attention_layers,
 )
 from halo.models.introspection.config_access import config_sources, model_type_matches
-from halo.models.moe.family_specs import find_moe_family_spec_for_config
+from halo.models.moe.family_specs import find_moe_family_spec_for_config, find_moe_family_spec_for_tower
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -75,8 +75,9 @@ def has_dense_packing_leak(model_config) -> bool:
 
 
 def packing_isolation_is_measured(model_config) -> bool:
-    """Read through the text sub-config, so a composite resolves like its decoder."""
-    if find_moe_family_spec_for_config(model_config) is not None:
+    """Read through the text sub-config, so a composite resolves like its decoder: a dense tower under a MoE family's
+    composite spelling (``ministral3`` under ``mistral3``) counts only if its own type was measured."""
+    if find_moe_family_spec_for_tower(model_config) is not None:
         return True
     return any(
         getattr(source, "model_type", None) in _PACKING_MEASURED_DENSE_MODEL_TYPES

@@ -24,7 +24,7 @@ from halo.env import env_flag, weight_sync_gather_ahead
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
 from halo.models.fp8_rollout import Fp8RolloutPlan, RolloutWeightPrecision, fp8_rollout_refusal
-from halo.models.introspection.config_access import config_model_types, get_config_field
+from halo.models.introspection.config_access import config_model_types, get_config_field, text_config
 from halo.models.introspection.unwrapping import (
     base_transformers_model,
     plain_peft_param_name,
@@ -135,6 +135,38 @@ def _engine_loaded_buffer(layer: EPMoELayerBase, attr: str) -> torch.Tensor:
     return buffer
 
 
+_TRAIN_OFFLINE = (
+    "Online and environmental GRPO cannot train it. Train it offline: offline GRPO needs no server "
+    "(agent-docs/training-methods/grpo/offline.md)."
+)
+
+
+def _dense_tower_reason(config, family_layers: list[str]) -> str:
+    tower = text_config(config)
+    dense = f"its {getattr(tower, 'model_type', None)} text tower is dense" if tower is not config else "it is dense"
+    return (
+        f"model_type {sorted(config_model_types(config))} is a spelling of the MoE family {', '.join(family_layers)}, "
+        f"but this checkpoint has no routed experts: {dense}, and no weight sync into a dense model under that "
+        f"spelling has been validated (agent-docs/infrastructure/rollout-servers.md#construction-gates)."
+    )
+
+
+def dense_tower_refusal(config) -> str | None:
+    """Why no weight sync takes ``config``, read off the config alone: a dense model under a spelling a MoE family
+    claims (Ministral 3 and Devstral Small 2, ``mistral3`` over ``ministral3``). ``None`` for any other config. The
+    caller adds the remedy that fits it."""
+    family_layers = sorted({cls.__name__ for cls in ep_layer_classes_for_config(config)})
+    if not family_layers or has_routed_experts(config):
+        return None
+    return _dense_tower_reason(config, family_layers)
+
+
+def _reject_dense_tower_of_a_family_spelling(config) -> None:
+    """Ahead of the load :func:`_reject_stock_tree` would refuse after."""
+    if (reason := dense_tower_refusal(config)) is not None:
+        raise ValueError(f"{reason} {_TRAIN_OFFLINE}")
+
+
 def _reject_stock_tree(config, family_layers: list[str], client_cls) -> None:
     """A model with no live EP layer forwards its stock module tree, whose expert names no validated sync reads. Only a
     dense model with no MoE family's spelling passes."""
@@ -151,11 +183,7 @@ def _reject_stock_tree(config, family_layers: list[str], client_cls) -> None:
             f"expert_parallel_size 1 too."
         )
     if family_layers:
-        raise ValueError(
-            f"model_type {model_types} is a spelling of the MoE family {', '.join(family_layers)}, but this checkpoint "
-            f"has no routed experts: it is a dense tower under a composite the weight sync has no validated layout "
-            f"for. Train it offline, or sync its dense text checkpoint."
-        )
+        raise ValueError(f"{_dense_tower_reason(config, family_layers)} {_TRAIN_OFFLINE}")
     if routed:
         raise ValueError(
             f"model_type {model_types} is a MoE with no Halo EP family, so no expert layout has been validated against "
@@ -257,6 +285,7 @@ def reject_unsyncable_config(
     _reject_refused_families(
         [(registry, cls) for cls in ep_layer_classes_for_config(config)], client_cls, adapter_sync=adapter_sync
     )
+    _reject_dense_tower_of_a_family_spelling(config)
     _reject_unquantizable_rollout(config, backend, precision)
 
 

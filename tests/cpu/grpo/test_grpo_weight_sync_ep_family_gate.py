@@ -132,7 +132,8 @@ def test_adapter_sync_is_validated_for_inkling2_on_vllm_alone():
     }
     assert validated == {"EPInkling2MoELayer": ("vllm",)}
     for model_type in ("inkling2", "inkling2_text"):
-        config = SimpleNamespace(model_type=model_type)
+        # Routed experts, as the release's config has, so the dense-tower check passes it.
+        config = SimpleNamespace(model_type=model_type, num_experts=384)
         assert serves_family_as_adapter(config, "vllm") and not serves_family_as_adapter(config, "sglang")
         reject_unsyncable_config(config, "vllm", adapter_sync=True)
         for backend, adapter_sync in (("sglang", True), ("vllm", False)):

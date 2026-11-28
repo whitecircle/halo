@@ -25,7 +25,8 @@ _DOC_LINK = re.compile(r"(agent-docs/[\w./-]+\.md)#([\w-]+)")
 
 
 def _config(model_type: str) -> types.SimpleNamespace:
-    return types.SimpleNamespace(model_type=model_type)
+    """A config stub with routed experts, as each MoE family's config has, so the dense-tower check passes it."""
+    return types.SimpleNamespace(model_type=model_type, num_experts=8)
 
 
 def _run_with_everything_past_the_gate_failing(tmp_path, script: tuple[str, str], config) -> None:

@@ -77,7 +77,7 @@ All three weight each example by `1/group_size`, so every group counts equally.
 
 ### Row positions
 
-DeepSeek-V4 and Mistral 4 read a token's row index in attention: DeepSeek-V4's compressors cut KV windows at fixed indices, and Mistral 4's query scale steps at a position. A left-padded row would score as another row, so these families always take the chunked scorer, which forwards each row alone, trimmed to its real tokens (`attention_reads_row_positions` on the family spec). At `per_device_train_batch_size` above 1 that is one forward per row before each backward. PP's stages forward the collated batch whole, so DeepSeek-V4 under PP is refused above one row per batch.
+DeepSeek-V4 and the towers that scale queries by position (Mistral 4, Ministral 3 and Devstral Small 2) read a token's row index in attention: DeepSeek-V4's compressors cut KV windows at fixed indices, and the llama-4 query scale steps at a position. A left-padded row would score as another row, so these models always take the chunked scorer, which forwards each row alone, trimmed to its real tokens (`attention_reads_row_positions`: the family spec's flag, or a nonzero `llama_4_scaling_beta` in the tower's `rope_parameters`). At `per_device_train_batch_size` above 1 that is one forward per row before each backward. PP's stages forward the collated batch whole, so DeepSeek-V4 under PP is refused above one row per batch.
 
 ### Memory: chunked log-probs
 

@@ -32,7 +32,7 @@ from halo.trainers.grpo.rollout.adapter_sync import (
     engine_adapter_refusal,
     unservable_adapter_reasons,
 )
-from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
+from halo.trainers.grpo.rollout.weight_push import dense_tower_refusal, reject_unsyncable_config
 from halo.weight_sync.adapter_directory import publish_adapter_directory
 from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 
@@ -143,6 +143,11 @@ def export_engine_adapter(
         )
 
     base = load_base_for_adapter(adapter_dir, base_path, build_base, excuse_task_head=True, log=logger.info).model
+    if (dense := dense_tower_refusal(base.config)) is not None:
+        raise ValueError(
+            f"{dense} A run under rollout_adapter_sync refuses it too, so no engine directory is written for it. "
+            f"Serve it merged instead: merge_peft_adapters.py folds it into its base."
+        )
     reject_unsyncable_config(base.config, rollout_backend, adapter_sync=True)
     weight_file = find_adapter_weight_file(adapter_dir)
     if weight_file is None:
