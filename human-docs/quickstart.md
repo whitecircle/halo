@@ -10,7 +10,7 @@ runs. Check the hardware column before you launch.
 
 | Recipe | Config | Hardware |
 | --- | --- | --- |
-| Qwen3 LoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` | 1 GPU |
+| Qwen3 LoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` | 1 GPU (25.4 GiB peak; a 24 GB card needs the batch-1 override in the config header) |
 | Qwen3 QLoRA SFT | `examples/sft/qwen3/qwen3-4b-ultrachat-qlora.yaml` | 1 GPU (7.9 GiB peak; fits 24 GB) |
 | Qwen3 full SFT | `examples/sft/qwen3/qwen3-4b-ultrachat.yaml` | 1–8 GPUs |
 | GPT-OSS EP SFT | `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` | 2 × 8 GPUs as written (MoE, expert parallel) |
@@ -50,6 +50,9 @@ To change a field without editing the file, add it after the config path:
 `dataset` and `rewards`, can only be set in the YAML. `halo launch --list` prints
 every method. See [The `halo` CLI](cli.md) and
 [Writing a config](configuration.md).
+
+The three recipes above set `report_to: wandb`. If your `.env` holds no
+`WANDB_API_KEY`, add `--report_to=none` to the command.
 
 For a long run, detach the container. In the `docker run` command, replace `-it`
 with `-d --name myrun` and pass `bash -lc "halo launch ..."` as the command.

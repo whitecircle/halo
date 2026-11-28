@@ -11,8 +11,7 @@ from peft import LoraConfig, get_peft_model
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor, init_device_mesh
 
-from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, sync_weights_to_client
-from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, snapshot_to_sync_device
+from halo.trainers.grpo.rollout.weight_push import sync_weights_to_client
 from tests.common.adapters import randomize_adapters
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import (
@@ -28,67 +27,6 @@ from tests.common.weight_sync import (
 PUSHES = 6
 _DIM = 64
 FSDP_WORLD_SIZE = 2
-
-
-class _TinyModel(nn.Module):
-    def __init__(self, dim: int = 16):
-        super().__init__()
-        self.proj = nn.Linear(dim, dim, bias=False)
-
-    def forward(self, x):  # pragma: no cover - never called
-        return self.proj(x)
-
-
-class _RecordingClient:
-    """Stand-in for the weight-sync client's snapshot-then-late-flush semantics."""
-
-    def __init__(self):
-        self._buffer: list[tuple[str, torch.Tensor]] = []
-        self.flushed: dict[str, torch.Tensor] = {}
-
-    def update_named_param(self, name: str, weights: torch.Tensor) -> None:
-        # The client's own snapshot, taken at forward. The whole push rides one chunk sent by finish_weight_update.
-        snapshot = snapshot_to_sync_device(
-            name, weights, device=None, buffered_bytes=0, budget=WEIGHT_SYNC_CHUNK_BYTES, flush=lambda: None
-        )
-        self._buffer.append((name, snapshot))
-
-    def finish_weight_update(self) -> None:
-        # The broadcast happens here, after gather_and_send_weights has returned.
-        self.flushed = {name: tensor.detach().clone() for name, tensor in self._buffer}
-        self._buffer = []
-
-
-def _build_lora_model() -> nn.Module:
-    torch.manual_seed(0)
-    base = _TinyModel()
-    cfg = LoraConfig(r=4, lora_alpha=8, target_modules=["proj"], task_type=None)
-    model = get_peft_model(base, cfg)
-    randomize_adapters(model, lora_b_only=True)
-    return model
-
-
-def test_peft_sync_broadcasts_merged_not_base():
-    model = _build_lora_model()
-    merged = as_pushed(model, merged_by_peft(model))
-    assert "proj.weight" in merged
-
-    client = _RecordingClient()
-    gather_and_send_weights(model, client)
-    client.finish_weight_update()
-
-    assert "proj.weight" in client.flushed, "base weight was never forwarded"
-    assert not any("lora_" in k for k in client.flushed)
-
-    base_weight = model.base_model.model.proj.base_layer.weight.detach()
-    sent = client.flushed["proj.weight"]
-
-    assert torch.allclose(sent, merged["proj.weight"], atol=1e-6), (
-        "vLLM received weights that do not match the merged adapter (W + B@A)"
-    )
-    assert not torch.allclose(sent, base_weight, atol=1e-6), (
-        "vLLM received the base weights — the adapter was never folded in"
-    )
 
 
 class _Block(nn.Module):

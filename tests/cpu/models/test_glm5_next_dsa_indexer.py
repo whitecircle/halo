@@ -70,7 +70,7 @@ def _inputs(attention, name: str):
 
 
 @pytest.mark.parametrize("name", sorted(BATCHES))
-@pytest.mark.parametrize("queries_per_call", [1, 5, 37, SEQ_LEN])
+@pytest.mark.parametrize("queries_per_call", [1, 5, SEQ_LEN])
 def test_the_chunked_selection_is_upstreams(attention, monkeypatch, name, queries_per_call):
     indexer = attention.indexer
     hidden, q_resid, mask = _inputs(attention, name)

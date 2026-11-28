@@ -12,6 +12,7 @@ import re
 import shutil
 from collections.abc import Callable, Collection, Iterator
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import torch
 from huggingface_hub.errors import StrictDataclassError
@@ -78,10 +79,17 @@ _LORA_WEIGHT_KEY = re.compile(r"^(?P<module>.+)\.lora_(?P<half>[AB])\.(?P<param>
 _MAGNITUDE_KEY = re.compile(r"^(?P<module>.+)\.lora_magnitude_vector$")
 _EXPERT_KEY = re.compile(r"^(?P<layer>.+)\.experts\.(?P<attr>[^.]+)\.lora_(?P<half>[AB])$")
 _DELTA_BYTES_PER_ELEMENT = 4
+# Stored dtypes (safetensors names) whose values are the weight itself, so a delta adds to them.
+_FOLDABLE_DTYPES = frozenset({"F16", "BF16", "F32", "F64"})
 _LAYER_COPIES_IN_FLIGHT = 3
 
 # A key's fold: the merged tensor from the base's.
 Fold = Callable[[torch.Tensor], torch.Tensor]
+
+
+class _StoredTensor(NamedTuple):
+    shape: tuple[int, ...]
+    dtype: str
 
 
 @dataclass
@@ -319,7 +327,8 @@ def _classify_adapter_tensors(
     return linear, experts, replacements
 
 
-def _expert_spec(config: dict) -> ExpertLoraSpec:
+def resolve_expert_lora_spec(config: dict) -> ExpertLoraSpec:
+    """The native expert adapters' recipe a saved ``adapter_config.json`` records; raises for one that records none."""
     peft_type = config.get("peft_type")
     if peft_type == MIXED_EXPERT_LORA_PEFT_TYPE:
         config = config[EXPERT_LORA_CONFIG_KEY]
@@ -328,11 +337,12 @@ def _expert_spec(config: dict) -> ExpertLoraSpec:
     return ExpertLoraSpec(r=config["r"], alpha=config["lora_alpha"], use_rslora=bool(config.get("use_rslora")))
 
 
-def _base_tensor_shapes(base_dir: str) -> dict[str, tuple[int, ...]]:
-    return {
-        key: tuple(reader.get_slice(key).get_shape())
-        for _shard, reader, key in iter_checkpoint_shard_entries(base_dir)
-    }
+def _base_tensors(base_dir: str) -> dict[str, _StoredTensor]:
+    stored = {}
+    for _shard, reader, key in iter_checkpoint_shard_entries(base_dir):
+        view = reader.get_slice(key)
+        stored[key] = _StoredTensor(tuple(view.get_shape()), view.get_dtype())
+    return stored
 
 
 def _expert_layers(
@@ -347,8 +357,20 @@ def _expert_layers(
             f"there is no expert layout to fold its expert adapters through. Supported: "
             f"{', '.join(sorted(moe_model_types()))}."
         )
-    scaling = _expert_spec(config).scaling
+    scaling = resolve_expert_lora_spec(config).scaling
     return {name: _ExpertLayer(name, spec, scaling, attrs) for name, attrs in experts.items()}
+
+
+def _release_slot_dtypes(layers: dict[str, _ExpertLayer], base: dict[str, _StoredTensor]) -> dict[str, str]:
+    """The stored dtype of every tensor a family's packed release holds in place of an expert tensor the adapter
+    rewrites. The release spells the layer's prefix its own way, so the slots are found by their stem."""
+    stems = {
+        slot.hub_stem
+        for layer in layers.values()
+        for slot in layer.spec.frozen_expert_slots
+        if any(key.rpartition(".")[2] == slot.weight for key in layer.hub_shapes)
+    }
+    return {key: stored.dtype for key, stored in base.items() if key.rpartition(".")[2] in stems}
 
 
 def _stored_keys_by_live_name(
@@ -466,13 +488,19 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
     by_key = {key: layer for layer in layers.values() for key in layer.hub_shapes}
     sidecar = _read_balancing_sidecar(adapter_dir)
 
-    base_shapes = _base_tensor_shapes(base_dir)
+    base = _base_tensors(base_dir)
+    base_shapes = {key: stored.shape for key, stored in base.items()}
     remedy = _unmergeable_remedy(bool(experts))
     stored = (
         _stored_keys_by_live_name(base_dir, base_shapes, by_live_name, trust_remote_code, remedy)
         if by_live_name or sidecar
         else {}
     )
+    neutralizes_sinks = _has_neutralized_sinks(adapter_dir)
+    sinks = {key for key in base if is_sink_key(key)} if neutralizes_sinks else set()
+    rewritten = {stored[name] for name in by_live_name if name in stored} | (set(by_key) & set(base)) | sinks
+    stored_dtypes = {key: base[key].dtype for key in rewritten}
+    _reject_packed_tensors(base_dir, adapter_dir, stored_dtypes | _release_slot_dtypes(layers, base))
     absent = sorted((set(by_live_name) - set(stored)) | (set(by_key) - set(base_shapes)))
     if absent:
         raise ValueError(
@@ -506,8 +534,7 @@ def _plan_merge(adapter_dir: str, config: dict, base_dir: str, trust_remote_code
             f"The base's expert tensors are not in the family's export layout, so the adapter's deltas cannot be "
             f"folded by key: {mismatched[:3]}."
         )
-    neutralizes_sinks = _has_neutralized_sinks(adapter_dir)
-    if neutralizes_sinks and not any(is_sink_key(key) for key in base_shapes):
+    if neutralizes_sinks and not sinks:
         raise ValueError(
             f"{os.path.join(adapter_dir, TRAINING_PROVENANCE_FILE)} records neutralized GptOss attention sinks, and "
             f"the base at {base_dir} stores no sink tensor to neutralize: the adapter belongs to another base."
@@ -527,6 +554,21 @@ def _merged_tensors(base_dir: str, plan: _MergePlan) -> Iterator[tuple[str, torc
         yield key, plan.fold(key, tensor)
 
 
+def _reject_packed_tensors(base_dir: str, adapter_dir: str, rewritten: dict[str, str]) -> None:
+    """``rewritten`` maps each base tensor the merge would rewrite to its stored dtype. A packed tensor (NVFP4
+    nibbles, MXFP8 or fp8 bytes with their scales apart) is no weight, and a fold adds its delta to the stored
+    values at the stored dtype. A quantized base whose rewritten tensors are all stored as floats merges."""
+    packed = sorted(f"{key} ({dtype})" for key, dtype in rewritten.items() if dtype not in _FOLDABLE_DTYPES)
+    if not packed:
+        return
+    raise ValueError(
+        f"The adapter at {adapter_dir} rewrites {len(packed)} tensor(s) that the base at {base_dir} stores packed "
+        f"(e.g. {packed[:3]}), and a delta folded into the stored values gives no weight. The adapter has no merged "
+        f"export. An adapter trained over a packed release (frozen_quantized_experts) resumes training from its "
+        f"adapter directory; any other adapter merges over the base's bf16 conversion."
+    )
+
+
 def merge_adapter_streaming(
     adapter_dir: str,
     output_dir: str,
@@ -539,9 +581,10 @@ def merge_adapter_streaming(
     """Fold ``adapter_dir`` into its base and write ``output_dir``: tensors keep the base's stored dtype and key
     spelling, the base's config and tokenizer files are copied (the adapter's tokenizer replaces them), and the
     adapter config lands in ``original_adapter_config/``. A Hub base is read at the commit the adapter records, or at
-    ``base_revision``. Every key the adapter rewrites is resolved against the base before the first write, so a
-    refusal leaves no output. A run that trained with neutralized GptOss sinks gets them back: the base stores them
-    live, and the merge writes each at its dtype minimum."""
+    ``base_revision``. A rewrite of a tensor the base stores packed is refused, and every key the adapter rewrites is
+    resolved against the base before the first write, so a refusal leaves no output. A run that trained with
+    neutralized GptOss sinks gets them back: the base stores them live, and the merge writes each at its dtype
+    minimum."""
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
     config = read_adapter_config(adapter_dir)

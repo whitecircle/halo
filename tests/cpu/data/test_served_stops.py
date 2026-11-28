@@ -10,6 +10,7 @@ import pytest
 import torch
 from datasets import Dataset
 
+from halo.data.collators.factory import select_data_collator
 from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
@@ -41,6 +42,7 @@ from tests.common.tool_rounds import TOOL_ROUND, TOOLS
 from tests.common.trained_spans import trained_pieces, tree_row_labels
 
 GPT_OSS_FINAL = "<|start|>assistant<|channel|>final<|message|>"
+CHATML_FROM_THE_TURN_BEFORE = "<|im_end|>\n<|im_start|>assistant\n"
 GPT_OSS_HARMONY_TEMPLATE = REPO_ROOT / "jinja-templates" / "gpt-oss" / "gpt-oss-harmony.jinja"
 
 
@@ -105,7 +107,69 @@ def test_gpt_oss_opens_every_turn_at_a_special_token_all_special_ids_leaves_out(
     assert start not in tokenizer.all_special_ids, "the added-token read is moot: all_special_ids lists <|start|>"
     assert resolve_span_bounds(tokenizer, GPT_OSS_FINAL, eos_token_ids).turn_opener == start
     # A plain first token also opens markdown inside an answer, so it bounds no span.
-    assert find_turn_opener(tokenizer, tokenizer.encode("### Answer", add_special_tokens=False)) is None
+    assert find_turn_opener(tokenizer, tokenizer.encode("### Answer", add_special_tokens=False), eos_token_ids) is None
+
+
+def _two_answers_from_the_turn_before(route, tokenizer, eos_token_ids, conversation) -> list[str]:
+    """What ``route`` trains of ``conversation`` under a marker that starts at ``<|im_end|>``."""
+    served = {
+        "model_config": load_cached_config(QWEN3_0_6B),
+        "generation_config": load_cached_generation_config(QWEN3_0_6B),
+    }
+    if route == "self_distill":
+        collator = SelfDistillTextCollator(
+            tokenizer,
+            max_length=4096,
+            conversation_field="messages",
+            hint_template=None,
+            train_on_completions_only=True,
+            answer_field=None,
+            solution_field=None,
+            confidence_power=1.0,
+            response_prompt_template=CHATML_FROM_THE_TURN_BEFORE,
+            **served,
+        )
+        row = collator.encode_row({"messages": conversation})
+        return trained_pieces(tokenizer, row["input_ids"], row["labels"])
+    if route == "factory":
+        # The route an SFT run takes: its refusal of a setup that trains nothing probes the marker first.
+        collator = select_data_collator(
+            tokenizer,
+            train_on_completions_only=True,
+            assistant_message_template=CHATML_FROM_THE_TURN_BEFORE,
+            **served,
+        )
+    else:
+        collator_class = {
+            "padded": DataCollatorForCompletionOnlyLM,
+            "padding_free": DataCollatorWithFlatteningAndCompletionMask,
+        }[route]
+        collator = collator_class(
+            response_prompt_template=CHATML_FROM_THE_TURN_BEFORE, tokenizer=tokenizer, eos_token_ids=eos_token_ids
+        )
+    ids = tokenizer.apply_chat_template(conversation, tokenize=True, return_dict=True)["input_ids"]
+    labels = collator([{"input_ids": ids}])["labels"].flatten().tolist()
+    return trained_pieces(tokenizer, ids, labels)
+
+
+@pytest.mark.parametrize("route", ["padded", "padding_free", "self_distill", "factory"])
+def test_a_marker_written_from_the_turn_before_trains_each_reply_through_its_terminator(route):
+    """Its first token ends every turn, the reply's own included: read as the turn opener it cuts each span before
+    its terminator, and the row trains nothing."""
+    tokenizer, eos_token_ids = _served_terminators(QWEN3_0_6B)
+    assert tokenizer.convert_tokens_to_ids("<|im_end|>") in eos_token_ids
+    conversation = [
+        {"role": "user", "content": "USER-ONE"},
+        {"role": "assistant", "content": "ANSWER-ONE"},
+        {"role": "user", "content": "USER-TWO"},
+        {"role": "assistant", "content": "ANSWER-TWO"},
+    ]
+    trained = _two_answers_from_the_turn_before(route, tokenizer, eos_token_ids, conversation)
+    assert len(trained) == 2
+    assert all(piece.endswith("<|im_end|>") for piece in trained)
+    assert "ANSWER-ONE" in trained[0] and "ANSWER-TWO" in trained[1]
+    assert not any("USER" in piece for piece in trained)
+    assert resolve_span_bounds(tokenizer, CHATML_FROM_THE_TURN_BEFORE, eos_token_ids).turn_opener is None
 
 
 def _final_then_call(thinking: bool) -> list[dict]:

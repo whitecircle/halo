@@ -3,6 +3,7 @@
 row breaking that raises at prep, world-uniform. The text path encodes each row once at prep, and confidence
 weights divide by one dataset normalizer. Tests skip when a real tokenizer is not cached."""
 
+import logging
 import types
 from functools import partial
 
@@ -22,12 +23,19 @@ from halo.data.collators.self_distill import (
     privileged_hint,
     teacher_history,
 )
-from halo.data.completion_spans import build_training_labels
+from halo.data.completion_spans import (
+    PADDED_SPAN_POLICY,
+    build_training_labels,
+    reject_untrainable_text_completions,
+)
 from halo.data.pipeline.vlm_rows import _filter_vlm_over_length
+from halo.data.turn_markers import resolve_eos_token_ids
 from halo.data.vlm_render import extract_conversation_images
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from tests.common.effort_templates import LEVEL_LINES, QWEN3_6_EFFORT_TEMPLATE
-from tests.common.models import GLM5_3_FLASH, PINNED_REVISIONS, QWEN3_0_6B
+from tests.common.models import GLM4_FLASH, GLM5_3_FLASH, PINNED_REVISIONS, QWEN3_0_6B
 from tests.common.open_turn_templates import (
+    GLM_ANSWER_CLOSER,
     GLM_ASSISTANT_MARKER,
     OPEN_FINAL_TURN_TEMPLATES,
     TWO_EXCHANGES,
@@ -35,8 +43,12 @@ from tests.common.open_turn_templates import (
 )
 from tests.common.repo import load_script_module
 from tests.common.tokenizers import load_cached_config, load_cached_processor, load_cached_tokenizer
+from tests.common.trained_spans import trained_pieces
 
 MARKER = "<|im_start|>assistant\n"
+# A marker cut from a render after the user's text starts at that turn's terminator.
+FROM_THE_TURN_BEFORE = "<|im_end|>\n<|im_start|>assistant\n"
+_MARKER_LOGGER = "halo.data.turn_markers"
 
 
 def _tokenizer():
@@ -151,17 +163,18 @@ def _plain_ids(tokenizer, history, row):
 
 @pytest.mark.parametrize("name", sorted(OPEN_FINAL_TURN_TEMPLATES))
 def test_both_branches_close_the_last_turn_an_open_template_leaves(name):
-    """The student and the hinted teacher end on one assistant turn, so both take the closing eos and still supervise
-    the same tokens. Left open, that turn trains to the row end and never a stop."""
+    """The student and the hinted teacher end on one assistant turn, so both take the ``<|user|>`` the template writes
+    after an answer and still supervise the same tokens. Left open, that turn trains to the row end and never a stop."""
     collator = _glm_collator(name)
-    tokenizer, eos = collator.tokenizer, collator.tokenizer.eos_token_id
+    tokenizer = collator.tokenizer
+    closer = tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
     row = {"messages": TWO_EXCHANGES, "answer": "delta"}
     encoded = collator.encode_row(row)
     for prefix, history in (("", TWO_EXCHANGES), ("teacher_", collator._teacher_history(TWO_EXCHANGES, row))):
         plain = _plain_ids(tokenizer, history, row)
         assert plain[-1] not in collator.eos_token_ids, "the template closes its last turn: this case tests nothing"
-        assert encoded[f"{prefix}input_ids"] == [*plain, eos]
-        assert encoded[f"{prefix}labels"][-1] == eos, "the stop is not trained"
+        assert encoded[f"{prefix}input_ids"] == [*plain, closer]
+        assert encoded[f"{prefix}labels"][-1] == closer, "the stop is not trained"
 
     batch = collator([encoded])
     student = batch["input_ids"][0][batch["labels"][0] != -100]
@@ -188,10 +201,11 @@ def test_a_terminated_last_turn_and_a_row_ending_on_a_user_turn_take_no_eos():
 
 def test_the_vlm_branches_close_the_last_turn_an_open_template_leaves():
     """The VLM collator closes each branch at the text its processor tokenizes, so the student and the hinted teacher
-    of an image row both end on the eos and stay aligned."""
+    of an image row both end on the ``<|user|>`` its template writes after an answer and stay aligned."""
     revision = PINNED_REVISIONS[GLM5_3_FLASH]
     processor = load_cached_processor(GLM5_3_FLASH, revision=revision)
-    tokenizer, eos = processor.tokenizer, processor.tokenizer.eos_token_id
+    tokenizer = processor.tokenizer
+    closer = tokenizer.convert_tokens_to_ids(GLM_ANSWER_CLOSER)
     collator = SelfDistillVLMDataCollator(
         processor,
         tokenizer,
@@ -218,7 +232,7 @@ def test_the_vlm_branches_close_the_last_turn_an_open_template_leaves():
     trained = {}
     for branch, prefix in (("student", ""), ("teacher", "teacher_")):
         input_ids, labels = batch[f"{prefix}input_ids"][0], batch[f"{prefix}labels"][0]
-        assert input_ids[-1] == eos and labels[-1] == eos, f"the {branch} branch is left open"
+        assert input_ids[-1] == closer and labels[-1] == closer, f"the {branch} branch is left open"
         trained[branch] = input_ids[labels != -100]
     assert torch.equal(trained["student"], trained["teacher"])
     assert "Seven." in tokenizer.decode(trained["student"])
@@ -350,6 +364,76 @@ def test_a_marker_the_chat_template_never_renders_is_refused_at_construction():
     """It would match no row, so completion-only masking would train zero tokens at loss ~0."""
     with pytest.raises(ValueError, match="does not occur in this tokenizer's rendered chat template"):
         _collator(_tokenizer(), response_prompt_template="<|start|>assistant<|channel|>final<|message|>")
+
+
+def test_a_setup_that_would_train_no_token_is_refused_at_construction(monkeypatch):
+    """A marker written from the turn before starts at ``<|im_end|>``, which opens the next turn where the terminators
+    leave it out (a base checkpoint's ``<|endoftext|>``): each reply's own ``<|im_end|>`` cuts its span before any
+    terminator, so every row would train nothing at loss 0."""
+    tokenizer = _tokenizer()
+    tokenizer.eos_token = "<|endoftext|>"
+    refusal = r"Self-distillation: no assistant turn .* ends in a turn terminator \['<\|endoftext\|>'\]"
+    with pytest.raises(ValueError, match=refusal):
+        _collator(tokenizer, response_prompt_template=FROM_THE_TURN_BEFORE)
+
+    # Built past the probe, the same setup warns on the row and trains none of it.
+    monkeypatch.setattr(self_distill_collator, "reject_untrainable_text_completions", lambda *args: None)
+    unprobed = _collator(tokenizer, response_prompt_template=FROM_THE_TURN_BEFORE)
+    with pytest.warns(UserWarning, match="ignored in loss"):
+        row = unprobed.encode_row(_row())
+    assert set(row["labels"]) == set(row["teacher_labels"]) == {LABEL_IGNORE_INDEX}
+    monkeypatch.undo()
+
+    # The remedy the refusal names: with the token closing a turn as eos, the reply trains through it.
+    tokenizer.eos_token = "<|im_end|>"
+    row = _collator(tokenizer, response_prompt_template=FROM_THE_TURN_BEFORE).encode_row(_row())
+    (trained,) = trained_pieces(tokenizer, row["input_ids"], row["labels"])
+    assert trained.endswith("4<|im_end|>") and "2+2?" not in trained, trained
+
+
+def test_the_probe_masks_under_the_self_distillation_policy():
+    """A template that closes only user turns leaves each reply open. The padded policy trains none of them, while
+    this one runs the last reply to the row end, where the encoding closes it: the collator builds and trains it."""
+    tokenizer = _tokenizer()
+    tokenizer.chat_template = (
+        "{% for m in messages %}<|im_start|>{{ m.role }}\n{{ m.content }}"
+        "{% if m.role == 'user' %}<|im_end|>{% endif %}\n{% endfor %}"
+    )
+    eos_token_ids = resolve_eos_token_ids(tokenizer)
+    with pytest.raises(ValueError, match="ends in a turn terminator"):
+        reject_untrainable_text_completions(tokenizer, MARKER, eos_token_ids, PADDED_SPAN_POLICY, "padded")
+
+    row = _collator(tokenizer).encode_row(_row())
+    assert trained_pieces(tokenizer, row["input_ids"], row["labels"]) == ["4<|im_end|>"]
+
+
+def test_a_tokenizer_without_a_chat_template_is_not_probed(caplog):
+    """No template renders the probe, so the collator builds as it did without one, and warns of no unchecked probe."""
+    tokenizer = _tokenizer()
+    tokenizer.eos_token = "<|endoftext|>"
+    tokenizer.chat_template = None
+    with caplog.at_level(logging.WARNING, logger=_MARKER_LOGGER):
+        _collator(tokenizer, response_prompt_template=FROM_THE_TURN_BEFORE)
+    assert not [record for record in caplog.records if record.name == _MARKER_LOGGER], caplog.text
+
+
+def test_the_probe_reads_the_terminators_the_run_resolves():
+    """A turn end only the served config lists keeps a marker written from the turn before trainable."""
+    tokenizer = _tokenizer()
+    tokenizer.eos_token = "<|endoftext|>"
+    served = types.SimpleNamespace(eos_token_id=[tokenizer.convert_tokens_to_ids("<|im_end|>")])
+    row = _collator(tokenizer, response_prompt_template=FROM_THE_TURN_BEFORE, model_config=served).encode_row(_row())
+    (trained,) = trained_pieces(tokenizer, row["input_ids"], row["labels"])
+    assert trained.endswith("4<|im_end|>") and "2+2?" not in trained, trained
+
+
+def test_one_probe_conversation_that_trains_keeps_the_setup():
+    """Without its model config GLM-4.7-Flash ends no turn at ``<|user|>``, so the next assistant turn cuts the
+    ``thinking`` probe's one span while the plain probe trains: the setup builds and a row trains its reply."""
+    tokenizer = load_cached_tokenizer(GLM4_FLASH)
+    row = _collator(tokenizer, response_prompt_template="<|assistant|></think>").encode_row(_row())
+    assert trained_pieces(tokenizer, row["input_ids"], row["labels"]) == ["4<|endoftext|>"]
+    assert trained_pieces(tokenizer, row["teacher_input_ids"], row["teacher_labels"]) == ["4<|endoftext|>"]
 
 
 class _JoinProcessor:

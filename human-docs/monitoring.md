@@ -43,7 +43,7 @@ The base trainer logs loss, learning rate and grad norm every `logging_steps`
 | Config field | Adds |
 | --- | --- |
 | `enable_efficiency_metrics` | step time, tokens/s per GPU and cluster-wide, allocated and peak GPU memory |
-| `report_mfu_diagnostics` | MFU and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models |
+| `report_mfu_diagnostics` | model FLOPs utilization (MFU) and achieved TFLOPS; needs `enable_efficiency_metrics`. MoE runs also get the S-MFU variants, since plain MFU misreads sparse models ([MFU](../agent-docs/reference/gpu-training-theory.md#mfu) ↗) |
 | `enable_moe_metrics` | expert load balance averaged over MoE layers (`moe/load_max`, `moe/load_cv`, `moe/dead_frac`, …); under `bias_update` the balancing callback logs the `moe/*` keys instead |
 | `generate_eval_examples` (SFT, DPO, SMPO, offline GRPO) | a table of sample generations at each evaluation; skipped under TP, CP and PP |
 | `save_completions` (online and async GRPO) | each logged step's rollouts as parquet under `<output_dir>/completions/`, and a W&B `completions` table when `report_to` includes `wandb` |

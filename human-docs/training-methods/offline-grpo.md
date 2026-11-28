@@ -20,9 +20,11 @@ trains nothing).
 completion, in the same order. The method is text-only. No dataset yet?
 `halo run inference/reward-model/rejection-sample --output_format offline_grpo` generates candidates
 against a served model, scores them with a reward model, and writes this shape. Rows with completions
-but no rewards: `halo run score-offline-grpo <yaml> --input rows.jsonl --output scored.jsonl` prices
-them with the YAML's `rewards` list, a `whitecircle` policy check included
-([White Circle](../../agent-docs/training-methods/grpo/rewards/whitecircle.md#offline-grpo) ↗).
+but no rewards: `halo run score-offline-grpo <yaml> --input rows.jsonl --output scored.jsonl --answer_field answer`
+scores them with the YAML's `rewards` list ([GRPO Rewards](rewards.md)). `--answer_field` names the
+ground-truth column; without it an `accuracy` term is refused before anything is sent, and a judge
+grades with no reference. The command does not resume, so a rerun scores every row again
+([Offline GRPO scoring](../../agent-docs/training-methods/grpo/rewards/whitecircle.md#offline-grpo) ↗).
 
 ## Run
 
@@ -30,9 +32,11 @@ them with the YAML's `rewards` list, a `whitecircle` policy check included
 halo launch grpo/offline examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml -n 8
 ```
 
-Nothing else has to run, so the families online RL refuses for weight sync still train here (on
-Qwen3.8-Flash-Next this path is CPU-tested only). `examples/grpo/offline/` also holds the GPT-OSS,
-Gemma 4 and Nemotron versions. Test a config first with `--max_steps=10 --save_strategy=no` on a slice of the data.
+Point the recipe's `dataset:` at your file before you launch; it holds a placeholder path. Nothing else
+has to run, so the families online RL refuses for weight sync still train here. On Qwen3.8-Flash-Next,
+offline GRPO is CPU-tested only. `examples/grpo/offline/` also holds the GPT-OSS, Gemma 4 and Nemotron
+versions, with the same placeholder. Test a config first with `--max_steps=10 --save_strategy=no` on a
+slice of the data.
 
 Context and pipeline parallelism take full fine-tuning only, and pipeline parallelism needs
 `max_prompt_length` and `max_completion_length` set.

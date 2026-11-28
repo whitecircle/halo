@@ -14,6 +14,7 @@ from halo.data.conversation import (
     has_wire_form_arguments,
     parse_tool_call_arguments,
     reject_image_content,
+    resolve_row_tools,
 )
 from halo.data.turn_markers import lacks_terminator
 
@@ -21,8 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Weak: a dropped tokenizer must not be kept alive.
 _tokenizer_specials_cache: "weakref.WeakKeyDictionary[Any, _TokenizerSpecials]" = weakref.WeakKeyDictionary()
-# Each verdict beside the text of the template it was probed on, as a run sets its template on a loaded tokenizer.
+# Each probe's result beside the text of the template it was probed on, as a run sets its template on a loaded
+# tokenizer.
 _wire_form_support_cache: "weakref.WeakKeyDictionary[Any, tuple[str, dict[bool, bool]]]" = weakref.WeakKeyDictionary()
+_turn_closer_cache: "weakref.WeakKeyDictionary[Any, tuple[str, dict[tuple, int | None]]]" = weakref.WeakKeyDictionary()
 
 
 def _strip_leading_bos(text: str, tokenizer: PreTrainedTokenizer) -> str:
@@ -99,10 +102,18 @@ def _strip_trailing_special_ids(encoded: Any, trailing_special_ids: tuple[int, .
             encoded[key] = value[:keep]
 
 
-def render_tool_round_probe(template_owner: Any, arguments: Any, *, with_tools: bool, answer: str = "a") -> str | None:
-    """The chat template's text for a user turn, one tool call carrying ``arguments``, its reply and the assistant's
-    ``answer``, declaring the tool under ``with_tools``; ``None`` where it raises. ``template_owner`` is the tokenizer
-    or processor whose template renders the rows."""
+def _template_probe_results(cache: weakref.WeakKeyDictionary, owner: Any) -> dict:
+    """``owner``'s probe results in ``cache`` under its current chat template, emptied when the template changed."""
+    template = str(getattr(owner, "chat_template", None))
+    cached = cache.get(owner)
+    if cached is None or cached[0] != template:
+        cached = cache[owner] = (template, {})
+    return cached[1]
+
+
+def _render_probe(template_owner: Any, conversation: list[dict[str, Any]], *, with_tools: bool) -> str | None:
+    """``conversation`` as the chat template of ``template_owner`` writes it, declaring the probe tool under
+    ``with_tools``; ``None`` where the template raises."""
     tool = {
         "type": "function",
         "function": {
@@ -115,20 +126,34 @@ def render_tool_round_probe(template_owner: Any, arguments: Any, *, with_tools: 
             },
         },
     }
-    call = {"type": "function", "id": "call_0", "function": {"name": "probe", "arguments": arguments}}
-    conversation = [
-        {"role": "user", "content": "q"},
-        {"role": "assistant", "content": "", "tool_calls": [call]},
-        {"role": "tool", "tool_call_id": "call_0", "content": "r"},
-        {"role": "assistant", "content": answer},
-    ]
     try:
         return template_owner.apply_chat_template(
             conversation, tokenize=False, **({"tools": [tool]} if with_tools else {})
         )
-    except Exception as exc:  # a template's own raise on a call it does not render
-        logger.debug(f"Tool-call probe render failed: {exc}")
+    except Exception as exc:  # a template's own raise on a turn it does not render
+        logger.debug(f"Chat-template probe render failed: {exc}")
         return None
+
+
+def _probe_tool_round(arguments: Any) -> list[dict[str, Any]]:
+    """An assistant turn calling the probe tool once with ``arguments``, then the tool's reply."""
+    call = {"type": "function", "id": "call_0", "function": {"name": "probe", "arguments": arguments}}
+    return [
+        {"role": "assistant", "content": "", "tool_calls": [call]},
+        {"role": "tool", "tool_call_id": "call_0", "content": "r"},
+    ]
+
+
+def render_tool_round_probe(template_owner: Any, arguments: Any, *, with_tools: bool, answer: str = "a") -> str | None:
+    """The chat template's text for a user turn, one tool call carrying ``arguments``, its reply and the assistant's
+    ``answer``, declaring the tool under ``with_tools``; ``None`` where it raises. ``template_owner`` is the tokenizer
+    or processor whose template renders the rows."""
+    conversation = [
+        {"role": "user", "content": "q"},
+        *_probe_tool_round(arguments),
+        {"role": "assistant", "content": answer},
+    ]
+    return _render_probe(template_owner, conversation, with_tools=with_tools)
 
 
 def supports_wire_form_arguments(tokenizer: PreTrainedTokenizer, *, with_tools: bool) -> bool:
@@ -139,11 +164,7 @@ def supports_wire_form_arguments(tokenizer: PreTrainedTokenizer, *, with_tools: 
     call id's length): such a template takes the mapping a serving engine hands it. Probed once per tokenizer, template
     and ``with_tools``: a tokenizer holding named templates renders a conversation that declares tools with its
     ``tool_use`` one."""
-    template = str(getattr(tokenizer, "chat_template", None))
-    cached = _wire_form_support_cache.get(tokenizer)
-    if cached is None or cached[0] != template:
-        cached = _wire_form_support_cache[tokenizer] = (template, {})
-    verdicts = cached[1]
+    verdicts = _template_probe_results(_wire_form_support_cache, tokenizer)
     if with_tools not in verdicts:
         arguments = {"value": "1"}
         # Compact, so a template writing the text as stored is told from one writing the mapping.
@@ -258,17 +279,87 @@ def has_open_final_assistant_turn(
     )
 
 
+def _probe_turn_closer(
+    template_owner: Any,
+    tokenizer: PreTrainedTokenizer,
+    eos_token_ids: frozenset[int],
+    *,
+    calls_tool: bool,
+    with_tools: bool,
+) -> int | None:
+    """The token the chat template writes right after an assistant turn that calls a tool (``calls_tool``) or answers,
+    once a tool reply or a user turn follows it, where that token is one of ``eos_token_ids``; ``None`` where a render
+    raises, the turn renders otherwise once followed, or the template writes another token first."""
+    user, answer = {"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}
+    turn, follow_up = _probe_tool_round({"value": "1"}) if calls_tool else (answer, user)
+    closed = _render_probe(template_owner, [user, turn], with_tools=with_tools)
+    continued = _render_probe(template_owner, [user, turn, follow_up], with_tools=with_tools)
+    if closed is None or continued is None:
+        return None
+    closed_ids = tokenizer(closed, add_special_tokens=False)["input_ids"]
+    continued_ids = tokenizer(continued, add_special_tokens=False)["input_ids"]
+    end = len(closed_ids)
+    if len(continued_ids) <= end or continued_ids[:end] != closed_ids:
+        return None
+    return continued_ids[end] if continued_ids[end] in eos_token_ids else None
+
+
+def resolve_final_turn_closer(
+    tokenizer: PreTrainedTokenizer,
+    message: dict[str, Any],
+    eos_token_ids: frozenset[int],
+    *,
+    with_tools: bool,
+    template_owner: Any = None,
+) -> int:
+    """The token closing a training row's last assistant turn ``message`` where the template leaves it open: the one
+    the chat template of ``template_owner`` (the tokenizer by default; a VLM run's processor) writes after such a turn,
+    a tool call or an answer, when the conversation goes on (GLM's ``<|observation|>`` after a call, ``<|user|>`` after
+    an answer), where that token is one of ``eos_token_ids``; else the tokenizer's eos. Probed once per template,
+    terminator set, kind of turn and ``with_tools``, whether the row declares tools."""
+    owner = tokenizer if template_owner is None else template_owner
+    closers = _template_probe_results(_turn_closer_cache, owner)
+    calls_tool = bool(message.get("tool_calls"))
+    key = (frozenset(eos_token_ids), calls_tool, with_tools)
+    if key not in closers:
+        closers[key] = _probe_turn_closer(owner, tokenizer, key[0], calls_tool=calls_tool, with_tools=with_tools)
+    return tokenizer.eos_token_id if closers[key] is None else closers[key]
+
+
+def resolve_final_turn_closers(
+    tokenizer: PreTrainedTokenizer, eos_token_ids: frozenset[int], *, template_owner: Any = None
+) -> dict[str, int]:
+    """:func:`resolve_final_turn_closer` for each kind of last turn, keyed ``answer`` or ``call``, suffixed
+    ``_with_tools`` where the row declares tools: what the training renders close an open last turn with, which a chat
+    bake records and a run is checked against."""
+    turns = {"answer": {"role": "assistant", "content": "a"}, "call": _probe_tool_round({"value": "1"})[0]}
+    return {
+        f"{kind}_with_tools" if with_tools else kind: resolve_final_turn_closer(
+            tokenizer, turn, eos_token_ids, with_tools=with_tools, template_owner=template_owner
+        )
+        for kind, turn in turns.items()
+        for with_tools in (False, True)
+    }
+
+
 def close_final_assistant_turn(
-    encoded, conversation: list[dict[str, Any]], tokenizer: PreTrainedTokenizer, eos_token_ids: frozenset[int]
+    encoded,
+    conversation: list[dict[str, Any]],
+    tokenizer: PreTrainedTokenizer,
+    eos_token_ids: frozenset[int],
+    *,
+    with_tools: bool,
 ) -> None:
-    """Append the tokenizer's eos, in place, to a training row :func:`has_open_final_assistant_turn` finds open."""
+    """Append the closing token :func:`resolve_final_turn_closer` names, in place, to a training row
+    :func:`has_open_final_assistant_turn` finds open; ``with_tools`` is whether the row declares tools."""
     input_ids = encoded["input_ids"]
     if not has_open_final_assistant_turn(input_ids, conversation, tokenizer, eos_token_ids):
         return
+    closer = resolve_final_turn_closer(tokenizer, conversation[-1], eos_token_ids, with_tools=with_tools)
     width = len(input_ids)
     for name, column in encoded.items():
         if isinstance(column, list) and len(column) == width:
-            column.append(tokenizer.eos_token_id if name == "input_ids" else column[-1])
+            column.append(closer if name == "input_ids" else column[-1])
 
 
 def tokenize_training_conversation(
@@ -283,5 +374,6 @@ def tokenize_training_conversation(
     ``eos_token_ids`` are the model's terminators."""
     rendered = render_conversation(tokenizer, conversation, row, **render_kwargs)
     encoded = tokenize_rendered(tokenizer, rendered, truncation=False, padding=False)
-    close_final_assistant_turn(encoded, conversation, tokenizer, eos_token_ids)
+    with_tools = resolve_row_tools(row, render_kwargs.get("tools_field")) is not None
+    close_final_assistant_turn(encoded, conversation, tokenizer, eos_token_ids, with_tools=with_tools)
     return encoded

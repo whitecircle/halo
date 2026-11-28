@@ -11,6 +11,7 @@ from transformers import PreTrainedTokenizerBase
 
 from halo.data.chat_render import render_tool_round_probe
 from halo.data.turn_markers import (
+    TEXT_PROBE_CONVERSATIONS,
     reject_missing_response_marker,
     resolve_eos_token_ids,
     tokenize_response_template,
@@ -51,10 +52,10 @@ class InjectedBlock(NamedTuple):
 
 class SpanBounds(NamedTuple):
     """What ends a completion span besides its terminator, read off the tokenizer and chat template once. A span ends
-    before a turn of another role, which opens at ``turn_opener`` (the marker's first token where special) with no
-    marker following, so a final answer gpt-oss closes with ``<|end|>`` never runs on through the next user turn to a
-    call's ``<|call|>``; without an opener only the span policy's marker bound applies, as a plain first token
-    (``###``) also opens markdown. A span ending at ``injected_block``'s opener restarts after it. Scalars and an
+    before a turn of another role, which opens at ``turn_opener`` (the marker's first token where special and no
+    terminator) with no marker following, so a final answer gpt-oss closes with ``<|end|>`` never runs on through the
+    next user turn to a call's ``<|call|>``; without an opener only the span policy's marker bound applies, as a plain
+    first token (``###``) also opens markdown. A span ending at ``injected_block``'s opener restarts after it. Scalars and an
     :class:`InjectedBlock`, so a dataset map's cache key reads it by value."""
 
     turn_opener: int | None = None
@@ -417,10 +418,16 @@ def _special_token_ids(tokenizer: PreTrainedTokenizerBase) -> set[int]:
     return set(tokenizer.all_special_ids) | added
 
 
-def find_turn_opener(tokenizer: PreTrainedTokenizerBase, response_token_ids: list[int]) -> int | None:
+def find_turn_opener(
+    tokenizer: PreTrainedTokenizerBase, response_token_ids: list[int], eos_token_ids: frozenset[int]
+) -> int | None:
     """The marker's first token where special: the token the template opens every turn with (``<|im_start|>``,
-    gpt-oss's ``<|start|>``), or the marker itself (``[/INST]``); ``None`` for a plain one."""
+    gpt-oss's ``<|start|>``), or the marker itself (``[/INST]``). ``None`` for a plain one, and for one that is itself
+    a terminator, as in a marker written from the turn before it (``<|im_end|>\\n<|im_start|>assistant\\n``): as an
+    opener it would end each span before the reply's own terminator."""
     first = response_token_ids[0]
+    if first in eos_token_ids:
+        return None
     return first if first in _special_token_ids(tokenizer) else None
 
 
@@ -435,21 +442,49 @@ def reject_untrainable_completions(
 ) -> None:
     """Refuse completion-only labels that would train no token of any of ``probe_conversations``: a marker the
     template never emits, or no assistant turn ending in ``eos_token_ids``, as with a template borrowed from another
-    family until ``eos_token`` names its closing token."""
+    family until ``eos_token`` names its closing token. One probe the marker matches that trains a span is enough;
+    the message quotes the first matched probe that trains none."""
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
-    span_bounds = SpanBounds(turn_opener=find_turn_opener(tokenizer, response_token_ids))
+    span_bounds = SpanBounds(turn_opener=find_turn_opener(tokenizer, response_token_ids, eos_token_ids))
+    untrained = None
     for text in verify_marker_renders(render, probe_conversations, response_prompt_template):
         input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
         starts, ends = resolve_completion_spans(
             input_ids, response_token_ids, eos_token_ids, span_bounds=span_bounds, **span_policy
         )
-        if starts and all(end == -1 for end in ends):
-            terminators = sorted(tokenizer.convert_ids_to_tokens(sorted(eos_token_ids)))
-            raise ValueError(
-                f"{subject}: no assistant turn of the chat template ends in a turn terminator {terminators}, so "
-                f"completion-only masking would train no token; the template renders {text!r}. Set eos_token to "
-                f"the token the template closes an assistant turn with, or set train_on_completions_only: false."
-            )
+        if any(end != -1 for end in ends):
+            return
+        if starts and untrained is None:
+            untrained = text
+    if untrained is not None:
+        terminators = sorted(tokenizer.convert_ids_to_tokens(sorted(eos_token_ids)))
+        raise ValueError(
+            f"{subject}: no assistant turn of the chat template ends in a turn terminator {terminators}, so "
+            f"completion-only masking would train no token; the template renders {untrained!r}. Set eos_token to "
+            f"the token the template closes an assistant turn with, or set train_on_completions_only: false."
+        )
+
+
+def reject_untrainable_text_completions(
+    tokenizer,
+    response_prompt_template: str,
+    eos_token_ids: frozenset[int],
+    span_policy: dict[str, bool],
+    subject: str,
+) -> None:
+    """:func:`reject_untrainable_completions` over :data:`TEXT_PROBE_CONVERSATIONS` as the tokenizer's chat template
+    renders them; a tokenizer without a chat template is not probed."""
+    if not getattr(tokenizer, "chat_template", None):
+        return
+    reject_untrainable_completions(
+        lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
+        TEXT_PROBE_CONVERSATIONS,
+        tokenizer,
+        response_prompt_template,
+        eos_token_ids,
+        span_policy,
+        subject,
+    )
 
 
 def find_injected_block(
@@ -502,7 +537,7 @@ def resolve_span_bounds(
     tokenizer by default; a VLM run's processor)."""
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
     return SpanBounds(
-        turn_opener=find_turn_opener(tokenizer, response_token_ids),
+        turn_opener=find_turn_opener(tokenizer, response_token_ids, eos_token_ids),
         injected_block=find_injected_block(
             tokenizer, response_token_ids, eos_token_ids, template_owner=template_owner
         ),

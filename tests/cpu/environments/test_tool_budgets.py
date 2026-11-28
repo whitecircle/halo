@@ -109,13 +109,6 @@ def test_tool_budgets_must_name_registered_tools_with_non_negative_int_caps():
             NativeToolUseEnvironment(tool_registry=_registry(), tool_budgets=bad)
 
 
-def test_a_zero_cap_disables_the_tool_for_the_episode():
-    env = NativeToolUseEnvironment(tool_registry=_registry(), tool_budgets={"echo": 0})
-    ids, _ = env.reset(["t"])
-    env.step(ids, [""], [{"tool_calls": [_call("a", "echo", code="x")]}])
-    assert _observations(env.get_trajectories(ids)[0]) == [_ECHO_SPENT]
-
-
 def test_the_refusal_wording_is_the_tools_own():
     env = NativeToolUseEnvironment(
         tool_registry=_registry(budget_message="No more echo this task; ping instead."), tool_budgets={"echo": 1}

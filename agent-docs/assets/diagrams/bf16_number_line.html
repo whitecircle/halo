@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The bf16 number line</title>
+<link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
+<style>
+  :root {
+    --label-col: 372px;
+    --mark-h: 44px;
+  }
+
+  body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
+
+  .figure { position: relative; }
+
+  /* A label, then the same stretch of the number line, in every row. */
+  .rows {
+    display: grid;
+    grid-template-columns: var(--label-col) minmax(0, 1fr);
+    column-gap: 40px;
+    row-gap: 34px;
+    align-items: center;
+  }
+
+  .label .name {
+    font-size: 27px;
+    line-height: 1.25;
+    color: var(--text);
+  }
+
+  .label p {
+    margin-top: 4px;
+    font-size: 21px;
+    line-height: 1.4;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .label p.spacing { color: var(--body); }
+
+  .track { height: var(--mark-h); }
+
+  .track.guide-top { height: 30px; }
+
+  .ticks {
+    position: relative;
+    height: 30px;
+    font-size: 21px;
+    color: var(--secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .ticks span {
+    position: absolute;
+    top: 0;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+
+  .ticks span.stored { color: var(--text); }
+
+  .landing {
+    position: absolute;
+    transform: translateX(-50%);
+    font-size: 21px;
+    line-height: 30px;
+    color: var(--body);
+    white-space: nowrap;
+  }
+
+  svg.marks {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+    pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<div class="canvas">
+  <header>
+    <h1 id="title"></h1>
+  </header>
+
+  <div class="figure" id="figure">
+    <svg class="marks" id="marks"></svg>
+    <div class="rows" id="rows"></div>
+  </div>
+
+  <footer>
+    <p>
+      <span class="s">Every position is computed, none is measured.</span>
+      <span class="s">Between {lowerPower} and {upperPower}, where {weight} lies, a format with n mantissa bits has values {lowerPower} ÷ 2ⁿ apart: n is {bitsList}.</span>
+      <span class="s">The weight w is the {stored} value nearest {weight}: {storedCount} × {storedStep} = {storedValue}.</span>
+      <span class="s">In this range every {stored} value is also an {middle} value and every {middle} value an {fine} value, so the ticks line up.</span>
+    </p>
+  </footer>
+</div>
+
+<script src="../../../skills/visuals/kit/figure.js"></script>
+<script>
+  /**
+   * Every position and number on the canvas is computed from this structure.
+   * The weight and the update are the lecture's worked case (the section "Precision", "What stays fp32 in a bf16
+   * run"). The mantissa bits are those of its number-format table: fp32 8 / 23, fp16 5 / 10, bf16 8 / 7.
+   */
+  const SETUP = {
+    weight: 0.02,
+    update: 1e-5,
+    /** The stretch of the number line drawn, in steps of the stored format below and above the stored weight. */
+    window: { below: 1.2, above: 2.2 },
+    /** Finest first. The run stores its weights in the last one. */
+    formats: [
+      { name: "fp32", mantissaBits: 23, hue: "var(--halo-blue)" },
+      { name: "fp16", mantissaBits: 10, hue: "var(--halo-violet)" },
+      { name: "bf16", mantissaBits: 7, hue: "var(--halo-indigo)" },
+    ],
+  };
+  /** The least space, in px, between two neighbouring values for each to be drawn as its own tick. */
+  const MIN_TICK_PITCH = 8;
+
+  const { weight, update } = SETUP;
+  const exponent = Math.floor(Math.log2(weight));
+
+  if (!(2 ** exponent <= weight && weight < 2 ** (exponent + 1))) {
+    throw new Error("the binade of the weight was computed wrongly");
+  }
+
+  // fp16 holds normal values from 2⁻¹⁴ up to 65,504, so its spacing rule applies to this weight.
+  if (weight < 2 ** -14 || weight > 65504) {
+    throw new Error("the weight is outside fp16’s normal range, where its values are not 2 to the mantissa bits per binade");
+  }
+
+  const formats = SETUP.formats.map((format) => ({ ...format, stepPower: exponent - format.mantissaBits, step: 2 ** (exponent - format.mantissaBits) }));
+  const stored = formats.at(-1);
+  const storedCount = Math.round(weight / stored.step);
+  const w = storedCount * stored.step;
+  const next = w + stored.step;
+  const target = w + update;
+  const lo = w - SETUP.window.below * stored.step;
+  const hi = w + SETUP.window.above * stored.step;
+  /** The update as a share of the gap to the next stored value: nearest rounding returns when it is under a half. */
+  const share = update / stored.step;
+
+  if (share >= 0.5) {
+    throw new Error("this update is at least half a step, so rounding to nearest keeps it: the figure draws the case where it is lost");
+  }
+
+  const superscript = (n) => String(n).replace(/[-\d]/g, (c) => (c === "-" ? "⁻" : "⁰¹²³⁴⁵⁶⁷⁸⁹"[Number(c)]));
+  const power2 = (n) => `2${superscript(n)}`;
+  /** 1.22 × 10⁻⁴, or 10⁻⁵ when the leading digits are exactly 1. */
+  const sci = (value, digits = 2) => {
+    const e = Math.floor(Math.log10(value));
+    const lead = value / 10 ** e;
+
+    return Math.abs(lead - 1) < 1e-9 ? `10${superscript(e)}` : `${lead.toFixed(digits)} × 10${superscript(e)}`;
+  };
+  const fmt = (v, digits = 0) => v.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
+  const percent = (v) => `${Math.round(100 * v)}%`;
+  const list = (items) => `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+
+  document.getElementById("title").textContent =
+    `Near ${weight}, ${stored.name} values are ${sci(stored.step)} apart, so an update of ${sci(update)} rounds back to where it started`;
+
+  fillValues({
+    lowerPower: power2(exponent),
+    upperPower: power2(exponent + 1),
+    weight: String(weight),
+    bitsList: list(formats.map((format) => `${format.mantissaBits} for ${format.name}`)),
+    stored: stored.name,
+    middle: formats[1].name,
+    fine: formats[0].name,
+    storedCount: fmt(storedCount),
+    storedStep: power2(stored.stepPower),
+    storedValue: String(w),
+  }, document.querySelector("footer"));
+
+  const rows = document.getElementById("rows");
+  const label = (name, lines) => {
+    const node = el("div", "label");
+    node.append(el("div", "name", name), ...lines.map(([cls, text]) => el("p", cls, text)));
+
+    return node;
+  };
+  const row = (labelNode, trackClass = "track") => {
+    const track = el("div", trackClass);
+    rows.append(labelNode, track);
+
+    return track;
+  };
+  /** How far the update reaches in one format's steps: "about 5,369 steps" or "0.66 of a step". */
+  const inSteps = (format) => {
+    const steps = update / format.step;
+
+    return steps >= 1 ? `The update is about ${fmt(steps)} steps` : `The update is ${fmt(steps, 2)} of a step`;
+  };
+
+  // The row above the lanes names the value the optimizer asks for. Every track is as wide as this one, so it
+  // fixes the scale before the labels that depend on it are written.
+  const topTrack = row(el("div"), "track guide-top");
+  const pxPerUnit = topTrack.getBoundingClientRect().width / (hi - lo);
+  const lanes = formats.map((format) => {
+    const asBand = format.step * pxPerUnit < MIN_TICK_PITCH;
+    const lines = [["spacing", `${power2(format.stepPower)} = ${sci(format.step)} apart`]];
+
+    lines.push(["", format === stored ? `One ${stored.name} step, or ULP` : `${fmt(stored.step / format.step)} values per ${stored.name} step`]);
+
+    if (asBand) {
+      lines.push(["", "Too close to draw apart: a band"]);
+    }
+
+    lines.push(["", inSteps(format)]);
+
+    return { format, asBand, track: row(label(format.name, lines)) };
+  });
+  const DETAILS = [
+    { id: "update", name: `An update of ${sci(update)}`, line: `Lands ${percent(share)} of the way to the next ${stored.name}\u00a0value` },
+    { id: "nearest", name: "Round to nearest", line: "Returns to w: the update is lost" },
+    { id: "stochastic", name: "Stochastic rounding", line: `Moves to the next value with probability\u00a0${percent(share)}, returns to w otherwise` },
+  ];
+  const details = DETAILS.map((detail) => ({ ...detail, track: row(label(detail.name, [["", detail.line]])) }));
+  const tickRow = el("div", "ticks");
+  rows.append(el("div"), tickRow);
+
+  // Geometry, from the laid-out rows.
+  const figure = document.getElementById("figure");
+  const marks = document.getElementById("marks");
+  const origin = figure.getBoundingClientRect();
+  const box = (node) => {
+    const r = node.getBoundingClientRect();
+
+    return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
+  };
+  const span = box(topTrack);
+  const x = (value) => span.l + ((value - lo) / (hi - lo)) * (span.r - span.l);
+  const add = (tag, attrs) => marks.appendChild(svgEl(tag, attrs));
+  const valuesOf = (format) => {
+    const first = Math.ceil(lo / format.step - 1e-9);
+    const last = Math.floor(hi / format.step + 1e-9);
+
+    return Array.from({ length: last - first + 1 }, (_, i) => (first + i) * format.step);
+  };
+  const storedValues = valuesOf(stored);
+  const lanesTop = box(lanes[0].track).t;
+  const guidesBottom = box(tickRow).t - 8;
+
+  // A faint guide at every stored value, through the lanes and the three outcome rows.
+  for (const value of storedValues) {
+    add("line", { x1: x(value), x2: x(value), y1: lanesTop - 10, y2: guidesBottom, stroke: "var(--line)", "stroke-width": 1.5 });
+  }
+
+  // The value the update asks for, as one guide through every row.
+  const landingTop = box(topTrack).b;
+  add("line", { x1: x(target), x2: x(target), y1: landingTop, y2: box(details.at(-1).track).b, stroke: "var(--secondary)", "stroke-width": 1.5 });
+  const landing = el("div", "landing", `w + ${sci(update)}`);
+  figure.append(landing);
+  landing.style.left = `${x(target)}px`;
+  landing.style.top = `${box(topTrack).t - 6}px`;
+
+  // Each lane: one tick per representable value, or a band where the values are too close to draw apart.
+  for (const { format, asBand, track } of lanes) {
+    const b = box(track);
+
+    if (asBand) {
+      add("rect", { x: span.l, y: b.t, width: span.r - span.l, height: b.b - b.t, rx: 6, fill: format.hue });
+      continue;
+    }
+
+    for (const value of valuesOf(format)) {
+      const isWeight = format === stored && value === w;
+      add("line", {
+        x1: x(value), x2: x(value), y1: b.t, y2: b.b,
+        stroke: isWeight ? "var(--text)" : format.hue,
+        "stroke-width": format === stored ? 5 : 2.5,
+        "stroke-linecap": "round",
+      });
+    }
+  }
+
+  // The three outcome rows, on the same scale: the update, then where each rounding rule leaves the weight.
+  const HUES = { update: "var(--text)", nearest: "var(--danger)", stochastic: "var(--success)" };
+  const ENDS = { update: [w, target], nearest: [target, w], stochastic: [target, next] };
+
+  for (const detail of details) {
+    const b = box(detail.track);
+    const y = (b.t + b.b) / 2;
+    const [from, to] = ENDS[detail.id];
+    arrow(marks, x(from), y, x(to), y, HUES[detail.id]);
+  }
+
+  // The stored values in decimal under their guides, the weight named.
+  for (const value of storedValues) {
+    const tick = el("span", value === w ? "stored" : undefined, `${value === w ? "w = " : ""}${value.toFixed(7)}`);
+    tickRow.append(tick);
+    tick.style.left = `${x(value) - box(tickRow).l}px`;
+  }
+</script>
+</body>
+</html>

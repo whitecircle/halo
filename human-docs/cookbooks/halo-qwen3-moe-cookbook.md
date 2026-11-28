@@ -88,12 +88,13 @@ adapters: `--merge_expert_lora_on_save=true` saves a merged checkpoint, and with
 ### GRPO
 
 Read [Before a GRPO run](README.md#before-a-grpo-run) first. This setup serves the SFT checkpoint from
-vLLM on GPUs 0–1 and trains on GPUs 2–3.
+vLLM on GPUs 0–1 and trains on GPUs 2–3. A run saves its model in step directories under `output_dir`, so
+the SFT checkpoint is the last `/data/checkpoints/qwen3-30b-a3b-sft/checkpoint-<step>`.
 
 On the host:
 
 ```bash
-VLLM_MODEL=/data/checkpoints/qwen3-30b-a3b-sft VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
+VLLM_MODEL=/data/checkpoints/qwen3-30b-a3b-sft/checkpoint-<step> VLLM_CUDA_DEVICES=0,1 VLLM_TP=2 VLLM_ENABLE_R3=1 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
 
@@ -103,7 +104,7 @@ launch:
 ```bash
 cp examples/grpo/environmental/environmental-grpo-template.yaml qwen3-moe-grpo.yaml
 CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental qwen3-moe-grpo.yaml -n 2 \
-  --model_name_or_path=/data/checkpoints/qwen3-30b-a3b-sft \
+  --model_name_or_path=/data/checkpoints/qwen3-30b-a3b-sft/checkpoint-<step> \
   --routing_replay=rollout --beta=0.0 \
   --output_dir=/data/checkpoints/qwen3-30b-a3b-grpo
 ```
@@ -140,7 +141,7 @@ trained Qwen3-30B-A3B export, so check the first one you serve. Serve it from th
 [host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
-SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft" \
+SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft/checkpoint-<step>" \
   docker compose -f docker-compose.sglang.yml up -d
 ```
 

@@ -24,8 +24,11 @@ from halo.environments.sandbox.factory import build_sandbox, warn_if_unisolated
 from halo.environments.sandbox.languages import LanguageSpec, require_language
 from halo.environments.sandbox.repl import format_sandbox_repl_output
 from halo.environments.tasks.coding.code_contests_prompts import (
+    FIRST_RUN_REFUSAL_NOTE,
     IDENTICAL_RESUBMISSION_NOTE,
+    LATER_RUN_REFUSAL_NOTE,
     MISLABELLED_LANGUAGE_REPLY,
+    NO_RUN_LEFT_NOTE,
     NO_STDIN_NOTE,
     SCRATCHPAD_TIME_LIMIT_NOTE,
     SUBMISSION_AFTER_ACCEPT_REPLY,
@@ -44,6 +47,7 @@ from halo.environments.tasks.coding.submission_record import (
     GRADED_PROGRAMS_KEY,
     IDENTICAL_RESUBMISSIONS_KEY,
     RUN_PROGRAMS_KEY,
+    RUN_REFUSAL_SHOWN_KEY,
     SUBMISSION_PASS_FRACS_KEY,
     TURN_RUN_PROGRAMS_KEY,
     TURN_RUNS_LEFT_KEY,
@@ -400,6 +404,27 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         info[TURN_RUNS_LEFT_KEY] = self._exhausted_tool_cap(trajectory, self.test_tool_name) is None
         info[TURN_RUN_PROGRAMS_KEY] = len(info.get(RUN_PROGRAMS_KEY, []))
         return super()._execute_tool_calls(tool_calls, trajectory)
+
+    def _record_tool_interaction(self, results: list[NativeToolResult], trajectory: Trajectory) -> dict[str, Any]:
+        """Marks for the judge each scratchpad call refused for the spent budget, told apart by whether an earlier
+        reply had said so, and each submission whose turn began with no run left, a refusal shown or not."""
+        recorded = super()._record_tool_interaction(results, trajectory)
+        info = trajectory.info
+        refusal_note = LATER_RUN_REFUSAL_NOTE if info.get(RUN_REFUSAL_SHOWN_KEY) else FIRST_RUN_REFUSAL_NOTE
+        marks = {}
+        for result in results:
+            if result.name == self.test_tool_name and result.budget_spent:
+                info[RUN_REFUSAL_SHOWN_KEY] = True
+                mark = refusal_note
+            elif result.name == SUBMIT_TOOL and not info[TURN_RUNS_LEFT_KEY]:
+                mark = NO_RUN_LEFT_NOTE
+            else:
+                continue
+            if result.tool_call_id:
+                marks[result.tool_call_id] = mark
+        if marks:
+            trajectory.last_assistant_message().call_notes = marks
+        return recorded
 
     def _run_test(self, code: str, language: str | None = None, stdin: str = "") -> str:
         """Run a scratchpad test under the per-test limit the episode's problem is graded at; outside an episode it

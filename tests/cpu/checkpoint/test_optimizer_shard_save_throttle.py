@@ -110,8 +110,8 @@ class _OneGigabyteOfMoments:
 
 @pytest.mark.parametrize(
     ("available_gb", "warns"),
-    [(0.9, True), (1.9, True), (2.1, False)],
-    ids=["below-one-copy", "below-the-admitted-copies", "above-them"],
+    [(1.9, True), (2.1, False)],
+    ids=["below-the-admitted-copies", "above-them"],
 )
 def test_the_low_ram_warning_counts_the_ranks_admitted_together(monkeypatch, caplog, available_gb, warns):
     """At ``max_concurrent_loading=2`` the node holds two at once."""

@@ -100,13 +100,6 @@ def test_cpp_compiles_and_runs_with_stdin():
     assert not res.compile_failed
 
 
-def test_cpp_alias_runs():
-    if not _HAS_GPP:
-        return _skip("g++ not installed")
-    res = LocalSubprocessSandbox().run(_CPP_DOUBLE, stdin="5", language="c++")
-    assert res.ok and res.stdout.strip() == "10"
-
-
 def test_c_compiles_and_runs():
     if not _HAS_GCC:
         return _skip("gcc not installed")

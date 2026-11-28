@@ -32,6 +32,8 @@ CUT_CALL_NOTE = "cut by the engine before the turn closed; never run"
 # Ids of a turn's calls refused unrun, so a judge reads each as never run though the policy wrote it.
 REFUSED_CALL_IDS_KEY = "refused_call_ids"
 REFUSED_CALL_NOTE = "refused unrun; never run"
+# The environment's own note on a turn's call, by call id, read beside the call after any refused note.
+CALL_NOTES_KEY = "call_notes"
 # A message's keys on the chat wire; any other sample-message key is the sample's own.
 WIRE_KEYS = ("role", "content", "name", "tool_calls", "tool_call_id")
 
@@ -201,11 +203,11 @@ def _call_id(call: Any) -> str | None:
     return call.get("id") if isinstance(call, Mapping) else None
 
 
-def _render_call(call: Any, argument_chars: int | None, *, note: str | None = None) -> str:
-    """``→ name`` with the call id and ``note``, then every argument; ``argument_chars=None`` keeps each whole."""
+def _render_call(call: Any, argument_chars: int | None, *, notes: Sequence[str | None] = ()) -> str:
+    """``→ name`` with the call id and ``notes``, then every argument; ``argument_chars=None`` keeps each whole."""
     function = call.get("function", call) if isinstance(call, Mapping) else {}
     call_id = _call_id(call)
-    tags = "; ".join(tag for tag in (f"call {call_id}" if call_id else None, note) if tag)
+    tags = "; ".join(tag for tag in (f"call {call_id}" if call_id else None, *notes) if tag)
     head = f"→ {function.get('name', '?')}" + (f" ({tags})" if tags else "")
     arguments = call_arguments(call)
     if not isinstance(arguments, Mapping):
@@ -253,14 +255,12 @@ def _render_turn(
         lines.append(content)
     argument_chars = DIGEST_INLINE_CHARS if digest else None
     refused = set(message.get(REFUSED_CALL_IDS_KEY) or ())
+    call_notes = message.get(CALL_NOTES_KEY) or {}
     for call in message.get("tool_calls") or []:
-        lines.append(
-            escape_tags(
-                _render_call(call, argument_chars, note=REFUSED_CALL_NOTE if _call_id(call) in refused else None)
-            )
-        )
+        marks = (REFUSED_CALL_NOTE if _call_id(call) in refused else None, call_notes.get(_call_id(call)))
+        lines.append(escape_tags(_render_call(call, argument_chars, notes=marks)))
     for call in message.get(CUT_TOOL_CALLS_KEY) or []:
-        lines.append(escape_tags(_render_call(call, argument_chars, note=CUT_CALL_NOTE)))
+        lines.append(escape_tags(_render_call(call, argument_chars, notes=(CUT_CALL_NOTE,))))
     return "\n".join(lines)
 
 

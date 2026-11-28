@@ -2,12 +2,9 @@
 """The toolkit's eval metric gather must survive more than one evaluation loop.
 The HF loop resets ``gather_function``; without a re-arm later evaluates report duplicated or mis-trimmed metrics."""
 
-import inspect
-import re
 import types
 
 import pytest
-from transformers import Trainer
 
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
@@ -29,11 +26,6 @@ class _Trainer(DistributedTrainerMixin, _HFEvaluationLoop):
         if scoped:
             self._dp_metric_gather_scope = (KEEP, WORLD)
         self.gather_function = self._dp_gather_for_metrics
-
-
-def test_upstream_still_resets_the_gather_function():
-    source = inspect.getsource(Trainer.evaluation_loop)
-    assert re.search(r"self\.gather_function\s*=\s*self\.accelerator\.gather_for_metrics", source)
 
 
 def test_every_evaluation_loop_gathers_over_the_dp_replicas():

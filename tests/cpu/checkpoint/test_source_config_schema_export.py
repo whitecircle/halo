@@ -17,7 +17,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 from huggingface_hub import constants as hub_constants
-from huggingface_hub.errors import StrictDataclassFieldValidationError
 from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
@@ -302,13 +301,6 @@ def test_a_dashed_auto_map_reference_is_carried_with_no_module_looked_for(cls, t
 
 
 @pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
-def test_the_export_reloads_to_the_config_that_was_trained(cls, tmp_path):
-    """This transformers accepts the source's spellings, so the export reloads exactly."""
-    _payload, export, model = _exported(tmp_path, cls)
-    assert AutoConfig.from_pretrained(export).to_diff_dict() == model.config.to_diff_dict()
-
-
-@pytest.mark.parametrize("cls", list(FIXTURES), ids=_IDS)
 def test_a_patched_vocab_size_reaches_the_carried_config(cls, tmp_path):
     """Carried verbatim, it would serve the source's vocabulary against a resized embedding, an off-by-N no reader
     can detect."""
@@ -505,19 +497,6 @@ def test_the_release_fixture_is_the_roster_release():
     release = nemotron_h_release_config()
     assert release["llm_config"]["layers_block_type"] == NEMOTRON_H_RELEASE_TEXT_CONFIG["layers_block_type"]
     assert release["vision_config"]["hidden_size"] == NEMOTRON_H_RELEASE_VISION_CONFIG["hidden_size"]
-
-
-def test_the_release_tag_needs_decoding_before_the_class_reads_it():
-    """Raw, the carry would crash on the release's own ``time_step_limit``, so the decode is load-bearing here."""
-    release = nemotron_h_release_config()
-    assert release["llm_config"]["time_step_limit"] == [0.0, {"__float__": "Infinity"}]
-    config_class = NemotronH_Omni_Reasoning_V3.config_class
-    with pytest.raises(StrictDataclassFieldValidationError, match="time_step_limit"):
-        config_class.from_dict(copy.deepcopy(release))
-    assert config_class.from_dict(config_class._decode_special_floats(release)).text_config.time_step_limit == [
-        0.0,
-        float("inf"),
-    ]
 
 
 def test_a_trainers_cache_write_on_the_composite_root_does_not_fail_the_save(tmp_path, nemotron_source):

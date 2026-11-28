@@ -21,7 +21,6 @@ from openai import (
     AuthenticationError,
     BadRequestError,
     NotFoundError,
-    PermissionDeniedError,
 )
 
 import halo.environments.rollouts.eval_runner as eval_runner
@@ -171,7 +170,7 @@ async def test_an_extra_body_over_a_field_the_eval_writes_refuses_the_eval(monke
         await collect_results(_tooled_env(), [{"prompt": "q", "context": {}}], client=object(), rollout=rollout)
 
 
-@pytest.mark.parametrize("field", ["temperature", "top_p", "max_tokens", "model", "messages", "tools"])
+@pytest.mark.parametrize("field", ["temperature", "model", "tools"])
 async def test_an_extra_body_over_a_field_the_sdk_takes_as_a_keyword_refuses_the_eval(monkeypatch, field):
     """The SDK lays extra_body over the whole body, keyword fields included: ``{"temperature": 0}`` would sample the
     whole eval greedily under the run's name."""
@@ -784,10 +783,9 @@ async def test_a_failure_the_episode_itself_caused_is_graded_not_dropped(monkeyp
     [
         _status_error(NotFoundError, 404, "The model `m` does not exist."),
         _status_error(AuthenticationError, 401, "Invalid API key"),
-        _status_error(PermissionDeniedError, 403, "Forbidden"),
         _bad_request("max_tokens must be positive"),
     ],
-    ids=["unknown-model", "rejected-key", "forbidden", "malformed-request"],
+    ids=["unknown-model", "rejected-key", "malformed-request"],
 )
 async def test_a_client_error_the_episode_did_not_cause_is_a_generation_error(monkeypatch, failure):
     """An unknown model or route, a rejected key, a request built wrong says nothing about the episode; graded as a

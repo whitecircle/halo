@@ -1,6 +1,6 @@
 # Served Reward Model
 
-A `reward_model` term scores with a `*ForSequenceClassification` or `*ForRewardModel` checkpoint served by the rollout engines' pooling routes, on both arms.
+A `reward_model` term scores with a `*ForSequenceClassification` or `*ForRewardModel` checkpoint served on its own vLLM or SGLang server in pooling mode, apart from the rollout server, on both arms.
 
 The scorer renders the conversation with the `tokenizer`'s chat template, adds no special tokens, and maps the head's logit to `sigmoid((logit − logit_shift) / logit_scale)`. On the online arm it renders the original conversation, not TRL's generation prompt.
 
@@ -23,10 +23,14 @@ TRL's in-process path stays reachable through the online trainer's API (not the 
 | `tokenizer` | `model` | Whose chat template renders the conversation |
 | `label_index` | `0` | The head output read as the logit |
 | `logit_shift`, `logit_scale` | `0.0`, `1.0` | The sigmoid mapping above |
-| `view` | `final` | `final`: the prompt plus one assistant message holding the final answer; `full`: every turn; `digest` is refused |
+| `view` | `final` | `final`: the prompt plus one assistant message holding the final answer (empty when the episode delivered none, never its last turn); `full`: every turn; `digest` is refused |
 | `batch_size` | `8` | Rows per request |
 | `max_concurrency` | `4` | Requests in flight per scorer |
 | `request_timeout` | `60` s | Per request |
 | `on_error` | `invalid` | [Outages](README.md#outages) |
 
 The raw logit logs as `reward_model/<name>/logit`, the verdict rate as `reward_model/<name>/scored`.
+
+## Requests
+
+A request goes to `url` with no authentication header and is not retried. A timeout, a connection error, an error status or a malformed reply leaves every completion of that batch (`batch_size` of them) without a score, booked by `on_error` ([Outages](README.md#outages)).

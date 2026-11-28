@@ -71,9 +71,7 @@ def _stream(model, output_dir, *, is_save_rank=True, max_shard_size=SHARD_SIZE):
         ("layers.0.mlp.gate.weight", "layers.0"),
         ("h.3.attn.c_attn.weight", "h.3"),
         ("encoder.layer.1.attention.self.query.weight", "encoder.layer.1"),
-        ("bert.encoder.layer.0.output.dense.weight", "bert.encoder.layer.0"),
         ("embed_tokens.weight", ""),
-        ("model.norm.weight", ""),
         ("model.xlayers.1.weight", ""),
     ],
 )

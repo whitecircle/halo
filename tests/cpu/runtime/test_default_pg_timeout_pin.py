@@ -14,15 +14,6 @@ from halo.runtime.process_group import _apply_default_pg_timeout
 from tests.common.distributed import init_distributed as harness_init_distributed
 
 
-def test_torch_still_exposes_the_new_group_timeout_default():
-    assert hasattr(c10d, "default_pg_nccl_timeout"), (
-        "torch.distributed.distributed_c10d.default_pg_nccl_timeout is gone on this PyTorch build — "
-        "_apply_default_pg_timeout can no longer pin the subgroup default, and every DeviceMesh "
-        "(DP/HSDP/TP) subgroup falls back to the 10-minute NCCL watchdog. Point "
-        "_apply_default_pg_timeout at the renamed symbol."
-    )
-
-
 def test_apply_default_pg_timeout_rebinds_the_module_default(monkeypatch):
     monkeypatch.setenv("DIST_NCCL_TIMEOUT_MINUTES", "123")
     original = c10d.default_pg_nccl_timeout

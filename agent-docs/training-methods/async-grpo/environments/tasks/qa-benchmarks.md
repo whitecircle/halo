@@ -22,7 +22,7 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `search_backend` | auto | `serper`, `brave`, `tavily`, `keenable`, `duckduckgo`; auto picks by which API key is set, keyless DuckDuckGo last. Validated at construction |
-| `include_python_tools` | `false` | `qa_search` only: adds the in-process restricted `python` REPL |
+| `include_python_tools` | `false` | `qa_search` only: adds the `python` REPL, in-process and restricted unless `HALO_SANDBOX_REPL=1` sends it to the [sandbox](../sandbox.md#modal) backend |
 | `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` or a tool price (`tool_success_reward`, `tool_error_penalty`, `tool_reward_cap`) closed-book raises |
 | `system_prompt` | class prompt | Replaces the built-in instructions |
 

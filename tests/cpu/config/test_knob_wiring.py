@@ -242,9 +242,9 @@ def _rejected_knobs(script_path: str) -> set[str]:
     return rejected
 
 
-@pytest.mark.parametrize(
-    ("script", "fields"),
-    [
+def test_script_rejects_knobs_it_cannot_honor(subtests):
+    """These knobs parse on the listed script but nothing consumes them."""
+    rows = [
         ("scripts/training/preference/kto.py", {*TEMPLATE_COLUMN_KNOBS, "log_decoded_samples"}),
         (
             "scripts/training/reward/reward_model.py",
@@ -266,11 +266,12 @@ def _rejected_knobs(script_path: str) -> set[str]:
                 "text_only_model",
             },
         ),
-    ],
-)
-def test_script_rejects_knobs_it_cannot_honor(script, fields):
-    """These knobs parse on the listed script but nothing consumes them."""
-    assert fields <= _rejected_knobs(script), f"{script} no longer rejects {sorted(fields - _rejected_knobs(script))}"
+    ]
+    for script, fields in rows:
+        with subtests.test(script):
+            assert fields <= _rejected_knobs(script), (
+                f"{script} no longer rejects {sorted(fields - _rejected_knobs(script))}"
+            )
 
 
 def _run_script_main(script: str, config_body: str, tmp_path: Path, **stubs) -> None:

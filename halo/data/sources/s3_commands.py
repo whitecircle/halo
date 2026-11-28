@@ -22,24 +22,38 @@ def build_command_client(args) -> S3Client:
 
 
 def push_command(args, client: S3Client) -> str:
-    result = client.push_folder(
-        local_path=args.local_path,
-        key=args.s3_key,
-        subfolder=args.subfolder,
-        overwrite=not args.no_overwrite,
-        show_progress=not args.quiet,
-    )
+    """An existing prefix is refused unless ``args.overwrite``, which deletes the objects the folder lacks."""
+    try:
+        result = client.push_folder(
+            local_path=args.local_path,
+            key=args.s3_key,
+            subfolder=args.subfolder,
+            overwrite=args.overwrite,
+            show_progress=not args.quiet,
+        )
+    except FileExistsError as e:
+        raise SystemExit(
+            f"✗ {client.s3_uri(args.s3_key, args.subfolder)} already exists. Pass --overwrite to replace it: the "
+            "objects the folder lacks are then deleted."
+        ) from e
     return f"✓ Uploaded to {result}"
 
 
 def download_command(args, client: S3Client) -> str:
-    result = client.download_folder(
-        key=args.s3_key,
-        local_path=args.local_path,
-        subfolder=args.subfolder,
-        overwrite=not args.no_overwrite,
-        show_progress=not args.quiet,
-    )
+    """An existing local path is refused unless ``args.overwrite``, which removes it before the download."""
+    try:
+        result = client.download_folder(
+            key=args.s3_key,
+            local_path=args.local_path,
+            subfolder=args.subfolder,
+            overwrite=args.overwrite,
+            show_progress=not args.quiet,
+        )
+    except FileExistsError as e:
+        raise SystemExit(
+            f"✗ {args.local_path} already exists. Pass --overwrite to replace it: it is then removed before the "
+            "download."
+        ) from e
     return f"✓ Downloaded to {result}"
 
 

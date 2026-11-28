@@ -15,7 +15,7 @@ trains with GRPO. For pre-collected rewards use [Offline GRPO](../grpo/offline.m
 
 1. The trainer pushes its weights to the engines over NCCL, then hands one prompt per batch row to `RolloutManager`, which dispatches round-robin across Ray actors and server URLs.
 2. Each actor holds its own environment instance: POST `/v1/chat/completions`, parse the reply and its `tool_calls`, run the step, repeat until done or `max_turns`.
-3. The environment grades each trajectory; the trainer builds training rows from the engine's sampled tokens and computes the GRPO loss.
+3. The environment grades each finished episode, and the actor that played it waits for any external reward term (`judge`, `reward_model`, `whitecircle`) before handing it back, inside `episode_timeout`; the trainer builds training rows from the engine's sampled tokens and computes the GRPO loss.
 
 ![One async GRPO step: weight push, multi-turn episodes on Ray actors against the rollout servers, grading, one training row per assistant turn, GRPO loss](../../assets/diagrams/batch_rollout_pipeline.png)
 
@@ -40,7 +40,7 @@ dataset without it is refused at trainer construction:
 - `code_contests` / `codeforces` (hidden-test payload), `exam_qa`, `qa_search` and the `react_*` presets (graded
   final answer) require it, as does [`swe`](environments/tasks/swe.md#reward) without a `test_function`, unless
   judge-only;
-- `native_*` and `mcp` need none.
+- `native_*` and `mcp` need none: they grade a row's `answer` where it has one, and without one any finished episode grades 1, so the `environment` term rewards finishing ([Native Tool-Use](environments/protocols/native-tool-use.md#reward)).
 
 Rename columns with `prompt_field` / `answer_field` and forward extras with `context_fields`. A `context_fields`
 entry, or an `answer_field` renamed away from `answer`, that names no column raises at startup.
@@ -117,7 +117,7 @@ python scripts/environments/inference/eval_env.py \
 - [Episodes](episodes.md): sampling, turn and episode budgets, tool calls, unproductive turns
 - [Reasoning Budgets](reasoning.md): effort levels, the engine's reasoning cap, the per-level budget and price
 - [Objective and Stability](objective.md): training rows, importance sampling, advantages, KL
-- [Memory and Throughput](performance.md): the logits wall, chunked log-probs, sizing
+- [Memory and Throughput](performance.md): the logits plane, chunked log-probs, sizing
 - [Monitoring](monitoring.md): logged metrics, saved trajectories, early stop
 - [Evaluation](evaluation.md): eval during training, the offline runner, re-grading
 - [Troubleshooting](troubleshooting.md): symptoms and fixes

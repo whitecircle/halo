@@ -61,6 +61,6 @@ One B300, `hidden_size` 2560, four streams, `hc_lowrank` 320, bf16, one gated re
 - **Trained weights:** the backward takes 3.61 ms upstream and 2.21 ms here, the norm weight's gradient and the two matmuls for the mix's costing the difference; the graph 1010 MiB against 205 MiB.
 - **16384 tokens:** 3.00 ms and 6.00 ms upstream, 0.92 ms and 1.77 ms here (frozen); trained backward 6.67 ms against 3.84 ms.
 
-The release runs 96 of these per step (two on each of 48 layers), so the frozen numbers are about 0.3 s of an 8192-token step.
+The release runs 96 of these per step, two on each of 48 layers, so on the frozen numbers the kernels take about 0.3 s off an 8192-token step ((4.77 − 1.62) ms × 96, computed).
 
 On the real checkpoint the gated residual alone takes the LoRA step at 16k packed tokens from 28.95 s to 23.66 s (1.22×) and the peak from 98.71 to 96.52 GB, on the same loss trajectory ([Flash-Next kernel defaults](../models/qwen4_exp.md#kernel-defaults)).

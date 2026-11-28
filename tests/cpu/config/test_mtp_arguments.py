@@ -65,9 +65,10 @@ def _reject(args, sft_config, config, *, model_args=None, dist_args=None) -> Non
     )
 
 
-@pytest.mark.parametrize(
-    "script_args",
-    [
+def test_only_the_sft_script_carries_the_knobs(subtests):
+    """A run that syncs weights, or scores its own logits, cannot reach a head: the parser's unknown-key raise keeps it
+    out."""
+    script_arguments = [
         ClassificationScriptArguments,
         DPOScriptArguments,
         EmbeddingScriptArguments,
@@ -79,16 +80,10 @@ def _reject(args, sft_config, config, *, model_args=None, dist_args=None) -> Non
         SMPOScriptArguments,
         SelfDistillScriptArguments,
         TeacherDistillScriptArguments,
-    ],
-)
-def test_only_the_sft_script_carries_the_knobs(script_args):
-    """A run that syncs weights, or scores its own logits, cannot reach a head: the parser's unknown-key raise keeps it
-    out."""
-    assert not set(MTP_FIELDS) & set(script_args.__dataclass_fields__)
-
-
-def test_the_sft_script_carries_every_knob():
-    assert set(MTP_FIELDS) <= set(SFTScriptArguments.__dataclass_fields__)
+    ]
+    for script_args in script_arguments:
+        with subtests.test(script_args.__name__):
+            assert not set(MTP_FIELDS) & set(script_args.__dataclass_fields__)
 
 
 def test_by_default_no_head_is_requested():

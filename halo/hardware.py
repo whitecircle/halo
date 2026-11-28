@@ -4,6 +4,7 @@ peaks differ within one architecture."""
 import logging
 import math
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -44,7 +45,7 @@ def supports_grouped_mm() -> bool:
 @dataclass(frozen=True)
 class GpuPeak:
     """One GPU's dense Tensor-Core peaks by precision and its name aliases; an alias matches when every token of it is
-    in the reported name, and the most specific wins."""
+    a whole token of the reported name, and the most specific wins."""
 
     aliases: tuple[str, ...]
     flops: dict[str, float]
@@ -90,7 +91,7 @@ GPU_PEAK_FLOPS = {
             "fp32": 80.0e12,
         },
     ),
-    "B300": GpuPeak(  # same 148-SM die as B200; the published 6x FP4 names GB300, so this keeps the 4x
+    "B300": GpuPeak(  # bf16 as NVIDIA's HGX B300 row; fp4 keeps the B200's 4x where that row gives 6x dense
         aliases=("B300",),
         flops={
             "bf16": 2250.0e12,
@@ -109,18 +110,36 @@ GPU_PEAK_FLOPS = {
         aliases=("A6000",),
         flops={"bf16": 154.8e12, "fp16": 154.8e12, "tf32": 77.4e12, "fp32": 38.7e12},
     ),
+    "A10": GpuPeak(  # not the A10G, which reports its own name and has no NVIDIA spec page
+        aliases=("A10",),
+        flops={"bf16": 125.0e12, "fp16": 125.0e12, "tf32": 62.5e12, "fp32": 31.2e12},
+    ),
+    "L4": GpuPeak(
+        aliases=("L4",),
+        flops={"bf16": 121.0e12, "fp16": 121.0e12, "tf32": 60.0e12, "fp32": 30.3e12},
+    ),
+    "L40S": GpuPeak(
+        aliases=("L40S",),
+        flops={"bf16": 366.5e12, "fp16": 366.5e12, "tf32": 183.0e12, "fp32": 91.6e12},
+    ),
 }
 PEAK_KEY_BY_DTYPE = {torch.bfloat16: "bf16", torch.float16: "fp16"}
 
 
+def _name_tokens(name_upper: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[A-Z0-9]+", name_upper))
+
+
 def _classify_gpu_name(gpu_name_upper: str) -> str | None:
-    """Most specific alias first (``H100 PCIE`` before ``H100``, ``GB200`` before ``B200``)."""
+    """Most specific alias first (``H100 PCIE`` before ``H100``). Tokens compare whole, so ``A100`` does not claim an
+    ``RTX A1000`` nor ``L4`` an ``L40``."""
+    reported = set(_name_tokens(gpu_name_upper))
     candidates = sorted(
-        ((key, tuple(alias.split())) for key, entry in GPU_PEAK_FLOPS.items() for alias in entry.aliases),
+        ((key, _name_tokens(alias)) for key, entry in GPU_PEAK_FLOPS.items() for alias in entry.aliases),
         key=lambda candidate: (len(candidate[1]), sum(len(token) for token in candidate[1])),
         reverse=True,
     )
-    return next((key for key, tokens in candidates if all(token in gpu_name_upper for token in tokens)), None)
+    return next((key for key, tokens in candidates if reported.issuperset(tokens)), None)
 
 
 def detect_gpu_model() -> str | None:

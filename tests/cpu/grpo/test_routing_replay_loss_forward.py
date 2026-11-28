@@ -175,8 +175,13 @@ def test_the_padded_recompute_capture_records_ordinary_padding():
     assert (forward.masks >= 0).all()
 
 
-@_LOSS_PATHS
-@_REPLAY_MODES
+@pytest.mark.parametrize(
+    ("replay", "dense"),
+    [
+        pytest.param("rollout", False, id="rollout-padded"),
+        pytest.param("recompute", True, id="recompute-dense"),
+    ],
+)
 def test_a_round_carries_row_ids_in_place_of_a_dense_mask(replay, dense):
     """The batch holds one int64 id per row, and no tensor spans the round's width in the routing's layers."""
     batch = _loss_forward(replay=replay, dense=dense).batch

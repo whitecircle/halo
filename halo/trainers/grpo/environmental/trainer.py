@@ -195,6 +195,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             reject_negative_reward_terms_under_maxrl(cfg, price_on=self._reasoning_price_on)
         self._rollout_backend = cfg.rollout_backend
         self._rollout_weight_precision = cfg.rollout_weight_precision
+        self._rollout_adapter_sync = cfg.rollout_adapter_sync
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
         reject_open_ended_tool_turns(
             self._rollout_env, unwrap_framework_wrappers(self.model), self._tokenizer, self._rollout_stop_token_ids

@@ -150,11 +150,15 @@ def read_adapter_keys(adapter_dir: str) -> list[str]:
 
 
 def adapter_module_paths(adapter_dir: str) -> set[str]:
-    """The base model's module paths a saved adapter addresses; a key with no PEFT segment is a whole parameter."""
+    """The base model's module paths a saved adapter addresses; a key with no PEFT segment is a whole parameter, and a
+    native expert adapter addresses its EP layer, where the base holds the family's own MoE module."""
     paths: set[str] = set()
     for key in read_adapter_keys(adapter_dir):
         name = key.removeprefix(PEFT_BASE_MODEL_PREFIX)
-        cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
+        if is_expert_lora_key(key):
+            cut = name.rfind(".experts.")
+        else:
+            cut = min((at for marker in _ADAPTER_KEY_SUFFIX_MARKERS if (at := name.find(marker)) >= 0), default=-1)
         paths.add(name[:cut] if cut >= 0 else name.rpartition(".")[0])
     return paths
 

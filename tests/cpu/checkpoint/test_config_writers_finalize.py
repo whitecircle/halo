@@ -64,19 +64,22 @@ def _python_files():
         yield from sorted((REPO_ROOT / root).rglob("*.py"))
 
 
-@pytest.mark.parametrize("path", list(_python_files()), ids=lambda p: str(p.relative_to(REPO_ROOT)))
-def test_every_model_config_writer_finalizes_the_config(path):
-    relative = str(path.relative_to(REPO_ROOT))
-    unfinalized = [
-        name
-        for name, finalizes in _config_writers(path)
-        if not finalizes and (relative, name) not in _EXEMPT_FUNCTIONS and name not in _FINALIZERS
-    ]
-    assert not unfinalized, (
-        f"{relative}: {unfinalized} write a model config.json without finalize_exported_config "
-        f"(or save_full_checkpoint / save_model_config) — a Bailing export from here is family-less, "
-        f"a Step-3.7 one carries a schema no server parses and a Laguna one names remote code it lacks"
-    )
+def test_every_model_config_writer_finalizes_the_config(subtests):
+    files = list(_python_files())
+    assert files, "the sweep found no python file under halo/ or scripts/"
+    for path in files:
+        with subtests.test(str(path.relative_to(REPO_ROOT))):
+            relative = str(path.relative_to(REPO_ROOT))
+            unfinalized = [
+                name
+                for name, finalizes in _config_writers(path)
+                if not finalizes and (relative, name) not in _EXEMPT_FUNCTIONS and name not in _FINALIZERS
+            ]
+            assert not unfinalized, (
+                f"{relative}: {unfinalized} write a model config.json without finalize_exported_config "
+                f"(or save_full_checkpoint / save_model_config) — a Bailing export from here is family-less, "
+                f"a Step-3.7 one carries a schema no server parses and a Laguna one names remote code it lacks"
+            )
 
 
 @pytest.mark.parametrize(("relative", "name"), sorted(_EXEMPT_FUNCTIONS))

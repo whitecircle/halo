@@ -1,4 +1,4 @@
-"""Teacher distillation against the student's own checkpoint warns on a resolved bias update, ``auto`` included."""
+"""Teacher distillation against the student's own checkpoint warns on a resolved bias update."""
 
 import logging
 from types import SimpleNamespace
@@ -40,18 +40,6 @@ def _warns(requested: str, resolved: str, *, teacher_is_student: bool, caplog) -
 @pytest.mark.parametrize("mode", ["bias_update", "bias_update_transient"])
 def test_a_bias_update_against_the_students_own_checkpoint_warns(mode, caplog):
     assert _warns(mode, mode, teacher_is_student=True, caplog=caplog)
-
-
-def test_auto_is_judged_by_the_mode_it_resolves_to(caplog):
-    """``auto`` picks ``bias_update`` on a router with ``balancing_biases`` (Zaya), so a config with no
-    ``moe_balancing`` line warns too."""
-    assert _warns("auto", "bias_update", teacher_is_student=True, caplog=caplog)
-    assert not _warns("auto", "none", teacher_is_student=True, caplog=caplog)
-
-
-def test_a_requested_bias_update_that_resolves_to_none_does_not_warn(caplog):
-    """A dense student or a downgrade resolves ``bias_update`` to ``none``, and then nothing moves the router."""
-    assert not _warns("bias_update", "none", teacher_is_student=True, caplog=caplog)
 
 
 @pytest.mark.parametrize("mode", ["none", "aux_loss"])

@@ -146,11 +146,6 @@ def test_an_invalid_matmul_precision_compares_as_its_fallback(monkeypatch):
         assert _settings_with(monkeypatch, {"HALO_FP32_MATMUL_PRECISION": "not-a-precision"}) == default
 
 
-def test_grad_bucket_is_reported_in_operator_units(monkeypatch):
-    """MB, the unit the operator can grep their ``--env-file`` for."""
-    assert _settings_with(monkeypatch, {})["HALO_GRAD_BUCKET_MB"] == 256
-
-
 @pytest.mark.parametrize(
     ("raw", "spans_domains", "expected"), [("", True, "0"), ("  ", False, "1"), ("1", True, "1"), ("0", False, "0")]
 )

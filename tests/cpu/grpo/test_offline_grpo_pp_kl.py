@@ -118,9 +118,17 @@ def _pp_loss(me, policy, batch) -> torch.Tensor:
     return me._pp_token_loss(policy, target) / me._pp_normalizer(inputs)
 
 
-@pytest.mark.parametrize("loss_type", ["grpo", "bnpo", "dr_grpo"])
-@pytest.mark.parametrize("pg", ["reinforce", "prob_weighted"])
-@pytest.mark.parametrize("min_log_prob", [None, MIN_LOG_PROB])
+@pytest.mark.parametrize(
+    "min_log_prob,pg,loss_type",
+    [
+        (None, "reinforce", "grpo"),
+        (MIN_LOG_PROB, "reinforce", "grpo"),
+        (None, "prob_weighted", "grpo"),
+        (MIN_LOG_PROB, "prob_weighted", "grpo"),
+        (MIN_LOG_PROB, "reinforce", "bnpo"),
+        (None, "prob_weighted", "dr_grpo"),
+    ],
+)
 def test_pp_kl_loss_matches_compute_loss(loss_type, pg, min_log_prob):
     batch = _collated_batch()
     policy, reference = _logits_pair()

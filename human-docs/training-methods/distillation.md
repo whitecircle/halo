@@ -16,7 +16,7 @@ pipeline parallelism. The MoE recipes are under `examples/distillation/gptoss/` 
 
 ## Teacher distillation
 
-Data is the SFT conversation format. Both models sit on every rank, the teacher as weights only, so
+Data is the SFT conversation format, read from the `messages` column by default (`conversation_field`). Both models sit on every rank, the teacher as weights only, so
 memory is the binding constraint and the shipped recipe puts LoRA on the student. Before any teacher
 weight loads, the script raises unless both tokenizers map every token to the same id: in practice
 teacher and student share a tokenizer family.
@@ -44,8 +44,8 @@ halo launch self-distill examples/distillation/qwen3_5/self-distill-qwen3.5-9b.y
 - `max_length` needs headroom for the hint: neither branch is truncated, so an over-length row raises.
 - `assistant_message_template` must byte-match what the chat template renders, and
   `train_on_completions_only` must stay on while the distillation term is.
-- `reference_kl_coef: 0` loads no reference model. Raising it costs a second resident model, unsharded
-  under expert or tensor parallelism.
+- `reference_kl_coef: 0` loads no reference model. Raising it costs a second resident model, a whole
+  unsharded copy on every rank.
 
 ## Online SDPG
 
@@ -62,8 +62,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch grpo/online \
 ```
 
 SDPG adds a no-grad teacher forward on the longer hinted sequence. By default it keeps the student's
-and the teacher's logits alive until backward, so it runs out of memory at batch sizes Online GRPO
-survives. Set `use_chunked_grpo_logprobs: true` and neither is built.
+and the teacher's logits alive until backward, so it runs out of memory at batch sizes where Online GRPO
+fits. Set `use_chunked_grpo_logprobs: true` and neither is built.
 
 ## What to watch
 

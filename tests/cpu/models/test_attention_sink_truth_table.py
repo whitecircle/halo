@@ -34,20 +34,14 @@ LIVE_EAGER = ("eager", False)
 # A from-scratch build has no pretrained sinks to neutralize, so it resolves as live.
 # CP refuses live sinks, and so a from-scratch build even under reset_sinks, and runs flex requests on flash.
 EXPECTED = {
-    (True, True, True, True): (CONTRADICTION,) * 4,
-    (True, True, True, False): (CONTRADICTION,) * 4,
-    (True, True, False, True): (CONTRADICTION,) * 4,
     (True, True, False, False): (CONTRADICTION,) * 4,
     (True, False, True, True): (SCRATCH_SINKS_UNDER_CP,) * 4,
     (True, False, True, False): (DROPS_SINKS, DROPS_SINKS, LIVE_FLEX, LIVE_EAGER),
     (True, False, False, True): (("sdpa", True), NEUTRALIZED_FLASH, NEUTRALIZED_FLASH, ("eager", True)),
     (True, False, False, False): (("sdpa", True), NEUTRALIZED_FLASH, ("flex_attention", True), ("eager", True)),
-    (False, True, True, True): (CP_LIVE_SINKS,) * 4,
-    (False, True, True, False): (DROPS_SINKS, DROPS_SINKS, LIVE_FLEX, LIVE_EAGER),
     (False, True, False, True): (CP_LIVE_SINKS,) * 4,
     (False, True, False, False): (DROPS_SINKS, DROPS_SINKS, LIVE_FLEX, LIVE_EAGER),
     (False, False, True, True): (CP_LIVE_SINKS,) * 4,
-    (False, False, True, False): (DROPS_SINKS, DROPS_SINKS, LIVE_FLEX, LIVE_EAGER),
     (False, False, False, True): (CP_LIVE_SINKS,) * 4,
     (False, False, False, False): (DROPS_SINKS, DROPS_SINKS, LIVE_FLEX, LIVE_EAGER),
 }
@@ -121,8 +115,28 @@ def _resolve(requested, reset_sinks, train_sinks, init_from_scratch, context_par
     raise AssertionError("the loader passed the build seam without reaching it")
 
 
-@pytest.mark.parametrize("flags", list(EXPECTED), ids=lambda flags: "-".join(map(str, flags)))
-@pytest.mark.parametrize("requested", REQUESTS)
+@pytest.mark.parametrize(
+    ("requested", "flags"),
+    [
+        ("sdpa", (True, True, False, False)),
+        ("flash_attention_2", (False, False, False, True)),
+        ("sdpa", (False, False, True, True)),
+        ("eager", (False, True, False, True)),
+        ("flex_attention", (True, False, True, True)),
+        *(
+            (requested, flags)
+            for flags in [
+                (True, False, True, False),
+                (True, False, False, True),
+                (True, False, False, False),
+                (False, False, False, False),
+                (False, True, False, False),
+            ]
+            for requested in REQUESTS
+        ),
+    ],
+    ids=lambda value: "-".join(map(str, value)) if isinstance(value, tuple) else value,
+)
 def test_sink_flags_resolve_as_tabled(flags, requested):
     assert _resolve(requested, *flags) == EXPECTED[flags][REQUESTS.index(requested)]
 

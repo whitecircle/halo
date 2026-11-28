@@ -6,16 +6,20 @@
 <link rel="stylesheet" href="../../../skills/visuals/kit/figure.css">
 <style>
   :root {
-    /* One rank's copy of a chunk is a tint of blue, a chunk summed over ranks is full violet. */
+    /* One rank's copy of a piece is a tint of blue, a piece summed over ranks is full violet. */
     --copy: oklch(from var(--halo-blue) calc(l * 0.58) c h);
     --sum: var(--halo-violet);
     --rank-col: 44px;
     --cell-w: 64px;
     --cell-h: 44px;
     --arrow-gap: 80px;
+    /* A named step carries its name and its bytes on the arrow. */
+    --step-gap: 220px;
   }
 
   body { width: 1600px; }
+
+  h1 { font-variant-numeric: lining-nums; }
 
   .figure { position: relative; }
 
@@ -65,12 +69,25 @@
     color: var(--secondary);
   }
 
+  .panel.wide { grid-column: 1 / -1; }
+
+  /* The rank column, then each state's cells, with a gap for the arrow between two states. */
   .grids {
     display: grid;
-    grid-template-columns: var(--rank-col) repeat(var(--ranks), var(--cell-w)) var(--arrow-gap) repeat(var(--ranks), var(--cell-w));
+    grid-template-columns: var(--rank-col) repeat(var(--ranks), var(--cell-w));
+    grid-auto-columns: var(--cell-w);
     grid-auto-rows: var(--cell-h);
     gap: 4px;
     margin-top: var(--heading-gap);
+  }
+
+  .step {
+    position: absolute;
+    font-size: 21px;
+    line-height: 1.2;
+    color: var(--body);
+    white-space: nowrap;
+    transform: translateX(-50%);
   }
 
   .rank {
@@ -115,13 +132,13 @@
 <div class="canvas">
   <header>
     <h1><span class="nw">All-reduce</span> is <span class="nw">reduce-scatter</span> plus <span class="nw">all-gather</span></h1>
-    <p class="subtitle">Chunks of a D-byte tensor on R = {ranks} ranks, before and after each collective</p>
+    <p class="subtitle">Pieces of a D-byte tensor on R = {ranks} ranks, before and after each collective</p>
   </header>
 
   <div class="figure" id="figure">
     <div class="key">
-      <span style="--fill: var(--copy)"><i></i>a₁ is chunk a from R1</span>
-      <span style="--fill: var(--sum)"><i></i>∑a is chunk a summed over every rank</span>
+      <span style="--fill: var(--copy)"><i></i>a₁ is piece a from R1</span>
+      <span style="--fill: var(--sum)"><i></i>∑a is piece a summed over every rank</span>
       <span style="--fill: var(--surface); --edge: var(--line)"><i></i>Slot not held</span>
     </div>
     <div class="panels" id="panels"></div>
@@ -130,8 +147,9 @@
 
   <footer>
     <p>
-      <span class="s">Bytes are what each GPU sends over a ring.</span>
-      <span class="s">Backward runs the dual: <span class="nw">all-gather</span> and <span class="nw">reduce-scatter</span> are each other’s gradient, and an <span class="nw">all-to-all</span>’s is another <span class="nw">all-to-all</span>.</span>
+      <span class="s">D is the whole tensor: what each rank ends with (<span class="nw">all-gather</span>) or starts with (the others).</span>
+      <span class="s">Bytes are what each rank sends, and what it receives.</span>
+      <span class="s">Backward runs the mirror: <span class="nw">all-gather</span> and <span class="nw">reduce-scatter</span> are each other’s gradient, and an <span class="nw">all-to-all</span>’s is another <span class="nw">all-to-all</span>.</span>
     </p>
   </footer>
 </div>
@@ -148,45 +166,48 @@
   const R = SETUP.ranks;
   /** Text for each `{name}` in the page's static text. */
   const VALUES = { ranks: String(R) };
-  /** Chunk c is the c-th letter, a copy from rank r carries r as a subscript. */
-  const chunkName = (chunk) => String.fromCharCode(97 + chunk);
+  /** Piece c is the c-th letter, a copy from rank r carries r as a subscript. */
+  const pieceName = (piece) => String.fromCharCode(97 + piece);
   const subscript = (rank) => String(rank).replace(/\d/g, (d) => String.fromCharCode(0x2080 + Number(d)));
 
-  // A cell is a chunk copied from one rank, a chunk summed over ranks, or an empty slot.
-  const copy = (chunk, rank) => ({ kind: "copy", text: `${chunkName(chunk)}${subscript(rank)}` });
-  const sum = (chunk) => ({ kind: "sum", text: `∑${chunkName(chunk)}` });
+  // A cell is a piece copied from one rank, a piece summed over ranks, or an empty slot.
+  const copy = (piece, rank) => ({ kind: "copy", text: `${pieceName(piece)}${subscript(rank)}` });
+  const sum = (piece) => ({ kind: "sum", text: `∑${pieceName(piece)}` });
   const EMPTY = { kind: "empty", text: "" };
   const grid = (cell) => Array.from({ length: R }, (_, r) => Array.from({ length: R }, (_, c) => cell(r, c)));
 
+  /** What one rank sends in an all-gather, a reduce-scatter or an all-to-all: every piece but its own. */
+  const ONE_PASS = "(R − 1)/R × D";
   const EVERY_RANK_FULL = grid((r, c) => copy(c, r));
+  const ONE_SUM_EACH = grid((r, c) => (c === r ? sum(c) : EMPTY));
+  /** A collective's `states` are the grids it passes through, and `steps` name the arrows between them. */
   const COLLECTIVES = [
     {
       name: "All-gather",
       uses: "FSDP forward: everyone gets every shard",
-      cost: "(R − 1)/R × D per GPU",
-      before: grid((r, c) => (c === r ? copy(c, c) : EMPTY)),
-      after: grid((r, c) => copy(c, c)),
+      cost: `${ONE_PASS} per rank`,
+      states: [grid((r, c) => (c === r ? copy(c, c) : EMPTY)), grid((r, c) => copy(c, c))],
     },
     {
       name: "Reduce-scatter",
       uses: "FSDP backward: sum, keep your shard",
-      cost: "(R − 1)/R × D per GPU, the dual of all-gather",
-      before: EVERY_RANK_FULL,
-      after: grid((r, c) => (c === r ? sum(c) : EMPTY)),
+      cost: `${ONE_PASS} per rank, the mirror of all-gather`,
+      states: [EVERY_RANK_FULL, ONE_SUM_EACH],
     },
     {
       name: "All-reduce",
-      uses: "DDP gradient sync · TP layer outputs",
-      cost: "Reduce-scatter then all-gather: 2 · (R − 1)/R × D",
-      before: EVERY_RANK_FULL,
-      after: grid((r, c) => sum(c)),
+      uses: "DDP gradient sync · tensor-parallel layer outputs",
+      cost: `Reduce-scatter then all-gather: 2 × ${ONE_PASS} per rank`,
+      states: [EVERY_RANK_FULL, ONE_SUM_EACH, grid((r, c) => sum(c))],
+      steps: ["Reduce-scatter", "All-gather"],
+      wide: true,
     },
     {
       name: "All-to-all",
-      uses: "EP dispatch · CP Ulysses",
-      cost: "A transpose: each chunk has one destination",
-      before: EVERY_RANK_FULL,
-      after: grid((r, c) => copy(r, c)),
+      uses: "Expert parallelism’s token exchange, where piece sizes vary with routing · context parallelism",
+      cost: `${ONE_PASS} per rank. A transpose: each piece goes one hop, to its one destination`,
+      states: [EVERY_RANK_FULL, grid((r, c) => copy(r, c))],
+      wide: true,
     },
   ];
 
@@ -197,19 +218,21 @@
   const arrows = [];
 
   for (const op of COLLECTIVES) {
-    const panel = el("div", "panel");
+    const panel = el("div", op.wide ? "panel wide" : "panel");
     const head = el("div", "head");
     head.append(el("h2", undefined, op.name), el("span", undefined, op.uses));
 
     const grids = el("div", "grids");
-    const firstAfter = [];
-    const lastBefore = [];
+    const gap = op.steps ? "var(--step-gap)" : "var(--arrow-gap)";
+    grids.style.gridTemplateColumns = ["var(--rank-col)", ...op.states.map(() => `repeat(${R}, var(--cell-w))`)].join(` ${gap} `).replace(` ${gap} `, " ");
+    // The first and last cell of each state's top and bottom rows, for the arrows between states.
+    const edges = op.states.map(() => ({ first: [], last: [] }));
 
     for (let r = 0; r < R; r += 1) {
       grids.append(el("div", "rank", `R${r}`));
 
-      for (const [side, rows] of [["before", op.before], ["after", op.after]]) {
-        if (side === "after") {
+      op.states.forEach((rows, i) => {
+        if (i > 0) {
           grids.append(el("div"));
         }
 
@@ -217,20 +240,23 @@
           const node = el("div", `cell ${cell.kind}`, cell.text);
           grids.append(node);
 
-          if (side === "before" && c === R - 1) {
-            lastBefore.push(node);
+          if (c === 0) {
+            edges[i].first.push(node);
           }
 
-          if (side === "after" && c === 0) {
-            firstAfter.push(node);
+          if (c === R - 1) {
+            edges[i].last.push(node);
           }
         });
-      }
+      });
     }
 
     panel.append(head, grids, el("div", "cost", op.cost));
     panels.append(panel);
-    arrows.push([lastBefore, firstAfter]);
+
+    for (let i = 1; i < op.states.length; i += 1) {
+      arrows.push({ from: edges[i - 1].last, to: edges[i].first, step: op.steps?.[i - 1] });
+    }
   }
 
   const figure = document.getElementById("figure");
@@ -242,15 +268,24 @@
     return { l: r.left - origin.left, r: r.right - origin.left, t: r.top - origin.top, b: r.bottom - origin.top };
   };
 
-
   const grey = getComputedStyle(document.documentElement).getPropertyValue("--secondary").trim();
 
-  // Each before grid points at its after grid across the gap, level with the middle of the rank rows.
-  for (const [lastBefore, firstAfter] of arrows) {
-    const from = box(lastBefore[0]);
-    const to = box(firstAfter[0]);
-    const y = (box(lastBefore[0]).t + box(lastBefore[R - 1]).b) / 2;
-    arrow(wires, from.r + 18, y, to.l - 18, y, grey);
+  // Each grid points at the next across the gap, level with the middle of the rank rows. A named step carries
+  // its name above the arrow and its bytes below.
+  for (const { from, to, step } of arrows) {
+    const a = box(from[0]);
+    const z = box(to[0]);
+    const y = (a.t + box(from[R - 1]).b) / 2;
+    arrow(wires, a.r + 18, y, z.l - 18, y, grey);
+
+    if (step !== undefined) {
+      const x = (a.r + z.l) / 2;
+      const name = el("div", "step", step);
+      const bytes = el("div", "step", ONE_PASS);
+      figure.append(name, bytes);
+      name.style.cssText = `left:${x}px; top:${y - 14 - name.getBoundingClientRect().height}px`;
+      bytes.style.cssText = `left:${x}px; top:${y + 14}px`;
+    }
   }
 </script>
 </body>

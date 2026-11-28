@@ -234,7 +234,7 @@ Each row becomes a group of `num_generations` completions. Under TP and ETP ever
 
 ## vLLM on Blackwell (B200)
 
-- **Server:** `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0 ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
+- **Server:** `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on compute capability 10.0 ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
 - **Trainer:** all three GRPO scripts give an unset `attn_implementation` the padded-batch default — the loader's own pick on Blackwell (SDPA for a remote-code checkpoint, FA2 for a softcapped policy), **SDPA** elsewhere — and request nothing under `reset_sinks: false` and offline GRPO under CP ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
 
 ## Testing a setup
@@ -245,7 +245,7 @@ CPU: `pytest tests/cpu/grpo -m cpu`. GPU: `tests/gpu/trainers/grpo/test_online_g
 
 ## What to watch
 
-Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 when trainer and engine agree), `completions/clipped_ratio`, `entropy`, and each external term's (`judge`, `reward_model`) `<source>/<name>/scored`. Toolkit additions:
+Metric names follow TRL's `GRPOTrainer`. Read every run: `rewards/accuracy/mean`, `frac_reward_zero_std`, `sampling/importance_sampling_ratio/mean` (near 1 when trainer and engine agree), `completions/clipped_ratio`, `entropy`, and each external term's (`judge`, `reward_model`, `whitecircle`) `<source>/<name>/scored`. Toolkit additions:
 
 - `kl_clamp_frac`: share of loss tokens whose reference log-ratio hits the 5-nat clamp, at `beta > 0`.
 - `sampling/degenerate_group_frac`: share of completions `drop_degenerate_groups` masked out.

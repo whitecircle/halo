@@ -694,7 +694,7 @@ class StepBatchMixin:
         loss_mask: torch.Tensor,
         rollout_results: list[RolloutResult],
     ) -> None:
-        """COLLECTIVE. A launch whose rounds have carried no policy gradient so far raises once
+        """COLLECTIVE. A run whose rounds have carried no policy gradient so far raises once
         ``zero_gradient_round_limit`` come in a row, as the empty-step halt reads validity only, so a run whose valid
         episodes all tie (a tool parser that leaves calls as text, an answerless environment) would log loss 0 forever.
         A round the breaker zeroed counts, and its own early stop acts first. Past the first round that trained, a streak
@@ -735,7 +735,7 @@ class StepBatchMixin:
         )
         if at_limit and not self._policy_gradient_seen:
             raise RuntimeError(
-                f"{detail} Stopping at zero_gradient_round_limit={limit}, as this launch has trained nothing yet. Raise "
+                f"{detail} Stopping at zero_gradient_round_limit={limit}, as this run has trained nothing yet. Raise "
                 f"it for a reward this sparse, or set it to null."
             )
         if is_global_main_process() and (first_of_a_dead_start or self._zero_gradient_rounds == limit):

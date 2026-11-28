@@ -43,7 +43,11 @@ def _load_ep_policy() -> nn.Module:
         experts_fsdp_managed=False,
     )
     pc = SimpleNamespace(
-        ep_config=lambda: ep_config, ep_lazy_loading=True, fp32_non_ep_params=False, max_concurrent_loading=None
+        ep_config=lambda: ep_config,
+        ep_lazy_loading=True,
+        fp32_non_ep_params=False,
+        max_concurrent_loading=None,
+        frozen_quantized_experts=False,
     )
     from_pretrained_kwargs = {
         "config": AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True),

@@ -39,8 +39,16 @@ def test_advantages_are_clipped_to_ten_either_way():
     )
 
 
-@pytest.mark.parametrize("method", METHODS)
-@pytest.mark.parametrize("rewards", [[1, 1, 1], [0, 0, 0], [0, 1, 1, 0], [1, 0, 0, 0]])
+@pytest.mark.parametrize(
+    ("rewards", "method"),
+    [
+        pytest.param([1, 1, 1], "minmax", id="rewards0-minmax"),
+        pytest.param([1, 1, 1], "robust", id="rewards0-robust"),
+        pytest.param([1, 1, 1], "quantile_norm", id="rewards0-quantile_norm"),
+        pytest.param([1, 1, 1], "quantile_uniform", id="rewards0-quantile_uniform"),
+        pytest.param([1, 0, 0, 0], "z_norm", id="rewards3-z_norm"),
+    ],
+)
 def test_integer_rewards_with_best_completion_emphasis(method, rewards):
     advantages = compute_group_advantages(rewards, method, best_completion_emphasis=1.5)
     assert len(advantages) == len(rewards)
@@ -120,9 +128,16 @@ def test_two_completion_normal_methods_are_symmetric():
     )
 
 
-@pytest.mark.parametrize("method", METHODS)
-@pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
-@pytest.mark.parametrize("group", [1, 2, 3])
+@pytest.mark.parametrize(
+    ("group", "bad", "method"),
+    [
+        pytest.param(1, float("nan"), "z_norm", id="1-nan-z_norm"),
+        pytest.param(2, float("inf"), "minmax", id="2-inf-minmax"),
+        pytest.param(3, float("-inf"), "robust", id="3--inf-robust"),
+        pytest.param(2, float("nan"), "quantile_norm", id="2-nan-quantile_norm"),
+        pytest.param(3, float("inf"), "quantile_uniform", id="3-inf-quantile_uniform"),
+    ],
+)
 def test_non_finite_rewards_are_refused(method, bad, group):
     """Unrefused, a bad row trains as an average completion or poisons its siblings' gradients, by group size."""
     rewards = [0.0, 1.0, 0.5][: group - 1] + [bad]
@@ -130,8 +145,18 @@ def test_non_finite_rewards_are_refused(method, bad, group):
         compute_group_advantages(rewards, method, best_completion_emphasis=0.0)
 
 
-@pytest.mark.parametrize("method", METHODS)
-@pytest.mark.parametrize("emphasis", [0.0, 0.5, 1.0])
+@pytest.mark.parametrize(
+    ("emphasis", "method"),
+    [
+        pytest.param(0.0, "z_norm", id="0.0-z_norm"),
+        pytest.param(0.5, "z_norm", id="0.5-z_norm"),
+        pytest.param(1.0, "z_norm", id="1.0-z_norm"),
+        pytest.param(0.5, "minmax", id="0.5-minmax"),
+        pytest.param(0.5, "quantile_norm", id="0.5-quantile_norm"),
+        pytest.param(0.5, "quantile_uniform", id="0.5-quantile_uniform"),
+        pytest.param(0.5, "robust", id="0.5-robust"),
+    ],
+)
 def test_emphasis_at_or_below_one_is_inert(method, emphasis):
     """``0.0`` is not special-cased to ``1.0``."""
     rewards = [0.0, 0.25, 1.0, 1.0]

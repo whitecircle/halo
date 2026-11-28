@@ -35,14 +35,15 @@ skips the ladder (writing the tokenizer through the same `save_tokenizer`), fold
 tensor as it is gathered and streams the result through `stream_gathered_checkpoint`. How it resumes,
 LoRA or full fine-tune: [Embedding — Saving](../training-methods/embedding.md#saving).
 
-Every gather is a collective, so **all** ranks run it. Only the save rank copies the result to host memory
-(`materialize_dtensor` on the others; under EP the same `retain` flag skips the layout assembly in
+Every gather is a collective, so **all** ranks run it. Only a writer copies the result to host memory, the
+save rank or, under an EP stripe, the writer that owns the chunk (`materialize_dtensor` on the others; under
+EP the same `retain` flag skips the layout assembly in
 `EPGatherMixin.gather_layer_state_dict`), so a node pays one writer's copy instead of `gpus_per_node` ×
 model. Every gathered save **streams** through `stream_gathered_checkpoint`: FSDP2, CP and TP one
 conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors and then each MoE layer as
 it is gathered. The writer holds at most one chunk, the shard it is filling and one shard per background
 write thread (`HALO_CHECKPOINT_WRITE_THREADS`, default `0`), so host memory stays well under 1× model
-([measured peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
+([computed peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
 line; opting in with a positive count writes the finished parts on that many threads while the next chunk is
 gathered and converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
 rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;
@@ -109,7 +110,7 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | `model.safetensors` (or sharded + index) | Yes | Yes | Weights, a trained [MTP head](../optimization/mtp-heads.md#checkpoints) under its release keys included |
 | `config.json`, `tokenizer.*` (full processor for VLMs and for RL runs on a multimodal checkpoint, whose `processing_class` stays the tokenizer) | Yes | Yes | Architecture config + `processing_class` |
 | `generation_config.json` | Yes | Yes | Sampling defaults, stop strings and the custom `eos_token_id` set — written for a generative model only, and paired with `config.json` by `save_model_config`. `PretrainedConfig` does not carry it, so a save that writes only `config.json` serves with defaults. |
-| `trainer_state.json` | Yes | Yes | Step count, epoch, loss history — published last ([Interrupted saves](#interrupted-saves)) |
+| `trainer_state.json` | Yes | Yes | Step count, epoch, loss history, and a `token_sources` run's mix fingerprint ([Pre-training](../training-methods/pretraining.md#training-from-datatrove-token-folders)) — published last ([Interrupted saves](#interrupted-saves)) |
 | `optimizer_shard_XXXXX.pt` | Yes | No | Per-rank optimizer shard — every torchrun sharded mode. Under multi-group EP only the replica group's lowest rank carries the replicated (FSDP-ignored) expert state; its peers read it from that shard |
 | `optimizer_meta.pt` | Yes | No | Topology fingerprint gating exact resume |
 | `scheduler.pt` | Yes | Yes | LR scheduler state — re-persisted on every mode so resume continues the schedule |
@@ -356,7 +357,7 @@ live names differ from its hub's declares the pairs in its spec's `export_key_re
 gather and `merge_ep_shards.py` apply; the lazy loader reads the hub spelling through transformers' own
 Laguna renamings. Every lazy build plans its keys with the family's whole transformers conversion mapping,
 as `from_pretrained` does (`halo/model_loading/checkpoint_keys.py`), a SigLIP tower's `vision_model` level
-included. Four families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling,
+included. Five families declare the mapping their hub checkpoints need (`hub_conversion_keys`: Inkling, Inkling 2,
 DeepSeek-V4, GLM-5 Next, Step-3.7 Flash); each declared key must resolve in the installed transformers, and
 a text-only class with no mapping of its own (Inkling's text artifact) plans with those entries. A key stays
 unconverted when its rename target misses the live names while the key itself is live, the retry
@@ -533,9 +534,7 @@ FSDP2 (`fully_shard`) itself.
 transformers logger, which non-logging ranks silence — a truncated or wrong-architecture directory would
 train from random weights with no output. Every toolkit load path (the per-mode loaders, the lazy EP
 loader, the reference/teacher loads) routes its absent set through `verify_checkpoint_coverage`
-(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`,
-which also keeps the checkpoint's weights on every rank under accelerate's `fsdp_cpu_ram_efficient_loading`
-([Accelerate launch configs](../parallelism/data-parallelism.md#accelerate-launch-configs)).
+(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`.
 
 Legitimate absences are read off the model: a task head outside `base_model_prefix` (`score`,
 `classifier`, an untied `lm_head` — what makes reward / classification training on a base checkpoint

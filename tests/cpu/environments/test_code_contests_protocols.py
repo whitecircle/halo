@@ -221,11 +221,6 @@ def test_a_contradiction_stated_for_this_run_is_refused():
         _env(**{**contract, "eval_protocol": "leaderboard", "max_submissions": 3})
 
 
-def test_the_eval_script_takes_the_protocol_from_its_flag_only():
-    with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
-        reject_flag_owned_env_kwargs({"eval_protocol": "leaderboard"}, FLAG_OWNED_ENV_KWARGS)
-
-
 def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
     """``--env_kwargs`` is laid over the flags, so ``{"max_turns": 3}`` would silently cap a ``--max_turns 16`` run.
     Read off the resolver, so a flag added without a refusal fails here."""

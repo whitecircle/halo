@@ -42,7 +42,7 @@ rewards:
 | `max_time_limit` | 15 s | Clamp on every per-test limit; below `timeout_per_test` it is refused |
 | `compiled_time_limit_scale` | `1.0` | Multiplies a compiled language's limit |
 | [`max_grading_seconds`](grading.md#grading-budget) | `None` | Wall-clock budget for one grade |
-| `max_output_size` | 1 MB | Bytes, at least 1. Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
+| `max_output_size` | 1,000,000 | Stdout characters, at least 1. Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
 | `stop_on_first_failure` | `false` | Stop at the first failing test. The grade is unchanged; `outcome/test_pass_frac` becomes a lower bound |
 | `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level, and set here rather than in `tool_budgets`, which raises. The tuning lever; `max_turns` (15) is a backstop |
 | [`eval_protocol`](evaluation.md#evaluation-protocols) | `harness` | `leaderboard` pins both tool budgets |
@@ -96,6 +96,16 @@ a [notes SFT checkpoint](#notes-sft-checkpoint). It has no length terms: the pro
 `notes-no-thinking.txt` as its context. Shaping and check prices are the thinking curriculum's, except
 `resubmission_penalty` 0.1: a failure there has no free stop, so spending every submission left must cost less than
 running out ([Economy invariants](reward.md#economy-invariants)).
+
+`qwen3.6-35b-a3b-code-contests-notes-full-ep1-codeforces.yaml` runs the stage-1 pool with the notes harness and the
+reasoning step on, from the base. It keeps the thinking curriculum's caps and length terms, with the notes recipes'
+`resubmission_penalty` 0.1, so its `reasoning_floor` (0.15) and `reasoning_price_cap` (0.18) stay under one more failed
+submission at 0.2, and its per-level prices (0.005, 0.004, 0.003 per 1,000 tokens) fall with the cap. No turn sees an
+earlier turn's reasoning (`carry_reasoning` stays off): the notes carry what later turns need, and the judge reads
+`notes-thinking.txt` as its context.
+
+Every notes recipe grades with `stop_on_first_failure: true`. Each test runs in a fresh sandbox jail, so grading a wrong
+program to the end would spend the [grading budget](grading.md#grading-budget) on tests already decided.
 
 ### Notes SFT checkpoint
 

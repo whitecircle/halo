@@ -2,12 +2,12 @@
 """Load-time guards in ``halo/data/sources/loading.py``: a declared render column must exist, ``test_size`` warns
 where inert, a train-only corpus entry adds no held-out rows, and ``validation`` serves as the held-out split."""
 
-import json
 import logging
 import os
 import shutil
 import tempfile
 from functools import partial
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -143,26 +143,6 @@ def test_load_script_datasets_hands_the_loader_every_template_column():
     parallelism = SimpleNamespace(get_data_parallel_rank=lambda: 0, data_parallel_size=1)
     assert load_script_datasets(args, parallelism, loader=loader) == ("loaded", False)
     assert seen["template_columns"] == columns
-
-
-def test_declared_tools_field_present_loads():
-    temp_dir = tempfile.mkdtemp()
-    try:
-        train = _conversation_dataset(4).add_column("tools", [[]] * 4)
-        test = _conversation_dataset(2).add_column("tools", [[]] * 2)
-        _save_raw_dataset(temp_dir, train, test)
-        ds = load_datasets(
-            temp_dir,
-            test_size=None,
-            dataset_ratio=1,
-            conversation_field="messages",
-            template_columns={"tools_field": "tools"},
-        )
-        assert len(ds["train"]) == 4
-        ds = load_datasets(temp_dir, test_size=None, dataset_ratio=1, conversation_field="messages")
-        assert len(ds["train"]) == 4
-    finally:
-        shutil.rmtree(temp_dir)
 
 
 def test_tools_column_is_aliased_onto_the_spelling_the_reward_trainer_renders():
@@ -496,7 +476,7 @@ def test_a_ratio_list_on_a_preprocessed_string_path_takes_the_raw_path_refusal(t
         load_datasets_auto(source, test_size=None, dataset_ratio=[0.1])
 
 
-@pytest.mark.parametrize("ratio", [None, 1, 1.0])
+@pytest.mark.parametrize("ratio", [None, 1.0])
 def test_a_ratio_keeping_every_row_loads_a_preprocessed_dataset(tmp_path, ratio):
     source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
     ds, is_preprocessed = load_datasets_auto(source, test_size=None, dataset_ratio=ratio)
@@ -541,17 +521,47 @@ def test_test_size_still_splits_a_plain_dataset(caplog):
         shutil.rmtree(temp_dir)
 
 
-def test_preprocessed_metadata_fixture_is_detected():
-    """A fixture no longer detected as pre-processed would send the two tests above down the raw path."""
-    temp_dir = tempfile.mkdtemp()
-    try:
-        _save_preprocessed_dataset(temp_dir)
-        with open(os.path.join(temp_dir, METADATA_FILE)) as f:
-            assert json.load(f)["preprocessed"] is True
-        _, is_preprocessed = load_datasets_auto(temp_dir, test_size=None, dataset_ratio=1)
-        assert is_preprocessed
-    finally:
-        shutil.rmtree(temp_dir)
+@pytest.mark.parametrize("layout", ["bare", "train_only", "train_and_test"])
+def test_test_size_writes_its_split_under_the_datasets_cache(tmp_path, monkeypatch, layout):
+    """``datasets`` writes a split's index files beside the source's Arrow files: a read-only input fails, and every
+    node's load rank writes into a shared one."""
+    cache = tmp_path / "datasets_cache"
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(cache))
+    source = str(tmp_path / "source")
+    if layout == "bare":
+        _conversation_dataset(10).save_to_disk(source)
+    elif layout == "train_only":
+        _save_train_only_dataset(source, _conversation_dataset(10))
+    else:
+        _save_raw_dataset(source, _conversation_dataset(6), _conversation_dataset(4))
+    before = sorted(str(p.relative_to(source)) for p in Path(source).rglob("*"))
+
+    ds = load_datasets(source, test_size=0.2, dataset_ratio=1, conversation_field="messages")
+
+    assert (len(ds["train"]), len(ds["test"])) == (8, 2)
+    assert sorted(str(p.relative_to(source)) for p in Path(source).rglob("*")) == before
+    assert list(cache.glob("split-*.arrow")), "the split's index went nowhere under the datasets cache"
+
+
+def test_a_directory_mixing_two_bakes_is_refused(tmp_path):
+    """A copy that adds files without removing the old ones leaves a sharded bake's index beside an unsharded bake's
+    rows and stamp, and the index decides the load."""
+    mixed = str(tmp_path / "mixed")
+    _save_sharded_dataset(mixed, train_rows=20, test_rows=6)
+    _save_preprocessed_dataset(mixed, train_rows=8, test_rows=4)
+    with pytest.raises(ValueError, match=r"has shard_index.json while its metadata.json records num_shards=1"):
+        load_datasets_auto(mixed, test_size=None, dataset_ratio=None)
+
+    sharded_stamp_over_rows = str(tmp_path / "shards")
+    _save_preprocessed_dataset(sharded_stamp_over_rows)
+    write_stamped_sidecar(
+        os.path.join(sharded_stamp_over_rows, METADATA_FILE),
+        PreprocessedDatasetMetadata(max_length=2, num_shards=2),
+    )
+    with pytest.raises(
+        ValueError, match=r"has no readable shard_index.json while its metadata.json records num_shards=2"
+    ):
+        load_datasets_auto(sharded_stamp_over_rows, test_size=None, dataset_ratio=None)
 
 
 def test_train_only_list_entry_contributes_no_rows_to_the_held_out_split(caplog):

@@ -375,15 +375,30 @@ def test_a_delivery_to_a_full_output_queue_raises_instead_of_waiting_and_the_wor
 
 @pytest.fixture(params=[False, True], ids=["cancel-raises", "cancel-swallowed"])
 def retraining(prefetching, monkeypatch, request):
-    """``prefetching`` with a held round in flight and a join too short for it to finish."""
+    """``prefetching`` with a held round in flight and a join too short for it to finish. The poll outlasts the join,
+    so the stopped worker still has one in flight when the next run submits."""
     monkeypatch.setattr(async_rollouts, "_PREFETCH_JOIN_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(async_rollouts, "_PREFETCH_POLL_TIMEOUT_S", 1.0)
     prefetching._rollout_manager = _HeldRolloutManager(finishes_when_cancelled=request.param)
     prefetching.state = SimpleNamespace(global_step=0)
     prefetching._sync_weights_to_engine_fenced = lambda force=False: True
     prefetching._start_rollout_generation()
     prefetching._submit_for_prefetch(["a"], [None])
     assert prefetching._rollout_manager.entered.wait(_WORKER_WAIT_S)
-    return prefetching
+    yield prefetching
+    # A restarted worker is mid-poll at the teardown's stop, which then waits the poll out instead of leaving it.
+    monkeypatch.setattr(async_rollouts, "_PREFETCH_JOIN_TIMEOUT_S", _WORKER_WAIT_S)
+
+
+def test_a_stopped_worker_takes_no_later_submission(retraining):
+    """No new worker is started, so only the stopped one, its poll still in flight, could take the submission."""
+    old_worker = retraining._prefetch_thread
+    retraining._cleanup_async_components()
+    retraining._submit_for_prefetch(["b"], [None])
+    retraining._rollout_manager.release.set()
+    old_worker.join(_WORKER_WAIT_S)
+    assert not old_worker.is_alive()
+    assert retraining._prefetch_input_queue.qsize() == 1, "the stopped worker took the next run's submission"
 
 
 def test_a_restarted_worker_runs_the_next_trains_rounds(retraining):

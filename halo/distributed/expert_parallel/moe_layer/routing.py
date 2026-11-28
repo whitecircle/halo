@@ -8,6 +8,7 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.distributed.fsdp import FSDPModule
 
 from halo.models.gradient_checkpointing import active_recompute_scope
 from halo.models.moe.config_fields import ROUTER_TOPK_FIELDS
@@ -71,10 +72,13 @@ class EPRoutingMixin:
     @property
     def _fp32_router_input(self) -> bool:
         """Whether the router input is upcast to match a live fp32 router weight. Read off the weight, since an FSDP2
-        group unshards the router at its bf16 ``param_dtype``, but nothing wraps a one-rank job's model."""
+        group unshards the router at its bf16 ``param_dtype``, but nothing wraps a one-rank job's model. A checkpoint
+        recompute reaches the router before its own pre-forward unshard, so the read unshards first."""
         if not self.fp32_router:
             return False
         router = self._live_router_module()
+        if isinstance(router, FSDPModule):
+            router.unshard()
         weight = next(router.parameters(), None) if router is not None else None
         return weight is not None and weight.dtype == torch.float32
 

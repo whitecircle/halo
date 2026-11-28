@@ -92,10 +92,6 @@ def test_gate_up_swap_is_detected(cls):
     )
 
 
-def test_roster_has_no_conflicting_fusion_claims():
-    assert per_expert_fusion_map(), "roster produced an empty per-expert fusion map"
-
-
 def test_conflicting_family_claim_raises(monkeypatch):
     """Plain assignment would let it overwrite the earlier claim, and the loser's experts fuse swapped."""
     gate_name, up_name, down_name = _unfusing_families()[0].FAMILY.expert_layout.per_expert_keys

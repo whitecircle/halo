@@ -9,8 +9,8 @@ Each MoE layer routes 512 experts at top-22 on a 1024-wide latent.
 Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
 [Rollout engines](../supported-matrix.md#rollout-engines).
 
-- **Checkpoint:** `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, loaded through transformers' own
-  classes with no conversion step.
+- **Checkpoint:** `nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16`, which this page calls the release, loaded
+  through transformers' own classes with no conversion step.
 - **GPUs:** EP8 on eight B300s, 64 experts per GPU.
 - **Lightning:** `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16` is the same text class with no vision tower. Its
   recipe, `examples/sft/nemotron_h/nemotron-3.5-lightning-ep8-full.yaml`, ran 20 steps at EP8 and 8,192 tokens at 9,986
@@ -32,8 +32,8 @@ Modes: the Nemotron-H row of the [Supported Matrix](../supported-matrix.md#model
 | Images | about 6,790 | 3,198 | 184–188 GB |
 | Half image rows, half text | — | 3,166 | 183–186 GB |
 
-A B300 reports 288 GB, and the top GPU reached 99.4% at 32,000 and 99% at 50,000, so treat those as the limit. Each
-`max_length` is a starting point: watch the first steps' peak.
+A B300's driver reports 287.4 GB (NVIDIA lists 288 GB), and the top GPU reserved 283 GB at 32,000 and at 50,000,
+so treat those as the limit. Each `max_length` is a starting point: watch the first steps' peak.
 
 ## Recipes
 
@@ -58,8 +58,8 @@ halo launch sft examples/sft/nemotron_h/nemotron-3.5-super-vl-ep8-lora.yaml -n 8
   --output_dir=/data/checkpoints/nemotron-lora
 ```
 
-These targets adapt attention, the Mamba projections and the experts. Every save folds the adapters into a full
-checkpoint, 251 GB with its adapter state, so raise `save_steps` when disk is tight.
+The recipe's `lora_target_modules` adapt attention, the Mamba projections and the experts. Every save folds the
+adapters into a full checkpoint, 251 GB with its adapter state, so raise `save_steps` when disk is tight.
 
 ### SMPO
 
@@ -95,8 +95,8 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
 
 - **Gradient checkpointing stays on.** By arithmetic a token holds about 66 MB without it, so a GPU fits about
   1,650 tokens per rank. It costs 37% on a Mamba layer.
-- **Speed.** The Mamba scan dominates, at 64.8% of the tower's forward and backward at EP8, and throughput stays flat
-  with length. Rows of many short documents scan slower: 64 × 128 costs 1.9× one 8,192-token document on a Mamba layer.
+- **Speed.** The Mamba layers take 64.8% of the tower's forward and backward at EP8 and 8,192 tokens per rank, and
+  their scan is the bottleneck. Throughput stays flat with length. Rows of many short documents scan slower: 64 × 128 costs 1.9× one 8,192-token document on a Mamba layer.
 - **Attention.** Leave `attn_implementation` unset: FA4 runs both towers on B300, with FA2 as the fallback.
 - **Pad token.** `pad_token: <unk>` keeps the export's config equal to the release's. The tokenizer's own pad is
   its eos.
@@ -104,7 +104,7 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
   text, so the empty block trains as part of the completion.
 - **Router balancing.** `auto` picks `bias_update`, which trains the router's own bias and ships it in every
   checkpoint. The bias stays fp32 and routes with balancing off as well.
-- **LoRA.** `lora_r` must be a multiple of 8. An adapter on `conv1d` is refused.
+- **LoRA.** `lora_r` must be a multiple of 8 for the expert adapters. An adapter on `conv1d` is refused.
 
 ## Limits
 
@@ -125,20 +125,21 @@ into the fp32 logits the forward returns. The loss, the gradients and eval metri
 
 ## Export and serve
 
-Smoke-test a text-only export with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
+A run saves its model in step directories under `output_dir`, so the text-only export is the run's last
+`checkpoint-<step>`. Smoke-test it with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Stock
 transformers clamps Mamba's time steps at a floor neither the run nor the engines use, so its loss on real text reads
 0.05–0.09 nats higher than under the run's limit. To serve the export, rebuild the composite, which also streams back the
 vision tower and, unless the run trained one with `mtp_loss_weight`, the `mtp.*` head at the release's weights:
 
 ```bash
-halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft \
+halo run reattach-vision-tower --input_dir /data/checkpoints/nemotron-sft/checkpoint-<step> \
   --model_id nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16 \
   --output_dir /data/checkpoints/nemotron-sft-vl
 ```
 
-Serve from the [host](README.md#serve-from-the-host). vLLM started this way needs `--trust-remote-code` and
-`--mamba-ssm-cache-dtype float32`, which `docker-compose.vllm.yml` takes as `VLLM_TRUST_REMOTE_CODE=1` and
-`VLLM_EXTRA_ARGS`:
+Serve from the [host](README.md#serve-from-the-host). vLLM needs `--trust-remote-code` and
+`--mamba-ssm-cache-dtype float32`. This command starts the image directly, and `docker-compose.vllm.yml` takes the two
+flags as `VLLM_TRUST_REMOTE_CODE=1` and `VLLM_EXTRA_ARGS`:
 
 ```bash
 docker run -d --rm --name nemotron-vllm --gpus '"device=0,1"' --ipc=host --network host \

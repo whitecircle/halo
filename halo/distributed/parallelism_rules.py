@@ -511,8 +511,8 @@ def _reject_fsdp_settings(pc: ParallelismConfig) -> None:
             f"data_parallel_size={pc.data_parallel_size}): FSDP2's backward re-gather issues a plain "
             f"c10d all-gather on the TP-sharded DTensor params, which has no registered DTensor sharding "
             f"strategy (NotImplementedError mid-step). Use fsdp_reshard_after_forward=False (SHARD_GRAD_OP / "
-            f"ZeRO-2), which keeps params gathered between forward and backward, or use_hsdp for replica "
-            f"memory savings."
+            f"ZeRO-2), which keeps params gathered between forward and backward, and lower peak memory with "
+            f"gradient_checkpointing; ZeRO-3 itself needs a run without tensor parallelism (pure DP or CP)."
         )
 
 

@@ -18,7 +18,6 @@ from tests.common.repo import REPO_ROOT
 ENV_EXAMPLES_ROOT = REPO_ROOT / "examples" / "grpo" / "environmental"
 
 _EXAMPLES = sorted(ENV_EXAMPLES_ROOT.rglob("*.yaml"))
-_ID = {"ids": lambda config: config.relative_to(ENV_EXAMPLES_ROOT).as_posix()}
 
 # The negative controls below need an example whose environment binds these kwargs.
 _CODING_ENV_TYPES = ("code_contests", "codeforces")
@@ -96,18 +95,19 @@ def _in_process_sandbox(monkeypatch):
 
 
 def test_environmental_examples_tree_is_not_empty():
-    """A glob that stops matching would make every parametrized case vanish silently."""
+    """A glob that stops matching would leave the sweeps over it looping nothing, and passing."""
     assert len(_EXAMPLES) > 10, f"expected the shipped environmental examples, found {len(_EXAMPLES)}"
 
 
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_environment_resolves(config):
-    cfg = environment_config(config)
-    env = build_environment(cfg.environment_type, cfg.to_env_config())
-    try:
-        assert env.max_turns >= 1
-    finally:
-        env.close()
+def test_example_environment_resolves(subtests):
+    for config in _EXAMPLES:
+        with subtests.test(config.relative_to(ENV_EXAMPLES_ROOT).as_posix()):
+            cfg = environment_config(config)
+            env = build_environment(cfg.environment_type, cfg.to_env_config())
+            try:
+                assert env.max_turns >= 1
+            finally:
+                env.close()
 
 
 def test_an_unknown_environment_kwarg_is_still_rejected():
@@ -130,11 +130,12 @@ def test_some_example_runs_a_judge():
     assert _JUDGED_EXAMPLES, "no shipped environmental example runs a judge term"
 
 
-@pytest.mark.parametrize("config", _JUDGED_EXAMPLES, **_ID)
-def test_a_judge_names_only_the_tools_its_environment_offers(config):
+def test_a_judge_names_only_the_tools_its_environment_offers(subtests):
     """The judge reads each call under the environment's tool name, so naming a tool it does not offer describes
     calls its transcripts never hold."""
-    assert not foreign_tools(judge_text(config), offered_tools(config))
+    for config in _JUDGED_EXAMPLES:
+        with subtests.test(config.relative_to(ENV_EXAMPLES_ROOT).as_posix()):
+            assert not foreign_tools(judge_text(config), offered_tools(config))
 
 
 def test_a_judge_naming_another_runs_scratchpad_is_caught():

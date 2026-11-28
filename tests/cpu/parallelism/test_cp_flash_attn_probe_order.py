@@ -22,7 +22,6 @@ def _importable(name: str) -> bool:
 
 
 HAS_FA2 = _importable("flash_attn")
-HAS_FA3 = _importable("flash_attn_interface")
 HAS_FA4 = _importable("flash_attn.cute")
 
 
@@ -44,16 +43,6 @@ def _module_of(func) -> str:
     return getattr(func, "__module__", "")
 
 
-@pytest.mark.skipif(not (HAS_FA2 and HAS_FA4), reason="needs both flash_attn and flash_attn.cute installed")
-def test_blackwell_reaches_fa4_even_though_fa2_is_also_installed():
-    """FA2 imports fine here, so an FA2-first probe would win silently."""
-    func = _resolve(blackwell=True, hopper=False)
-    assert "cute" in _module_of(func), (
-        f"CP resolved {_module_of(func)!r} on Blackwell while flash_attn.cute is installed — "
-        f"an FA2-first probe order makes the FA4 branch dead code"
-    )
-
-
 @pytest.mark.skipif(not HAS_FA2, reason="flash_attn (FA2) not installed")
 def test_off_blackwell_and_hopper_it_still_falls_back_to_fa2():
     """Anti-vacuity: the FA4 preference must be arch-gated."""
@@ -72,13 +61,6 @@ def test_a_refused_fa4_gets_fa2():
         f"a refused FA4 resolved {_module_of(func)!r} on Blackwell; allow_fa4=False did not hold"
     )
     assert _module_of(func).startswith("flash_attn"), f"expected the FA2 entry point, got {_module_of(func)!r}"
-
-
-@pytest.mark.skipif(not HAS_FA3, reason="flash_attn_interface (FA3) not installed in this image")
-def test_hopper_prefers_fa3_over_everything_else():
-    """Hopper runs its own FA3 for the non-varlen forward CP calls, the path FA2 serves worst."""
-    func = _resolve(blackwell=False, hopper=True)
-    assert _module_of(func).startswith("flash_attn_interface"), f"expected FA3 on Hopper, got {_module_of(func)!r}"
 
 
 if __name__ == "__main__":

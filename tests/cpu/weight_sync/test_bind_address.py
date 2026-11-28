@@ -3,6 +3,7 @@ The store is unauthenticated and vLLM unpickles the NCCL bootstrap from it, so a
 
 import ipaddress
 import logging
+import os
 import socket
 from pathlib import Path
 from typing import NamedTuple
@@ -25,35 +26,39 @@ from tests.common.weight_sync import offline_client
 BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
 # RFC 5737 documentation ranges here and in _TwoNicHost: never an address of the test host.
 NON_LOCAL_ADDRESS = "203.0.113.7"
-_TCP_LISTEN = "0A"
 
 
 def _listening_addresses(port: int) -> list[str]:
-    addresses = []
-    for table, family in (("/proc/net/tcp", socket.AF_INET), ("/proc/net/tcp6", socket.AF_INET6)):
-        for row in Path(table).read_text().splitlines()[1:]:
-            fields = row.split()
-            address_hex, port_hex = fields[1].split(":")
-            if int(port_hex, 16) != port or fields[3] != _TCP_LISTEN:
+    """Where this process listens on ``port``, read off its own sockets. /proc/net/tcp also lists other processes'
+    sockets the kernel gave the same number on other addresses (a gloo rank's on the NIC), and a read of it while
+    sockets come and go can repeat or drop a row."""
+    by_inode = {}
+    for fd in Path("/proc/self/fd").iterdir():
+        try:
+            if not os.readlink(fd).startswith("socket:"):
                 continue
-            raw = bytes.fromhex(address_hex)
-            # The kernel prints the address as 32-bit words in host (little-endian) byte order.
-            packed = b"".join(raw[i : i + 4][::-1] for i in range(0, len(raw), 4))
-            addresses.append(socket.inet_ntop(family, packed))
-    return addresses
+            with socket.socket(fileno=os.dup(int(fd.name))) as sock:
+                if (
+                    sock.family in (socket.AF_INET, socket.AF_INET6)
+                    and sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN)
+                    and sock.getsockname()[1] == port
+                ):
+                    # Keyed by inode: the listener keeps a dup of the socket it hands the store.
+                    by_inode[os.fstat(sock.fileno()).st_ino] = sock.getsockname()[0]
+        except OSError:  # closed since the listing
+            continue
+    return list(by_inode.values())
 
 
 def _assert_listens_only_on(port: int, address: str) -> None:
-    """One socket binds one address, so a wildcard is the only way to reach past the advertised one.
-    A parallel test's own socket on another address may share the number."""
     listening = _listening_addresses(port)
-    assert address in listening and not {"0.0.0.0", "::"} & set(listening), (
+    assert listening == [address], (
         f"the rendezvous store listens on {listening} while the engine was told to dial {address}:{port}"
     )
 
 
 class _JoinRequest(NamedTuple):
-    """``listening``: who held the port when the request arrived."""
+    """``listening``: where this process listened on the port when the request arrived."""
 
     address: str
     port: int
@@ -116,7 +121,9 @@ def _recording_engine(engine_requests: list[_JoinRequest], server_calls: list[st
         if path == "/get_world_size":
             return _Response({"world_size": 0})
         if path == "/server_info":
-            return _Response({"vllm_env": {"VLLM_HALO_PATCHES": "vllm_layerwise_reload_patch"}})
+            return _Response(
+                {"vllm_env": {"VLLM_HALO_PATCHES": f"{FakeVLLMServer.VERSION}|vllm_layerwise_reload_patch"}}
+            )
         if path in ("/health", "/end_weight_update"):
             return _Response({})
         server_calls.append(path)

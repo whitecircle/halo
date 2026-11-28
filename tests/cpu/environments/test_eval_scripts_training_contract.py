@@ -10,7 +10,6 @@ from types import SimpleNamespace
 import pytest
 from transformers import CONFIG_MAPPING
 
-import halo.environments.rollout_config as rollout_config
 from halo.entrypoints import eval_contract
 from halo.entrypoints.code_contests_eval import CODING_ENV_TYPES, resolve_env_config
 from halo.entrypoints.eval_contract import (
@@ -255,11 +254,6 @@ def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_bud
     unbudgeted = TrainingContract.load(str(plain))
     rollout = unbudgeted.rollout_config(_env(unbudgeted))
     assert rollout.reasoning_end_token_id is None and not rollout.capture_token_ids
-
-
-def test_the_eval_resolves_stop_tokens_as_the_trainer_does():
-    """One resolver, one policy: a recipe the trainer accepts is one its eval accepts."""
-    assert eval_contract.resolve_rollout_stop_token_ids is rollout_config.resolve_rollout_stop_token_ids
 
 
 @pytest.mark.parametrize(

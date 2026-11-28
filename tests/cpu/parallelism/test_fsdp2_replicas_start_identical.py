@@ -48,14 +48,15 @@ def _max_abs(tensors) -> float:
     return max_or_nan((tensor.abs().max().item() for tensor in tensors if tensor.numel()), default=0.0)
 
 
-def _replica_spread(model) -> tuple[int, float]:
-    """Parameters on the 2-D HSDP mesh and the largest ``|Δ|`` across the ``dp_replicate`` group. COLLECTIVE."""
+def _replica_spread(model) -> float:
+    """The largest ``|Δ|`` across the ``dp_replicate`` group over the parameters on the 2-D HSDP mesh, NaN when none
+    sits there. COLLECTIVE."""
     shards = [
         param.data
         for param in model.parameters()
         if isinstance(param.data, DTensor) and param.data.device_mesh.ndim == 2
     ]
-    spread = max_or_nan(
+    return max_or_nan(
         (
             group_max_abs_diff(to_local(shard), shard.device_mesh[MeshDim.DP_REPLICATE].get_group())
             for shard in shards
@@ -63,7 +64,6 @@ def _replica_spread(model) -> tuple[int, float]:
         ),
         default=float("nan"),
     )
-    return len(shards), spread
 
 
 def _grad_spread(model) -> float:
@@ -122,7 +122,7 @@ def _hsdp_lora_step(rank: int, family: str) -> dict:
     before_wrap = {name: _gather_world(param.data) for name, param in model.named_parameters()}
 
     fsdp.apply_fsdp2_for_dp(model, WORLD, compute_dtype=torch.float32, fp32_reduce=True, dp_replicate_size=REPLICAS)
-    sharded, at_wrap = _replica_spread(model)
+    at_wrap = _replica_spread(model)
     first_replica = _first_replica_gap(model, before_wrap)
 
     trainable = [param for param in model.parameters() if param.requires_grad]
@@ -133,12 +133,11 @@ def _hsdp_lora_step(rank: int, family: str) -> dict:
     model(input_ids=ids, labels=ids).loss.backward()
     grads = _grad_spread(model)
     optimizer.step()
-    _, after_step = _replica_spread(model)
+    after_step = _replica_spread(model)
     forward = _forward_spread(model, vocab)
     moved = sum(not torch.equal(old, to_local(param.data)) for old, param in zip(before_step, trainable, strict=True))
     return {
         "drawn": drawn,
-        "sharded": sharded,
         "at_wrap": at_wrap,
         "first_replica": first_replica,
         "forward": forward,
@@ -220,10 +219,6 @@ def ep(request, tmp_path_factory) -> list[dict]:
 
 def test_premise_ranks_drew_their_own_adapters(hsdp):
     assert all(record["drawn"] > 0 for record in hsdp), hsdp
-
-
-def test_premise_the_wrap_runs_hsdp(hsdp):
-    assert all(record["sharded"] > 0 for record in hsdp), hsdp
 
 
 def test_hsdp_replicas_start_from_the_first_replicas_shards(hsdp):

@@ -9,8 +9,9 @@ from halo.environments.episodes.episode_keys import EPISODE_INVALID_KEY
 
 TRUNCATION_MARKER = "\n…[truncated {dropped} chars]"
 
-# Harmony (gpt-oss) reads ``thinking``, other reasoning families ``reasoning_content``. Templates ignore a spelling
-# they do not know, so emitting both renders the CoT once everywhere.
+# Harmony (gpt-oss) templates read ``thinking``, other reasoning families ``reasoning_content``, and a template
+# ignores a spelling it does not know. transformers fills both from either before it renders; a rollout server
+# renders with its own stack, so the message carries both.
 REASONING_KEYS = ("thinking", "reasoning_content")
 
 
@@ -77,6 +78,8 @@ class Message:
     calls_rejected: bool = False
     # The calls the environment refused unrun or that named no tool: a scorer's view marks them as never run.
     refused_call_ids: tuple[str, ...] = ()
+    # What the environment alone knows of a call, by call id: a scorer's view shows it beside the call.
+    call_notes: dict[str, str] | None = None
     empty: bool = False
 
     def to_dict(self, include_thinking: bool = False) -> dict[str, Any]:

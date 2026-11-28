@@ -261,7 +261,7 @@ RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
     fi
 
 # The EFA userspace every Halo image shares (docker/efa/install_efa_userspace.sh owns the pins and
-# the reason all three images must match): the installer's rdma-core and libfabric over the
+# the reason the builds must match): the installer's rdma-core and libfabric over the
 # NGC-bundled MOFED ones, plus a GIN-capable aws-ofi-nccl (DeepEP V2 cross-node EP over AWS EFA; the
 # NGC-bundled plugin exports no ncclGin symbol). GDRCopy >= 2.5 backs proxy GIN, whose host gdrdrv
 # module must be loaded at runtime.
@@ -284,7 +284,7 @@ RUN pip install --ignore-installed --no-deps PyYAML pygments wheel
 # their dependencies come from the locked install below, and a fresh resolve here would leave
 # unlocked packages in the image.
 RUN export TORCH_CUDA_ARCH_LIST=$(cat /etc/cuda_arch) \
-    && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.4.2"
+    && pip install --no-build-isolation --no-deps "causal-conv1d==1.6.2.post1" "flash-linear-attention==0.6.0"
 
 # Remaining locked deps (flat export; compiled deps already satisfy their pins and are skipped).
 # The export carries the dev group — this image is also the test/docs/lint runtime — and all three optional
@@ -315,7 +315,7 @@ ARG SOURCE_REVISION=dev
 RUN echo "Building Halo source revision: ${SOURCE_REVISION}"
 
 LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
-ARG VERSION=1.3.0rc1
+ARG VERSION=1.3.0rc2
 ARG BUILD_DATE
 LABEL version="${VERSION}"
 LABEL org.opencontainers.image.version="${VERSION}"

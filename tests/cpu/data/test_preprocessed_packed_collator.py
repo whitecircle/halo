@@ -35,6 +35,9 @@ def make_tokenizer(pad_token_id: int = PAD, eos_token_id: int = EOS) -> MagicMoc
     tok.padding_side = "right"
     tok.model_max_length = 4096
     tok.encode.return_value = [RESP_1, RESP_2]
+    # A plain tokenizer of the vocabulary _write_metadata records, not a processor wrapping one.
+    tok.__len__.return_value = 100
+    del tok.tokenizer
 
     def _pad(features, **kwargs):
         max_len = max(len(f["input_ids"]) for f in features)

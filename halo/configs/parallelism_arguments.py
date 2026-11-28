@@ -2,16 +2,13 @@
 
 import math
 from dataclasses import dataclass, field, fields
-from typing import TYPE_CHECKING
 
 from halo.config_validation import ValidatedConfig, present, require_int
 from halo.distributed.expert_parallel.config import EPBufferBackend
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.parallelism_rules import AXES, EPScope, PPSchedule, reject_cross_domain_determinism
 from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
-
-if TYPE_CHECKING:
-    from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
 
 
 @dataclass
@@ -151,6 +148,14 @@ class ParallelismArguments(ValidatedConfig):
             "help": "Load an EP model by lazy safetensors slicing, each rank reading only its own expert slice "
             "(meta init, low CPU RAM); false loads with from_pretrained and patches EP afterwards. "
             "See agent-docs/parallelism/expert-parallelism.md#model-loading."
+        },
+    )
+    frozen_quantized_experts: bool = field(
+        default=ParallelismConfig.frozen_quantized_experts,
+        metadata={
+            "help": "Keep a block-scaled release's routed experts in their shipped NVFP4/MXFP8 layout as a frozen "
+            "base, dequantized per expert GEMM, instead of a bf16 copy (Inkling 2). "
+            "See agent-docs/models/inkling2.md#frozen-quantized-experts."
         },
     )
     ep_buffer_backend: EPBufferBackend = field(
@@ -342,13 +347,39 @@ def _declared_forward_budget(trainer_cls, training_config, row_sources: tuple) -
     return rows, trainer_cls.declared_row_length(training_config, *row_sources) or 0
 
 
+def reject_frozen_experts_without_peft_adapters(dist_args, model_config) -> None:
+    """``frozen_quantized_experts`` trains a PEFT adapter, with or without expert adapters beside it: no save exports
+    the frozen banks, so a full fine-tune over them would fail at its first checkpoint, and expert adapters alone are
+    served by no engine and merged into no packed expert. Runs before ``split_expert_lora_targets`` peels the
+    expert targets."""
+    if not dist_args.frozen_quantized_experts:
+        return
+    if not getattr(model_config, "use_peft", False):
+        raise ValueError(
+            "frozen_quantized_experts needs use_peft: true with LoRA targets: the frozen expert banks are exported by "
+            "no save, so a full fine-tune over them fails at its first checkpoint, while an adapter run saves its "
+            "adapters alone."
+        )
+    targets = model_config.lora_target_modules
+    if targets is not None and all(
+        expert_target_projections(target) for target in ([targets] if isinstance(targets, str) else targets)
+    ):
+        raise ValueError(
+            "frozen_quantized_experts needs a LoRA target outside the routed experts, and lora_target_modules "
+            f"{targets!r} names none: expert targets train as native expert adapters with no PEFT model beside them, "
+            "which adapter sync and the export-engine-adapter tool serve only beside an attention adapter, and no "
+            "merge folds a delta into the packed experts. Add an attention target, such as o_proj: "
+            "lora_target_modules: [o_proj, gate_up_proj, down_proj]."
+        )
+
+
 def parallelism_config_from_args(
     dist_args,
     *,
     trainer_cls,
     training_config=None,
     supports_init_from_scratch: bool = False,
-    expert_lora: "ExpertLoraSpec | None" = None,
+    expert_lora: ExpertLoraSpec | None = None,
     row_sources: tuple = (),
 ) -> ParallelismConfig:
     """The ``ParallelismConfig`` the parsed arguments describe. Refuses here, before any model loads, a CP/PP size

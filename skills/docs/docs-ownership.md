@@ -119,7 +119,6 @@ changes.
 |---|---|
 | `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md`; a `weight_sync_refusal` also `agent-docs/infrastructure/rollout-servers.md` and `human-docs/supported-matrix.md` |
 | `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/families/zaya.py` | `agent-docs/models/zaya.md` |
-| `halo/models/families/mistral4.py` | `agent-docs/models/mistral4.md` |
 | `halo/distributed/expert_parallel/families/nemotron_h.py`, `halo/models/families/nemotron_h.py` | `agent-docs/models/nemotron-h.md`, `human-docs/cookbooks/halo-nemotron-3.5-super-cookbook.md` |
 | `halo/distributed/expert_parallel/families/qwen3_next.py` | `agent-docs/models/qwen3-next.md` |
 | `halo/distributed/expert_parallel/families/qwen4_exp.py`, `halo/models/families/qwen4_exp/` | `agent-docs/models/qwen4_exp.md` |
@@ -129,7 +128,9 @@ changes.
 | `halo/model_loading/tokenizer_setup.py`, `halo/models/introspection/context_window.py` | `agent-docs/reference/configuration-reference.md`; the vocabulary grow also `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md`; the kept eos list also `agent-docs/data/collators.md`; the effort-template refusal also `agent-docs/data/dataset-formats.md` |
 | `halo/model_loading/buffer_repair.py`, `halo/model_loading/finalization.py`, `halo/models/kernel_warmups.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/hub_kernel_dispatch.py` | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
-| `halo/kernels/fla_launch.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/models/bailing.md`, `agent-docs/models/glm5-next.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/kernels/fla_launch.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/models/families/inkling2.py` | `agent-docs/models/inkling2.md` |
+| `halo/model_loading/parallel/frozen_experts.py` | `agent-docs/models/inkling2.md` |
 | `halo/model_loading/checkpoint_coverage.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`; the full-weight loads under accelerate FSDP also `agent-docs/parallelism/data-parallelism.md` |
 | `halo/model_loading/dtype.py` | `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/models/introspection/config_access.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
@@ -152,6 +153,7 @@ changes.
 | `halo/data/` | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
 | `halo/data/sources/s3_client.py`, `halo/data/sources/s3_dataset_store.py`, `halo/data/sources/dataset_cache.py`, `halo/data/sources/paths.py`, `halo/data/sources/s3_commands.py`, `scripts/before_training/s3.py` | `agent-docs/data/s3-utilities.md` |
 | `halo/data/preprocessed/`, `scripts/before_training/prepare_dataset.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
+| `halo/data/sources/{token_shards,token_mix}.py`, `halo/callbacks/token_mix_checkpoint.py`, the `token_sources` path of `scripts/training/sft.py` and `halo/entrypoints/data_setup.py` | `agent-docs/training-methods/pretraining.md`, `agent-docs/data/dataset-formats.md` (the folder layout), `agent-docs/reference/configuration-reference.md`, `human-docs/data.md` |
 | `halo/data/chat_render.py`, `halo/model_loading/tokenizer_backend.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md`; the final-turn close also `agent-docs/data/collators.md` |
 | `halo/data/render_columns.py` | `agent-docs/data/dataset-formats.md` |
 | `halo/data/pipeline/vlm_rows.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
@@ -181,9 +183,10 @@ changes.
 | `halo/models/attention/{selection,backend_setup,fa4_entry_points}.py` | `agent-docs/optimization/flash-attention.md` |
 | `halo/models/attention/prefix_lm.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/training-methods/sft.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/jit_cache.py` | `agent-docs/optimization/flash-attention.md`; the Liger implementation pin also `agent-docs/optimization/liger-kernels.md`; the cache and CuTe DSL variables also `agent-docs/infrastructure/docker.md`, `agent-docs/reference/configuration-reference.md` |
-| `halo/models/attention/packed_position_ids.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/mistral4.md`, `agent-docs/models/zaya.md` |
+| `halo/models/attention/packed_position_ids.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/zaya.md` |
 | `halo/models/attention/remote_flash_attention.py`, `halo/models/attention/tensor_memo.py` | `agent-docs/models/bailing.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/data/collators.md` |
 | `halo/models/attention/sdpa_flex_sliding.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/gemma4.md`, `agent-docs/models/step3p7.md` |
+| `halo/models/attention/inkling2_relative_flex.py` | `agent-docs/models/inkling2.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/data/collators.md` |
 | `halo/models/attention/gpt_oss_sinks.py` | `agent-docs/models/gpt-oss.md`, `agent-docs/reference/configuration-reference.md` |
 | `torch.compile` call sites | `agent-docs/optimization/torch-compile.md` |
 | `halo/model_loading/parallel/{peft_setup,freeze_patterns}.py` | `agent-docs/optimization/peft.md` |
@@ -250,11 +253,12 @@ changes.
 | `scripts/environments/**` | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
 | `scripts/cli_arguments.py`, `scripts/inference/inference_arguments.py`, `scripts/inference/reward_model/reward_model_arguments.py`, `halo/entrypoints/{resumable_generation,reward_scoring,rejection_sampling,offline_reward_scoring}.py`, `halo/entrypoints/eval_contract.py` | `agent-docs/reference/scripts-reference.md` |
 | `scripts/after_training/merge_ep_shards.py`, `halo/checkpoint/tools/ep_shard_merge.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/expert-parallelism.md` |
+| `scripts/after_training/export_engine_adapter.py`, `halo/entrypoints/engine_adapter_export.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/models/inkling2.md`, `agent-docs/infrastructure/rollout-servers.md`, `human-docs/checkpoints.md` |
 | `scripts/after_training/merge_pp_stages.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `scripts/after_training/quantize_to_lowp.py`, `halo/checkpoint/tools/lowp_export.py`, `halo/checkpoint/tools/compressed_tensors_layout.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `scripts/after_training/convert_to_bf16.py`, `halo/checkpoint/tools/bf16_conversion.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md` |
 | `scripts/after_training/merge_models.py`, `halo/checkpoint/tools/model_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
-| `Dockerfile*`, `docker-compose*`, `docker/*/verify_image.py`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches also `agent-docs/infrastructure/rollout-servers.md` |
+| `Dockerfile*`, `docker-compose*`, `docker/*/verify_*.py`, `docker/sglang/patches/` | `agent-docs/infrastructure/docker.md`; `Dockerfile.vllm`/`Dockerfile.sglang` + their compose files and server patches also `agent-docs/infrastructure/rollout-servers.md` |
 | `docker/engine_source_patch.py`, `docker/vllm/patches/`, `docker/vllm/parity/`, `docker/vllm/plugins/` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/infrastructure/docker.md`; plugins also `agent-docs/models/gpt-oss.md` |
 | `docker/nccl_pin.py` | `agent-docs/infrastructure/docker.md` |
 | `docker/efa/install_efa_userspace.sh` | `agent-docs/infrastructure/docker.md`, `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/parallelism/multi-node.md` |
@@ -265,7 +269,10 @@ changes.
 | `.github/workflows/**`, `.github/scripts/**`, `Makefile` test targets, `tests/common/hub_seed.py` | `agent-docs/infrastructure/ci.md`; tier composition lives in `agent-docs/contributing/README.md` |
 | `scripts/docs/**` | `agent-docs/infrastructure/ci.md`, `skills/docs/SKILL.md` |
 | `agent-docs/assets/**/*.html` figure pages, `skills/visuals/kit/**` | the page embedding the figure (every embedding page, for a kit change); re-render in the same commit (`make diagrams`, [Contributing → Docs](../../agent-docs/contributing/README.md#docs)) |
+| `tests/common/datatrove_shards.{py,json}`, `tests/common/goldens/token_mix_stream.py` | `agent-docs/contributing/README.md` (Goldens) |
 | `tests/baselines/bench/**`, `tests/gpu/profiling/benchmark_sft_{dense,ep}.py` | `agent-docs/contributing/README.md`, `agent-docs/optimization/throughput-benchmarks.md` |
+| `tests/gpu/profiling/{measurement,benchmark_roofline,benchmark_memory_hierarchy,benchmark_attention_scaling,benchmark_loss_head,benchmark_training_step,benchmark_matmul_precision,benchmark_first_call,benchmark_collectives}.py` | `agent-docs/reference/gpu-training-theory.md` (Reproduce the numbers), `agent-docs/reference/scripts-reference.md` |
+| `tests/gpu/profiling/{benchmark_lowp_kernels,benchmark_grouped_mm}.py` | `agent-docs/reference/gpu-training-theory.md` (Reproduce the numbers), `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/grouped-gemm.md` (`benchmark_grouped_mm`) |
 
 ## Cross-cutting
 
@@ -311,6 +318,7 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 | `human-docs/cookbooks/*.md` | the family's `examples/` recipes; its `agent-docs/models/` page |
 | `human-docs/installation.md`, `human-docs/quickstart.md` | `Dockerfile*`, the image tags, `examples/`; `agent-docs/infrastructure/docker.md`, `agent-docs/parallelism/launch-recipes.md` |
 | `human-docs/choosing-a-method.md`, `human-docs/training-methods/*.md` | `halo/trainers/`, `scripts/training/**`; the method's `agent-docs/training-methods/` page |
+| `human-docs/training-methods/rewards.md` | `halo/rewards/`, `scripts/before_training/{create_whitecircle_policies,score_offline_grpo}.py`; `agent-docs/training-methods/grpo/rewards/` |
 | `human-docs/ai-tooling.md` | `skills/` |
 | `human-docs/contributing.md` | `CONTRIBUTING.md`, `agent-docs/contributing/` |
 

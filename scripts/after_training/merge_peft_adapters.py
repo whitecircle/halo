@@ -13,6 +13,7 @@ from halo.checkpoint.tools.offline_export import ADAPTER_TASKS
 from halo.log import configure_cli_logging
 from halo.model_loading.dtype import DTYPE_BY_NAME
 from scripts.cli_arguments import (
+    add_base_revision_arg,
     add_device_map_arg,
     add_dtype_arg,
     add_max_shard_size_arg,
@@ -75,15 +76,7 @@ Examples:
     )
     add_max_shard_size_arg(parser)
     add_trust_remote_code_arg(parser, default=None)
-    parser.add_argument(
-        "--base_revision",
-        type=str,
-        default=None,
-        help="Hub revision to read the base at, in place of the commit adapter_config.json records. For an adapter "
-        "that records none (stock PEFT writes none unless asked) whose run did not train on the base's default "
-        "branch; ignored for a local base. Give a commit hash: a branch name is resolved again by each read of the "
-        "base.",
-    )
+    add_base_revision_arg(parser)
     parser.add_argument(
         "--fp32_norms",
         action="store_true",

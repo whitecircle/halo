@@ -134,8 +134,15 @@ def _lora_model(case: str, dtypes: tuple[torch.dtype, torch.dtype]) -> nn.Module
     return model
 
 
-@pytest.mark.parametrize("dtypes", sorted(_DTYPES))
-@pytest.mark.parametrize("case", sorted(_CASES))
+@pytest.mark.parametrize(
+    ("case", "dtypes"),
+    [
+        (case, dtypes)
+        for case in sorted(_CASES)
+        for dtypes in sorted(_DTYPES)
+        if dtypes != "fp32" or case in ("conv", "embedding", "linear")
+    ],
+)
 def test_lora_folded_is_peft_merge_bit_for_bit(case, dtypes):
     model = _lora_model(case, _DTYPES[dtypes])
     expected = merged_by_peft(model)

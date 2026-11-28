@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import Shard, distribute_tensor
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES
+from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES
 
 from halo.distributed.tensor_parallel import local_linears
 from halo.trainers.grpo.logprob_scoring import _tp_gathered_output_head

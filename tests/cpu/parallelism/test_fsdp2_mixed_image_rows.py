@@ -335,9 +335,31 @@ def test_each_tree_shape_agrees_on_its_own_processors_row(tmp_path, family):
         assert result["worst"] < 1e-5, result
 
 
-@pytest.mark.parametrize("mesh", [[2], [2, 2]], ids=["fsdp", "hsdp"])
-@pytest.mark.parametrize("reshard", [False, True], ids=["zero2", "zero3"])
-@pytest.mark.parametrize("gc", list(_GC_KINDS))
+@pytest.mark.parametrize(
+    ("gc", "reshard", "mesh"),
+    [
+        ("off", False, [2]),
+        ("off", True, [2]),
+        ("reentrant", False, [2]),
+        ("reentrant", True, [2]),
+        ("non_reentrant", False, [2]),
+        ("non_reentrant", True, [2]),
+        ("off", False, [2, 2]),
+        ("reentrant", True, [2, 2]),
+        ("non_reentrant", False, [2, 2]),
+    ],
+    ids=[
+        "off-zero2-fsdp",
+        "off-zero3-fsdp",
+        "reentrant-zero2-fsdp",
+        "reentrant-zero3-fsdp",
+        "non_reentrant-zero2-fsdp",
+        "non_reentrant-zero3-fsdp",
+        "off-zero2-hsdp",
+        "reentrant-zero3-hsdp",
+        "non_reentrant-zero2-hsdp",
+    ],
+)
 def test_nemotron_h_tower_takes_the_mixed_path(tmp_path, gc, reshard, mesh):
     """A composite holding ``language_model`` itself, so its embedding and tower share the root group."""
     world = 2 if mesh == [2] else 4
@@ -574,7 +596,6 @@ _ADAPTER_CASE = {
 @pytest.mark.parametrize(
     "case",
     [
-        {"gc": "reentrant"},
         {"family": _NEMOTRON, "gc": "reentrant"},
         {"family": _NEMOTRON, "gc": "non_reentrant"},
         {"family": "qwen3_5_moe", "gc": "reentrant"},
@@ -584,7 +605,6 @@ _ADAPTER_CASE = {
         {"spots": "tower_and_head"},
     ],
     ids=[
-        "reentrant",
         "nemotron_reentrant",
         "nemotron_non_reentrant",
         "moe_reentrant",

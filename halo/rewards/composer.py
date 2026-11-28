@@ -80,8 +80,8 @@ class RewardComposer:
             )
         self._scorers: dict[str, Scorer] | None = None
 
-    @property
-    def scorers(self) -> dict[str, Scorer]:
+    def build_scorers(self) -> dict[str, Scorer]:
+        """Each external term's scorer, built by the first call; a scorer that cannot be built (its key unset) raises."""
         if self._scorers is None:
             self._scorers = {term.name: build_scorer(term) for term in self.external_terms}
         return self._scorers
@@ -90,7 +90,8 @@ class RewardComposer:
         """``{term name: result}`` per sample, every term scored concurrently."""
         if not self.external_terms:
             return [{} for _ in samples]
-        per_term = await asyncio.gather(*(self.scorers[term.name].score(samples) for term in self.external_terms))
+        scorers = self.build_scorers()
+        per_term = await asyncio.gather(*(scorers[term.name].score(samples) for term in self.external_terms))
         return [
             {term.name: results[index] for term, results in zip(self.external_terms, per_term, strict=True)}
             for index in range(len(samples))
@@ -129,8 +130,9 @@ class RewardComposer:
 
     async def verify(self) -> None:
         """The first failure raises."""
+        scorers = self.build_scorers()
         for term in self.external_terms:
-            await self.scorers[term.name].verify()
+            await scorers[term.name].verify()
 
     async def aclose(self) -> None:
         scorers, self._scorers = self._scorers, None

@@ -5,6 +5,7 @@ what the sharded loader hands ``N`` DP ranks, every row exactly once."""
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
@@ -212,6 +213,43 @@ def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():
     assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
 
 
+def test_sigterm_runs_the_cleanup_that_removes_the_scratch(tmp_path):
+    """scancel and docker stop send SIGTERM, whose default action skips every finally block: the scratch, up to twice
+    the output, would stay behind with the map workers."""
+    prelude = (
+        "import time\n"
+        "from halo.data.pipeline import coordinated_map\n"
+        "def _slow_bake(**kwargs):\n"
+        "    print('BAKING', coordinated_map.ensure_cache_dir(), flush=True)\n"
+        "    time.sleep(120)\n"
+        "prepare_dataset_tool.preprocess_dataset = _slow_bake\n"
+    )
+    raw = tmp_path / "raw"
+    Dataset.from_dict({"text": ["a raw document"]}).save_to_disk(raw)
+    driver = _DRIVER.format(
+        argv=["--input", str(raw), "--output", str(tmp_path / "out"), *_DOC_TEXT_ARGV], prelude=prelude
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": str(REPO_ROOT) + os.pathsep + os.environ.get("PYTHONPATH", ""),
+        "HF_DATASETS_CACHE": str(tmp_path / "cache"),
+    }
+    with subprocess.Popen(
+        [sys.executable, "-c", driver], stdout=subprocess.PIPE, text=True, env=env, cwd=REPO_ROOT
+    ) as proc:
+        line = proc.stdout.readline()
+        while line and not line.startswith("BAKING"):
+            line = proc.stdout.readline()
+        assert line, "the bake never started"
+        scratch = line.split()[1]
+        assert os.path.isdir(scratch)
+        proc.send_signal(signal.SIGTERM)
+        output = proc.communicate(timeout=60)[0]
+
+    assert f"EXIT:{128 + signal.SIGTERM}" in output, f"the process died without its cleanup: {proc.returncode}"
+    assert not os.path.exists(scratch), "the scratch survived the SIGTERM"
+
+
 def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
     """A compressor whose windows cut by row index trains nothing the collator would accept from an offline-packed
     artifact."""
@@ -310,7 +348,8 @@ def test_the_bake_leaves_no_map_cache_behind_and_stores_no_full_sequence_labels(
         proc = subprocess.run(argv, capture_output=True, text=True, env=env, cwd=REPO_ROOT)
         assert proc.returncode == 0, proc.stdout + proc.stderr
 
-        assert os.listdir(cache) == [], f"the bake left map caches behind: {os.listdir(cache)}"
+        left = [name for name in os.listdir(cache) if not name.endswith(".lock")]
+        assert left == [], f"the bake left map caches behind: {left}"
         features = load_preprocessed_dataset(out)["train"].features
         assert set(features) == {"input_ids", "seq_lengths"}, features
 

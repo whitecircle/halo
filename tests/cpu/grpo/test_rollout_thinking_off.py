@@ -109,14 +109,15 @@ def test_some_example_samples_without_thinking():
     assert _NO_THINKING_EXAMPLES
 
 
-@pytest.mark.parametrize("path", _NO_THINKING_EXAMPLES, ids=lambda p: p.name)
-def test_a_no_thinking_example_passes_the_startup_gates(path):
-    config = yaml.safe_load(path.read_text())
-    build_environment(
-        config["environment_type"], config.get("environment_kwargs", {})
-    ).reject_settings_without_thinking()
-    tokenizer = _TemplateTokenizer((REPO_ROOT / config["chat_template"]).read_text())
-    verify_template_closes_thinking(tokenizer, {"enable_thinking": False, "reasoning_effort": "low"})
+def test_a_no_thinking_example_passes_the_startup_gates(subtests):
+    for path in _NO_THINKING_EXAMPLES:
+        with subtests.test(path.name):
+            config = yaml.safe_load(path.read_text())
+            build_environment(
+                config["environment_type"], config.get("environment_kwargs", {})
+            ).reject_settings_without_thinking()
+            tokenizer = _TemplateTokenizer((REPO_ROOT / config["chat_template"]).read_text())
+            verify_template_closes_thinking(tokenizer, {"enable_thinking": False, "reasoning_effort": "low"})
 
 
 def test_the_script_checks_the_template_before_it_probes_the_servers():

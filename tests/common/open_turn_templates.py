@@ -12,6 +12,10 @@ OPEN_FINAL_TURN_TEMPLATES = {
     "glm-5.3-flash-hub": "tests/common/hub_templates/glm-5.3-flash.jinja",
 }
 GLM_ASSISTANT_MARKER = "<|assistant|>"
+# What each template writes after an assistant turn the conversation goes on from: the token that closes a row's last
+# turn of that kind.
+GLM_ANSWER_CLOSER = "<|user|>"
+GLM_CALL_CLOSER = "<|observation|>"
 # The first assistant turn ends at the second user turn's role marker; nothing ends the second.
 TWO_EXCHANGES = [
     {"role": "user", "content": "Question alpha numero uno"},

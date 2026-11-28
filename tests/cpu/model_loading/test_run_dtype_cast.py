@@ -104,6 +104,8 @@ NON_MODEL_BUILDERS = frozenset(
 # A lazy loader plans against ``from_pretrained``'s meta shell or, for ``config_shell``, the config-built one; PP loads
 # the single stage of a one-stage split.
 FP32_MASTER_LOADERS = ("path_string", "ep_lazy", "ep_lazy_config_shell", "pp_stage", "pp_stage_config_shell")
+# The pinned families whose text model a declared PP refusal claims, as their pipeline load refuses before the pins.
+_PP_REFUSED_FAMILIES = {"inkling2_text"}
 
 
 class _Mixed(nn.Module):
@@ -239,14 +241,6 @@ def pinned_checkpoints(roster_checkpoints) -> dict[str, str]:
 
 
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
-def test_a_bf16_from_pretrained_keeps_the_family_pins(pinned_checkpoints, family):
-    """The premise: without the cast, these checkpoints load mixed."""
-    model = TINY_MOE_FAMILIES[family].load_class.from_pretrained(pinned_checkpoints[family], dtype=torch.bfloat16)
-
-    assert params_off_dtype(model, torch.bfloat16)
-
-
-@pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_the_frozen_loader_scores_in_the_run_dtype(pinned_checkpoints, family):
     model = load_frozen_auxiliary_model(
         pinned_checkpoints[family], dtype=torch.bfloat16, device_map="cpu", trust_remote_code=False, download_tag=None
@@ -307,17 +301,23 @@ def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpo
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
 def test_exactly_the_pinned_families_load_fp32_parameters(roster_checkpoints, family):
-    """A family that starts or stops pinning fails here. None pins inside a MoE block, the premise of the EP
-    loaders' block cast."""
+    """A family that starts or stops pinning fails here. A pin inside a MoE block is its router's (Inkling's
+    ``gate.global_scale``), which ``fp32_router`` keeps; the EP loaders' block cast trains every other block
+    parameter at the run dtype."""
     tiny = TINY_MOE_FAMILIES[family]
     model = tiny.load_class.from_pretrained(
         roster_checkpoints[family], dtype=torch.bfloat16, trust_remote_code=tiny.trust_remote_code
     )
     fp32 = set(params_off_dtype(model, torch.bfloat16))
     in_blocks = {f"{path}.{name}" for path, block in ep_claimed_blocks(model) for name, _ in block.named_parameters()}
+    routers = fp32_master_param_keys(
+        model,
+        EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True, fp32_router=True),
+        keep_non_ep=False,
+    )
 
     assert bool(fp32) == (family in PINNED_FP32_FAMILIES)
-    assert not fp32 & in_blocks
+    assert fp32 & in_blocks <= routers
 
 
 @pytest.mark.parametrize("family", sorted(TINY_MOE_FAMILIES))
@@ -425,13 +425,17 @@ def test_every_loader_keeps_a_pinned_buffer_fp32(roster_checkpoints, loader, mon
 @pytest.mark.parametrize("loader", FP32_MASTER_LOADERS)
 @pytest.mark.parametrize("family", PINNED_FP32_FAMILIES)
 def test_fp32_masters_keep_exactly_the_stored_pins(stored_fp32_checkpoints, family, loader, keep_fp32, monkeypatch):
+    if loader.startswith("pp_stage") and family in _PP_REFUSED_FAMILIES:
+        pytest.skip(f"{family} is refused for pipeline parallelism")
     path = stored_fp32_checkpoints[family]
     pinned, stored = stored_fp32_pins(family, path)
 
     model = _load_with(loader, family, path, keep_fp32, monkeypatch)
 
+    # The EP and PP loaders train a pin inside a MoE block (a router's) at the run dtype unless fp32_router.
     masters = None if loader == "path_string" else _outside_moe_blocks(model)
-    _assert_keeps_exactly(model, {name: name for name in pinned}, stored, keep_fp32, masters=masters)
+    kept = pinned if masters is None else pinned & masters
+    _assert_keeps_exactly(model, {name: name for name in kept}, stored, keep_fp32, masters=masters)
 
 
 @pytest.mark.parametrize("keep_fp32", [False, True], ids=["bf16", "fp32_masters"])
@@ -552,11 +556,14 @@ def test_the_eager_load_surface_is_pinned():
     assert discovered == pinned, f"the model-build surface changed: {sorted(discovered ^ pinned)}; classify each"
 
 
-@pytest.mark.parametrize("loader", sorted(EAGER_LOADERS), ids=lambda loader: loader[1])
-def test_every_eager_loader_casts_and_finalizes(loader):
-    calls = _eager_loaders()[loader]
-    assert calls & CASTS, f"{loader} builds a model without calling any of {sorted(CASTS)}"
-    assert FINALIZE in calls, f"{loader} builds a model without calling {FINALIZE}"
+def test_every_eager_loader_casts_and_finalizes(subtests):
+    assert EAGER_LOADERS, "no eager loader is pinned"
+    loaders = _eager_loaders()
+    for loader in sorted(EAGER_LOADERS):
+        with subtests.test(loader[1]):
+            calls = loaders[loader]
+            assert calls & CASTS, f"{loader} builds a model without calling any of {sorted(CASTS)}"
+            assert FINALIZE in calls, f"{loader} builds a model without calling {FINALIZE}"
 
 
 if __name__ == "__main__":

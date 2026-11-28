@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 
 import torch.nn as nn
-from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_parameter_plan
+from transformers.distributed.parallel_utils import ALL_PARALLEL_STYLES, _get_parameter_plan
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh

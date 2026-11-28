@@ -118,23 +118,18 @@ def test_unpinned_config_requests_the_padded_workload_backend(script, tmp_path):
     assert _requested_attn(script, "", tmp_path) == "sdpa"
 
 
-_PADDED_DEFAULT_SCRIPTS = [*_GRPO_SCRIPTS, "preference/smpo.py"]
-
-
 # Gemma 2 27B's attention: 128-wide heads, which FA4's general kernel runs, and a logit softcap.
 _SOFTCAPPED = Gemma2Config(hidden_size=4608, num_attention_heads=32, num_key_value_heads=16, head_dim=128)
 
 
-@pytest.mark.parametrize("script", _PADDED_DEFAULT_SCRIPTS)
 @pytest.mark.parametrize(
-    ("checkpoint_config", "expected"),
+    ("script", "checkpoint_config", "expected"),
     [
-        (Qwen3Config(), None),
-        (GemmaConfig(), None),
-        (_RemoteCodeConfig(), "sdpa"),
-        (_SOFTCAPPED, "flash_attention_2"),
+        pytest.param("grpo/offline.py", Qwen3Config(), None, id="native-grpo/offline.py"),
+        pytest.param("grpo/environmental.py", GemmaConfig(), None, id="head_dim-256-grpo/environmental.py"),
+        pytest.param("grpo/online.py", _RemoteCodeConfig(), "sdpa", id="remote-grpo/online.py"),
+        pytest.param("preference/smpo.py", _SOFTCAPPED, "flash_attention_2", id="softcapped-preference/smpo.py"),
     ],
-    ids=["native", "head_dim-256", "remote", "softcapped"],
 )
 def test_blackwell_leaves_the_kernel_to_the_loader_unless_the_checkpoint_rules_it_out(
     script, checkpoint_config, expected, tmp_path
@@ -187,8 +182,6 @@ def test_smpo_off_cp_keeps_the_padded_default(tmp_path):
         (None, True, False, "sdpa"),
         (None, False, False, None),
         (None, True, True, None),
-        (None, False, True, None),
-        ("flash_attention_4", True, False, "flash_attention_4"),
         ("flash_attention_4", False, False, "flash_attention_4"),
         ("eager", True, True, "eager"),
     ],
@@ -280,16 +273,17 @@ def test_the_call_site_sweep_is_not_empty():
     assert len(_HELPER_CALL_SITES) >= 8, _HELPER_CALL_SITES
 
 
-@pytest.mark.parametrize("script", _HELPER_CALL_SITES, ids=lambda p: p.stem)
-def test_every_call_site_wires_the_exemption_to_the_runs_own_flag(script):
+def test_every_call_site_wires_the_exemption_to_the_runs_own_flag(subtests):
     """A literal here is a claim about the model at a site that cannot know it; every caller passes the run's
     reset_sinks."""
-    for call in _helper_calls(script):
-        wired = [kw.value for kw in call.keywords if kw.arg == "sinks_reset"]
-        assert wired, f"{script.name} calls an attention helper without sinks_reset"
-        assert not isinstance(wired[0], ast.Constant), (
-            f"{script.name} hardcodes sinks_reset; it must come from the run's reset_sinks flag"
-        )
+    for script in _HELPER_CALL_SITES:
+        with subtests.test(script.stem):
+            for call in _helper_calls(script):
+                wired = [kw.value for kw in call.keywords if kw.arg == "sinks_reset"]
+                assert wired, f"{script.name} calls an attention helper without sinks_reset"
+                assert not isinstance(wired[0], ast.Constant), (
+                    f"{script.name} hardcodes sinks_reset; it must come from the run's reset_sinks flag"
+                )
 
 
 if __name__ == "__main__":

@@ -306,6 +306,7 @@ def _packed_train_rows(values: dict, hf_config) -> int:
         tokenizer,
         SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
         hf_config,
+        generation_config=None,
     )
     return len(train)
 

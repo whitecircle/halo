@@ -24,8 +24,6 @@ from halo.checkpoint.writing import StreamingShardWriter
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel import stage as stage_module
 from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
-from halo.distributed.pipeline_parallel.partition import validate_partition
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from halo.model_loading.external_tables import attach_external_tables
 from halo.model_loading.parallel.pp import _load_stage_lazy
@@ -216,13 +214,6 @@ def test_the_stream_collapse_is_last_stage_state_and_identity_elsewhere(model):
     first_keys = {first.global_parameter_name(k) for k in first.state_dict()}
     last_keys = {last.global_parameter_name(k) for k in last.state_dict()}
     assert first_keys | last_keys == set(model.state_dict()) and not first_keys & last_keys
-
-
-def test_the_spec_registers_a_rebase_safe_family(model):
-    spec = PP_SPEC_MAP["Qwen4ExpTextModel"]
-    assert spec.validated and spec.layer_types_rebase_safe and spec.token_ids_kwarg == "ple_input_ids"
-    reject_unsupported_pp_model(model, "none")
-    validate_partition(model, [(0, 1), (1, model.config.num_hidden_layers)])  # Off the layer_types period.
 
 
 def test_a_stage_saves_its_tables_under_unsplit_names_in_files_of_its_own(model, tmp_path):

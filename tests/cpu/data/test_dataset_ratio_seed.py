@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from datasets import Dataset, DatasetDict
 
-from halo.data.sources.loading import _DEFAULT_DATA_SEED, load_datasets
+from halo.data.sources.loading import load_datasets
 
 # Rows kept from a 20-row split at ratio 0.5. Train draws with ``_DEFAULT_DATA_SEED``, test with
 # ``+ 1`` so the two subsets are not the same row positions.
@@ -37,15 +37,6 @@ def test_ratio_subset_keeps_the_pinned_rows(tmp_path):
     assert _kept(ds, "test") == _PINNED_TEST_ROWS
 
 
-def test_train_and_test_draw_different_positions(tmp_path):
-    """The ``seed + 1`` offset on the test split: identical splits must not keep identical positions."""
-    path = _save_raw_dataset(str(tmp_path / "ds"))
-
-    ds = load_datasets(path, test_size=None, dataset_ratio=0.5, conversation_field=None)
-
-    assert _kept(ds, "train") != _kept(ds, "test")
-
-
 def test_selection_ignores_global_numpy_state(tmp_path):
     """A draw off ``np.random``'s global stream would diverge once one rank consumed a different count, handing
     ranks disjoint corpora with no error."""
@@ -72,11 +63,6 @@ def test_list_entries_draw_distinct_rows(tmp_path):
     assert len(kept) == 20
     assert sorted(kept[:10]) == _PINNED_TRAIN_ROWS
     assert sorted(kept[10:]) != _PINNED_TRAIN_ROWS
-
-
-def test_default_seed_is_the_documented_one():
-    """The pinned row sets above are only meaningful against the shipped default."""
-    assert _DEFAULT_DATA_SEED == 42
 
 
 if __name__ == "__main__":

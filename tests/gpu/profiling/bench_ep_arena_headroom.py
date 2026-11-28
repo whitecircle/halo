@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Dispatch + combine time of a DeepEP V2 arena sized exactly to the tokens/rank in flight against the same arena
 with the headroom a grow now takes (``arena_capacity``), at the wire shape of a shipped family. No model: random
-routing over the whole EP group, one forward dispatch and its combine per iteration."""
+routing over the whole EP group, one forward dispatch and its combine per iteration, inside one NVLink domain."""
 
 import argparse
 import statistics
@@ -10,7 +10,12 @@ import sys
 import torch
 import torch.distributed as dist
 
-from halo.distributed.expert_parallel.deepep.backends import _ElasticArena, deep_ep, free_all_ep_buffers
+from halo.distributed.expert_parallel.deepep.backends import (
+    _configure_deepep_env,
+    _ElasticArena,
+    deep_ep,
+    free_all_ep_buffers,
+)
 from halo.distributed.expert_parallel.deepep.capacity import arena_capacity, ep_dispatch_capacity, padded_wire_hidden
 from halo.distributed.expert_parallel.deepep.settings import DEEPEP_NUM_QPS
 from tests.common.distributed import init_distributed, teardown_distributed
@@ -29,9 +34,7 @@ def time_dispatch_combine(shape: str, tokens: int, headroom: bool) -> tuple[floa
     hidden, top_k, experts = SHAPES[shape]
     padded = padded_wire_hidden(hidden)
     needed = ep_dispatch_capacity(tokens)
-    capacity = (
-        arena_capacity(needed, num_topk=top_k, padded_hidden=padded, spans_domains=False) if headroom else needed
-    )
+    capacity = arena_capacity(needed, spans_domains=False) if headroom else needed
     arena = _ElasticArena.acquire(dist.group.WORLD, padded, top_k, DEEPEP_NUM_QPS, False)
     arena.ensure(capacity)
     buffer = arena.buffer
@@ -74,6 +77,8 @@ def main() -> int:
     parser.add_argument("--tokens", type=int, default=8192, help="tokens/rank in flight")
     args = parser.parse_args()
     rank, _, _ = init_distributed()
+    # The arena is acquired without an EP layer, so DeepEP's Gin switch is set here as the layer's first dispatch does.
+    _configure_deepep_env(spans_domains=False)
     exact_ms, exact_capacity = time_dispatch_combine(args.shape, args.tokens, headroom=False)
     padded_ms, padded_capacity = time_dispatch_combine(args.shape, args.tokens, headroom=True)
     if rank == 0:

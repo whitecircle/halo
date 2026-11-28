@@ -10,7 +10,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). EP and
 
 The one difference is the router. `Qwen3NextTopKRouter` renormalizes the top-k weights only under its `norm_topk_prob` (`true` on the released checkpoints), where Qwen3.5's router always does. Every gate weight the layer re-derives reads that flag live: routing replay (`_gate_weights_at`) and the balancing-biased route (`_biased_route`, top-k on the biased probabilities, then the router's own gating at those indices). A zero bias reproduces the router for either value of the flag.
 
-At `ep_size: 1` the layer is installed whenever `use_grouped_gemm` is on (the torchrun default), so the experts run Halo's grouped GEMM and FSDP2 shards them (`fsdp_shard_ep1_experts`) instead of running transformers' `grouped_mm` experts.
+At `expert_parallel_size: 1` the layer is installed whenever `use_grouped_gemm` is on (the torchrun default), so the experts run Halo's grouped GEMM and FSDP2 shards them (`fsdp_shard_ep1_experts`) instead of running transformers' `grouped_mm` experts.
 
 ## Checkpoint layout
 

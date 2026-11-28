@@ -1,6 +1,7 @@
 """Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncRolloutConfig``."""
 
 import logging
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import timedelta
@@ -311,9 +312,20 @@ class AsyncRolloutConfig(
         metadata={
             "help": "Serve a LoRA policy as an adapter beside the frozen base instead of pushing it folded into the "
             "weights: the first sync pushes the base once, and each later sync loads the adapter alone under a new "
-            "name that new episodes select. SGLang only, launched with --enable-lora; attention and dense-MLP "
-            "projections only. A model it cannot serve is refused at startup with the reason. "
-            "See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+            "name that new episodes select. A family whose base no push carries (Inkling 2) is never pushed: its "
+            "servers keep the base they launched with. SGLang launched with --enable-lora, and vLLM for Inkling 2 "
+            "with rollout_adapter_dir and VLLM_ALLOW_RUNTIME_LORA_UPDATING=True; attention and dense-MLP "
+            "projections, plus Inkling 2's routed experts on vLLM. A model it cannot serve is refused at "
+            "startup with the reason. See agent-docs/infrastructure/rollout-servers.md#adapter-sync."
+        },
+    )
+    rollout_adapter_dir: str | None = field(
+        default=None,
+        metadata={
+            "help": "Under rollout_adapter_sync: an absolute directory the trainer and every rollout server mount at "
+            "the same path. Each adapter version is published there and loaded by path instead of sent in a request "
+            "body. It belongs to one run at a time, since a run's first sync removes every halo-adapter-* directory "
+            "there. vLLM requires it."
         },
     )
     sync_weights_every_n_steps: int = field(
@@ -384,9 +396,10 @@ class AsyncRolloutConfig(
         default=50,
         metadata={
             "help": "Raise after this many train rounds in a row in which no token anywhere carries a policy gradient, "
-            "while no earlier round of this launch has: every group tied or dropped, or every token masked, trains on "
-            "nothing while logging loss 0. Past the first round that trained, a streak this long only warns. Logged as "
-            "sampling/zero_gradient_round. Positive; null = off."
+            "while no earlier round of this run has (a resume keeps that verdict): every group tied or dropped, or "
+            "every token masked, trains on nothing while logging loss 0. Past the first round that trained, a streak "
+            "this long only warns. Warns on the first such round of a run that has not trained yet, and logs "
+            "sampling/zero_gradient_round. Positive; null never raises."
         },
     )
     episode_error_rate_limit: float | None = field(
@@ -573,6 +586,13 @@ class AsyncRolloutConfig(
                 "rollout_chat_template_kwargs must not carry 'reasoning_effort': the level is per episode and "
                 "travels as the request's top-level field."
             )
+        if self.rollout_adapter_dir is not None and (
+            not self.rollout_adapter_sync or not os.path.isabs(self.rollout_adapter_dir)
+        ):
+            raise ValueError(
+                f"rollout_adapter_dir={self.rollout_adapter_dir!r} needs rollout_adapter_sync: true and an absolute "
+                "path the rollout servers read at the same path."
+            )
         # The normalized form below passes, so validating a normalized config again holds.
         if ENABLE_THINKING in self.rollout_chat_template_kwargs and (
             self.rollout_thinking or self.rollout_chat_template_kwargs[ENABLE_THINKING] is not False
@@ -753,8 +773,8 @@ class EnvironmentConfig(ValidatedConfig):
         default_factory=lambda: [{"source": "environment"}],
         metadata={
             "help": "Reward terms, each {source, name?, weight?, exponent?, ...}, summed into the episode reward as "
-            "weight × score^exponent: 'environment' (the environment's own grade), 'judge' or 'reward_model'. The "
-            "environment's per-turn and shaping terms add on top; YAML-only. "
+            "weight × score^exponent: 'environment' (the environment's own grade), 'judge', 'reward_model' or "
+            "'whitecircle'. The environment's per-turn and shaping terms add on top; YAML-only. "
             "See agent-docs/training-methods/grpo/rewards/README.md#environment-arm."
         },
     )

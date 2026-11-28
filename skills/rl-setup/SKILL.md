@@ -31,14 +31,14 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
 
 ## End-to-end wiring
 
-1. **Bring up the server.** `make build-vllm` (or `build-sglang`), or pull the public image and point
+1. **Bring up the server.** `make build-vllm` (or `build-sglang`; Inkling 2 is served from `make build-vllm-inkling2`, `make up-vllm-inkling2`), or pull the public image and point
    `VLLM_IMAGE` / `SGLANG_IMAGE` at it; then `docker-compose.vllm.yml` / `docker-compose.sglang.yml`, which
    refuse to start without `HALO_SCRATCH` (vLLM) / `SGLANG_MODEL_DIR` (SGLang): export them or set them in
    the repo-root `.env`. Server and trainer GPUs must be **disjoint** (`VLLM_CUDA_DEVICES` vs
    `TRAINER_CUDA_DEVICES`: a rank cannot broadcast to itself), both containers run `network_mode: host`,
    and **MoE needs the triton expert backend** (the compose default; the auto backends repack expert
    weights and corrupt synced updates). Use the toolkit images, not upstream: both pin the training
-   image's NCCL. Server flags, parsers per family, R3: `rollout-servers.md#vllm` / `#sglang`.
+   image's NCCL. Server flags, parsers per family, R3: `rollout-servers.md#vllm` / `#sglang`; a server on the wrong family image is refused by `#startup-preflight`.
 
 2. **Point the trainer at it.** Env GRPO reads `AsyncRolloutConfig` from YAML: `rollout_backend`
    (`vllm` default; `sglang` for the families its loaders take an update for — the trainer refuses the

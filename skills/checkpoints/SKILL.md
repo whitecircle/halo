@@ -57,7 +57,8 @@ Read the script's `--help` before running it — don't guess the flags.
 
 Other tools: `convert_to_bf16.py`, `quantize_to_lowp.py` (an artifact tool, not a speedup),
 `reset_sinks.py`, `unfuse_moe_experts.py` (only for a per-expert-only serving loader),
-`merge_models.py`, `reattach_vision_tower.py` — what each does and refuses:
+`merge_models.py`, `reattach_vision_tower.py`, `export_engine_adapter.py` (a saved adapter as the directory a
+rollout engine loads by path, the serving route where no merge exists: Inkling 2) — what each does and refuses:
 `agent-docs/reference/scripts-reference.md#post-training-scripts`.
 
 **Training sidecars:** export through `merge_peft_adapters.py` or `convert_to_bf16.py`, which re-apply

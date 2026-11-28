@@ -25,6 +25,9 @@ from tests.common.repo import REPO_ROOT
 _SAME_NAME_FIELDS = {f.name for f in fields(ParallelismArguments)} & {
     f.name for f in fields(ParallelismConfig) if f.init
 }
+# Valid only beside an EP group and expert LoRA, which this one-process sweep cannot build; its rules are tested in
+# tests/cpu/models/test_inkling2_frozen_experts.py.
+_SWEPT_FIELDS = _SAME_NAME_FIELDS - {"frozen_quantized_experts"}
 
 _LOWP_ARG_FIELDS = {f"lowp_{f.name}": f.name for f in fields(LowpSpec)}
 
@@ -82,16 +85,18 @@ def _config_kwargs_built_by_builder() -> set[str]:
     return keys | {axis.size_field for axis in AXES} | _SAME_NAME_FIELDS
 
 
-@pytest.mark.parametrize(("arg_field", "spec_field"), sorted(_LOWP_ARG_FIELDS.items()))
-def test_every_lowp_knob_lands_on_the_built_spec(arg_field, spec_field):
+def test_every_lowp_knob_lands_on_the_built_spec(subtests):
     """A ``lowp_*`` knob set away from its default reaches ``ParallelismConfig.lowp`` on the SFT path."""
-    requested = _non_default_value(arg_field)
-    # Under an enabled mode, so a shape knob is not the bf16 no-op.
-    dist_args = ParallelismArguments(**{"lowp_precision": "fp8", arg_field: requested})
+    assert _LOWP_ARG_FIELDS, "LowpSpec declares no field, so no lowp knob is swept"
+    for arg_field, spec_field in sorted(_LOWP_ARG_FIELDS.items()):
+        with subtests.test(f"{arg_field}-{spec_field}"):
+            requested = _non_default_value(arg_field)
+            # Under an enabled mode, so a shape knob is not the bf16 no-op.
+            dist_args = ParallelismArguments(**{"lowp_precision": "fp8", arg_field: requested})
 
-    config = parallelism_config_from_args(dist_args, trainer_cls=_LowpTrainer)
+            config = parallelism_config_from_args(dist_args, trainer_cls=_LowpTrainer)
 
-    assert getattr(config.lowp, spec_field) == requested
+            assert getattr(config.lowp, spec_field) == requested
 
 
 def test_ep_scope_auto_default_resolves_a_hand_built_cross_domain_config():
@@ -133,20 +138,22 @@ def _non_default_value(arg_field: str):
     raise AssertionError(f"no non-default value rule for ParallelismArguments.{arg_field}: {annotation}")
 
 
-@pytest.mark.parametrize("arg_field", sorted(_SAME_NAME_FIELDS))
-def test_every_same_name_knob_lands_on_the_built_config(arg_field):
+def test_every_same_name_knob_lands_on_the_built_config(subtests):
     """A forward that goes missing leaves the runtime default standing, which is the value the user overrode."""
-    requested = _non_default_value(arg_field)
+    assert _SWEPT_FIELDS, "ParallelismArguments and ParallelismConfig share no field name"
+    for arg_field in sorted(_SWEPT_FIELDS):
+        with subtests.test(arg_field):
+            requested = _non_default_value(arg_field)
 
-    config = parallelism_config_from_args(
-        ParallelismArguments(**{arg_field: requested}),
-        trainer_cls=_LowpTrainer,
-    )
+            config = parallelism_config_from_args(
+                ParallelismArguments(**{arg_field: requested}),
+                trainer_cls=_LowpTrainer,
+            )
 
-    assert getattr(config, arg_field) == requested, (
-        f"ParallelismArguments.{arg_field}={requested!r} never reached ParallelismConfig.{arg_field} "
-        f"(got {getattr(config, arg_field)!r}): the knob parses and the runtime keeps its own default."
-    )
+            assert getattr(config, arg_field) == requested, (
+                f"ParallelismArguments.{arg_field}={requested!r} never reached ParallelismConfig.{arg_field} "
+                f"(got {getattr(config, arg_field)!r}): the knob parses and the runtime keeps its own default."
+            )
 
 
 class _WithFieldRemoved:
@@ -195,26 +202,27 @@ _DOCUMENTED = _documented_names()
 _SETTABLE_CONFIG_FIELDS = sorted(f.name for f in fields(ParallelismConfig) if f.init)
 
 
-def test_the_documentation_sweep_sees_the_reference():
-    assert len(_DOCUMENTED) > 100, f"the configuration reference parsed to {len(_DOCUMENTED)} identifiers"
-
-
-@pytest.mark.parametrize("arg_field", sorted(f.name for f in fields(ParallelismArguments)))
-def test_every_argument_is_documented(arg_field):
+def test_every_argument_is_documented(subtests):
     """The YAML/CLI surface is only reachable through the reference; nothing else lists these names."""
-    assert arg_field in _DOCUMENTED, (
-        f"ParallelismArguments.{arg_field} appears nowhere in agent-docs/reference/configuration-reference.md: "
-        "a user cannot set a knob whose name is not written down. Add its row, or delete the field."
-    )
+    argument_fields = sorted(f.name for f in fields(ParallelismArguments))
+    assert argument_fields, "ParallelismArguments declares no field"
+    for arg_field in argument_fields:
+        with subtests.test(arg_field):
+            assert arg_field in _DOCUMENTED, (
+                f"ParallelismArguments.{arg_field} appears nowhere in agent-docs/reference/configuration-reference.md: "
+                "a user cannot set a knob whose name is not written down. Add its row, or delete the field."
+            )
 
 
-@pytest.mark.parametrize("config_field", _SETTABLE_CONFIG_FIELDS)
-def test_every_settable_config_field_is_documented(config_field):
+def test_every_settable_config_field_is_documented(subtests):
     """Same for the config-side spellings, which differ from the argument names for nine knobs."""
-    assert config_field in _DOCUMENTED, (
-        f"ParallelismConfig.{config_field} is settable but appears nowhere in "
-        "agent-docs/reference/configuration-reference.md."
-    )
+    assert _SETTABLE_CONFIG_FIELDS, "ParallelismConfig declares no settable field"
+    for config_field in _SETTABLE_CONFIG_FIELDS:
+        with subtests.test(config_field):
+            assert config_field in _DOCUMENTED, (
+                f"ParallelismConfig.{config_field} is settable but appears nowhere in "
+                "agent-docs/reference/configuration-reference.md."
+            )
 
 
 if __name__ == "__main__":

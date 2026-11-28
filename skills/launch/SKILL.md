@@ -111,7 +111,7 @@ arch with `nvidia-smi`. What each image carries, and pulling a missing tag from 
   # Job A on GPUs 0-3
   docker run -d --rm --name jobA --gpus '"device=0,1,2,3"' \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
-    --env-file .env -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
+    --cap-add=SYS_PTRACE --env-file .env -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
     -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws \
     -w /workspace halo:blackwell \
     bash -lc "torchrun --nproc_per_node=4 --master_port=29801 <script> <config> > \"$D/jobA.log\" 2>&1"
@@ -119,7 +119,7 @@ arch with `nvidia-smi`. What each image carries, and pulling a missing tag from 
   # Job B on GPUs 4-7 — different port + name + log
   docker run -d --rm --name jobB --gpus '"device=4,5,6,7"' \
     --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
-    --env-file .env -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
+    --cap-add=SYS_PTRACE --env-file .env -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
     -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws \
     -w /workspace halo:blackwell \
     bash -lc "torchrun --nproc_per_node=4 --master_port=29802 <script> <config> > \"$D/jobB.log\" 2>&1"
@@ -154,6 +154,7 @@ Training configs should set `output_dir` (and checkpoints) under `$D` too.
 - [ ] `HF_HOME=$D/hf`, `HF_DATASETS_CACHE=$D/hf/datasets`, `TMPDIR=$D/tmp`,
       `HALO_DATA_ROOT=$D` (S3 cache + profiler scratch) — all on a verified large volume?
 - [ ] Concurrent jobs → unique `--master_port`, `--name`, log, disjoint GPUs?
+- [ ] Free host RAM, and GPUs healthy and unoccupied (`nvidia-smi`; `halo run nvlink-health` for NVLink)?
 - [ ] Detached (`-d`) for anything long-running, so it survives the turn?
 
 ## Sources of truth

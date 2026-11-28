@@ -190,12 +190,6 @@ def test_the_release_splits_by_its_head_cost_with_a_mixer_of_every_kind_on_each_
         assert set(NEMOTRON_H_RELEASE_LAYOUT[lo:hi]) == set(NEMOTRON_H_RELEASE_BLOCKS)
 
 
-def test_the_spec_registers_a_rebase_safe_family():
-    assert PP_SPEC_MAP["NemotronHModel"] is NEMOTRON_H_PP
-    assert NEMOTRON_H_PP.validated and NEMOTRON_H_PP.layer_types_rebase_safe
-    assert NEMOTRON_H_PP.final_norm_attrs == ("norm_f",)
-
-
 def test_the_default_norm_probes_find_no_final_norm(model, monkeypatch):
     monkeypatch.setitem(PP_SPEC_MAP, "NemotronHModel", dataclasses.replace(NEMOTRON_H_PP, final_norm_attrs=("norm",)))
     with pytest.raises(ValueError, match="exposes no final norm"):

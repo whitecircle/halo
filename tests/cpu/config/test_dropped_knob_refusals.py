@@ -93,7 +93,7 @@ def _run_sft_to_the_model_load(
     tmp_path, config_body: str, *, is_cp: bool, baked_packed: bool | None = None, is_vlm: bool = False
 ) -> None:
     """``baked_packed`` stands in a pre-processed corpus; ``None`` keeps it raw."""
-    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=is_cp))
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=is_cp), resume_checkpoint=None)
     _run_main(
         "sft.py",
         config_body,
@@ -147,7 +147,7 @@ def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> No
         config_body,
         tmp_path,
         probe_checkpoint=lambda *args, **kwargs: (None, False),
-        init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None),
+        init_training_script=lambda *args, **kwargs: SimpleNamespace(parallelism_config=None, resume_checkpoint=None),
         load_script_datasets=lambda *args, **kwargs: ((None, preprocessed), False),
         resolve_vlm_run=_stop,
     )
