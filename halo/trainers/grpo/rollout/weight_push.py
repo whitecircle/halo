@@ -135,23 +135,36 @@ def _engine_loaded_buffer(layer: EPMoELayerBase, attr: str) -> torch.Tensor:
     return buffer
 
 
-def _dense_tower_refusal(config, family_layers: list[str]) -> str:
-    tower = getattr(text_config(config), "model_type", None)
+_TRAIN_OFFLINE = (
+    "Online and environmental GRPO cannot train it. Train it offline: offline GRPO needs no server "
+    "(agent-docs/training-methods/grpo/offline.md)."
+)
+
+
+def _dense_tower_reason(config, family_layers: list[str]) -> str:
+    tower = text_config(config)
+    dense = f"its {getattr(tower, 'model_type', None)} text tower is dense" if tower is not config else "it is dense"
     return (
         f"model_type {sorted(config_model_types(config))} is a spelling of the MoE family {', '.join(family_layers)}, "
-        f"but this checkpoint has no routed experts: its {tower} text tower is dense, under a composite no weight sync "
-        f"has been validated into (agent-docs/infrastructure/rollout-servers.md#construction-gates), so online and "
-        f"environmental GRPO cannot train it. Train it offline: offline GRPO needs no server "
-        f"(agent-docs/training-methods/grpo/offline.md)."
+        f"but this checkpoint has no routed experts: {dense}, and no weight sync into a dense model under that "
+        f"spelling has been validated (agent-docs/infrastructure/rollout-servers.md#construction-gates)."
     )
 
 
-def _reject_dense_tower_of_a_family_spelling(config) -> None:
-    """Off the config alone, ahead of the load :func:`_reject_stock_tree` would refuse after: a dense tower under a
-    spelling a MoE family claims (Ministral 3 and Devstral Small 2, ``mistral3`` over ``ministral3``)."""
+def dense_tower_refusal(config) -> str | None:
+    """Why no weight sync takes ``config``, read off the config alone: a dense model under a spelling a MoE family
+    claims (Ministral 3 and Devstral Small 2, ``mistral3`` over ``ministral3``). ``None`` for any other config. The
+    caller adds the remedy that fits it."""
     family_layers = sorted({cls.__name__ for cls in ep_layer_classes_for_config(config)})
-    if family_layers and not has_routed_experts(config):
-        raise ValueError(_dense_tower_refusal(config, family_layers))
+    if not family_layers or has_routed_experts(config):
+        return None
+    return _dense_tower_reason(config, family_layers)
+
+
+def _reject_dense_tower_of_a_family_spelling(config) -> None:
+    """Ahead of the load :func:`_reject_stock_tree` would refuse after."""
+    if (reason := dense_tower_refusal(config)) is not None:
+        raise ValueError(f"{reason} {_TRAIN_OFFLINE}")
 
 
 def _reject_stock_tree(config, family_layers: list[str], client_cls) -> None:
@@ -170,7 +183,7 @@ def _reject_stock_tree(config, family_layers: list[str], client_cls) -> None:
             f"expert_parallel_size 1 too."
         )
     if family_layers:
-        raise ValueError(_dense_tower_refusal(config, family_layers))
+        raise ValueError(f"{_dense_tower_reason(config, family_layers)} {_TRAIN_OFFLINE}")
     if routed:
         raise ValueError(
             f"model_type {model_types} is a MoE with no Halo EP family, so no expert layout has been validated against "

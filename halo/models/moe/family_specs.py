@@ -288,8 +288,8 @@ LFM2 = MoEFamilySpec(
 )
 MISTRAL4 = MoEFamilySpec(
     # The published Mistral-Small-4 checkpoints are composite: ``mistral3`` wrapping a ``mistral4`` text tower. The
-    # root spelling stays for the lookups that read it alone (the sharded EP save, merge_ep_shards, the expert-adapter
-    # streaming merge); a dense ``ministral3`` or ``mistral`` tower under it is no Mistral 4.
+    # root spelling stays for the lookups that read the root type alone; a dense ``ministral3`` or ``mistral`` tower
+    # under it is no Mistral 4.
     model_types=("mistral4", "mistral3"),
     shared_expert_attrs=("shared_experts",),
 )
@@ -422,12 +422,10 @@ def find_moe_family_spec_for_tower(config) -> MoEFamilySpec | None:
 
 def llama_4_scaling_beta(config) -> float:
     """The beta of the llama-4 query scale the text tower applies past its ``original_max_position_embeddings``
-    (Mistral 4, Ministral 3), 0 for a tower with none. Read from ``rope_parameters``, per layer type where it is
-    keyed so."""
+    (Mistral 4, Ministral 3), read from its ``rope_parameters``; 0 for a tower with none."""
     tower = text_config(config) if config is not None else None
     rope = getattr(tower, "rope_parameters", None) or {}
-    levels = [rope, *(value for value in rope.values() if isinstance(value, dict))]
-    return max((float(level.get("llama_4_scaling_beta") or 0.0) for level in levels), default=0.0)
+    return float(rope.get("llama_4_scaling_beta") or 0.0)
 
 
 def attention_reads_row_positions(config) -> bool:

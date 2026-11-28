@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """A dense text tower under the ``mistral3`` composite is no Mistral 4: Ministral 3 and Devstral Small 2 wrap
 ``ministral3``, Mistral Small 3.1 wraps ``mistral``. Online GRPO refuses one before the load with a remedy that exists,
-a llama-4 query scale counts as reading row positions, and packing isolation is the tower's own."""
+the post-load gate and the adapter export say the same with the remedy that fits each, a llama-4 query scale counts as
+reading row positions, and packing isolation is the tower's own."""
 
 from __future__ import annotations
 
@@ -11,8 +12,18 @@ from pathlib import Path
 
 import pytest
 import torch
-from transformers import Ministral3Config, Ministral3ForCausalLM, Mistral3Config
+from peft import LoraConfig, get_peft_model
+from transformers import (
+    Gemma4TextConfig,
+    Ministral3Config,
+    Ministral3ForCausalLM,
+    Mistral3Config,
+    Mistral3ForConditionalGeneration,
+)
 
+from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.entrypoints.engine_adapter_export import export_engine_adapter
+from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import (
     MISTRAL4,
     attention_reads_row_positions,
@@ -20,10 +31,15 @@ from halo.models.moe.family_specs import (
     llama_4_scaling_beta,
 )
 from halo.models.segment_markers import packing_isolation_is_measured
-from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_config
+from halo.trainers.grpo.rollout.weight_push import (
+    dense_tower_refusal,
+    reject_unsyncable_config,
+    reject_unsyncable_model,
+)
 from halo.weight_sync.registry import rollout_backends
-from tests.common.models import TINY_MISTRAL4_CONFIG, TINY_PIXTRAL_VISION_CONFIG
+from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG, TINY_MISTRAL4_CONFIG, TINY_PIXTRAL_VISION_CONFIG
 from tests.common.repo import REPO_ROOT
+from tests.common.tiny_models import word_level_tokenizer
 
 # Where the llama-4 query scale starts: Ministral 3's original window, shrunk.
 _WINDOW = 16
@@ -92,6 +108,70 @@ def test_a_dense_tower_under_the_mistral3_spelling_is_refused_before_the_load(to
         "the remedy must be one that exists"
     )
     _links_resolve(message)
+
+
+def test_a_bare_dense_tower_under_a_family_spelling_is_not_called_wrapped():
+    """Dense Gemma 4 ships a bare ``gemma4_text``, a spelling the Gemma 4 family claims."""
+    config = Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["sliding_attention", "full_attention"])
+    assert not has_routed_experts(config), "premise: the tower is dense"
+    reason = dense_tower_refusal(config)
+    assert reason is not None and "no routed experts: it is dense," in reason, reason
+    assert "text tower" not in reason and "composite" not in reason, reason
+
+
+@pytest.mark.parametrize("backend", rollout_backends())
+def test_a_loaded_dense_tower_with_no_ep_layer_is_refused_with_the_same_remedy(backend):
+    """The gate at the trainer's construction, for a caller that never ran the config gate."""
+    torch.manual_seed(0)
+    model = Mistral3ForConditionalGeneration(_ministral3_composite())
+    with pytest.raises(ValueError, match="no routed experts: its ministral3 text tower is dense") as refusal:
+        reject_unsyncable_model(model, backend)
+    message = str(refusal.value)
+    assert "Train it offline" in message and "dense text checkpoint" not in message, message
+    _links_resolve(message)
+
+
+_TOWER_Q = r".*language_model\.layers\.\d+\.self_attn\.q_proj"
+
+
+def _saved_adapter(tmp_path: Path):
+    """A LoRA on the tower's q_proj of a tiny dense ``mistral3``, drawn away from its zero init and saved."""
+    torch.manual_seed(0)
+    model = Mistral3ForConditionalGeneration(_ministral3_composite())
+    model.save_pretrained(tmp_path / "base")
+    word_level_tokenizer().save_pretrained(tmp_path / "base")
+    model.name_or_path = str(tmp_path / "base")
+    peft_model = get_peft_model(model, LoraConfig(r=4, lora_alpha=8, target_modules=_TOWER_Q)).eval()
+    with torch.no_grad():
+        for name, param in peft_model.named_parameters():
+            if "lora_" in name:
+                param.normal_(std=0.05)
+    peft_model.save_pretrained(tmp_path / "saved")
+    return peft_model
+
+
+@pytest.mark.parametrize("backend", rollout_backends())
+def test_the_export_of_an_adapter_on_a_dense_tower_is_refused_with_a_merge(tmp_path, backend):
+    _saved_adapter(tmp_path)
+    with pytest.raises(ValueError, match="no routed experts: its ministral3 text tower is dense") as refusal:
+        export_engine_adapter(str(tmp_path / "saved"), str(tmp_path / "exported"), rollout_backend=backend)
+    message = str(refusal.value)
+    assert "merge_peft_adapters.py folds it into its base" in message and "Train it offline" not in message, message
+    assert not (tmp_path / "exported").exists()
+
+
+def test_the_merge_the_export_names_folds_the_adapter_into_the_dense_tower(tmp_path):
+    peft_model = _saved_adapter(tmp_path)
+    merge_peft_adapter(str(tmp_path / "saved"), str(tmp_path / "merged"), dtype=torch.float32, verbose=False)
+    ids = torch.arange(3, 11).unsqueeze(0)
+    with torch.no_grad():
+        want = peft_model(input_ids=ids).logits
+        merged = Mistral3ForConditionalGeneration.from_pretrained(tmp_path / "merged", dtype=torch.float32).eval()
+        got = merged(input_ids=ids).logits
+        base = Mistral3ForConditionalGeneration.from_pretrained(tmp_path / "base", dtype=torch.float32).eval()
+        unmerged = base(input_ids=ids).logits
+    assert not torch.allclose(unmerged, want, atol=1e-4), "premise: the adapter moves the logits"
+    torch.testing.assert_close(got, want, atol=1e-5, rtol=1e-4)
 
 
 @pytest.mark.parametrize("backend", rollout_backends())
