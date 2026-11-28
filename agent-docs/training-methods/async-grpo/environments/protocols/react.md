@@ -43,7 +43,7 @@ The [common knobs](../README.md#common-knobs) apply too. The native protocol's `
 
 The grade is 1 when the final answer matches, 0 otherwise, priced as `reward/objective` ([Reward Terms](../../../grpo/rewards/README.md#environment-arm)).
 
-- Matching is all-or-nothing: exact match after normalization (`\boxed{}`, bold, answer prefixes), then a numeric compare at 1% relative tolerance.
+- Matching is all-or-nothing: exact match after normalization (`\boxed{}`, bold, answer prefixes), then a numeric compare at 1% relative tolerance, capped at half a unit of the last digit for a gold written as an integer ([`numeric_match`](../tasks/qa-benchmarks.md)).
 - An `answer_validator` `(final_answer, expected) -> bool` grades instead wherever one is passed, and clears `requires_answer` ([From Python](#from-python)). Without one the presets require the `answer` column.
 - A validator that raises marks the episode `episode_invalid` and grades it 0.
 

@@ -31,7 +31,7 @@ Each `rewards:` [term](rewards/README.md) becomes one TRL reward function named 
 | `accuracy` | the last `\boxed{...}` equals `answer` | none |
 | `format` | the completion matches `pattern` | `pattern`, default `<think>.*?</think>\s*<answer>.*?</answer>` under `re.DOTALL` |
 
-Accuracy is strict: the answer keeps only its text after a GSM8K `####`, both sides drop `,` and `$`, braces match by depth, and an empty extraction never scores. The environments' grader also lowercases and accepts `rtol=0.01` numeric matches.
+Accuracy is strict: the answer keeps only its text after a GSM8K `####`, both sides drop `,` and `$`, braces match by depth, and an empty extraction never scores. The environments' grader also lowercases and accepts `rtol=0.01` numeric matches, capped at half a unit of the last digit for a gold written as an integer.
 
 A judge reads the `answer` column as its reference. A veto judge (one listing `checks`) is refused at config time; list `requirements` instead.
 

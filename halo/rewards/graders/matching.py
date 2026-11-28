@@ -1,5 +1,6 @@
 """Rule-based answer normalization and matching; every environment grades through :func:`is_correct_answer`."""
 
+import math
 import re
 from typing import Any
 
@@ -144,24 +145,41 @@ def exact_match(predicted: str, expected: str) -> bool:
     return normalize_text(predicted) == normalize_text(expected)
 
 
-def _stated_values(text: str) -> list[float]:
-    """Every number a normalized answer states, or none when it is an expression or a bound."""
+def _value_text(text: str) -> str | None:
+    """A normalized answer with formatting and unit exponents read away, or ``None`` for an expression or a bound."""
     text = _LATEX_GROUPING_RE.sub(",", text)
     text = _LATEX_FORMATTING_RE.sub(" ", text).translate(_CHAR_MAP)
     text = _UNIT_EXPONENT_RE.sub(" ", text)
     if _EXPRESSION_OR_BOUND_RE.search(text) or _VARIABLE_OPERAND_RE.search(text):
+        return None
+    return text
+
+
+def _stated_values(text: str) -> list[float]:
+    """Every number a normalized answer states, or none when it is an expression or a bound."""
+    value_text = _value_text(text)
+    if value_text is None:
         return []
 
     values: list[float] = []
     previous_end = None
-    for match in _NUMBER_RE.finditer(text):
+    for match in _NUMBER_RE.finditer(value_text):
         # The gap runs up to the digits, so a sign right after an operand reads as the operator it is.
-        if previous_end is not None and _OPERATOR_GAP_RE.fullmatch(text, previous_end, match.start("value")):
+        if previous_end is not None and _OPERATOR_GAP_RE.fullmatch(value_text, previous_end, match.start("value")):
             return []
         value = float(match["sign"] + match["value"].replace(",", ""))
         values.append(value / 100.0 if match["percent"] else value)
         previous_end = match.end()
     return values
+
+
+def _integer_half_unit(text: str) -> float | None:
+    """Half a unit of the last digit of the one number a normalized answer states when it is written as an integer
+    (0.5, or 0.005 for an integer percent), else ``None``."""
+    match = _NUMBER_RE.search(_value_text(text) or "")
+    if match is None or "." in match["value"] or "e" in match["value"]:
+        return None
+    return 0.005 if match["percent"] else 0.5
 
 
 def numeric_match(
@@ -172,16 +190,22 @@ def numeric_match(
 ) -> bool:
     """Whether the prediction states one value equal to the expected number within tolerance. Every number in it must
     match, so a hedge (``7 or 8``), restated working, an operand or expression (``1/2``, ``10²``, ``\\sqrt{2}``,
-    ``log 2``) and a bound (``x < 3``) grade wrong. The expected answer must state exactly one value."""
-    expected_values = _stated_values(normalize_text(expected))
-    if len(expected_values) != 1:
+    ``log 2``) and a bound (``x < 3``) grade wrong. The expected answer must state exactly one finite value.
+
+    A gold written as an integer caps the ``rtol`` band at half a unit of its last digit, so it accepts what rounds
+    to it and never another integer (``895`` grades wrong for ``902``)."""
+    expected_text = normalize_text(expected)
+    expected_values = _stated_values(expected_text)
+    if len(expected_values) != 1 or not math.isfinite(expected_values[0]):
         return False
     target = expected_values[0]
+    band = rtol * abs(target)
+    half_unit = _integer_half_unit(expected_text)
+    if half_unit is not None:
+        band = min(band, half_unit)
 
     values = _stated_values(normalize_text(predicted))
-    return bool(values) and all(
-        abs(value - target) <= atol or (target != 0 and abs(value - target) / abs(target) <= rtol) for value in values
-    )
+    return bool(values) and all(abs(value - target) <= max(band, atol) for value in values)
 
 
 def is_correct_answer(predicted: Any, expected: Any) -> bool:
